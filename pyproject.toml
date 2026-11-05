@@ -1,0 +1,116 @@
+[build-system]
+requires = ["setuptools>=77.0.3", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "document_lab"
+dynamic = ["version"]
+license = "MIT"
+license-files = ["LICENSE"]
+description = "Documents (PDF, HTML tables) to typed data that carries its provenance"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "Mingyang Bao" }]
+# PyMuPDF reads the PDF (text, vector drawings, tables, images); numpy carries the digitised curves.
+# lab-commons supplies what the family already owns: the output location and logging.
+dependencies = [
+    "lab-commons[paths] @ git+https://github.com/DawnEver/lab-commons.git",
+    "numpy",
+    "pymupdf",
+]
+
+[project.optional-dependencies]
+# A paper as per-section markdown on CPU (`document-lab paper`).
+# Below 1: from 1.x pymupdf4llm requires pymupdf-layout -> onnxruntime, which has no cp315 wheel (measured
+# 2026-11-05); 0.3.x keeps that layout model an opt-in extra.
+paper = ["pymupdf4llm>=0.3,<1"]
+# The same conversion through marker-pdf when a GPU with >= 4 GB VRAM is present.
+gpu = ["marker-pdf"]
+# Values a model reads out of a document (`document_lab.ai`), through the family's one model interface.
+ai = ["ai_lab @ git+https://github.com/DawnEver/ai-lab.git"]
+# The family's development kit: rules registry, rendered configs, shared test bodies, verify entry.
+dev = [
+    "dev-lab[test] @ git+https://github.com/DawnEver/dev-lab.git",
+    "document_lab[paper,ai]",
+    "pytest",
+    "ruff",
+]
+
+[project.scripts]
+document-lab = "document_lab.__main__:main"
+
+[tool.setuptools_scm]
+version_file = "src/document_lab/__version__.py"
+fallback_version = "0.0.0"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["document_lab*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "vendor: reads a real document named by DOCUMENT_LAB_VENDOR_PDF; skipped with its reason when unset",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.ruff.lint]
+select = [
+    "A", "AIR", "ANN", "ARG", "ASYNC", "B", "BLE", "C4", "C90", "COM", "D", "DJ", "DTZ", "E", "EM", "ERA",
+    "F", "FA", "FBT", "FIX", "FLY", "FURB", "G", "I", "ICN", "INP", "INT", "ISC", "LOG", "N", "NPY", "PD",
+    "PERF", "PGH", "PIE", "PLC", "PLE", "PLR", "PLW", "PT", "PTH", "PYI", "Q", "RET", "RSE", "RUF", "S",
+    "SIM", "SLF", "SLOT", "T10", "T20", "TD", "TID", "TRY", "UP", "W", "YTT",
+]
+ignore = ["COM812", "D203", "D213", "D400", "D401", "N818", "PLR0913", "Q000", "Q003", "S603"]
+
+[tool.ruff.lint.per-file-ignores]
+# A test asserts, reads private seams of what it tests, and names fixtures rather than documenting them.
+"tests/**" = ["S101", "SLF001", "D", "ANN", "ARG", "FBT003", "PLR2004", "PT018", "INP001"]
+
+[tool.dev_lab.branchset]
+trunk = 'main'
+sessions = ['integrate/main']
+prune_merged = true
+
+[tool.lab_commons.hpc]
+# PIN + FRESHNESS (user ruling 2026-10-17): the venv is exactly the committed lock, and the lock keys it.
+install = 'uv sync --frozen --extra dev'
+dependency_inputs = ['pyproject.toml', 'uv.lock']
+source_roots = ['src']
+collect = 'tests'
+
+[tool.dev_lab.parts]
+output = "output/logs"
+
+[tool.lab_commons.tests]
+produce = ["-m", "dev_lab.dev.verify", "--part", "{part}"]
+
+# The family branch flow: integrate/main coordinates; main moves only by `integrate promote` (fast-forward).
+[tool.dev_lab.integrator]
+trunk = "main"
+integration = "integrate/main"
+
+# GitHub Actions: the family's one PR lifecycle (dev_lab/dev/ci_base.toml) as is; rendered to
+# .github/workflows/ci.yml by `python -m dev_lab.dev.ciworkflows render`, never hand-edited.
+[tool.dev_lab.ci."ci.yml"]
+
+# Git hooks: the family base (dev_lab/dev/githooks/base.toml) plus one merged row. The lock is generated and
+# measures 532 KB because the `gpu` extra (marker-pdf -> torch) resolves in it; the size check guards against
+# committed blobs, which a lock is not.
+[tool.dev_lab.hooks]
+
+[[tool.dev_lab.hooks.pre-commit]]
+id = "check-added-large-files"
+exclude = '^uv\.lock$'
+
+[tool.dev_lab.doors]
+BARE-TEST-INVOCATION = "<venv python> -m dev_lab.dev.verify [-- <pytest args>]  (the verdict door; a hand-written pytest line has none)"
+PUSH-NO-VERIFY = "<venv python> -m dev_lab.dev.verify, then push without skipping the hook"
+NETWORK-VERB = "<venv python> -m dev_lab.dev.netverb -- <git push|fetch|pull|clone|ls-remote|submodule update ...  or  uv lock|add|remove ...>  (retries 3x, then reports a diagnosis); an environment change is <venv python> -m dev_lab.dev.dep --sync, which retries inside"
+ENV-MUTATION-THROUGH-THE-DOOR = "<any family venv python> -m dev_lab.dev.dep --bootstrap <this checkout> --extra dev  (run from this checkout)"

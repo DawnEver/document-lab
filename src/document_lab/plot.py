@@ -14,24 +14,21 @@ from __future__ import annotations
 
 import itertools
 import math
-import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal
 
 import numpy as np
 
 from document_lab.ir import BBox, Page, Provenance, TextSpan, VectorPath, union
+from document_lab.numbers import parse_number
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-__all__ = ['Axis', 'Curve', 'Plot', 'RasterPlot', 'Scale', 'parse_number', 'plots']
+__all__ = ['Axis', 'Curve', 'Plot', 'RasterPlot', 'Scale', 'plots']
 
 Scale = Literal['linear', 'log10']
 
-#: Typography a tick label may use: a true minus sign and a thin-space digit separator.
-MINUS: Final = chr(0x2212)
-THIN_SPACE: Final = chr(0x2009)
 #: The smallest frame side (points) that can hold a plot.
 MIN_FRAME: Final = 40.0
 #: How far outside the frame (points) a tick label may sit.
@@ -57,25 +54,9 @@ GRID_SPAN: Final = 0.9
 #: The share of the frame an image must cover for a curve-less plot to count as a raster plot.
 RASTER_COVER: Final = 0.25
 
-_NUMBER: Final = re.compile(r'^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$')
-_SUPERSCRIPT: Final = str.maketrans('⁰¹²³⁴⁵⁶⁷⁸⁹⁻⁺', '0123456789-+')
-_POWER: Final = re.compile(r'^10([⁻⁺]?[⁰¹²³⁴⁵⁶⁷⁸⁹]+)$')
-_INTEGER: Final = re.compile(r'^[+-]?\d+$')
-
 
 class RasterPlot(ValueError):
     """The plot is a raster image; only vector plots are digitised."""
-
-
-def parse_number(text: str) -> float | None:
-    """A tick label's value: decimals, exponents, a typographic minus, ``10⁻³``; ``None`` if it is not a number."""
-    clean = text.strip().replace(MINUS, '-').replace(THIN_SPACE, '')
-    if _NUMBER.match(clean):
-        return float(clean)
-    power = _POWER.match(clean)
-    if power:
-        return 10.0 ** int(power.group(1).translate(_SUPERSCRIPT))
-    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,18 +235,18 @@ def _exponent_of(i: int, spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> 
     bb = base.provenance.bbox
     for j, other in enumerate(spans):
         ob = other.provenance.bbox
-        text = other.text.strip().replace(MINUS, '-')
-        if j == i or ob is None or not _INTEGER.match(text) or other.size >= base.size * 0.9:
+        power = parse_number(other.text)
+        if j == i or ob is None or power is None or power != int(power) or other.size >= base.size * 0.9:
             continue
         raised = (ob.y0 + ob.y1) / 2 < (bb.y0 + bb.y1) / 2 and ob.y1 > bb.y0 and ob.y0 >= bb.y0 - ob.height
         if not raised:
             continue
         gap = ob.x0 - bb.x1
         if -EDGE_TOL <= gap <= EDGE_TOL:
-            return j, int(text)
+            return j, int(power)
         dashed = any(bb.x1 - EDGE_TOL <= d.lo and d.hi <= ob.x0 + EDGE_TOL and bb.y0 <= d.at <= ob.y1 for d in dashes)
-        if 0 < gap <= DASH_MAX + EDGE_TOL and dashed and not text.startswith('-'):
-            return j, -int(text)
+        if 0 < gap <= DASH_MAX + EDGE_TOL and dashed and power > 0:
+            return j, -int(power)
     return None
 
 

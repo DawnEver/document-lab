@@ -7,7 +7,7 @@ import pymupdf
 import pytest
 
 from document_lab.pdf import read_pdf
-from document_lab.plot import RasterPlot, parse_number, plots
+from document_lab.plot import RasterPlot, plots
 from tests.synthetic import BLUE, RED, Axis, PlotSpec, draw_plot, plot_pdf, to_page
 
 XS = [float(x) for x in range(0, 101, 10)]
@@ -117,26 +117,6 @@ def test_the_tick_values_are_the_label_values(tmp_path):
     spec = PlotSpec(Axis([0, 20, 40]), Axis([-1, 0, 1]), [(math.sin, XS[:5], RED)])
     plot = _one_plot(tmp_path, spec)
     assert sorted(v for _, v in plot.y.ticks) == [-1, 0, 1]
-
-
-@pytest.mark.parametrize(
-    ('text', 'value'),
-    [
-        (chr(0x2212) + '1.5', -1.5),
-        ('2e3', 2000.0),
-        ('.5', 0.5),
-        ('10⁻³', 1e-3),
-        ('10²', 100.0),
-        ('1' + chr(0x2009) + '000', 1000.0),
-    ],
-)
-def test_a_tick_label_spelling_parses_to_its_value(text, value):
-    assert parse_number(text) == value
-
-
-@pytest.mark.parametrize('text', ['Fig. 1', '', '1-2', 'kHz', '100     100'])
-def test_a_word_is_not_a_tick_label(text):
-    assert parse_number(text) is None
 
 
 def test_minor_log_grid_lines_do_not_capture_a_decade_label(tmp_path):

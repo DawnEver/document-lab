@@ -40,6 +40,18 @@ LABEL_REACH: Final = 30.0
 TICK_MAX: Final = 10.0
 #: How close (points) two coordinates must be to count as the same edge.
 EDGE_TOL: Final = 1.5
+#: Coordinates closer than this (points) count as equal along an edge.
+AXIS_TOL: Final = 0.5
+#: A filled rectangle no thicker than this (points) is a rule, drawn as a fill.
+RULE_MAX: Final = 1.5
+#: The longest drawn minus sign (points) between a ``10`` and its exponent.
+DASH_MAX: Final = 5.0
+#: The widest gap (points) between a drawn minus sign and its digits.
+DASH_GAP: Final = 2.5
+#: Font sizes (points) closer than this are one size.
+SIZE_TOL: Final = 0.25
+#: How close (points) a shifted label must land to a mark to count as on it.
+SNAP_TOL: Final = 0.75
 #: A grid line spans at least this fraction of the frame.
 GRID_SPAN: Final = 0.9
 #: The share of the frame an image must cover for a curve-less plot to count as a raster plot.
@@ -57,7 +69,7 @@ class RasterPlot(ValueError):
 
 def parse_number(text: str) -> float | None:
     """A tick label's value: decimals, exponents, a typographic minus, ``10⁻³``; ``None`` if it is not a number."""
-    clean = text.strip().replace(MINUS, '-').replace(THIN_SPACE, '').replace(' ', '')
+    clean = text.strip().replace(MINUS, '-').replace(THIN_SPACE, '')
     if _NUMBER.match(clean):
         return float(clean)
     power = _POWER.match(clean)
@@ -91,6 +103,7 @@ class Curve:
     provenance: Provenance
     axis_scales: tuple[Scale, Scale]
     stroke: tuple[float, ...] | None
+    width: float
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -108,19 +121,36 @@ class Plot:
 class _Label:
     value: float
     box: BBox
+    size: float
+
+
+@dataclass(frozen=True, slots=True)
+class _Edge:
+    """An axis-parallel segment: ``at`` is its constant coordinate, ``lo``..``hi`` its extent along the other."""
+
+    vertical: bool
+    at: float
+    lo: float
+    hi: float
+
+    @property
+    def length(self) -> float:
+        return self.hi - self.lo
 
 
 def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = None) -> list[Plot]:
     """Every vector plot on ``page``; ``x_scale``/``y_scale`` force an axis scale instead of inferring it."""
-    labels = _labels(page.spans)
+    edges = _edges(page.paths)
+    labels = _labels(page.spans, [e for e in edges if not e.vertical and e.length <= DASH_MAX])
+    # A grid line may stop short of the far edge (a legend sits there), so a long rule anchored on an edge counts.
     found = []
-    for frame in _frames(page.paths):
-        xs = _x_labels(frame, labels)
-        ys = _y_labels(frame, labels)
+    for frame in _frames(edges):
+        xs = _one_size(_x_labels(frame, labels))
+        ys = _one_size(_y_labels(frame, labels))
         if len(xs) < 2 or len(ys) < 2:  # noqa: PLR2004 -- a line needs two points
             continue
-        x_ticks = _snap([((lb.box.x0 + lb.box.x1) / 2, lb.value) for lb in xs], _x_marks(frame, page.paths))
-        y_ticks = _snap([((lb.box.y0 + lb.box.y1) / 2, lb.value) for lb in ys], _y_marks(frame, page.paths))
+        x_ticks = _snap([((lb.box.x0 + lb.box.x1) / 2, lb.value) for lb in xs], _marks(frame, edges, vertical=True))
+        y_ticks = _snap([((lb.box.y0 + lb.box.y1) / 2, lb.value) for lb in ys], _marks(frame, edges, vertical=False))
         x_axis, y_axis = _fit(x_ticks, x_scale), _fit(y_ticks, y_scale)
         curves = tuple(
             Curve(
@@ -129,17 +159,55 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
                 path.provenance,
                 (x_axis.scale, y_axis.scale),
                 path.stroke,
+                path.width,
             )
             for path in _curve_paths(frame, page.paths)
         )
         if not curves:
             _refuse_raster(page, frame)
-        here = Provenance(page.spans[0].provenance.sha256, page.spans[0].provenance.uri, page.number, frame)
-        found.append(Plot(frame, x_axis, y_axis, curves, here))
+        found.append(Plot(frame, x_axis, y_axis, curves, page.spans[0].provenance.at(bbox=frame)))
     return found
 
 
-def _labels(spans: Sequence[TextSpan]) -> list[_Label]:
+def _edges(paths: Sequence[VectorPath]) -> list[_Edge]:
+    """Every axis-parallel stroked segment, and every thin filled rectangle (a rule drawn as a fill)."""
+    out = []
+    for path in paths:
+        if path.stroke is None:
+            box = path.provenance.bbox
+            if path.closed and box is not None and min(box.width, box.height) <= RULE_MAX:
+                if box.height > box.width:
+                    out.append(_Edge(vertical=True, at=(box.x0 + box.x1) / 2, lo=box.y0, hi=box.y1))
+                else:
+                    out.append(_Edge(vertical=False, at=(box.y0 + box.y1) / 2, lo=box.x0, hi=box.x1))
+            continue
+        points = (*path.points, path.points[0]) if path.closed else path.points
+        for (x0, y0), (x1, y1) in itertools.pairwise(points):
+            if abs(x0 - x1) <= AXIS_TOL < abs(y0 - y1):
+                out.append(_Edge(vertical=True, at=(x0 + x1) / 2, lo=min(y0, y1), hi=max(y0, y1)))
+            elif abs(y0 - y1) <= AXIS_TOL < abs(x0 - x1):
+                out.append(_Edge(vertical=False, at=(y0 + y1) / 2, lo=min(x0, x1), hi=max(x0, x1)))
+    return out
+
+
+def _frames(edges: Sequence[_Edge]) -> list[BBox]:
+    """A frame per bottom-left corner: a long horizontal edge (the x axis) meeting a long vertical one (the y axis).
+
+    A corner where several edges meet (a grid line cut short along the x axis) keeps its largest frame.
+    """
+    long = [e for e in edges if e.length >= MIN_FRAME]
+    corners: dict[tuple[float, float], BBox] = {}
+    for h in (e for e in long if not e.vertical):
+        for v in (e for e in long if e.vertical):
+            if abs(h.lo - v.at) <= EDGE_TOL and abs(h.at - v.hi) <= EDGE_TOL:
+                box = BBox(v.at, v.lo, h.hi, h.at)
+                key = (round(box.x0), round(box.y1))
+                if key not in corners or box.width * box.height > corners[key].width * corners[key].height:
+                    corners[key] = box
+    return list(corners.values())
+
+
+def _labels(spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> list[_Label]:
     """Numeric spans, with ``10`` plus a raised smaller integer span merged into a power of ten."""
     out, used = [], set()
     for i, span in enumerate(spans):
@@ -147,49 +215,58 @@ def _labels(spans: Sequence[TextSpan]) -> list[_Label]:
         if box is None or i in used:
             continue
         if span.text.strip() == '10':
-            exp = _exponent_of(i, spans)
-            if exp is not None:
-                used.add(exp)
-                power = int(spans[exp].text.strip().replace(MINUS, '-'))
-                out.append(_Label(10.0**power, union([box, spans[exp].provenance.bbox])))
+            found = _exponent_of(i, spans, dashes)
+            if found is not None:
+                j, power = found
+                used.add(j)
+                out.append(_Label(10.0**power, union([box, spans[j].provenance.bbox]), span.size))
                 continue
         value = parse_number(span.text)
-        if value is not None:
-            out.append(_Label(value, box))
+        if value is None:
+            continue
+        dash = _dash_before(box, dashes) if value > 0 else None
+        if dash is not None:
+            value, box = -value, union([box, BBox(dash.lo, box.y0, dash.hi, box.y1)])
+        out.append(_Label(value, box, span.size))
     return out
 
 
-def _exponent_of(i: int, spans: Sequence[TextSpan]) -> int | None:
+def _dash_before(box: BBox, dashes: Sequence[_Edge]) -> _Edge | None:
+    """A drawn minus sign: a short horizontal stroke ending just left of the label, within its height."""
+    for d in dashes:
+        if box.x0 - DASH_GAP <= d.hi <= box.x0 + EDGE_TOL / 3 and box.y0 < d.at < box.y1:
+            return d
+    return None
+
+
+def _one_size(labels: list[_Label]) -> list[_Label]:
+    """The labels in the axis' most common font size: a unit's superscript beside the axis is not a tick label."""
+    if not labels:
+        return labels
+    sizes = [round(lb.size, 1) for lb in labels]
+    common = max(set(sizes), key=sizes.count)
+    return [lb for lb, size in zip(labels, sizes, strict=True) if abs(size - common) <= SIZE_TOL]
+
+
+def _exponent_of(i: int, spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> tuple[int, int] | None:
+    """The raised smaller integer right after span ``i`` and its value; a drawn dash in the gap makes it negative."""
     base = spans[i]
     bb = base.provenance.bbox
     for j, other in enumerate(spans):
         ob = other.provenance.bbox
-        if j == i or ob is None or not _INTEGER.match(other.text.strip().replace(MINUS, '-')):
+        text = other.text.strip().replace(MINUS, '-')
+        if j == i or ob is None or not _INTEGER.match(text) or other.size >= base.size * 0.9:
             continue
-        raised = (ob.y0 + ob.y1) / 2 < (bb.y0 + bb.y1) / 2
-        if other.size < base.size * 0.9 and abs(ob.x0 - bb.x1) <= EDGE_TOL and raised:
-            return j
+        raised = (ob.y0 + ob.y1) / 2 < (bb.y0 + bb.y1) / 2 and ob.y1 > bb.y0 and ob.y0 >= bb.y0 - ob.height
+        if not raised:
+            continue
+        gap = ob.x0 - bb.x1
+        if -EDGE_TOL <= gap <= EDGE_TOL:
+            return j, int(text)
+        dashed = any(bb.x1 - EDGE_TOL <= d.lo and d.hi <= ob.x0 + EDGE_TOL and bb.y0 <= d.at <= ob.y1 for d in dashes)
+        if 0 < gap <= DASH_MAX + EDGE_TOL and dashed and not text.startswith('-'):
+            return j, -int(text)
     return None
-
-
-def _is_rect(path: VectorPath) -> BBox | None:
-    pts = path.points[:-1] if len(path.points) == 5 and path.points[0] == path.points[-1] else path.points  # noqa: PLR2004
-    if not path.closed or len(pts) != 4:  # noqa: PLR2004
-        return None
-    xs = sorted({round(p[0], 3) for p in pts})
-    ys = sorted({round(p[1], 3) for p in pts})
-    if len(xs) != 2 or len(ys) != 2:  # noqa: PLR2004
-        return None
-    return BBox(xs[0], ys[0], xs[1], ys[1])
-
-
-def _frames(paths: Sequence[VectorPath]) -> list[BBox]:
-    seen: dict[tuple[float, ...], BBox] = {}
-    for path in paths:
-        box = _is_rect(path)
-        if box is not None and box.width >= MIN_FRAME and box.height >= MIN_FRAME:
-            seen.setdefault(tuple(round(v, 1) for v in box), box)
-    return list(seen.values())
 
 
 def _x_labels(frame: BBox, labels: list[_Label]) -> list[_Label]:
@@ -210,46 +287,43 @@ def _y_labels(frame: BBox, labels: list[_Label]) -> list[_Label]:
     ]
 
 
-def _segment(path: VectorPath) -> tuple[tuple[float, float], tuple[float, float]] | None:
-    return (path.points[0], path.points[1]) if len(path.points) == 2 and not path.closed else None  # noqa: PLR2004
-
-
-def _x_marks(frame: BBox, paths: Sequence[VectorPath]) -> list[float]:
-    """X of vertical tick marks on the bottom/top edge and of vertical grid lines."""
+def _marks(frame: BBox, edges: Sequence[_Edge], *, vertical: bool) -> list[float]:
+    """Positions of tick marks (short, on a frame edge) and grid lines (spanning the frame) across one axis."""
+    lo_edge, hi_edge, span = (frame.y0, frame.y1, frame.height) if vertical else (frame.x0, frame.x1, frame.width)
+    first, last = (frame.x0, frame.x1) if vertical else (frame.y0, frame.y1)
     marks = []
-    for path in paths:
-        seg = _segment(path)
-        if seg is None or abs(seg[0][0] - seg[1][0]) > EDGE_TOL / 3:
+    for e in edges:
+        if e.vertical != vertical or not first - EDGE_TOL <= e.at <= last + EDGE_TOL:
             continue
-        lo, hi = sorted((seg[0][1], seg[1][1]))
-        on_edge = any(abs(e - lo) <= EDGE_TOL or abs(e - hi) <= EDGE_TOL for e in (frame.y0, frame.y1))
-        if (on_edge and hi - lo <= TICK_MAX) or hi - lo >= GRID_SPAN * frame.height:
-            marks.append(seg[0][0])
-    return marks
-
-
-def _y_marks(frame: BBox, paths: Sequence[VectorPath]) -> list[float]:
-    """Y of horizontal tick marks on the left/right edge and of horizontal grid lines."""
-    marks = []
-    for path in paths:
-        seg = _segment(path)
-        if seg is None or abs(seg[0][1] - seg[1][1]) > EDGE_TOL / 3:
-            continue
-        lo, hi = sorted((seg[0][0], seg[1][0]))
-        on_edge = any(abs(e - lo) <= EDGE_TOL or abs(e - hi) <= EDGE_TOL for e in (frame.x0, frame.x1))
-        if (on_edge and hi - lo <= TICK_MAX) or hi - lo >= GRID_SPAN * frame.width:
-            marks.append(seg[0][1])
+        on_edge = any(abs(b - e.lo) <= EDGE_TOL or abs(b - e.hi) <= EDGE_TOL for b in (lo_edge, hi_edge))
+        if (on_edge and e.length <= TICK_MAX) or e.length >= GRID_SPAN * span:
+            marks.append(e.at)
     return marks
 
 
 def _snap(ticks: list[tuple[float, float]], marks: list[float]) -> tuple[tuple[float, float], ...]:
-    """Each label's position moved to the nearest mark within 40% of the label spacing, when there is one."""
+    """Labels moved onto their marks by ONE shared offset, the one that lands the most labels on a mark.
+
+    A label sits a constant distance from its tick (same font, same alignment), so the offset is a property of
+    the axis, not of each label; snapping each to its nearest mark instead lets a dense minor grid capture it.
+    A label with no mark at its shifted position keeps its own position.
+    """
     positions = sorted(p for p, _ in ticks)
     spacing = min((b - a for a, b in itertools.pairwise(positions) if b > a), default=LABEL_REACH)
+    reach = 0.4 * spacing
+    shifts = [m - p for p in positions for m in marks if abs(m - p) <= reach]
+    if not shifts:
+        return tuple(sorted(ticks))
+
+    def score(shift: float) -> tuple[int, float]:
+        misses = [min(abs(m - (p + shift)) for m in marks) for p in positions]
+        return (sum(miss <= SNAP_TOL for miss in misses), -sum(min(miss, reach) for miss in misses))
+
+    shift = max(shifts, key=score)
     out = []
     for pos, value in ticks:
-        near = min(marks, key=lambda m: abs(m - pos), default=None)
-        out.append((near if near is not None and abs(near - pos) <= 0.4 * spacing else pos, value))
+        near = min(marks, key=lambda m: abs(m - (pos + shift)))
+        out.append((near if abs(near - (pos + shift)) <= SNAP_TOL else pos, value))
     return tuple(sorted(out))
 
 
@@ -280,29 +354,25 @@ def _misfit(pos: np.ndarray, target: np.ndarray) -> float:
 
 
 def _curve_paths(frame: BBox, paths: Sequence[VectorPath]) -> list[VectorPath]:
+    """Stroked open paths inside the frame that are not a single tick mark, grid line or frame edge."""
     out = []
     for path in paths:
         if path.stroke is None or path.closed or len(path.points) < 2:  # noqa: PLR2004
             continue
         if not all(frame.contains(x, y, tol=EDGE_TOL) for x, y in path.points):
             continue
-        seg = _segment(path)
-        if seg is not None and _is_rule(seg, frame):
+        rules = _edges([path])
+        if len(path.points) == 2 and rules and _is_rule(rules[0], frame):  # noqa: PLR2004
             continue
         out.append(path)
     return out
 
 
-def _is_rule(seg: tuple[tuple[float, float], tuple[float, float]], frame: BBox) -> bool:
-    """A tick mark, grid line or frame edge: an axis-parallel segment that is short or spans the frame."""
-    (x0, y0), (x1, y1) = seg
-    if abs(x0 - x1) <= EDGE_TOL / 3:
-        length, span = abs(y1 - y0), frame.height
-    elif abs(y0 - y1) <= EDGE_TOL / 3:
-        length, span = abs(x1 - x0), frame.width
-    else:
-        return False
-    return length <= TICK_MAX or length >= GRID_SPAN * span
+def _is_rule(edge: _Edge, frame: BBox) -> bool:
+    """A tick (short), a grid line across the frame, or a long one anchored on a frame edge (a legend cut it)."""
+    span, first, last = (frame.height, frame.y0, frame.y1) if edge.vertical else (frame.width, frame.x0, frame.x1)
+    anchored = min(abs(edge.lo - first), abs(edge.hi - last)) <= EDGE_TOL
+    return edge.length <= TICK_MAX or edge.length >= GRID_SPAN * span or (anchored and edge.length >= span / 2)
 
 
 def _refuse_raster(page: Page, frame: BBox) -> None:

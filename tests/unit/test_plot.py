@@ -121,12 +121,68 @@ def test_the_tick_values_are_the_label_values(tmp_path):
 
 @pytest.mark.parametrize(
     ('text', 'value'),
-    [(chr(0x2212) + '1.5', -1.5), ('2e3', 2000.0), ('.5', 0.5), ('10⁻³', 1e-3), ('10²', 100.0), ('1 000', 1000.0)],
+    [
+        (chr(0x2212) + '1.5', -1.5),
+        ('2e3', 2000.0),
+        ('.5', 0.5),
+        ('10⁻³', 1e-3),
+        ('10²', 100.0),
+        ('1' + chr(0x2009) + '000', 1000.0),
+    ],
 )
 def test_a_tick_label_spelling_parses_to_its_value(text, value):
     assert parse_number(text) == value
 
 
-@pytest.mark.parametrize('text', ['Fig. 1', '', '1-2', 'kHz'])
+@pytest.mark.parametrize('text', ['Fig. 1', '', '1-2', 'kHz', '100     100'])
 def test_a_word_is_not_a_tick_label(text):
     assert parse_number(text) is None
+
+
+def test_minor_log_grid_lines_do_not_capture_a_decade_label(tmp_path):
+    # Real sheets draw 2..9 x grid lines inside each decade; a label box centre sits nearer a minor line than its own.
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([10, 100, 1000, 10000], log=True, power_labels=True, label_drop=4.0),
+        [(lambda x: 10 ** (1 + x / 50), XS, RED)],
+        grid=True,
+        minor_grid=True,
+        tick_marks=False,
+    )
+    plot = _one_plot(tmp_path, spec)
+    for pos, value in plot.y.ticks:
+        assert pos == pytest.approx(to_page(spec, 0, value)[1], abs=1e-3)  # points
+    (curve,) = plot.curves
+    assert np.log10(curve.y) == pytest.approx([1 + x / 50 for x in XS], abs=1e-3)
+
+
+def test_a_frame_drawn_as_four_lines_and_a_drawn_minus_in_an_exponent(tmp_path):
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([0.01, 0.1, 1, 10], log=True, power_labels=True, vector_minus=True),
+        [(lambda x: 10 ** (x / 50 - 2), XS, RED)],
+        frame_as_lines=True,
+    )
+    plot = _one_plot(tmp_path, spec)
+    assert sorted(v for _, v in plot.y.ticks) == pytest.approx([0.01, 0.1, 1, 10], rel=1e-12, abs=0)
+    (curve,) = plot.curves
+    assert np.log10(curve.y) == pytest.approx([x / 50 - 2 for x in XS], abs=1e-3)
+
+
+def test_a_drawn_minus_before_a_plain_label_makes_it_negative(tmp_path):
+    spec = PlotSpec(Axis([-50, 0, 50, 100], vector_minus=True), Axis([0, 50, 100]), [(lambda x: x / 2 + 25, XS, RED)])
+    plot = _one_plot(tmp_path, spec)
+    assert sorted(v for _, v in plot.x.ticks) == [-50, 0, 50, 100]
+    (curve,) = plot.curves
+    assert curve.x == pytest.approx(XS, abs=0.05)
+
+
+def test_a_smaller_number_beside_the_y_axis_is_not_a_tick_label(tmp_path):
+    # A unit's superscript ("kW/m3") sits where y labels sit, in a smaller size.
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=[('3', 90, 150, 5)])
+    assert sorted(v for _, v in _one_plot(tmp_path, spec).y.ticks) == [0, 50, 100]
+
+
+def test_grid_lines_cut_short_by_a_legend_are_not_curves(tmp_path):
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], grid=True, grid_reach=0.75)
+    assert [c.stroke for c in _one_plot(tmp_path, spec).curves] == [RED]

@@ -16,23 +16,20 @@ authors = [{ name = "Mingyang Bao" }]
 dependencies = [
     "lab-commons[paths] @ git+https://github.com/DawnEver/lab-commons.git",
     "numpy",
-    "pymupdf",
+    # Below 2: PyMuPDF 2.x requires pymupdf4llm, pymupdf-layout and onnxruntime, and onnxruntime has no cp315
+    # wheel (measured 2026-11-05 on 2.1). 1.x is the whole reader this package needs.
+    "pymupdf<2",
 ]
 
 [project.optional-dependencies]
-# A paper as per-section markdown on CPU (`document-lab paper`).
-# Exactly 1.27.2.3 (with its layout model): tests/paper/e2e goldens reproduce on it; 1.28.2, 0.3 and 0.2 split a
-# paper's title off differently so every later section shifts by one (measured 2026-11-05). 1.x requires
-# pymupdf-layout -> onnxruntime, which has no cp315 wheel: this extra installs on Python <= 3.14.
-paper = ["pymupdf4llm==1.27.2.3"]
-# The same conversion through marker-pdf when a GPU with >= 4 GB VRAM is present.
+# `document-lab paper` through marker-pdf when a GPU with >= 4 GB VRAM is present (else the base package's IR path).
 gpu = ["marker-pdf"]
 # Values a model reads out of a document (`document_lab.ai`), through the family's one model interface.
 ai = ["ai_lab @ git+https://github.com/DawnEver/ai-lab.git"]
 # The family's development kit: rules registry, rendered configs, shared test bodies, verify entry.
 dev = [
     "dev-lab[test] @ git+https://github.com/DawnEver/dev-lab.git",
-    "document_lab[paper,ai]",
+    "document_lab[ai]",
     "pytest",
     "ruff",
 ]
@@ -51,7 +48,8 @@ include = ["document_lab*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "vendor: reads a real document named by DOCUMENT_LAB_VENDOR_PDF; skipped with its reason when unset",
+    "gpu: converts with marker-pdf on a CUDA GPU: its own part (tests/gpu), never tests/base",
+    "vendor: reads the real document DOCUMENT_LAB_VENDOR_PDF names: its own part (tests/vendor), never tests/base",
 ]
 
 [tool.ruff]
@@ -74,7 +72,7 @@ ignore = ["COM812", "D203", "D213", "D400", "D401", "N818", "PLR0913", "Q000", "
 # A test asserts, reads private seams of what it tests, and names fixtures rather than documenting them.
 # The paper port's layout heuristics (absorbed from paper_pdf_ingest): their thresholds are measured page-geometry
 # constants read inline, their branching IS the heuristic, and its re.sub callbacks run synchronously in the loop.
-"src/document_lab/paper/**" = ["PLR2004", "C901", "PLR0912", "PLR0915", "PLR0917", "FBT001", "FBT002", "B023"]
+"src/document_lab/paper/**" = ["PLR2004", "C901", "PLR0911", "PLR0912", "PLR0915", "PLR0917", "FBT001", "FBT002", "B023"]
 "tests/**" = ["S101", "SLF001", "D", "ANN", "ARG", "FBT003", "PLR2004", "PT018", "INP001"]
 
 [tool.dev_lab.branchset]
@@ -91,9 +89,13 @@ collect = 'tests'
 
 [tool.dev_lab.parts]
 output = "output/logs"
+# Neither resource exists on a hosted runner: `gpu` needs a CUDA GPU and the gpu extra, `vendor` a vendor PDF that
+# may never be committed. Each is produced where it exists, by hand; base never selects them.
+unproduced = ["gpu", "vendor"]
 
 [tool.lab_commons.tests]
 produce = ["-m", "dev_lab.dev.verify", "--part", "{part}"]
+resources = ["gpu", "vendor"]
 
 # The family branch flow: integrate/main coordinates; main moves only by `integrate promote` (fast-forward).
 [tool.dev_lab.integrator]

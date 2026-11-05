@@ -1,4 +1,6 @@
-"""Opt-in: a real document named by ``DOCUMENT_LAB_VENDOR_PDF`` (vendor PDFs are never committed).
+"""The ``vendor`` part: a real document named by ``DOCUMENT_LAB_VENDOR_PDF`` (vendor PDFs are never committed).
+
+Its own part, never tests/base; run where the file exists, and it FAILS without one rather than skip.
 
 The expected values of a vendor sheet are not known exactly, so these are the PROPERTIES every calibration must
 hold; the exact checks are the synthetic controls in tests/unit. Measured 2026-11-05 on a ferrite material sheet:
@@ -22,7 +24,7 @@ _PATH = os.environ.get('DOCUMENT_LAB_VENDOR_PDF')
 @pytest.fixture(scope='module')
 def found():
     if not _PATH:
-        pytest.skip('DOCUMENT_LAB_VENDOR_PDF is unset: name a real PDF with vector plots to run this')
+        pytest.fail('the vendor part needs DOCUMENT_LAB_VENDOR_PDF naming a real PDF with vector plots')
     doc = read_pdf(Path(_PATH), tables=False)
     return [plot for page in doc.pages for plot in plots(page)]
 

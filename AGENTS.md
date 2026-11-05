@@ -6,14 +6,17 @@ consumers. Modules and usage: `README.md`.
 
 ## Rules here
 
-- Dependency arrow: `paper`, `ai` -> `extract` -> `plot`, `pdf`, `html` -> `numbers`, `ir`. The base imports
+- Dependency arrow: `paper`, `ai` -> `extract`; `paper` -> `pdf`; `extract` -> `plot`, `pdf`, `html` -> `numbers`, `ir`. The base imports
   without `ai_lab` (`tests/unit/test_ai.py` proves it in a subprocess).
 - A test that needs expected values builds a SYNTHETIC PDF (`tests/synthetic.py`); vendor PDFs are never
-  committed. `DOCUMENT_LAB_VENDOR_PDF=<pdf>` runs `tests/vendor` against a real one.
+  committed. The three real papers are checked STRUCTURALLY against what each PDF says
+  (`tests/paper/structure.py`), every check paired with a planted wrong truth it must report.
+- `gpu` (marker-pdf) and `vendor` (`DOCUMENT_LAB_VENDOR_PDF=<pdf>`) are declared resource parts, unproduced on
+  hosted runners: base never selects them, and they FAIL where their resource is missing, never skip.
 - A value the document does not state is absent, a raster plot raises, an ambiguous match refuses: never a
   silent default.
-- The venv runs Python <= 3.14: the `paper` extra pins pymupdf4llm 1.27.2.3, whose layout model needs onnxruntime
-  (no cp315 wheel); `tests/paper/e2e` goldens hold only on that version (`pyproject.toml`).
+- No pymupdf4llm: paper markdown is written from the IR (`paper/markdown.py`). `pymupdf<2` because 2.x requires
+  pymupdf4llm and onnxruntime (no cp315 wheel); the venv is the family's Python 3.15.
 - Verdicts: `.venv/Scripts/python.exe -m dev_lab.dev.verify -- <paths>`. Family files are rendered
   (`tests/architecture/_famconfig.py`, `python -m dev_lab.dev.famfiles`, `python -m dev_lab.dev.ciworkflows render`).
 - Design record: `.claude/memory/2026/11/05/`.

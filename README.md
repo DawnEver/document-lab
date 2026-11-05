@@ -12,7 +12,7 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 | `numbers` | the one number grammar: `parse_number` (whole text) and `first_number` (a cell's leading value) |
 | `extract` | typed values against the caller's `Schema` from key-value (`from_rows`) or column (`from_columns`) tables |
 | `ai` | `ask(responder, schema, page_or_table)`: the same values read by a model through ai-lab (`[ai]` extra) |
-| `paper` | `document-lab paper <pdf> <out>`: a paper as per-section markdown plus cropped figures/tables/equations |
+| `paper` | `document-lab paper <pdf> <out>`: a paper as per-section markdown (written from the IR, or marker-pdf on a GPU) plus cropped figures/tables/equations |
 
 ```python
 from document_lab.pdf import read_pdf
@@ -30,5 +30,5 @@ A `Value` keeps the source `text` beside the typed `value` (a `≈`, `≤` or `�
 
 ## Install
 
-`pip install "document_lab @ git+https://github.com/DawnEver/document-lab.git"`; extras: `paper`
-(pymupdf4llm, Python <= 3.14), `gpu` (marker-pdf), `ai` (ai-lab). Domain schemas live in the consumers.
+`pip install "document_lab @ git+https://github.com/DawnEver/document-lab.git"`; extras: `gpu` (marker-pdf),
+`ai` (ai-lab). Domain schemas live in the consumers.

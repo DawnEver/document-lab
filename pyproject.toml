@@ -21,9 +21,10 @@ dependencies = [
 
 [project.optional-dependencies]
 # A paper as per-section markdown on CPU (`document-lab paper`).
-# Below 1: from 1.x pymupdf4llm requires pymupdf-layout -> onnxruntime, which has no cp315 wheel (measured
-# 2026-11-05); 0.3.x keeps that layout model an opt-in extra.
-paper = ["pymupdf4llm>=0.3,<1"]
+# Exactly 1.27.2.3 (with its layout model): tests/paper/e2e goldens reproduce on it; 1.28.2, 0.3 and 0.2 split a
+# paper's title off differently so every later section shifts by one (measured 2026-11-05). 1.x requires
+# pymupdf-layout -> onnxruntime, which has no cp315 wheel: this extra installs on Python <= 3.14.
+paper = ["pymupdf4llm==1.27.2.3"]
 # The same conversion through marker-pdf when a GPU with >= 4 GB VRAM is present.
 gpu = ["marker-pdf"]
 # Values a model reads out of a document (`document_lab.ai`), through the family's one model interface.
@@ -71,6 +72,9 @@ ignore = ["COM812", "D203", "D213", "D400", "D401", "N818", "PLR0913", "Q000", "
 
 [tool.ruff.lint.per-file-ignores]
 # A test asserts, reads private seams of what it tests, and names fixtures rather than documenting them.
+# The paper port's layout heuristics (absorbed from paper_pdf_ingest): their thresholds are measured page-geometry
+# constants read inline, their branching IS the heuristic, and its re.sub callbacks run synchronously in the loop.
+"src/document_lab/paper/**" = ["PLR2004", "C901", "PLR0912", "PLR0915", "PLR0917", "FBT001", "FBT002", "B023"]
 "tests/**" = ["S101", "SLF001", "D", "ANN", "ARG", "FBT003", "PLR2004", "PT018", "INP001"]
 
 [tool.dev_lab.branchset]
@@ -107,7 +111,8 @@ integration = "integrate/main"
 
 [[tool.dev_lab.hooks.pre-commit]]
 id = "check-added-large-files"
-exclude = '^uv\.lock$'
+# Also the three papers the paper e2e goldens were measured on (paper_pdf_ingest's own test data, up to 1.6 MB).
+exclude = '^(uv\.lock|tests/paper/data/[^/]+\.pdf)$'
 
 [tool.dev_lab.doors]
 BARE-TEST-INVOCATION = "<venv python> -m dev_lab.dev.verify [-- <pytest args>]  (the verdict door; a hand-written pytest line has none)"

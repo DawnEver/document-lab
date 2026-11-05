@@ -105,12 +105,18 @@ def _vector(
 
 
 def _tables(page: pymupdf.Page, here: Provenance) -> Iterator[Table]:
+    """Each detected table; a cell's text is read from its own box, so text and provenance are one fact.
+
+    (``Table.extract()`` of pymupdf 1.27.2.3 reorders characters: ``1.25`` came back as ``125`` and ``.`` on two lines.)
+    """
     for index, found in enumerate(page.find_tables().tables):
-        rows = tuple(tuple(cell or '' for cell in row) for row in found.extract())
         boxes = tuple(tuple(BBox(*c) if c else None for c in row.cells) for row in found.rows)
-        if [len(r) for r in boxes] != [len(r) for r in rows]:
-            boxes = None
+        rows = tuple(tuple(_text_in(page, box) if box else '' for box in row) for row in boxes)
         yield Table(rows, boxes, here.at(bbox=BBox(*found.bbox), locator=f'table[{index}]'))
+
+
+def _text_in(page: pymupdf.Page, box: BBox) -> str:
+    return ' '.join(page.get_text('text', clip=pymupdf.Rect(*box)).split())
 
 
 def _figures(page: pymupdf.Page, blocks: list[dict], here: Provenance) -> Iterator[Figure]:

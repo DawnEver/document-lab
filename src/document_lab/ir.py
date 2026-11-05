@@ -91,6 +91,7 @@ class TextSpan:
     size: float
     font: str
     provenance: Provenance
+    bold: bool = False
 
     @property
     def center(self) -> tuple[float, float]:

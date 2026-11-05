@@ -13,41 +13,31 @@ FIG_TABLE_RE = re.compile(rf'(Figure\s+\d+|Fig\.\s*\d+|Table\s+(?:\d+|{_RN}))', 
 
 
 def build_figure_page_map(pdf_path: Path) -> dict[str, int]:
-    """Return dict mapping normalized figure/table labels to 0-based page numbers.
+    """Normalised figure/table labels -> the 0-based page of their CAPTION.
 
-    Prioritises the page whose caption block is most compact (shortest height).
-    True caption blocks are 1-2 lines tall; body-text cross-references like
-    "…results shown in Fig. 14. In comparison, …" are in tall paragraph blocks.
-    Falls back to the first mention page when no caption block is found.
+    A caption is a LINE opening with its label (``Fig. 3. ...``, ``TABLE I`` over its title), or a compact block
+    holding ``label.``; of several, the most compact block wins (a body cross-reference sits in a tall paragraph).
+    A label only mentioned, never captioned (``see Table IV``), has no figure to crop and is absent.
     """
-    # Per-label: (min_caption_height, page_num)
-    caption_candidates: dict[str, tuple[float, int]] = {}
-    mention_pages: dict[str, int] = {}
-    doc = pymupdf.open(str(pdf_path))
-    for page_num in range(len(doc)):
-        blocks = doc[page_num].get_text('dict', flags=pymupdf.TEXT_PRESERVE_WHITESPACE)['blocks']
-        for blk in blocks:
-            if blk['type'] != 0:
-                continue
-            blk_text = ''.join(span.get('text', '') for line in blk.get('lines', []) for span in line.get('spans', []))
-            if len(blk_text) > 350:
-                continue
-            blk_height = blk['bbox'][3] - blk['bbox'][1]
-            for m in FIG_TABLE_RE.finditer(blk_text):
-                label = re.sub(r'\s+', ' ', m.group(1)).strip()
-                normalized = re.sub(r'(?i)^Fig\.\s*', 'Figure ', label)
-                # Caption: "label." must appear in the block text
-                is_caption = bool(re.search(re.escape(label) + r'\.', blk_text, re.IGNORECASE))
-                if is_caption:
-                    prev = caption_candidates.get(normalized)
-                    if prev is None or blk_height < prev[0]:
-                        caption_candidates[normalized] = (blk_height, page_num)
-                if normalized not in mention_pages:
-                    mention_pages[normalized] = page_num
-    doc.close()
-    result = dict(mention_pages)
-    result.update({norm: page for norm, (_, page) in caption_candidates.items()})
-    return result
+    captions: dict[str, tuple[float, int]] = {}
+    with pymupdf.open(str(pdf_path)) as doc:
+        for page_num, page in enumerate(doc):
+            for blk in page.get_text('dict', flags=pymupdf.TEXT_PRESERVE_WHITESPACE)['blocks']:
+                if blk['type'] != 0:
+                    continue
+                lines = [''.join(s.get('text', '') for s in ln.get('spans', [])).strip() for ln in blk.get('lines', [])]
+                text = ''.join(lines)
+                height = blk['bbox'][3] - blk['bbox'][1]
+                for m in FIG_TABLE_RE.finditer(text):
+                    label = re.sub(r'\s+', ' ', m.group(1)).strip()
+                    opens = re.compile(re.escape(label) + r'(?![\w])', re.IGNORECASE)
+                    is_caption = any(opens.match(line) for line in lines) or (
+                        len(text) <= 350 and re.search(re.escape(label) + r'\.', text, re.IGNORECASE)
+                    )
+                    normalized = re.sub(r'(?i)^Fig\.\s*', 'Figure ', label)
+                    if is_caption and (normalized not in captions or height < captions[normalized][0]):
+                        captions[normalized] = (height, page_num)
+    return {norm: page for norm, (_, page) in captions.items()}
 
 
 def build_page_section_map(
@@ -121,7 +111,7 @@ def build_equation_page_map(pdf_path: Path) -> dict[str, int]:
     """Map equation numbers like 'Equation (2)' to 0-based pages.
 
     Scans for parenthesized equation numbers near the right margin (IEEE
-    convention) and also at the end of text lines (pymupdf4llm style).
+    convention) and also at the end of text lines.
     """
     eq_pages: dict[str, int] = {}
     doc = pymupdf.open(str(pdf_path))
@@ -145,7 +135,7 @@ def build_equation_page_map(pdf_path: Path) -> dict[str, int]:
                     eq_pages[key] = page_num
                 continue
 
-            # Equation number at end of line (pymupdf4llm style): "...= result (5)"
+            # Equation number at end of line: "...= result (5)"
             # Use x1 (right edge) > 40% page width to accept both left- and right-column equations
             m = re.search(r'\((\d+)\)\s*$', blk_text)
             if m and bbox[2] > page_width * 0.40:

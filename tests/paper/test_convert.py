@@ -14,4 +14,4 @@ class TestDetectGpuVram:
 class TestChooseTool:
     def test_returns_valid_tool(self):
         tool = choose_tool()
-        assert tool in ('marker', 'pymupdf4llm')
+        assert tool in ('marker', 'pymupdf')

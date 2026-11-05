@@ -17,7 +17,7 @@ def main(argv: list[str] | None = None) -> int:
     paper = sub.add_parser('paper', help='a paper PDF to per-section markdown and cropped figures')
     paper.add_argument('pdf', type=Path)
     paper.add_argument('out', type=Path, help='the directory to write the paper layout into')
-    paper.add_argument('--tool', choices=('marker', 'pymupdf4llm'), help='force a converter (default: best available)')
+    paper.add_argument('--tool', choices=('marker', 'pymupdf'), help='force a converter (default: best available)')
     args = parser.parse_args(argv)
 
     from document_lab.paper.ingest import ingest  # noqa: PLC0415 -- a subcommand loads only what it runs

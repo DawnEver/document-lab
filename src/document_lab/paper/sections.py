@@ -9,7 +9,7 @@ _KEEP_HEADINGS = re.compile(r'result|experiment|evaluat|ablat|comparison', re.IG
 
 # ── Section splitter ─────────────────────────────────────────────────────────
 # Match: "III. INTERFERENCE MITIGATION..." — no $ anchor because body text
-# may leak onto the same line in 2-column IEEE pymupdf4llm output.
+# may leak onto the same line in 2-column IEEE converter output.
 _ROMAN_HEADING_RE = re.compile(rf'^({_RN})\.\s+([A-Z][A-Z\s,/-]{{4,}})')
 _STANDALONE_RE = re.compile(r'^(ACKNOWLEDGMENT|REFERENCES|APPENDIX|CONCLUSION)S?\s*$')
 _CLEAN_HEADING_RE = re.compile(r'^((?:I{1,3}V?|VI{1,3}|IX|X{1,3}V?I{0,2})\.)')
@@ -38,7 +38,7 @@ def _clean_heading_text(heading: str) -> str:
 def _split_plaintext(md: str) -> list[tuple[str, str]]:
     """Fallback: split on Roman-numeral sections and standalone ALL-CAPS headings.
 
-    Used when pymupdf4llm produces flat text without markdown `#` headings
+    Used when the converter produces flat text without markdown `#` headings
     (common for 2-column IEEE papers).
     """
     lines = md.split('\n')
@@ -108,7 +108,7 @@ def split_sections(md: str) -> list[tuple[str, str]]:
     Picks the *shallowest* heading level that has ≥3 matches (favours
     top-level sections over fine-grained subsections).  Falls back to
     plain-text heuristics (Roman numerals, ALL-CAPS lines) when no
-    markdown headings are found — handles pymupdf4llm output for
+    markdown headings are found — handles flat converter output for
     2-column IEEE papers.
     """
     counts = {lvl: len(re.findall(rf'^{"#" * lvl} ', md, re.MULTILINE)) for lvl in (1, 2, 3)}
@@ -151,7 +151,20 @@ def split_sections(md: str) -> list[tuple[str, str]]:
     if len(sections) < 2:
         sections = _split_plaintext(md)
 
-    return sections
+    return _split_titles(sections)
+
+
+def _split_titles(sections: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """A level-1 title inside a section body opens a section of its own (a further paper bound in after it)."""
+    out: list[tuple[str, str]] = []
+    for heading, body in sections:
+        if not heading:  # the preamble holds the paper's own title
+            out.append((heading, body))
+            continue
+        parts = re.split(r'^(# .*)$', body, flags=re.MULTILINE)
+        out.append((heading, parts[0].strip()))
+        out.extend((parts[i].strip(), parts[i + 1].strip()) for i in range(1, len(parts) - 1, 2))
+    return out
 
 
 # ── Section classification ──────────────────────────────────────────────────
@@ -167,6 +180,10 @@ def classify_section(heading: str, body: str) -> str:
     """
     clean_body = strip_formatting(body)
     clean_heading = re.sub(r'[*#]', '', heading).strip()
+
+    # A recognised section heading is a section however short its body (a one-line acknowledgment).
+    if _ROMAN_HEADING_RE.match(clean_heading) or _STANDALONE_RE.match(clean_heading):
+        return 'keep'
 
     # diagram sub-labels: (a), (b), (c), (d) — never real sections
     if re.match(r'^\([a-z]\)$', clean_heading):
@@ -264,7 +281,9 @@ def clean_sections(
     found_boundary = False
 
     for idx, (heading, body) in enumerate(cleaned):
-        if _is_paper_boundary(heading, body, idx):
+        # A bound-in paper opens with its title section; its own introduction right after is not another paper.
+        just_opened = found_boundary and len(current_batch) == 1 and current_batch[0][0].startswith('# ')
+        if _is_paper_boundary(heading, body, idx) and not just_opened:
             if current_batch:
                 if not found_boundary:
                     main_sections = current_batch

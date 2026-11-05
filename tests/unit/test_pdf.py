@@ -1,5 +1,6 @@
 import hashlib
 
+import pymupdf
 import pytest
 
 from document_lab.pdf import read_pdf
@@ -62,3 +63,13 @@ def test_an_image_is_a_figure_with_its_box_and_caption(doc):
 def test_tables_can_be_skipped_for_speed(tmp_path):
     doc = read_pdf(mixed_pdf(tmp_path / 'm.pdf'), tables=False)
     assert doc.page(1).tables == ()
+
+
+def test_a_bold_span_says_so(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), 'Strong', fontname='hebo', fontsize=10)
+    page.insert_text((72, 100), 'plain', fontname='helv', fontsize=10)
+    doc.save(tmp_path / 'b.pdf')
+    spans = {s.text: s.bold for s in read_pdf(tmp_path / 'b.pdf').spans()}
+    assert spans == {'Strong': True, 'plain': False}

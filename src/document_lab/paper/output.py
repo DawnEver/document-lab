@@ -249,7 +249,7 @@ def write_paper_output(
         f'- [{si["idx"]:02d} {si["heading"].lstrip("#").strip()}](md/{si["fname"]})' for si in section_info
     ]
 
-    # Route flat images (from marker/pymupdf4llm) to per-section dirs
+    # Route flat images (from marker) to per-section dirs
     route_images(img_flat, body_sections, md_dir, out_dir / 'img')
 
     # Render cropped figure/table images and insert inline
@@ -278,7 +278,7 @@ def write_paper_output(
                     title = candidate
                     best_pos = title_m.start()
 
-    # Fallback: plain-text preamble (pymupdf4llm output for 2-column IEEE)
+    # Fallback: plain-text preamble (a converter that emits no title heading)
     if title == 'Untitled':
         preamble = sections[0][1] if sections and sections[0][0] == '' else ''
         title = extract_title_from_preamble(preamble or md_text)

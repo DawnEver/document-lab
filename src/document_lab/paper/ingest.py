@@ -15,7 +15,7 @@ import shutil
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from document_lab.paper.convert import augment_markdown_with_formulas, convert
+from document_lab.paper.convert import convert
 from document_lab.paper.output import write_paper_output
 from document_lab.paper.sections import clean_sections, split_sections
 from document_lab.paper.text import slug
@@ -48,7 +48,6 @@ def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> Ingested:
     pdf = pdf.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     md_text, used = convert(pdf, out_dir, tool=tool)
-    md_text = augment_markdown_with_formulas(md_text, pdf)
     main, appended = clean_sections(split_sections(md_text))
     if not main:
         msg = f'{pdf.name}: the converted markdown has no section'

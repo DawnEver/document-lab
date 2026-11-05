@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
 __all__ = ['read_pdf']
 
+#: PyMuPDF's span flag bit for a bold font.
+BOLD_FLAG: Final = 16
 #: Points per cubic Bezier segment when a curve is flattened to a polyline.
 BEZIER_SAMPLES: Final = 8
 #: How far below an image (points) a caption may start.
@@ -53,7 +55,8 @@ def _spans(blocks: list[dict], here: Provenance) -> Iterator[TextSpan]:
         for line in block.get('lines', ()):
             for span in line['spans']:
                 if span['text'].strip():
-                    yield TextSpan(span['text'], span['size'], span['font'], here.at(bbox=BBox(*span['bbox'])))
+                    bold = bool(span['flags'] & BOLD_FLAG) or 'bold' in span['font'].lower()
+                    yield TextSpan(span['text'], span['size'], span['font'], here.at(bbox=BBox(*span['bbox'])), bold)
 
 
 def _bezier(p0: pymupdf.Point, c1: pymupdf.Point, c2: pymupdf.Point, p1: pymupdf.Point) -> list[tuple[float, float]]:

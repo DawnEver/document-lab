@@ -65,7 +65,7 @@
         },
         {
           "name": "Sync the environment",
-          "run": "uv sync --frozen --all-extras"
+          "run": "uv sync --frozen --extra dev"
         },
         {
           "id": "pending",
@@ -112,7 +112,7 @@
         },
         {
           "name": "Sync the environment",
-          "run": "uv sync --frozen --all-extras"
+          "run": "uv sync --frozen --extra dev"
         },
         {
           "name": "Produce and post the part",
@@ -155,7 +155,7 @@
         },
         {
           "name": "Sync the environment",
-          "run": "uv sync --frozen --all-extras"
+          "run": "uv sync --frozen --extra dev"
         },
         {
           "name": "Post every part no job settled",
@@ -190,7 +190,7 @@
         },
         {
           "name": "Sync the environment",
-          "run": "uv sync --frozen --all-extras"
+          "run": "uv sync --frozen --extra dev"
         },
         {
           "name": "tests/security",
@@ -294,7 +294,7 @@
         },
         {
           "name": "Sync the environment",
-          "run": "uv sync --frozen --all-extras"
+          "run": "uv sync --frozen --extra dev"
         },
         {
           "id": "ready",
@@ -344,7 +344,7 @@
         },
         {
           "name": "Sync the environment",
-          "run": "uv sync --frozen --all-extras"
+          "run": "uv sync --frozen --extra dev"
         },
         {
           "name": "Promote main",

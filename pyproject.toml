@@ -107,6 +107,16 @@ merges_only_since = "bd7950d9a35321edef37c71f40c85a22fd009e00"  # INTEGRATION-IS
 # .github/workflows/ci.yml by `python -m dev_lab.dev.ciworkflows render`, never hand-edited.
 [tool.dev_lab.ci."ci.yml"]
 
+# The setup every job shares, with the base's `--all-extras` narrowed to the extras a HOSTED runner uses: `dev`
+# (which carries `ai`). `gpu` is an unproduced part ([tool.dev_lab.parts]); installing it on a hosted runner only
+# built marker-pdf's pillow from source and failed `parts` (e0b6e02). The same install [tool.lab_commons.hpc] runs.
+[tool.dev_lab.ci._steps]
+setup = [
+    { uses = "actions/checkout@v4", with = { ref = "${{ env.HEAD_SHA }}", fetch-depth = 0 } },
+    { name = "Install uv", uses = "astral-sh/setup-uv@v5", with = { enable-cache = true } },
+    { name = "Sync the environment", run = "uv sync --frozen --extra dev" },
+]
+
 # Git hooks: the family base (dev_lab/dev/githooks/base.toml) plus one merged row. The lock is generated and
 # measures 532 KB because the `gpu` extra (marker-pdf -> torch) resolves in it; the size check guards against
 # committed blobs, which a lock is not.

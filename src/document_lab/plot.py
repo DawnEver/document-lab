@@ -2,9 +2,20 @@
 
 A plot here is an axis-aligned rectangular frame with numeric tick labels below it (x) and left of it (y). Each
 label's position is snapped to the tick mark or grid line it labels when one is drawn, else its box centre is
-used. An axis is ``linear`` or ``log10``, chosen by which one the labels fit better, or forced by the caller (two
-labels fit both exactly, so they read as linear unless told otherwise). Every stroked open polyline inside the
-frame that is not a tick, a grid line or the frame is a curve.
+used. A tick label is a number in the axis' common font size, aligned with the others on one row (x) or column
+(y), whose box overlaps the frame's extent along the axis; a stray number off that row or past the frame is not.
+
+An axis is ``linear`` or ``log10``, forced by the caller or else the one whose fit needs fewer pieces (then the
+smaller misfit; two labels fit both exactly, so they read as linear unless told otherwise). The fit is PIECEWISE:
+the axis is cut at every tick where the data-per-point spacing (in the scale's units) changes by more than
+``BREAK_TOL``, and each piece is a least-squares line through its own ticks -- a broken axis whose scale changes at
+a break reads right. Ticks whose values are not strictly monotone along the axis are refused (``ValueError``).
+
+Every stroked open polyline inside the frame that is not a tick, a grid line or the frame is a curve, after
+fragments are joined: polylines of one style (stroke, width, dash array) whose ends meet (to ``JOIN_DIGITS``
+decimals) become one, unless more than two ends of that style meet there (ambiguous, left unjoined). A short
+horizontal curve (at most ``SAMPLE_MAX`` long) with a text span starting within ``SAMPLE_GAP`` right of it, at its
+height, is a legend sample: it goes to ``Plot.legend`` with that text, not to ``Plot.curves``.
 
 A plot that is a RASTER image raises :class:`RasterPlot`: digitising pixels is not implemented, and a silent
 empty result would read as "this plot has no curves". Secondary (right/top) axes are not read.
@@ -14,6 +25,7 @@ from __future__ import annotations
 
 import itertools
 import math
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal
 
@@ -25,7 +37,7 @@ from document_lab.numbers import parse_number
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-__all__ = ['Axis', 'Curve', 'Plot', 'RasterPlot', 'Scale', 'plots']
+__all__ = ['Axis', 'Curve', 'LegendSample', 'Plot', 'RasterPlot', 'Scale', 'plots']
 
 Scale = Literal['linear', 'log10']
 
@@ -45,12 +57,22 @@ RULE_MAX: Final = 1.5
 DASH_MAX: Final = 5.0
 #: The widest gap (points) between a drawn minus sign and its digits.
 DASH_GAP: Final = 2.5
+#: A span holding only one of these is a minus sign set apart from its digits.
+MINUS_GLYPHS: Final = frozenset({'-', chr(0x2212), chr(0x2013), chr(0x2010)})
 #: Font sizes (points) closer than this are one size.
 SIZE_TOL: Final = 0.25
 #: How close (points) a shifted label must land to a mark to count as on it.
 SNAP_TOL: Final = 0.75
 #: A grid line spans at least this fraction of the frame.
 GRID_SPAN: Final = 0.9
+#: The relative change in data-per-point spacing between neighbouring tick intervals that marks an axis break.
+BREAK_TOL: Final = 0.1
+#: Decimals (points) to which two fragment ends must agree to meet.
+JOIN_DIGITS: Final = 2
+#: The longest legend sample line (points).
+SAMPLE_MAX: Final = 40.0
+#: The widest gap (points) between a legend sample line and its label.
+SAMPLE_GAP: Final = 10.0
 #: The share of the frame an image must cover for a curve-less plot to count as a raster plot.
 RASTER_COVER: Final = 0.25
 
@@ -61,17 +83,23 @@ class RasterPlot(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class Axis:
-    """A page coordinate -> data value map: ``value = s(slope * position + intercept)``, ``s`` identity or ``10**``."""
+    """A page coordinate -> data value map: per piece ``value = s(slope * position + intercept)``, ``s`` id or ``10**``.
+
+    The first piece also covers positions before it, the last those after it.
+    """
 
     scale: Scale
-    slope: float
-    intercept: float
+    #: The pieces in increasing position: (position the piece starts at, slope, intercept).
+    pieces: tuple[tuple[float, float, float], ...]
     #: The calibration points: (page coordinate, labelled value).
     ticks: tuple[tuple[float, float], ...]
 
     def to_data(self, position: np.ndarray) -> np.ndarray:
         """The data values at page coordinates ``position``."""
-        t = self.slope * np.asarray(position, dtype=float) + self.intercept
+        p = np.asarray(position, dtype=float)
+        starts, slopes, intercepts = (np.array(c) for c in zip(*self.pieces, strict=True))
+        k = np.clip(np.searchsorted(starts, p, side='right') - 1, 0, len(starts) - 1)
+        t = slopes[k] * p + intercepts[k]
         return 10.0**t if self.scale == 'log10' else t
 
 
@@ -85,16 +113,30 @@ class Curve:
     axis_scales: tuple[Scale, Scale]
     stroke: tuple[float, ...] | None
     width: float
+    #: The stroke's dash array (points: on, off, ...); empty for a solid curve.
+    dashes: tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class LegendSample:
+    """A legend entry inside the frame: a short sample line in a curve's style and the text beside it."""
+
+    label: str
+    stroke: tuple[float, ...] | None
+    width: float
+    dashes: tuple[float, ...]
+    provenance: Provenance
 
 
 @dataclass(frozen=True, slots=True, eq=False)
 class Plot:
-    """A calibrated frame and the curves inside it."""
+    """A calibrated frame, the curves inside it and its legend samples."""
 
     frame: BBox
     x: Axis
     y: Axis
     curves: tuple[Curve, ...]
+    legend: tuple[LegendSample, ...]
     provenance: Provenance
 
 
@@ -126,13 +168,20 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
     # A grid line may stop short of the far edge (a legend sits there), so a long rule anchored on an edge counts.
     found = []
     for frame in _frames(edges):
-        xs = _one_size(_x_labels(frame, labels))
-        ys = _one_size(_y_labels(frame, labels))
+        xs = _aligned(_one_size(_x_labels(frame, labels)), vertical=False)
+        ys = _aligned(_one_size(_y_labels(frame, labels)), vertical=True)
         if len(xs) < 2 or len(ys) < 2:  # noqa: PLR2004 -- a line needs two points
             continue
         x_ticks = _snap([((lb.box.x0 + lb.box.x1) / 2, lb.value) for lb in xs], _marks(frame, edges, vertical=True))
         y_ticks = _snap([((lb.box.y0 + lb.box.y1) / 2, lb.value) for lb in ys], _marks(frame, edges, vertical=False))
         x_axis, y_axis = _fit(x_ticks, x_scale), _fit(y_ticks, y_scale)
+        legend, paths = [], []
+        for path in _joined(_curve_paths(frame, page.paths)):
+            label = _sample_label(path, page.spans)
+            if label is None:
+                paths.append(path)
+            else:
+                legend.append(LegendSample(label, path.stroke, path.width, path.dashes, path.provenance))
         curves = tuple(
             Curve(
                 x_axis.to_data(np.array([p[0] for p in path.points])),
@@ -141,12 +190,13 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
                 (x_axis.scale, y_axis.scale),
                 path.stroke,
                 path.width,
+                path.dashes,
             )
-            for path in _curve_paths(frame, page.paths)
+            for path in paths
         )
         if not curves:
             _refuse_raster(page, frame)
-        found.append(Plot(frame, x_axis, y_axis, curves, page.spans[0].provenance.at(bbox=frame)))
+        found.append(Plot(frame, x_axis, y_axis, curves, tuple(legend), page.spans[0].provenance.at(bbox=frame)))
     return found
 
 
@@ -205,18 +255,31 @@ def _labels(spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> list[_Label]:
         value = parse_number(span.text)
         if value is None:
             continue
-        dash = _dash_before(box, dashes) if value > 0 else None
-        if dash is not None:
-            value, box = -value, union([box, BBox(dash.lo, box.y0, dash.hi, box.y1)])
+        minus = _minus_before(box, spans, dashes) if value > 0 else None
+        if minus is not None:
+            value, box = -value, union([box, minus])
         out.append(_Label(value, box, span.size))
     return out
 
 
-def _dash_before(box: BBox, dashes: Sequence[_Edge]) -> _Edge | None:
-    """A drawn minus sign: a short horizontal stroke ending just left of the label, within its height."""
+def _minus_before(box: BBox, spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> BBox | None:
+    """The box of a minus sign ending just left of the label, within its height.
+
+    It is a drawn short horizontal stroke, or a span of its own holding only a minus glyph (a minus set in another
+    font than its digits).
+    """
     for d in dashes:
         if box.x0 - DASH_GAP <= d.hi <= box.x0 + EDGE_TOL / 3 and box.y0 < d.at < box.y1:
-            return d
+            return BBox(d.lo, box.y0, d.hi, box.y1)
+    for span in spans:
+        sb = span.provenance.bbox
+        if (
+            span.text.strip() in MINUS_GLYPHS
+            and sb is not None
+            and box.x0 - DASH_GAP <= sb.x1 <= box.x0 + EDGE_TOL
+            and box.y0 < (sb.y0 + sb.y1) / 2 < box.y1
+        ):
+            return sb
     return None
 
 
@@ -255,7 +318,8 @@ def _x_labels(frame: BBox, labels: list[_Label]) -> list[_Label]:
         lb
         for lb in labels
         if frame.y1 - EDGE_TOL <= lb.box.y0 <= frame.y1 + LABEL_REACH
-        and frame.x0 - LABEL_REACH / 3 <= (lb.box.x0 + lb.box.x1) / 2 <= frame.x1 + LABEL_REACH / 3
+        and lb.box.x0 <= frame.x1
+        and lb.box.x1 >= frame.x0
     ]
 
 
@@ -264,8 +328,26 @@ def _y_labels(frame: BBox, labels: list[_Label]) -> list[_Label]:
         lb
         for lb in labels
         if frame.x0 - LABEL_REACH <= lb.box.x1 <= frame.x0 + EDGE_TOL
-        and frame.y0 - LABEL_REACH / 3 <= (lb.box.y0 + lb.box.y1) / 2 <= frame.y1 + LABEL_REACH / 3
+        and lb.box.y0 <= frame.y1
+        and lb.box.y1 >= frame.y0
     ]
+
+
+def _aligned(labels: list[_Label], *, vertical: bool) -> list[_Label]:
+    """The largest set of labels sharing one row (x: top, bottom or centre) or column (y: left, right or centre)."""
+    lo, hi = ('x0', 'x1') if vertical else ('y0', 'y1')
+    keys = (
+        lambda b: getattr(b, lo),
+        lambda b: getattr(b, hi),
+        lambda b: (getattr(b, lo) + getattr(b, hi)) / 2,
+    )
+    best: list[_Label] = []
+    for key in keys:
+        for anchor in labels:
+            row = [lb for lb in labels if abs(key(lb.box) - key(anchor.box)) <= EDGE_TOL]
+            if len(row) > len(best):
+                best = row
+    return best
 
 
 def _marks(frame: BBox, edges: Sequence[_Edge], *, vertical: bool) -> list[float]:
@@ -311,19 +393,43 @@ def _snap(ticks: list[tuple[float, float]], marks: list[float]) -> tuple[tuple[f
 def _fit(ticks: tuple[tuple[float, float], ...], forced: Scale | None) -> Axis:
     pos = np.array([p for p, _ in ticks])
     val = np.array([v for _, v in ticks])
+    steps = np.diff(val) * np.diff(pos)
+    if np.any(steps == 0) or (np.any(steps > 0) and np.any(steps < 0)):
+        msg = f'tick values are not monotone along the axis: {val.tolist()} at {pos.round(1).tolist()}'
+        raise ValueError(msg)
     scale = forced or _infer_scale(pos, val)
     if scale == 'log10' and np.any(val <= 0):
         msg = f'a log10 axis needs positive tick values, got {val.tolist()}'
         raise ValueError(msg)
-    target = np.log10(val) if scale == 'log10' else val
-    slope, intercept = np.polyfit(pos, target, 1)
-    return Axis(scale, float(slope), float(intercept), ticks)
+    return Axis(scale, _pieces(pos, np.log10(val) if scale == 'log10' else val), ticks)
+
+
+def _pieces(pos: np.ndarray, target: np.ndarray) -> tuple[tuple[float, float, float], ...]:
+    """Lines through runs of tick intervals of one data-per-point spacing; neighbouring pieces share a break tick."""
+    rates = np.diff(target) / np.diff(pos)
+    runs = [[0]]
+    for i in range(1, len(rates)):
+        ref = float(np.mean(rates[runs[-1]]))
+        if abs(rates[i] - ref) <= BREAK_TOL * abs(ref):
+            runs[-1].append(i)
+        else:
+            runs.append([i])
+    out = []
+    for run in runs:
+        lo, hi = run[0], run[-1] + 2
+        slope, intercept = np.polyfit(pos[lo:hi], target[lo:hi], 1)
+        out.append((float(pos[lo]), float(slope), float(intercept)))
+    return tuple(out)
 
 
 def _infer_scale(pos: np.ndarray, val: np.ndarray) -> Scale:
+    """The scale whose fit needs fewer pieces, then the one a single line fits better (two points fit both)."""
     if len(val) < 3 or np.any(val <= 0):  # noqa: PLR2004 -- two points fit both scales exactly
         return 'linear'
-    return 'log10' if _misfit(pos, np.log10(val)) < _misfit(pos, val) else 'linear'
+    log, lin = np.log10(val), val
+    key_log = (len(_pieces(pos, log)), _misfit(pos, log))
+    key_lin = (len(_pieces(pos, lin)), _misfit(pos, lin))
+    return 'log10' if key_log < key_lin else 'linear'
 
 
 def _misfit(pos: np.ndarray, target: np.ndarray) -> float:
@@ -347,6 +453,61 @@ def _curve_paths(frame: BBox, paths: Sequence[VectorPath]) -> list[VectorPath]:
             continue
         out.append(path)
     return out
+
+
+def _joined(paths: Sequence[VectorPath]) -> list[VectorPath]:
+    """Chains of paths of one style meeting end to end, each joined into one path in chain order.
+
+    Two ends link only when they are the only ends of that style at that point; a third makes the point ambiguous.
+    """
+    ends: dict[tuple, list[tuple[int, int]]] = defaultdict(list)
+    for i, path in enumerate(paths):
+        for end, (x, y) in ((0, path.points[0]), (1, path.points[-1])):
+            ends[(path.stroke, path.width, path.dashes, round(x, JOIN_DIGITS), round(y, JOIN_DIGITS))].append((i, end))
+    link = {}
+    for meeting in ends.values():
+        if len(meeting) == 2 and meeting[0][0] != meeting[1][0]:  # noqa: PLR2004 -- one end from each side
+            link[meeting[0]], link[meeting[1]] = meeting[1], meeting[0]
+    seen: set[int] = set()
+    out = []
+    # A chain is walked from a free end; a closed loop of fragments (no free end) from wherever it is met.
+    for start in sorted(range(len(paths)), key=lambda k: (k, 0) in link and (k, 1) in link):
+        if start in seen:
+            continue
+        i = start
+        enter = 1 if (i, 0) in link and (i, 1) not in link else 0
+        members, points = [], []
+        while i not in seen:
+            seen.add(i)
+            members.append(paths[i])
+            run = paths[i].points if enter == 0 else paths[i].points[::-1]
+            points.extend(run if not points else run[1:])
+            nxt = link.get((i, 1 - enter))
+            if nxt is None:
+                break
+            i, enter = nxt
+        first = members[0]
+        if len(members) == 1:
+            out.append(first)
+            continue
+        box = union([m.provenance.bbox for m in members if m.provenance.bbox is not None])
+        out.append(
+            VectorPath(tuple(points), first.stroke, first.width, first.dashes, False, first.provenance.at(bbox=box))  # noqa: FBT003
+        )
+    return out
+
+
+def _sample_label(path: VectorPath, spans: Sequence[TextSpan]) -> str | None:
+    """The text of a span starting just right of a short horizontal line, at its height: what the sample stands for."""
+    box = path.provenance.bbox
+    if box is None or box.width > SAMPLE_MAX or box.height > EDGE_TOL:
+        return None
+    y = (box.y0 + box.y1) / 2
+    for span in spans:
+        sb = span.provenance.bbox
+        if sb is not None and box.x1 <= sb.x0 <= box.x1 + SAMPLE_GAP and sb.y0 <= y <= sb.y1:
+            return span.text.strip()
+    return None
 
 
 def _is_rule(edge: _Edge, frame: BBox) -> bool:

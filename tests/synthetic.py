@@ -10,6 +10,7 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pymupdf
 
 if TYPE_CHECKING:
@@ -29,9 +30,13 @@ class Axis:
     labels: Sequence[str] | None = None  # defaults to the tick values' shortest spelling
     power_labels: bool = False  # draw "10" plus a raised exponent span instead of the value
     vector_minus: bool = False  # a negative exponent's minus is a drawn dash, not a glyph
+    span_minus: bool = False  # a negative label's minus is its own span (another font), apart from its digits
     label_drop: float = 0.0  # points a y label sits below its tick, as real sheets' labels do
+    at: Sequence[float] | None = None  # each tick's fraction along the frame; a broken axis changes scale at one
 
     def frac(self, value: float) -> float:
+        if self.at is not None:
+            return float(np.interp(value, self.ticks, self.at))
         lo, hi = self.ticks[0], self.ticks[-1]
         if self.log:
             return (math.log10(value) - math.log10(lo)) / (math.log10(hi) - math.log10(lo))
@@ -42,8 +47,9 @@ class Axis:
 class PlotSpec:
     x: Axis
     y: Axis
-    curves: list[tuple[Callable[[float], float], Sequence[float], tuple[float, float, float]]] = field(
-        default_factory=list
+    #: (function, sample xs, colour), optionally with a PDF dash string such as '[3 2] 0'.
+    curves: list[tuple[Callable[[float], float], Sequence[float], tuple[float, float, float], *tuple[str, ...]]] = (
+        field(default_factory=list)
     )
     frame: pymupdf.Rect = field(default_factory=lambda: pymupdf.Rect(FRAME))
     tick_marks: bool = True
@@ -52,6 +58,9 @@ class PlotSpec:
     frame_as_lines: bool = False  # the frame is four separate segments, not one rectangle
     grid_reach: float = 1.0  # the fraction of the frame width a horizontal grid line spans (a legend cuts it)
     stray: Sequence[tuple[str, float, float, float]] = ()  # extra text: (text, x, y, size)
+    fragments: int = 1  # each curve drawn as this many polylines meeting end to end, every other one reversed
+    #: Legend entries inside the frame's top right: (label, colour, PDF dash string or None), a sample line each.
+    legend: Sequence[tuple[str, tuple[float, float, float], str | None]] = ()
 
 
 def to_page(spec: PlotSpec, x: float, y: float) -> tuple[float, float]:
@@ -103,9 +112,22 @@ def _draw_frame(page: pymupdf.Page, spec: PlotSpec) -> None:
             page.draw_line((f.x0, py), (f.x1, py), color=(0.7, 0.7, 0.7), width=0.3)
 
 
+def _minus_span(page: pymupdf.Page, text: str, cx: float, cy: float) -> None:
+    """``text`` centred on ``cx`` with its minus set in another font, so it is a span of its own."""
+    digits = text[1:]
+    minus_w = pymupdf.get_text_length('-', fontname='tiro', fontsize=FONT_SIZE)
+    width = pymupdf.get_text_length(digits, fontname='helv', fontsize=FONT_SIZE)
+    start = cx - (minus_w + 0.5 + width) / 2
+    page.insert_text((start, cy + FONT_SIZE * 0.35), '-', fontname='tiro', fontsize=FONT_SIZE)
+    page.insert_text((start + minus_w + 0.5, cy + FONT_SIZE * 0.35), digits, fontname='helv', fontsize=FONT_SIZE)
+
+
 def _x_label(page: pymupdf.Page, spec: PlotSpec, text: str, px: float) -> None:
     """A label centred on its tick; a drawn minus is part of the centred whole, as typeset labels are."""
     y = spec.frame.y1 + 10
+    if spec.x.span_minus and text.startswith('-'):
+        _minus_span(page, text, px, y)
+        return
     if not (spec.x.vector_minus and text.startswith('-')):
         _centered(page, text, px, y)
         return
@@ -116,16 +138,8 @@ def _x_label(page: pymupdf.Page, spec: PlotSpec, text: str, px: float) -> None:
     _centered(page, digits, start + 3.5 + width / 2, y)
 
 
-def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
+def _y_axis(page: pymupdf.Page, spec: PlotSpec) -> None:
     f = spec.frame
-    _draw_frame(page, spec)
-    for i, v in enumerate(spec.x.ticks):
-        px, _ = to_page(spec, v, spec.y.ticks[0])
-        if spec.tick_marks:
-            page.draw_line((px, f.y1), (px, f.y1 - 4), color=(0, 0, 0), width=0.5)
-        if spec.grid:
-            page.draw_line((px, f.y0), (px, f.y1), color=(0.7, 0.7, 0.7), width=0.3)
-        _x_label(page, spec, spec.x.labels[i] if spec.x.labels else _label(v), px)
     for i, v in enumerate(spec.y.ticks):
         _, py = to_page(spec, spec.x.ticks[0], v)
         if spec.tick_marks:
@@ -138,11 +152,38 @@ def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
             continue
         text = spec.y.labels[i] if spec.y.labels else _label(v)
         width = pymupdf.get_text_length(text, fontname='helv', fontsize=FONT_SIZE)
+        if spec.y.span_minus and text.startswith('-'):
+            _minus_span(page, text, f.x0 - 4 - width / 2, py)
+            continue
         _centered(page, text, f.x0 - 4 - width / 2, py)
+
+
+def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
+    f = spec.frame
+    _draw_frame(page, spec)
+    for i, v in enumerate(spec.x.ticks):
+        px, _ = to_page(spec, v, spec.y.ticks[0])
+        if spec.tick_marks:
+            page.draw_line((px, f.y1), (px, f.y1 - 4), color=(0, 0, 0), width=0.5)
+        if spec.grid:
+            page.draw_line((px, f.y0), (px, f.y1), color=(0.7, 0.7, 0.7), width=0.3)
+        _x_label(page, spec, spec.x.labels[i] if spec.x.labels else _label(v), px)
+    _y_axis(page, spec)
     for text, x, y, size in spec.stray:
         page.insert_text((x, y), text, fontname='helv', fontsize=size)
-    for fn, xs, colour in spec.curves:
-        page.draw_polyline([to_page(spec, x, fn(x)) for x in xs], color=colour, width=1.0)
+    for fn, xs, colour, *dashes in spec.curves:
+        points = [to_page(spec, x, fn(x)) for x in xs]
+        step = math.ceil((len(points) - 1) / spec.fragments)
+        for k, start in enumerate(range(0, len(points) - 1, step)):
+            piece = points[start : start + step + 1]
+            page.draw_polyline(
+                piece[::-1] if k % 2 else piece, color=colour, width=1.0, dashes=next(iter(dashes), None)
+            )
+    for k, (text, colour, dashes) in enumerate(spec.legend):
+        y = spec.frame.y0 + 12 + 12 * k
+        x = spec.frame.x1 - 80
+        page.draw_line((x, y), (x + 20, y), color=colour, width=1.0, dashes=dashes)
+        page.insert_text((x + 24, y + FONT_SIZE * 0.35), text, fontname='helv', fontsize=FONT_SIZE)
 
 
 def plot_pdf(path: Path, *specs: PlotSpec) -> Path:

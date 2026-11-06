@@ -110,6 +110,8 @@ class VectorPath:
     points: tuple[tuple[float, float], ...]
     stroke: tuple[float, ...] | None
     width: float
+    #: The stroke's dash array (points: on, off, ...); empty for a solid stroke.
+    dashes: tuple[float, ...]
     closed: bool
     provenance: Provenance
 

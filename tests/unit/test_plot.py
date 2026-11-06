@@ -166,3 +166,92 @@ def test_a_smaller_number_beside_the_y_axis_is_not_a_tick_label(tmp_path):
 def test_grid_lines_cut_short_by_a_legend_are_not_curves(tmp_path):
     spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], grid=True, grid_reach=0.75)
     assert [c.stroke for c in _one_plot(tmp_path, spec).curves] == [RED]
+
+
+def test_a_broken_linear_axis_is_mapped_piecewise_at_its_scale_change(tmp_path):
+    # -25..50 every 25 over the left half, 50..250 every 50 over the right: one straight line skews every value.
+    x = Axis([-25, 0, 25, 50, 100, 150, 200, 250], at=[0, 1 / 6, 2 / 6, 3 / 6, 5 / 8, 6 / 8, 7 / 8, 1])
+    xs = [-25.0, -10.0, 0.0, 30.0, 50.0, 75.0, 120.0, 250.0]
+    spec = PlotSpec(x, Axis([0, 50, 100]), [(lambda v: v / 5 + 50, xs, RED)])
+    (curve,) = _one_plot(tmp_path, spec).curves
+    assert curve.x == pytest.approx(xs, abs=0.05)  # data units of x
+
+
+def test_a_label_off_the_tick_row_or_outside_the_frame_is_not_a_tick(tmp_path):
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([0, 50, 100]),
+        [(lambda x: x, XS, RED)],
+        stray=[('7', 250, 322, 8), ('400', 404, 312, 8), ('9', 72, 180, 8)],  # below the row, past x1, off the column
+    )
+    plot = _one_plot(tmp_path, spec)
+    assert sorted(v for _, v in plot.x.ticks) == [0, 50, 100]
+    assert sorted(v for _, v in plot.y.ticks) == [0, 50, 100]
+    (curve,) = plot.curves
+    assert curve.x == pytest.approx(XS, abs=0.01)
+
+
+def test_ticks_that_are_not_monotone_along_the_axis_are_refused(tmp_path):
+    spec = PlotSpec(Axis([0, 50, 100], labels=['0', '100', '50']), Axis([0, 50, 100]), [(lambda x: x, XS, RED)])
+    doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec), tables=False)
+    with pytest.raises(ValueError, match='monotone'):
+        plots(doc.page(1))
+
+
+def test_a_minus_set_as_its_own_span_makes_the_label_negative(tmp_path):
+    spec = PlotSpec(
+        Axis([-25, 0, 25, 50], span_minus=True),
+        Axis([-100, -50, 0, 50], span_minus=True),
+        [(lambda x: 2 * x - 50, [-25.0, 0.0, 50.0], RED)],
+    )
+    plot = _one_plot(tmp_path, spec)
+    assert sorted(v for _, v in plot.x.ticks) == [-25, 0, 25, 50]
+    assert sorted(v for _, v in plot.y.ticks) == [-100, -50, 0, 50]
+    (curve,) = plot.curves
+    assert curve.y == pytest.approx([-100, -50, 50], abs=0.05)  # data units of y
+
+
+def test_a_curve_carries_its_dash_array_and_a_solid_one_none(tmp_path):
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([0, 50, 100]),
+        [(lambda x: x, XS, RED), (lambda x: 100 - x, XS, BLUE, '[3 1.5] 0')],
+    )
+    by_colour = {c.stroke: c for c in _one_plot(tmp_path, spec).curves}
+    assert by_colour[RED].dashes == ()
+    assert by_colour[BLUE].dashes == (3.0, 1.5)  # points: on, off
+
+
+def test_fragments_meeting_end_to_end_in_one_style_are_one_curve(tmp_path):
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([0, 100, 200]),
+        [(lambda x: 2 * x, XS, RED), (lambda x: 200 - x, XS, BLUE, '[3 1.5] 0')],
+        fragments=4,
+    )
+    by_colour = {c.stroke: c for c in _one_plot(tmp_path, spec).curves}
+    assert set(by_colour) == {RED, BLUE}
+    assert sorted(by_colour[RED].x) == pytest.approx(XS, abs=0.01)  # data units of x, each sample once
+    assert by_colour[RED].y == pytest.approx([2 * x for x in by_colour[RED].x], abs=0.02)
+    assert by_colour[BLUE].dashes == (3.0, 1.5)
+
+
+def test_fragments_of_different_styles_are_not_joined(tmp_path):
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([0, 50, 100]),
+        [(lambda x: x, XS[:6], RED), (lambda x: x, XS[5:], RED, '[3 1.5] 0')],  # meet at x = 50
+    )
+    assert sorted(c.dashes for c in _one_plot(tmp_path, spec).curves) == [(), (3.0, 1.5)]
+
+
+def test_a_short_sample_line_beside_a_label_is_a_legend_entry_not_a_curve(tmp_path):
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([0, 100, 200]),
+        [(lambda x: x, XS, RED), (lambda x: 2 * x, XS, BLUE, '[3 1.5] 0')],
+        legend=[('25 C', RED, None), ('100 C', BLUE, '[3 1.5] 0')],
+    )
+    plot = _one_plot(tmp_path, spec)
+    assert sorted(c.stroke for c in plot.curves) == sorted([RED, BLUE])
+    assert [(e.label, e.stroke, e.dashes) for e in plot.legend] == [('25 C', RED, ()), ('100 C', BLUE, (3.0, 1.5))]

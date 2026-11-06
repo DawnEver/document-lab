@@ -75,6 +75,7 @@ def _paths(page: pymupdf.Page, here: Provenance) -> Iterator[VectorPath]:
     for drawing in page.get_drawings():
         stroke = tuple(drawing['color']) if drawing.get('color') is not None else None
         width = drawing.get('width') or 0.0
+        dashes = _dash_array(drawing.get('dashes'))
         runs: list[list[tuple[float, float]]] = []
         closed_shapes: list[list[tuple[float, float]]] = []
         for item in drawing['items']:
@@ -94,17 +95,31 @@ def _paths(page: pymupdf.Page, here: Provenance) -> Iterator[VectorPath]:
             runs[-1].extend(tail)
         closes = bool(drawing.get('closePath'))
         for points in closed_shapes:
-            yield _vector(points, stroke, width, closed=True, here=here)
+            yield _vector(points, stroke, width, dashes, closed=True, here=here)
         for points in runs:
-            yield _vector(points, stroke, width, closed=closes and len(runs) == 1, here=here)
+            yield _vector(points, stroke, width, dashes, closed=closes and len(runs) == 1, here=here)
 
 
 def _vector(
-    points: list[tuple[float, float]], stroke: tuple[float, ...] | None, width: float, *, closed: bool, here: Provenance
+    points: list[tuple[float, float]],
+    stroke: tuple[float, ...] | None,
+    width: float,
+    dashes: tuple[float, ...],
+    *,
+    closed: bool,
+    here: Provenance,
 ) -> VectorPath:
     xs, ys = zip(*points, strict=True)
     box = BBox(min(xs), min(ys), max(xs), max(ys))
-    return VectorPath(tuple(points), stroke, width, closed, here.at(bbox=box))
+    return VectorPath(tuple(points), stroke, width, dashes, closed, here.at(bbox=box))
+
+
+def _dash_array(spec: str | None) -> tuple[float, ...]:
+    """The array of a PDF dash spec such as ``[ 3 2 ] 0`` (the phase is dropped); ``()`` for a solid stroke."""
+    if not spec:
+        return ()
+    inside = spec[spec.index('[') + 1 : spec.index(']')]
+    return tuple(float(v) for v in inside.split())
 
 
 def _tables(page: pymupdf.Page, here: Provenance) -> Iterator[Table]:

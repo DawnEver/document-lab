@@ -47,8 +47,9 @@ class Axis:
 class PlotSpec:
     x: Axis
     y: Axis
-    curves: list[tuple[Callable[[float], float], Sequence[float], tuple[float, float, float]]] = field(
-        default_factory=list
+    #: (function, sample xs, colour), optionally with a PDF dash string such as '[3 2] 0'.
+    curves: list[tuple[Callable[[float], float], Sequence[float], tuple[float, float, float], *tuple[str, ...]]] = (
+        field(default_factory=list)
     )
     frame: pymupdf.Rect = field(default_factory=lambda: pymupdf.Rect(FRAME))
     tick_marks: bool = True
@@ -167,8 +168,10 @@ def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
     _y_axis(page, spec)
     for text, x, y, size in spec.stray:
         page.insert_text((x, y), text, fontname='helv', fontsize=size)
-    for fn, xs, colour in spec.curves:
-        page.draw_polyline([to_page(spec, x, fn(x)) for x in xs], color=colour, width=1.0)
+    for fn, xs, colour, *dashes in spec.curves:
+        page.draw_polyline(
+            [to_page(spec, x, fn(x)) for x in xs], color=colour, width=1.0, dashes=next(iter(dashes), None)
+        )
 
 
 def plot_pdf(path: Path, *specs: PlotSpec) -> Path:

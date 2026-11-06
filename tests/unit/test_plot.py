@@ -209,3 +209,14 @@ def test_a_minus_set_as_its_own_span_makes_the_label_negative(tmp_path):
     assert sorted(v for _, v in plot.y.ticks) == [-100, -50, 0, 50]
     (curve,) = plot.curves
     assert curve.y == pytest.approx([-100, -50, 50], abs=0.05)  # data units of y
+
+
+def test_a_curve_carries_its_dash_array_and_a_solid_one_none(tmp_path):
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([0, 50, 100]),
+        [(lambda x: x, XS, RED), (lambda x: 100 - x, XS, BLUE, '[3 1.5] 0')],
+    )
+    by_colour = {c.stroke: c for c in _one_plot(tmp_path, spec).curves}
+    assert by_colour[RED].dashes == ()
+    assert by_colour[BLUE].dashes == (3.0, 1.5)  # points: on, off

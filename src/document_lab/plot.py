@@ -102,6 +102,8 @@ class Curve:
     axis_scales: tuple[Scale, Scale]
     stroke: tuple[float, ...] | None
     width: float
+    #: The stroke's dash array (points: on, off, ...); empty for a solid curve.
+    dashes: tuple[float, ...]
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -158,6 +160,7 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
                 (x_axis.scale, y_axis.scale),
                 path.stroke,
                 path.width,
+                path.dashes,
             )
             for path in _curve_paths(frame, page.paths)
         )

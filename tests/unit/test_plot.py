@@ -220,3 +220,38 @@ def test_a_curve_carries_its_dash_array_and_a_solid_one_none(tmp_path):
     by_colour = {c.stroke: c for c in _one_plot(tmp_path, spec).curves}
     assert by_colour[RED].dashes == ()
     assert by_colour[BLUE].dashes == (3.0, 1.5)  # points: on, off
+
+
+def test_fragments_meeting_end_to_end_in_one_style_are_one_curve(tmp_path):
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([0, 100, 200]),
+        [(lambda x: 2 * x, XS, RED), (lambda x: 200 - x, XS, BLUE, '[3 1.5] 0')],
+        fragments=4,
+    )
+    by_colour = {c.stroke: c for c in _one_plot(tmp_path, spec).curves}
+    assert set(by_colour) == {RED, BLUE}
+    assert sorted(by_colour[RED].x) == pytest.approx(XS, abs=0.01)  # data units of x, each sample once
+    assert by_colour[RED].y == pytest.approx([2 * x for x in by_colour[RED].x], abs=0.02)
+    assert by_colour[BLUE].dashes == (3.0, 1.5)
+
+
+def test_fragments_of_different_styles_are_not_joined(tmp_path):
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([0, 50, 100]),
+        [(lambda x: x, XS[:6], RED), (lambda x: x, XS[5:], RED, '[3 1.5] 0')],  # meet at x = 50
+    )
+    assert sorted(c.dashes for c in _one_plot(tmp_path, spec).curves) == [(), (3.0, 1.5)]
+
+
+def test_a_short_sample_line_beside_a_label_is_a_legend_entry_not_a_curve(tmp_path):
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([0, 100, 200]),
+        [(lambda x: x, XS, RED), (lambda x: 2 * x, XS, BLUE, '[3 1.5] 0')],
+        legend=[('25 C', RED, None), ('100 C', BLUE, '[3 1.5] 0')],
+    )
+    plot = _one_plot(tmp_path, spec)
+    assert sorted(c.stroke for c in plot.curves) == sorted([RED, BLUE])
+    assert [(e.label, e.stroke, e.dashes) for e in plot.legend] == [('25 C', RED, ()), ('100 C', BLUE, (3.0, 1.5))]

@@ -8,7 +8,7 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 | `ir` | frozen IR: `Provenance`, `TextSpan`, `VectorPath`, `Table`/`Cell`, `Figure`, `Page`, `Document` |
 | `pdf` | `read_pdf(path)`: spans, vector paths, ruled tables with per-cell boxes, image figures and captions (PyMuPDF) |
 | `html` | `read_html(path)`: every `<table>` as a `Table` (standard-library parser) |
-| `plot` | `plots(page)`: curves digitised from VECTOR plots, axes linear or log10; a raster plot raises `RasterPlot` |
+| `plot` | `plots(page)`: curves digitised from VECTOR plots (axes linear or log10, piecewise at a break; fragments joined; legend samples apart); a raster plot raises `RasterPlot` |
 | `numbers` | the one number grammar: `parse_number` (whole text) and `first_number` (a cell's leading value) |
 | `extract` | typed values against the caller's `Schema` from key-value (`from_rows`) or column (`from_columns`) tables |
 | `ai` | `ask(responder, schema, page_or_table)`: the same values read by a model through ai-lab (`[ai]` extra) |
@@ -22,7 +22,9 @@ doc = read_pdf('sheet.pdf', tables=False)
 for page in doc.pages:
     for plot in plots(page):  # x_scale= / y_scale= force 'linear' or 'log10'
         for curve in plot.curves:
-            print(curve.axis_scales, curve.x, curve.y, curve.provenance.page, curve.provenance.bbox)
+            print(curve.axis_scales, curve.x, curve.y, curve.dashes, curve.provenance.page, curve.provenance.bbox)
+        for sample in plot.legend:  # a legend's sample line: its label and the style of the curve it names
+            print(sample.label, sample.stroke, sample.dashes)
 ```
 
 A `Value` keeps the source `text` beside the typed `value` (a `≈`, `≤` or `±25%` is never lost) and a `basis`:

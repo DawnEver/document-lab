@@ -58,6 +58,9 @@ class PlotSpec:
     frame_as_lines: bool = False  # the frame is four separate segments, not one rectangle
     grid_reach: float = 1.0  # the fraction of the frame width a horizontal grid line spans (a legend cuts it)
     stray: Sequence[tuple[str, float, float, float]] = ()  # extra text: (text, x, y, size)
+    fragments: int = 1  # each curve drawn as this many polylines meeting end to end, every other one reversed
+    #: Legend entries inside the frame's top right: (label, colour, PDF dash string or None), a sample line each.
+    legend: Sequence[tuple[str, tuple[float, float, float], str | None]] = ()
 
 
 def to_page(spec: PlotSpec, x: float, y: float) -> tuple[float, float]:
@@ -169,9 +172,18 @@ def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
     for text, x, y, size in spec.stray:
         page.insert_text((x, y), text, fontname='helv', fontsize=size)
     for fn, xs, colour, *dashes in spec.curves:
-        page.draw_polyline(
-            [to_page(spec, x, fn(x)) for x in xs], color=colour, width=1.0, dashes=next(iter(dashes), None)
-        )
+        points = [to_page(spec, x, fn(x)) for x in xs]
+        step = math.ceil((len(points) - 1) / spec.fragments)
+        for k, start in enumerate(range(0, len(points) - 1, step)):
+            piece = points[start : start + step + 1]
+            page.draw_polyline(
+                piece[::-1] if k % 2 else piece, color=colour, width=1.0, dashes=next(iter(dashes), None)
+            )
+    for k, (text, colour, dashes) in enumerate(spec.legend):
+        y = spec.frame.y0 + 12 + 12 * k
+        x = spec.frame.x1 - 80
+        page.draw_line((x, y), (x + 20, y), color=colour, width=1.0, dashes=dashes)
+        page.insert_text((x + 24, y + FONT_SIZE * 0.35), text, fontname='helv', fontsize=FONT_SIZE)
 
 
 def plot_pdf(path: Path, *specs: PlotSpec) -> Path:

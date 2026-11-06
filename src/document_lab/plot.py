@@ -11,7 +11,11 @@ the axis is cut at every tick where the data-per-point spacing (in the scale's u
 ``BREAK_TOL``, and each piece is a least-squares line through its own ticks -- a broken axis whose scale changes at
 a break reads right. Ticks whose values are not strictly monotone along the axis are refused (``ValueError``).
 
-Every stroked open polyline inside the frame that is not a tick, a grid line or the frame is a curve.
+Every stroked open polyline inside the frame that is not a tick, a grid line or the frame is a curve, after
+fragments are joined: polylines of one style (stroke, width, dash array) whose ends meet (to ``JOIN_DIGITS``
+decimals) become one, unless more than two ends of that style meet there (ambiguous, left unjoined). A short
+horizontal curve (at most ``SAMPLE_MAX`` long) with a text span starting within ``SAMPLE_GAP`` right of it, at its
+height, is a legend sample: it goes to ``Plot.legend`` with that text, not to ``Plot.curves``.
 
 A plot that is a RASTER image raises :class:`RasterPlot`: digitising pixels is not implemented, and a silent
 empty result would read as "this plot has no curves". Secondary (right/top) axes are not read.
@@ -21,6 +25,7 @@ from __future__ import annotations
 
 import itertools
 import math
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal
 
@@ -32,7 +37,7 @@ from document_lab.numbers import parse_number
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-__all__ = ['Axis', 'Curve', 'Plot', 'RasterPlot', 'Scale', 'plots']
+__all__ = ['Axis', 'Curve', 'LegendSample', 'Plot', 'RasterPlot', 'Scale', 'plots']
 
 Scale = Literal['linear', 'log10']
 
@@ -62,6 +67,12 @@ SNAP_TOL: Final = 0.75
 GRID_SPAN: Final = 0.9
 #: The relative change in data-per-point spacing between neighbouring tick intervals that marks an axis break.
 BREAK_TOL: Final = 0.1
+#: Decimals (points) to which two fragment ends must agree to meet.
+JOIN_DIGITS: Final = 2
+#: The longest legend sample line (points).
+SAMPLE_MAX: Final = 40.0
+#: The widest gap (points) between a legend sample line and its label.
+SAMPLE_GAP: Final = 10.0
 #: The share of the frame an image must cover for a curve-less plot to count as a raster plot.
 RASTER_COVER: Final = 0.25
 
@@ -106,14 +117,26 @@ class Curve:
     dashes: tuple[float, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class LegendSample:
+    """A legend entry inside the frame: a short sample line in a curve's style and the text beside it."""
+
+    label: str
+    stroke: tuple[float, ...] | None
+    width: float
+    dashes: tuple[float, ...]
+    provenance: Provenance
+
+
 @dataclass(frozen=True, slots=True, eq=False)
 class Plot:
-    """A calibrated frame and the curves inside it."""
+    """A calibrated frame, the curves inside it and its legend samples."""
 
     frame: BBox
     x: Axis
     y: Axis
     curves: tuple[Curve, ...]
+    legend: tuple[LegendSample, ...]
     provenance: Provenance
 
 
@@ -152,6 +175,13 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
         x_ticks = _snap([((lb.box.x0 + lb.box.x1) / 2, lb.value) for lb in xs], _marks(frame, edges, vertical=True))
         y_ticks = _snap([((lb.box.y0 + lb.box.y1) / 2, lb.value) for lb in ys], _marks(frame, edges, vertical=False))
         x_axis, y_axis = _fit(x_ticks, x_scale), _fit(y_ticks, y_scale)
+        legend, paths = [], []
+        for path in _joined(_curve_paths(frame, page.paths)):
+            label = _sample_label(path, page.spans)
+            if label is None:
+                paths.append(path)
+            else:
+                legend.append(LegendSample(label, path.stroke, path.width, path.dashes, path.provenance))
         curves = tuple(
             Curve(
                 x_axis.to_data(np.array([p[0] for p in path.points])),
@@ -162,11 +192,11 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
                 path.width,
                 path.dashes,
             )
-            for path in _curve_paths(frame, page.paths)
+            for path in paths
         )
         if not curves:
             _refuse_raster(page, frame)
-        found.append(Plot(frame, x_axis, y_axis, curves, page.spans[0].provenance.at(bbox=frame)))
+        found.append(Plot(frame, x_axis, y_axis, curves, tuple(legend), page.spans[0].provenance.at(bbox=frame)))
     return found
 
 
@@ -423,6 +453,61 @@ def _curve_paths(frame: BBox, paths: Sequence[VectorPath]) -> list[VectorPath]:
             continue
         out.append(path)
     return out
+
+
+def _joined(paths: Sequence[VectorPath]) -> list[VectorPath]:
+    """Chains of paths of one style meeting end to end, each joined into one path in chain order.
+
+    Two ends link only when they are the only ends of that style at that point; a third makes the point ambiguous.
+    """
+    ends: dict[tuple, list[tuple[int, int]]] = defaultdict(list)
+    for i, path in enumerate(paths):
+        for end, (x, y) in ((0, path.points[0]), (1, path.points[-1])):
+            ends[(path.stroke, path.width, path.dashes, round(x, JOIN_DIGITS), round(y, JOIN_DIGITS))].append((i, end))
+    link = {}
+    for meeting in ends.values():
+        if len(meeting) == 2 and meeting[0][0] != meeting[1][0]:  # noqa: PLR2004 -- one end from each side
+            link[meeting[0]], link[meeting[1]] = meeting[1], meeting[0]
+    seen: set[int] = set()
+    out = []
+    # A chain is walked from a free end; a closed loop of fragments (no free end) from wherever it is met.
+    for start in sorted(range(len(paths)), key=lambda k: (k, 0) in link and (k, 1) in link):
+        if start in seen:
+            continue
+        i = start
+        enter = 1 if (i, 0) in link and (i, 1) not in link else 0
+        members, points = [], []
+        while i not in seen:
+            seen.add(i)
+            members.append(paths[i])
+            run = paths[i].points if enter == 0 else paths[i].points[::-1]
+            points.extend(run if not points else run[1:])
+            nxt = link.get((i, 1 - enter))
+            if nxt is None:
+                break
+            i, enter = nxt
+        first = members[0]
+        if len(members) == 1:
+            out.append(first)
+            continue
+        box = union([m.provenance.bbox for m in members if m.provenance.bbox is not None])
+        out.append(
+            VectorPath(tuple(points), first.stroke, first.width, first.dashes, False, first.provenance.at(bbox=box))  # noqa: FBT003
+        )
+    return out
+
+
+def _sample_label(path: VectorPath, spans: Sequence[TextSpan]) -> str | None:
+    """The text of a span starting just right of a short horizontal line, at its height: what the sample stands for."""
+    box = path.provenance.bbox
+    if box is None or box.width > SAMPLE_MAX or box.height > EDGE_TOL:
+        return None
+    y = (box.y0 + box.y1) / 2
+    for span in spans:
+        sb = span.provenance.bbox
+        if sb is not None and box.x1 <= sb.x0 <= box.x1 + SAMPLE_GAP and sb.y0 <= y <= sb.y1:
+            return span.text.strip()
+    return None
 
 
 def _is_rule(edge: _Edge, frame: BBox) -> bool:

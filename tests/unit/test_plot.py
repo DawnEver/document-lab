@@ -166,3 +166,33 @@ def test_a_smaller_number_beside_the_y_axis_is_not_a_tick_label(tmp_path):
 def test_grid_lines_cut_short_by_a_legend_are_not_curves(tmp_path):
     spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], grid=True, grid_reach=0.75)
     assert [c.stroke for c in _one_plot(tmp_path, spec).curves] == [RED]
+
+
+def test_a_broken_linear_axis_is_mapped_piecewise_at_its_scale_change(tmp_path):
+    # -25..50 every 25 over the left half, 50..250 every 50 over the right: one straight line skews every value.
+    x = Axis([-25, 0, 25, 50, 100, 150, 200, 250], at=[0, 1 / 6, 2 / 6, 3 / 6, 5 / 8, 6 / 8, 7 / 8, 1])
+    xs = [-25.0, -10.0, 0.0, 30.0, 50.0, 75.0, 120.0, 250.0]
+    spec = PlotSpec(x, Axis([0, 50, 100]), [(lambda v: v / 5 + 50, xs, RED)])
+    (curve,) = _one_plot(tmp_path, spec).curves
+    assert curve.x == pytest.approx(xs, abs=0.05)  # data units of x
+
+
+def test_a_label_off_the_tick_row_or_outside_the_frame_is_not_a_tick(tmp_path):
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([0, 50, 100]),
+        [(lambda x: x, XS, RED)],
+        stray=[('7', 250, 322, 8), ('400', 404, 312, 8), ('9', 72, 180, 8)],  # below the row, past x1, off the column
+    )
+    plot = _one_plot(tmp_path, spec)
+    assert sorted(v for _, v in plot.x.ticks) == [0, 50, 100]
+    assert sorted(v for _, v in plot.y.ticks) == [0, 50, 100]
+    (curve,) = plot.curves
+    assert curve.x == pytest.approx(XS, abs=0.01)
+
+
+def test_ticks_that_are_not_monotone_along_the_axis_are_refused(tmp_path):
+    spec = PlotSpec(Axis([0, 50, 100], labels=['0', '100', '50']), Axis([0, 50, 100]), [(lambda x: x, XS, RED)])
+    doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec), tables=False)
+    with pytest.raises(ValueError, match='monotone'):
+        plots(doc.page(1))

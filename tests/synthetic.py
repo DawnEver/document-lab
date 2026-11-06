@@ -10,6 +10,7 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pymupdf
 
 if TYPE_CHECKING:
@@ -30,8 +31,11 @@ class Axis:
     power_labels: bool = False  # draw "10" plus a raised exponent span instead of the value
     vector_minus: bool = False  # a negative exponent's minus is a drawn dash, not a glyph
     label_drop: float = 0.0  # points a y label sits below its tick, as real sheets' labels do
+    at: Sequence[float] | None = None  # each tick's fraction along the frame; a broken axis changes scale at one
 
     def frac(self, value: float) -> float:
+        if self.at is not None:
+            return float(np.interp(value, self.ticks, self.at))
         lo, hi = self.ticks[0], self.ticks[-1]
         if self.log:
             return (math.log10(value) - math.log10(lo)) / (math.log10(hi) - math.log10(lo))

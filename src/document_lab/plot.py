@@ -2,9 +2,16 @@
 
 A plot here is an axis-aligned rectangular frame with numeric tick labels below it (x) and left of it (y). Each
 label's position is snapped to the tick mark or grid line it labels when one is drawn, else its box centre is
-used. An axis is ``linear`` or ``log10``, chosen by which one the labels fit better, or forced by the caller (two
-labels fit both exactly, so they read as linear unless told otherwise). Every stroked open polyline inside the
-frame that is not a tick, a grid line or the frame is a curve.
+used. A tick label is a number in the axis' common font size, aligned with the others on one row (x) or column
+(y), whose box overlaps the frame's extent along the axis; a stray number off that row or past the frame is not.
+
+An axis is ``linear`` or ``log10``, forced by the caller or else the one whose fit needs fewer pieces (then the
+smaller misfit; two labels fit both exactly, so they read as linear unless told otherwise). The fit is PIECEWISE:
+the axis is cut at every tick where the data-per-point spacing (in the scale's units) changes by more than
+``BREAK_TOL``, and each piece is a least-squares line through its own ticks -- a broken axis whose scale changes at
+a break reads right. Ticks whose values are not strictly monotone along the axis are refused (``ValueError``).
+
+Every stroked open polyline inside the frame that is not a tick, a grid line or the frame is a curve.
 
 A plot that is a RASTER image raises :class:`RasterPlot`: digitising pixels is not implemented, and a silent
 empty result would read as "this plot has no curves". Secondary (right/top) axes are not read.
@@ -51,6 +58,8 @@ SIZE_TOL: Final = 0.25
 SNAP_TOL: Final = 0.75
 #: A grid line spans at least this fraction of the frame.
 GRID_SPAN: Final = 0.9
+#: The relative change in data-per-point spacing between neighbouring tick intervals that marks an axis break.
+BREAK_TOL: Final = 0.1
 #: The share of the frame an image must cover for a curve-less plot to count as a raster plot.
 RASTER_COVER: Final = 0.25
 
@@ -61,17 +70,23 @@ class RasterPlot(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class Axis:
-    """A page coordinate -> data value map: ``value = s(slope * position + intercept)``, ``s`` identity or ``10**``."""
+    """A page coordinate -> data value map: per piece ``value = s(slope * position + intercept)``, ``s`` id or ``10**``.
+
+    The first piece also covers positions before it, the last those after it.
+    """
 
     scale: Scale
-    slope: float
-    intercept: float
+    #: The pieces in increasing position: (position the piece starts at, slope, intercept).
+    pieces: tuple[tuple[float, float, float], ...]
     #: The calibration points: (page coordinate, labelled value).
     ticks: tuple[tuple[float, float], ...]
 
     def to_data(self, position: np.ndarray) -> np.ndarray:
         """The data values at page coordinates ``position``."""
-        t = self.slope * np.asarray(position, dtype=float) + self.intercept
+        p = np.asarray(position, dtype=float)
+        starts, slopes, intercepts = (np.array(c) for c in zip(*self.pieces, strict=True))
+        k = np.clip(np.searchsorted(starts, p, side='right') - 1, 0, len(starts) - 1)
+        t = slopes[k] * p + intercepts[k]
         return 10.0**t if self.scale == 'log10' else t
 
 
@@ -126,8 +141,8 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
     # A grid line may stop short of the far edge (a legend sits there), so a long rule anchored on an edge counts.
     found = []
     for frame in _frames(edges):
-        xs = _one_size(_x_labels(frame, labels))
-        ys = _one_size(_y_labels(frame, labels))
+        xs = _aligned(_one_size(_x_labels(frame, labels)), vertical=False)
+        ys = _aligned(_one_size(_y_labels(frame, labels)), vertical=True)
         if len(xs) < 2 or len(ys) < 2:  # noqa: PLR2004 -- a line needs two points
             continue
         x_ticks = _snap([((lb.box.x0 + lb.box.x1) / 2, lb.value) for lb in xs], _marks(frame, edges, vertical=True))
@@ -255,7 +270,8 @@ def _x_labels(frame: BBox, labels: list[_Label]) -> list[_Label]:
         lb
         for lb in labels
         if frame.y1 - EDGE_TOL <= lb.box.y0 <= frame.y1 + LABEL_REACH
-        and frame.x0 - LABEL_REACH / 3 <= (lb.box.x0 + lb.box.x1) / 2 <= frame.x1 + LABEL_REACH / 3
+        and lb.box.x0 <= frame.x1
+        and lb.box.x1 >= frame.x0
     ]
 
 
@@ -264,8 +280,26 @@ def _y_labels(frame: BBox, labels: list[_Label]) -> list[_Label]:
         lb
         for lb in labels
         if frame.x0 - LABEL_REACH <= lb.box.x1 <= frame.x0 + EDGE_TOL
-        and frame.y0 - LABEL_REACH / 3 <= (lb.box.y0 + lb.box.y1) / 2 <= frame.y1 + LABEL_REACH / 3
+        and lb.box.y0 <= frame.y1
+        and lb.box.y1 >= frame.y0
     ]
+
+
+def _aligned(labels: list[_Label], *, vertical: bool) -> list[_Label]:
+    """The largest set of labels sharing one row (x: top, bottom or centre) or column (y: left, right or centre)."""
+    lo, hi = ('x0', 'x1') if vertical else ('y0', 'y1')
+    keys = (
+        lambda b: getattr(b, lo),
+        lambda b: getattr(b, hi),
+        lambda b: (getattr(b, lo) + getattr(b, hi)) / 2,
+    )
+    best: list[_Label] = []
+    for key in keys:
+        for anchor in labels:
+            row = [lb for lb in labels if abs(key(lb.box) - key(anchor.box)) <= EDGE_TOL]
+            if len(row) > len(best):
+                best = row
+    return best
 
 
 def _marks(frame: BBox, edges: Sequence[_Edge], *, vertical: bool) -> list[float]:
@@ -311,19 +345,43 @@ def _snap(ticks: list[tuple[float, float]], marks: list[float]) -> tuple[tuple[f
 def _fit(ticks: tuple[tuple[float, float], ...], forced: Scale | None) -> Axis:
     pos = np.array([p for p, _ in ticks])
     val = np.array([v for _, v in ticks])
+    steps = np.diff(val) * np.diff(pos)
+    if np.any(steps == 0) or (np.any(steps > 0) and np.any(steps < 0)):
+        msg = f'tick values are not monotone along the axis: {val.tolist()} at {pos.round(1).tolist()}'
+        raise ValueError(msg)
     scale = forced or _infer_scale(pos, val)
     if scale == 'log10' and np.any(val <= 0):
         msg = f'a log10 axis needs positive tick values, got {val.tolist()}'
         raise ValueError(msg)
-    target = np.log10(val) if scale == 'log10' else val
-    slope, intercept = np.polyfit(pos, target, 1)
-    return Axis(scale, float(slope), float(intercept), ticks)
+    return Axis(scale, _pieces(pos, np.log10(val) if scale == 'log10' else val), ticks)
+
+
+def _pieces(pos: np.ndarray, target: np.ndarray) -> tuple[tuple[float, float, float], ...]:
+    """Lines through runs of tick intervals of one data-per-point spacing; neighbouring pieces share a break tick."""
+    rates = np.diff(target) / np.diff(pos)
+    runs = [[0]]
+    for i in range(1, len(rates)):
+        ref = float(np.mean(rates[runs[-1]]))
+        if abs(rates[i] - ref) <= BREAK_TOL * abs(ref):
+            runs[-1].append(i)
+        else:
+            runs.append([i])
+    out = []
+    for run in runs:
+        lo, hi = run[0], run[-1] + 2
+        slope, intercept = np.polyfit(pos[lo:hi], target[lo:hi], 1)
+        out.append((float(pos[lo]), float(slope), float(intercept)))
+    return tuple(out)
 
 
 def _infer_scale(pos: np.ndarray, val: np.ndarray) -> Scale:
+    """The scale whose fit needs fewer pieces, then the one a single line fits better (two points fit both)."""
     if len(val) < 3 or np.any(val <= 0):  # noqa: PLR2004 -- two points fit both scales exactly
         return 'linear'
-    return 'log10' if _misfit(pos, np.log10(val)) < _misfit(pos, val) else 'linear'
+    log, lin = np.log10(val), val
+    key_log = (len(_pieces(pos, log)), _misfit(pos, log))
+    key_lin = (len(_pieces(pos, lin)), _misfit(pos, lin))
+    return 'log10' if key_log < key_lin else 'linear'
 
 
 def _misfit(pos: np.ndarray, target: np.ndarray) -> float:

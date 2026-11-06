@@ -196,3 +196,16 @@ def test_ticks_that_are_not_monotone_along_the_axis_are_refused(tmp_path):
     doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec), tables=False)
     with pytest.raises(ValueError, match='monotone'):
         plots(doc.page(1))
+
+
+def test_a_minus_set_as_its_own_span_makes_the_label_negative(tmp_path):
+    spec = PlotSpec(
+        Axis([-25, 0, 25, 50], span_minus=True),
+        Axis([-100, -50, 0, 50], span_minus=True),
+        [(lambda x: 2 * x - 50, [-25.0, 0.0, 50.0], RED)],
+    )
+    plot = _one_plot(tmp_path, spec)
+    assert sorted(v for _, v in plot.x.ticks) == [-25, 0, 25, 50]
+    assert sorted(v for _, v in plot.y.ticks) == [-100, -50, 0, 50]
+    (curve,) = plot.curves
+    assert curve.y == pytest.approx([-100, -50, 50], abs=0.05)  # data units of y

@@ -52,6 +52,8 @@ RULE_MAX: Final = 1.5
 DASH_MAX: Final = 5.0
 #: The widest gap (points) between a drawn minus sign and its digits.
 DASH_GAP: Final = 2.5
+#: A span holding only one of these is a minus sign set apart from its digits.
+MINUS_GLYPHS: Final = frozenset({'-', chr(0x2212), chr(0x2013), chr(0x2010)})
 #: Font sizes (points) closer than this are one size.
 SIZE_TOL: Final = 0.25
 #: How close (points) a shifted label must land to a mark to count as on it.
@@ -220,18 +222,31 @@ def _labels(spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> list[_Label]:
         value = parse_number(span.text)
         if value is None:
             continue
-        dash = _dash_before(box, dashes) if value > 0 else None
-        if dash is not None:
-            value, box = -value, union([box, BBox(dash.lo, box.y0, dash.hi, box.y1)])
+        minus = _minus_before(box, spans, dashes) if value > 0 else None
+        if minus is not None:
+            value, box = -value, union([box, minus])
         out.append(_Label(value, box, span.size))
     return out
 
 
-def _dash_before(box: BBox, dashes: Sequence[_Edge]) -> _Edge | None:
-    """A drawn minus sign: a short horizontal stroke ending just left of the label, within its height."""
+def _minus_before(box: BBox, spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> BBox | None:
+    """The box of a minus sign ending just left of the label, within its height.
+
+    It is a drawn short horizontal stroke, or a span of its own holding only a minus glyph (a minus set in another
+    font than its digits).
+    """
     for d in dashes:
         if box.x0 - DASH_GAP <= d.hi <= box.x0 + EDGE_TOL / 3 and box.y0 < d.at < box.y1:
-            return d
+            return BBox(d.lo, box.y0, d.hi, box.y1)
+    for span in spans:
+        sb = span.provenance.bbox
+        if (
+            span.text.strip() in MINUS_GLYPHS
+            and sb is not None
+            and box.x0 - DASH_GAP <= sb.x1 <= box.x0 + EDGE_TOL
+            and box.y0 < (sb.y0 + sb.y1) / 2 < box.y1
+        ):
+            return sb
     return None
 
 

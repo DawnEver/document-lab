@@ -37,19 +37,22 @@ A `Value` keeps the source `text` beside the typed `value` (a `≈`, `≤` or `�
 document-lab capture --list                        # the capturable windows and their handles
 document-lab capture out.pdf --pick                # click a window; it is scrolled to its end
 document-lab capture out.pdf --region --no-scroll  # drag a rectangle; one frame
-document-lab capture out.pdf --window "Notepad" --tolerance 4 --ignore-top 48 --ocr
+document-lab capture out.pdf --window "Notepad" --tolerance 4 --ignore-top 48 --ocr chi_sim+eng
 ```
 
 Targets: `--window TITLE` (must match one), `--hwnd`, `--pick`, `--region` (drag), `--rect L,T,W,H`. Scrolling:
 `--method wheel|message|keys`, `--notches`, `--settle`, `--max-frames`, `--max-height`; Esc stops and keeps what
-was captured. A window is read through `PrintWindow`, so another window over it does not show.
+was captured. A window is read through `PrintWindow`, so another window over it does not show; the wheel, which
+does land on whatever covers it, refuses then (bring it forward, or `--method message`). A view that seems not to have
+moved is looked at again before it is taken for the end, so a late-handled scroll does not cut the capture short.
 
 Frames are stitched where their shared rows agree -- exactly by default; `--tolerance` (mean grey difference,
 0-255) absorbs a blinking caret or hover highlight. `--ignore-top/--ignore-bottom` keep fixed chrome once. An overlap
 that fits more than one offset, or none, stops the capture with an error rather than a wrong image: scroll by fewer
 `--notches`, or raise `--min-overlap`. PDF: `--page-height` (pixels; default A4-shaped, `0` one page), `--dpi`,
-`--ocr` (Tesseract), `--png`. In Python: `capture.session.capture(grab, scroll)` takes any source;
-`capture.desktop.Source` is the Windows one.
+`--ocr [LANGS]` (Tesseract languages, default `eng`), `--png`. Page size and OCR are checked before the capture starts,
+and a PDF that still fails to write leaves the capture as a PNG beside it. In Python: `capture.session.capture(grab, scroll)` takes any source and
+holds one frame at a time (`capture.stitch.Stitcher`); `capture.desktop.Source` is the Windows one.
 
 ## Install
 

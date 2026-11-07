@@ -44,6 +44,30 @@ def test_waits_for_the_view_to_settle():
     assert np.array_equal(run(Viewport(image, 300, 160, lag=2)), image)
 
 
+class LateViewport(Viewport):
+    """A view whose scroll shows only after ``late`` grabs: equal frames first, as a queued message gives."""
+
+    def __init__(self, image: np.ndarray, height: int, step: int, late: int):
+        super().__init__(image, height, step)
+        self.late, self.waiting, self.shown = late, 0, 0
+
+    def grab(self) -> np.ndarray:
+        if self.waiting:
+            self.waiting -= 1
+        else:
+            self.shown = self.top
+        return self.image[self.shown : self.shown + self.height].copy()
+
+    def scroll(self) -> None:
+        super().scroll()
+        self.waiting = self.late
+
+
+def test_a_scroll_handled_late_is_not_the_end():
+    image = tall(1000)
+    assert np.array_equal(run(LateViewport(image, 300, 150, late=3)), image)
+
+
 def test_without_scroll_it_is_one_frame():
     image = tall(900)
     view = Viewport(image, 300, 160)

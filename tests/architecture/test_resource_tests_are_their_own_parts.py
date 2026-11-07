@@ -1,6 +1,6 @@
-"""`gpu` (marker-pdf on a CUDA GPU), `vendor` (a real vendor PDF) and `desktop` (an interactive Windows desktop) are
-declared resources: base never selects them, so they cannot skip inside it, and all are declared unproduced on hosted
-runners (none exists there)."""
+"""`gpu` (marker-pdf on a CUDA GPU), `vendor` (a real vendor PDF), `desktop` (an interactive Windows desktop) and `ocr`
+(Tesseract) are declared resources: base never selects them, so they cannot skip inside it, and all are declared
+unproduced on hosted runners (none exists there)."""
 
 import tomllib
 from pathlib import Path
@@ -10,12 +10,13 @@ from lab_commons.hpc.needsets import BASE, read_vocabulary, selecting
 
 from tests.desktop import test_capture_desktop
 from tests.gpu import test_marker
+from tests.ocr import test_ocr
 from tests.vendor import test_vendor_pdf
 
 PYPROJECT = Path(__file__).resolve().parents[2] / 'pyproject.toml'
 
 
-RESOURCES = {'gpu', 'vendor', 'desktop'}
+RESOURCES = {'gpu', 'vendor', 'desktop', 'ocr'}
 
 
 def test_each_is_a_declared_resource_so_base_excludes_it():
@@ -39,3 +40,4 @@ def test_each_part_marks_its_whole_module():
     assert test_marker.pytestmark.name == 'gpu'
     assert test_vendor_pdf.pytestmark.name == 'vendor'
     assert test_capture_desktop.pytestmark.name == 'desktop'
+    assert test_ocr.pytestmark.name == 'ocr'

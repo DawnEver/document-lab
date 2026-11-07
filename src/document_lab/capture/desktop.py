@@ -343,12 +343,23 @@ def _send(*inputs: _Input) -> None:
         raise OSError(msg)
 
 
+def _require_on_top(target: Window | Region, x: int, y: int) -> None:
+    """Refuse a wheel that would land on another window: ``target`` was grabbed even if covered, the wheel is not."""
+    if isinstance(target, Window):
+        user32 = _dll('user32')
+        under = user32.GetAncestor(user32.WindowFromPoint(wintypes.POINT(x, y)), _GA_ROOT)
+        if under != target.hwnd:
+            msg = f'{_title(under)!r} covers the middle of {target.title!r}: bring it to the front (or method message)'
+            raise OSError(msg)
+
+
 def scroll(target: Window | Region, notches: int, method: str = 'wheel') -> None:
     """Scroll the view under ``target``'s centre down by ``notches`` wheel notches (or Down presses)."""
     user32 = _dll('user32')
     area = target.client() if isinstance(target, Window) else target
     x, y = area.centre
     if method == 'wheel':
+        _require_on_top(target, x, y)
         cursor = wintypes.POINT()
         user32.GetCursorPos(ctypes.byref(cursor))
         user32.SetCursorPos(x, y)

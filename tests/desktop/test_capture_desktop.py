@@ -24,31 +24,37 @@ pytestmark = pytest.mark.desktop
 VIEWER = Path(__file__).with_name('viewer.py')
 
 
+def launched(title: str, seed: int) -> subprocess.Popen:
+    assert sys.platform == 'win32', f'the desktop part needs a Windows desktop, not {sys.platform}'
+    return subprocess.Popen([sys.executable, str(VIEWER), title, str(seed)])
+
+
+def shown(title: str) -> desktop.Window:
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        try:
+            window = desktop.find_window(title)
+            if window.client().height == VIEW:
+                time.sleep(0.5)
+                return window
+        except LookupError:
+            pass
+        time.sleep(0.1)
+    pytest.fail(f'the viewer window {title!r} never appeared: is there an interactive desktop?')
+
+
 @pytest.fixture
 def viewer():
-    assert sys.platform == 'win32', f'the desktop part needs a Windows desktop, not {sys.platform}'
     title, seed = f'document-lab capture fixture {os.getpid()}', 7
-    process = subprocess.Popen([sys.executable, str(VIEWER), title, str(seed)])
+    process = launched(title, seed)
     try:
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            try:
-                window = desktop.find_window(title)
-                if window.client().height == VIEW:
-                    break
-            except LookupError:
-                pass
-            time.sleep(0.1)
-        else:
-            pytest.fail('the viewer window never appeared: is there an interactive desktop?')
-        time.sleep(0.5)
-        yield window, picture(seed)
+        yield shown(title), picture(seed)
     finally:
         process.kill()
         process.wait()
 
 
-@pytest.mark.parametrize('method', ['wheel', 'keys'])
+@pytest.mark.parametrize('method', ['wheel', 'message', 'keys'])
 def test_a_scrolled_window_is_captured_whole(viewer, method):
     window, image = viewer
     source = desktop.Source(window, notches=3, method=method)
@@ -85,3 +91,16 @@ def test_max_height_stops_early(viewer):
     got = capture(source.grab, source.scroll, limits=Limits(max_height=700))
     assert 700 <= len(got) < HEIGHT
     assert np.array_equal(got, image[: len(got)])
+
+
+def test_a_wheel_onto_a_covered_window_refuses(viewer):
+    window, _ = viewer
+    title = f'document-lab capture cover {os.getpid()}'
+    cover = launched(title, 8)  # opens at the same place, above the first
+    try:
+        shown(title)
+        with pytest.raises(OSError, match='covers'):
+            desktop.Source(window).scroll()
+    finally:
+        cover.kill()
+        cover.wait()

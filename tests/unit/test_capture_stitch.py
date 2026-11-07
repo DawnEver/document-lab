@@ -1,10 +1,12 @@
 """The stitcher against a synthetic tall image cut into overlapping frames: re-stitched it must equal the image
 pixel for pixel, and an overlap it cannot place uniquely it refuses."""
 
+import time
+
 import numpy as np
 import pytest
 
-from document_lab.capture.stitch import AmbiguousOverlap, NoOverlap, offset, stitch
+from document_lab.capture.stitch import AmbiguousOverlap, Match, NoOverlap, Stitcher, offset, stitch
 
 WIDTH = 64
 
@@ -55,7 +57,7 @@ def test_fixed_header_and_footer_are_kept_once():
     image = tall(600, seed=1)
     header, footer = tall(12, seed=2), tall(9, seed=3)
     shots = frames(image, 150, [50, 90, 100, 100, 100, 100], header, footer)
-    assert np.array_equal(stitch(shots, top=12, bottom=9), np.concatenate([header, image, footer]))
+    assert np.array_equal(stitch(shots, Match(top=12, bottom=9)), np.concatenate([header, image, footer]))
 
 
 def test_repeated_frames_add_nothing():
@@ -104,12 +106,31 @@ def test_a_blinking_caret_breaks_the_exact_match_but_not_a_tolerant_one():
     shots[2] = blink(shots[2])
     with pytest.raises(NoOverlap):
         stitch(shots)
-    assert stitch(shots, tolerance=4).shape == image[:420].shape
-    assert offset(shots[1], shots[2], tolerance=4) == 70
+    assert stitch(shots, Match(tolerance=4)).shape == image[:420].shape
+    assert offset(shots[1], shots[2], Match(tolerance=4)) == 70
 
 
 def test_a_tolerant_match_still_refuses_a_periodic_overlap():
     image = np.concatenate([tall(20)] * 20)
     a, b = frames(image, 100, [40])
     with pytest.raises(AmbiguousOverlap):
-        offset(a, b, tolerance=4)
+        offset(a, b, Match(tolerance=4))
+
+
+def test_the_stitcher_keeps_only_the_last_frame():
+    image = tall(800)
+    shots = frames(image, 200, [100] * 6)
+    stitcher = Stitcher(shots[0])
+    for shot in shots[1:]:
+        stitcher.add(shot)
+    assert stitcher.last is shots[-1]
+    assert stitcher.height == 800
+    assert np.array_equal(stitcher.image(), image)
+
+
+def test_a_tolerant_match_of_a_tall_view_is_fast():
+    image = tall(4000)
+    a, b = frames(image, 1800, [500])
+    start = time.perf_counter()
+    assert offset(a, blink(b), Match(tolerance=4)) == 500
+    assert time.perf_counter() - start < 5

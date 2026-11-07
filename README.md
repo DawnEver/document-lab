@@ -34,26 +34,30 @@ A `Value` keeps the source `text` beside the typed `value` (a `≈`, `≤` or `�
 ## Capture
 
 ```
+document-lab capture                               # mark a window or an area, Enter: capture-<date>-<time>.pdf here
+document-lab capture out.pdf --drop-overlays       # paint out floating buttons and sticky bars where they recur
+document-lab capture out.pdf --no-scroll           # one frame
+document-lab capture out.pdf --window "Notepad" --tolerance 4 --ocr chi_sim+eng
 document-lab capture --list                        # the capturable windows and their handles
-document-lab capture out.pdf                       # click a window or drag a rectangle, then Enter/Start
-document-lab capture out.pdf --no-scroll           # the same, one frame
-document-lab capture out.pdf --window "Notepad" --tolerance 4 --ignore-top 48 --ocr chi_sim+eng
 ```
 
-Targets: none marks one on a dimmed still of the screen (the mark shows clear) (a click: the window under it; a drag: a rectangle; mark again to
-change it; Enter or Start confirms, Esc cancels), or `--window TITLE` (must match one), `--hwnd`, `--rect L,T,W,H`. Scrolling:
-`--method wheel|message|keys`, `--notches`, `--settle`, `--max-frames`, `--max-height`; Esc stops and keeps what
-was captured. A window is read through `PrintWindow`, so another window over it does not show; the wheel, which
-does land on whatever covers it, refuses then (bring it forward, or `--method message`). A view that seems not to have
-moved is looked at again before it is taken for the end, so a late-handled scroll does not cut the capture short.
+Targets: none shows a dimmed still of every monitor -- the window under the pointer lights up; a click marks it, a drag
+marks a rectangle, marking again replaces it; Enter or Start confirms, Esc cancels -- or `--window TITLE` (must match
+one), `--hwnd`, `--rect L,T,W,H`. Scrolling: `--method wheel|message|keys`, `--notches`, `--settle`, `--max-frames`,
+`--max-height`; the height so far shows while it runs, and Esc stops and keeps what was captured. A window is read
+through `PrintWindow`, so another window over it does not show; the wheel, which does land on whatever covers it,
+refuses then (bring it forward, or `--method message`); `keys` refuses a window it cannot bring forward.
 
-Frames are stitched where their shared rows agree -- exactly by default; `--tolerance` (mean grey difference,
-0-255) absorbs a blinking caret or hover highlight. `--ignore-top/--ignore-bottom` keep fixed chrome once. An overlap
-that fits more than one offset, or none, stops the capture with an error rather than a wrong image: scroll by fewer
-`--notches`, or raise `--min-overlap`. PDF: `--page-height` (pixels; default A4-shaped, `0` one page), `--dpi`,
-`--ocr [LANGS]` (Tesseract languages, default `eng`), `--png`. Page size and OCR are checked before the capture starts,
-and a PDF that still fails to write leaves the capture as a PNG beside it. In Python: `capture.session.capture(grab, scroll)` takes any source and
-holds one frame at a time (`capture.stitch.Stitcher`); `capture.desktop.Source` is the Windows one.
+Stitching (`capture.stitch`): what stays put while the page scrolls -- a sticky header, a floating button, a scrollbar
+thumb -- is left out of the match, so no setting is needed for it; the scroll is the one offset at which the rest
+agrees, exactly (`--tolerance` grey levels) but for an `--outliers` share (default 5%). An offset that is not unique,
+or none, stops the capture there: what was stitched is written, the reason is printed and the exit status is 1.
+`--drop-overlays` (off by default) also removes the overlays from where they would recur: each spot of the page is
+taken from the frame that showed it least covered. `--ignore-top/--ignore-bottom` exclude chrome that changes as it
+scrolls. PDF: `--page-height` (pixels; default A4-shaped, `0` one page), `--dpi`, `--ocr [LANGS]` (Tesseract, default
+`eng`), `--png`; page size and OCR are checked before the capture starts, and a PDF that still fails to write leaves the
+capture as a PNG beside it. In Python: `capture.session.capture(grab, scroll)` takes any source, holds one frame at a
+time and returns a `Capture` (image, frames, why it stopped); `capture.desktop.Source` is the Windows one.
 
 ## Install
 

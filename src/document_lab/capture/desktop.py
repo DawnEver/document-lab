@@ -256,6 +256,7 @@ def window_at(found: list[Window], x: int, y: int) -> Window | None:
 
 
 START_LABEL: Final = 'Start (Enter)'
+HINT: Final = 'Click a window or drag an area  |  Enter or Start: capture  |  Esc: cancel'
 OVERLAY_TITLE: Final = 'document-lab capture selection'
 _BUTTON: Final = (160, 40)  # the start button's size, beside the mark's lower right corner
 _JITTER: Final = 4  # a press that moves no further than this is a click, not a drag
@@ -281,6 +282,7 @@ class _Overlay:
         self.found, self.screen = found, screen
         self.drag: tuple[int, int] | None = None
         self.marked: Window | Region | None = None
+        self.hovered: Window | None = None
         self.confirmed: Window | Region | None = None
         self.root = tk.Tk()
         self.root.title(OVERLAY_TITLE)
@@ -294,6 +296,12 @@ class _Overlay:
         self.dim = tk.PhotoImage(master=self.root, data=_photo((still * _DIM).astype(np.uint8)), format='ppm')
         self.lit = tk.PhotoImage(master=self.root)
         self.canvas.create_image(0, 0, image=self.dim, anchor='nw')
+        middle, _ = self.local(_dll('user32').GetSystemMetrics(0) // 2, 0)  # over the primary monitor's top
+        text = self.canvas.create_text(middle, 28, text=HINT, fill='white', font=('Segoe UI', 13), tags='hint')
+        left, top, right, bottom = self.canvas.bbox(text)
+        self.canvas.create_rectangle(left - 14, top - 8, right + 14, bottom + 8, fill='#202020', width=0, tags='hint')
+        self.canvas.tag_raise(text)  # the text over its box; raising 'hint' later keeps that order
+        self.canvas.bind('<Motion>', self.hover)
         self.canvas.bind('<ButtonPress-1>', self.press)
         self.canvas.bind('<B1-Motion>', self.move)
         self.canvas.bind('<ButtonRelease-1>', self.release)
@@ -309,13 +317,25 @@ class _Overlay:
     def local(self, x: int, y: int) -> tuple[int, int]:
         return x - self.screen.left, y - self.screen.top
 
+    def hover(self, event: object) -> None:
+        """Before anything is marked, show the window under the pointer as a click would mark it."""
+        under = window_at(self.found, event.x_root, event.y_root)
+        if self.marked is not None or under == self.hovered:
+            return
+        self.hovered = under
+        self.canvas.delete('hover')
+        if under is not None:
+            area = under.client()
+            x0, y0 = self.local(area.left, area.top)
+            self.light(x0, y0, x0 + area.width, y0 + area.height, tag='hover', width=1)
+
     def press(self, event: object) -> None:
         on_start = 'start' in self.canvas.gettags('current')
         self.drag = None if on_start else (event.x_root, event.y_root)
 
     def move(self, event: object) -> None:
         if self.drag is not None:
-            self.canvas.delete('box', 'mark')
+            self.canvas.delete('box', 'mark', 'hover')
             (x0, x1), (y0, y1) = sorted((self.drag[0], event.x_root)), sorted((self.drag[1], event.y_root))
             self.light(*self.local(x0, y0), *self.local(x1, y1), tag='box')
 
@@ -338,13 +358,13 @@ class _Overlay:
         (w, h), screen = _BUTTON, self.screen
         bx = min(max(x1 - w, 0), screen.width - w)
         by = y1 + 8 if y1 + 8 + h <= screen.height else max(y0 - 8 - h, 0)
-        self.canvas.delete('mark')
+        self.canvas.delete('mark', 'hover')
         self.light(x0, y0, x1, y1, tag='mark')
         self.canvas.create_rectangle(bx, by, bx + w, by + h, fill='red', outline='white', tags=('mark', 'start'))
         self.canvas.create_text(bx + w // 2, by + h // 2, text=START_LABEL, fill='white', tags=('mark', 'start'))
 
-    def light(self, x0: int, y0: int, x1: int, y1: int, tag: str) -> None:
-        """Show ``x0, y0 .. x1, y1`` (overlay pixels) undimmed inside a red outline."""
+    def light(self, x0: int, y0: int, x1: int, y1: int, *, tag: str, width: int = 3) -> None:
+        """Show ``x0, y0 .. x1, y1`` (overlay pixels) undimmed inside a red outline ``width`` wide."""
         x0, x1 = (min(max(x, 0), self.screen.width) for x in (x0, x1))
         y0, y1 = (min(max(y, 0), self.screen.height) for y in (y0, y1))
         if x1 > x0 and y1 > y0:
@@ -352,7 +372,8 @@ class _Overlay:
             self.lit.configure(width=x1 - x0, height=y1 - y0)
             self.lit.tk.call(self.lit, 'copy', self.bright, '-from', x0, y0, x1, y1, '-to', 0, 0)
             self.canvas.create_image(x0, y0, image=self.lit, anchor='nw', tags=tag)
-        self.canvas.create_rectangle(x0, y0, x1, y1, outline='red', width=3, tags=tag)
+        self.canvas.create_rectangle(x0, y0, x1, y1, outline='red', width=width, tags=tag)
+        self.canvas.tag_raise('hint')
 
     def confirm(self, _: object = None) -> None:
         if self.marked is not None:

@@ -2,7 +2,7 @@
 
 The source is two callables, ``grab() -> frame`` and ``scroll()``, so the loop knows nothing of windows or screens
 (`document_lab.capture.desktop` supplies them on Windows). The end is the first scroll that moves nothing; the caps
-in :class:`Limits`, the ``aborted`` callback (the CLI binds Esc and a moved pointer) and a frame that cannot be
+in :class:`Limits`, the ``aborted`` callback (the CLI binds Esc) and a frame that cannot be
 stitched stop it earlier. There is no cap by default: a view as long as it scrolls is captured.
 
 The stitched rows go to ``sink`` as soon as no later frame can change them, so a capture of any length holds about

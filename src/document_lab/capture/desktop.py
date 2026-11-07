@@ -16,7 +16,7 @@ import ctypes
 import sys
 import time
 from ctypes import wintypes
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Final
 
 import numpy as np
@@ -30,7 +30,6 @@ __all__ = [
     'escape_pressed',
     'find_window',
     'grab',
-    'pointer',
     'scroll',
     'select',
     'virtual_screen',
@@ -514,21 +513,13 @@ def escape_pressed() -> bool:
     return bool(_dll('user32').GetAsyncKeyState(_VK_ESCAPE) & 0x8000)
 
 
-def pointer() -> tuple[int, int]:
-    """Where the mouse pointer is, in screen pixels."""
-    point = wintypes.POINT()
-    _dll('user32').GetCursorPos(ctypes.byref(point))
-    return point.x, point.y
-
-
-@dataclass
+@dataclass(frozen=True)
 class Source:
-    """``target`` as the grab/scroll pair `document_lab.capture.session.capture` takes, and when the user stops it."""
+    """``target`` as the grab/scroll pair `document_lab.capture.session.capture` takes."""
 
     target: Window | Region
     notches: int = 3
     method: str = 'wheel'
-    _rest: tuple[int, int] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Refuse an unknown scroll method at once, not at the first scroll."""
@@ -543,12 +534,3 @@ class Source:
     def scroll(self) -> None:
         """Scroll the target down one step."""
         scroll(self.target, self.notches, self.method)
-
-    def stopped(self) -> bool:
-        """Did the user press Esc, or move the pointer since the first look (scrolling puts it back where it was)?
-
-        A moved pointer means the user wants the mouse back -- and a wheel sent while they move it may land elsewhere.
-        """
-        if self._rest is None:
-            self._rest = pointer()
-        return escape_pressed() or pointer() != self._rest

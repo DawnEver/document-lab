@@ -99,12 +99,12 @@ def _target(args: argparse.Namespace) -> Window | Region:
 
 
 def _progress(stitcher: Stitcher) -> None:
-    sys.stderr.write(f'\rcapturing: {stitcher.height} px (Esc or a mouse move stops and keeps it)')
+    sys.stderr.write(f'\rcapturing: {stitcher.height} px (Esc stops and keeps it)')
     sys.stderr.flush()
 
 
 _SHORT: Final = {
-    'aborted': 'stopped by Esc or a mouse move',
+    'aborted': 'stopped by Esc',
     'max_frames': 'stopped at --max-frames',
     'max_height': 'stopped at --max-height',
 }
@@ -160,7 +160,7 @@ def run(args: argparse.Namespace) -> int:
             match=Match(args.ignore_top, args.ignore_bottom, args.min_overlap, args.tolerance, args.outliers),
             settling=Settling(interval=args.settle, end_wait=args.end_wait),
             drop_overlays=args.drop_overlays,
-            aborted=source.stopped,
+            aborted=desktop.escape_pressed,
             progress=_progress,
         )
     status = _report(result)

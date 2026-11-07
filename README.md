@@ -45,7 +45,7 @@ Targets: none shows a dimmed still of every monitor -- the window under the poin
 marks a rectangle, marking again replaces it; Enter or Start confirms, Esc cancels -- or `--window TITLE` (must match
 one), `--hwnd`, `--rect L,T,W,H`. Scrolling: `--method wheel|message|keys`, `--notches`, `--settle`; it runs until
 the view stops moving -- no cap unless `--max-frames`/`--max-height` -- and `--end-wait` (default 0.8 s) gives a feed
-that loads more at its end time to grow. The height so far shows while it runs; Esc or moving the mouse stops it and
+that loads more at its end time to grow. The height so far shows while it runs; Esc stops it and
 keeps what was captured. A window is read
 through `PrintWindow`, so another window over it does not show; the wheel, which does land on whatever covers it,
 refuses then (bring it forward, or `--method message`); `keys` refuses a window it cannot bring forward.

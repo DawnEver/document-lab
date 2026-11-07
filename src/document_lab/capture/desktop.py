@@ -663,40 +663,45 @@ class Hud:
             (area.left + area.width, area.top, e, area.height),
         ):
             self._edges.append(self._window(tk, x, y, (w, h)))
-        width, tall = _MINI[0] + 16, _MINI[1] + 110
-        right = area.left + area.width + 2 * e
-        x = right if right + width <= screen.left + screen.width else max(area.left - 2 * e - width, screen.left)
-        y = min(max(area.top, screen.top), screen.top + screen.height - tall)
-        self.panel = self._window(tk, x, y, (width, tall), colour='#202020')
-        self.text = tk.Label(
-            self.panel, fg='white', bg='#202020', font=('Segoe UI', 10), wraplength=width - 12, justify='left'
-        )
-        self.text.pack(fill='x', padx=6, pady=(6, 2))
-        self.canvas = tk.Canvas(self.panel, width=_MINI[0], height=_MINI[1], bg='black', highlightthickness=0)
-        self.canvas.pack(padx=8, pady=(0, 6))
+        width = _MINI[0] + 16
+        self.panel = self._window(tk, 0, 0, None, colour='#202020')
         self.finished = False  # set by the Finish button: a deliberate click ends the capture, a stray key does not
-        tk.Button(
+        tk.Button(  # first, at the top: always in view, whatever the text below wraps to
             self.panel,
             text='Finish and save',
             command=self.finish,
             fg='white',
             bg=OK,
             activebackground='#137d39',
-            font=('Segoe UI', 10, 'bold'),
+            font=('Segoe UI', 11, 'bold'),
             relief='flat',
-            pady=4,
-        ).pack(fill='x', padx=8, pady=(0, 8))
+            pady=6,
+        ).pack(fill='x', padx=8, pady=(8, 4))
+        self.text = tk.Label(
+            self.panel, fg='white', bg='#202020', font=('Segoe UI', 10), wraplength=width - 12, justify='left'
+        )
+        self.text.pack(fill='x', padx=6, pady=(2, 4))
+        self.canvas = tk.Canvas(self.panel, width=_MINI[0], height=_MINI[1], bg='black', highlightthickness=0)
+        self.canvas.pack(padx=8, pady=(0, 8))
+        self.panel.update_idletasks()  # the panel sizes itself to what it holds; only its place is set
+        tall = self.panel.winfo_reqheight()
+        right = area.left + area.width + 2 * e
+        x = right if right + width <= screen.left + screen.width else max(area.left - 2 * e - width, screen.left)
+        y = min(max(area.top, screen.top), screen.top + screen.height - tall)
+        self.panel.geometry(f'+{x}+{y}')
         self.mini: list[np.ndarray] = []
         self.step = max(1, -(-area.width // _MINI[0]))  # every step-th pixel each way: the miniature's scale
         self.photo = tk.PhotoImage(master=self.root)
         self.canvas.create_image(0, 0, image=self.photo, anchor='nw')
         self.status('Capturing. Scroll down at your own pace; click Finish when you are done.', ok=True)
 
-    def _window(self, tk: object, x: int, y: int, size: tuple[int, int], colour: str = OK) -> object:
+    def _window(self, tk: object, x: int, y: int, size: tuple[int, int] | None, colour: str = OK) -> object:
+        """A borderless topmost window at ``x, y``: ``size`` pixels, or as large as what it holds when None."""
         window = tk.Toplevel(self.root, bg=colour)
         window.overrideredirect(boolean=True)
         window.attributes('-topmost', True)  # noqa: FBT003 -- Tk's own spelling
-        window.geometry(f'{size[0]}x{size[1]}+{x}+{y}')  # +-N: Tk reads a bare -N from the far edge
+        shape = '' if size is None else f'{size[0]}x{size[1]}'
+        window.geometry(f'{shape}+{x}+{y}')  # +-N: Tk reads a bare -N from the far edge
         return window
 
     def status(self, text: str, *, ok: bool) -> None:

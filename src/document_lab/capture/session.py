@@ -19,12 +19,12 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from document_lab.capture.stitch import Match, Stitcher, Unstitchable
+from document_lab.capture.stitch import Match, Stitcher, Unstitchable, offset
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-__all__ = ['Capture', 'Limits', 'Rows', 'Settling', 'capture', 'follow']
+__all__ = ['Capture', 'Limits', 'Lost', 'Rows', 'Settling', 'capture', 'follow']
 
 
 @dataclass(frozen=True)
@@ -149,7 +149,27 @@ def capture(
     return Capture(frames, stitcher.height, stopped, stuck=scroll is not None and stopped == 'end' and frames == 1)
 
 
-def _report(_: str) -> None:
+@dataclass(frozen=True)
+class Lost:
+    """A view :func:`follow` could not place below the last frame: which way to scroll back, and that last frame.
+
+    ``back`` is ``down`` when the view is above the last frame (scrolled back up past it), else ``up`` (scrolled down
+    too far at once, past what one view can overlap).
+    """
+
+    back: str
+    last: np.ndarray
+    reason: str
+
+
+def _where(last: np.ndarray, frame: np.ndarray, match: Match) -> str:
+    try:
+        return 'down' if offset(frame, last, match) > 0 else 'up'
+    except Unstitchable:
+        return 'up'
+
+
+def _report(_: Lost) -> None:
     return None
 
 
@@ -163,14 +183,15 @@ def follow(
     match: Match = Match(),  # noqa: B008 -- frozen
     drop_overlays: bool = False,
     progress: Callable[[Stitcher], None] = _ignore,
-    lost: Callable[[str], None] = _report,
+    lost: Callable[[Lost], None] = _report,
     sleep: Callable[[float], None] = time.sleep,
 ) -> Capture:
     """What the source shows while the user scrolls it, to ``sink``, until ``aborted`` (the CLI binds Esc).
 
     A frame is grabbed every ``interval`` seconds and placed if the view moved; standing still ends nothing. A frame
-    that cannot be placed below the last -- scrolled too far at once, or back up -- is skipped and told to ``lost``;
-    the capture goes on from the last placed frame once the view overlaps it again.
+    that cannot be placed below the last -- scrolled too far at once, or back up -- is skipped and told to ``lost``
+    with the way back (:class:`Lost`); the capture goes on from the last placed frame once the view overlaps it again.
+    ``aborted`` is asked once per grab, so a caller can keep its own window responsive there.
     """
     stitcher = Stitcher(grab(), match, drop_overlays=drop_overlays)
     frames, stopped = 1, 'aborted'
@@ -189,7 +210,7 @@ def follow(
             try:
                 moved = stitcher.add(frame)
             except Unstitchable as error:
-                lost(str(error))
+                lost(Lost(_where(stitcher.last, frame, match), stitcher.last, str(error)))
                 continue
             if moved:
                 frames += 1

@@ -24,6 +24,7 @@ import numpy as np
 __all__ = [
     'OVERLAY_TITLE',
     'SCROLL_METHODS',
+    'Hud',
     'Region',
     'Source',
     'Window',
@@ -506,6 +507,88 @@ def scroll(target: Window | Region, notches: int, method: str = 'wheel') -> None
     else:
         msg = f'scroll method {method!r} is not one of {SCROLL_METHODS}'
         raise ValueError(msg)
+
+
+_EDGE: Final = 3  # the frame around a capture: its thickness, drawn just outside the area so it is never grabbed
+_MINI: Final = (180, 360)  # the panel's miniature of the capture: width, and the height of the newest part it shows
+OK, LOST = '#1aa34a', '#d93025'
+
+
+class Hud:
+    """What a capture shows while it runs, around the area and never inside it.
+
+    A frame just outside the area (green: following, red: lost) and, beside it, a panel with a line of status and a
+    live miniature of everything captured so far, its newest rows at the bottom.
+
+    It lives in the capture's own thread: :meth:`pump` (called once per grab) keeps it drawn, so nothing is shared.
+    Nothing of it is ever inside the area, so it is never in the capture.
+    """
+
+    def __init__(self, area: Region) -> None:
+        """Open the frame and the panel around ``area``."""
+        import tkinter as tk  # noqa: PLC0415 -- only a running capture shows this
+
+        screen = virtual_screen()
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self._edges = []
+        e = _EDGE
+        for x, y, w, h in (
+            (area.left - e, area.top - e, area.width + 2 * e, e),
+            (area.left - e, area.top + area.height, area.width + 2 * e, e),
+            (area.left - e, area.top, e, area.height),
+            (area.left + area.width, area.top, e, area.height),
+        ):
+            self._edges.append(self._window(tk, x, y, (w, h)))
+        width, tall = _MINI[0] + 16, _MINI[1] + 64
+        right = area.left + area.width + 2 * e
+        x = right if right + width <= screen.left + screen.width else max(area.left - 2 * e - width, screen.left)
+        y = min(max(area.top, screen.top), screen.top + screen.height - tall)
+        self.panel = self._window(tk, x, y, (width, tall), colour='#202020')
+        self.text = tk.Label(
+            self.panel, fg='white', bg='#202020', font=('Segoe UI', 10), wraplength=width - 12, justify='left'
+        )
+        self.text.pack(fill='x', padx=6, pady=(6, 2))
+        self.canvas = tk.Canvas(self.panel, width=_MINI[0], height=_MINI[1], bg='black', highlightthickness=0)
+        self.canvas.pack(padx=8, pady=(0, 8))
+        self.mini: list[np.ndarray] = []
+        self.step = max(1, -(-area.width // _MINI[0]))  # every step-th pixel each way: the miniature's scale
+        self.photo = tk.PhotoImage(master=self.root)
+        self.canvas.create_image(0, 0, image=self.photo, anchor='nw')
+        self.status('Capturing. Scroll down at your own pace; press Esc when you are done.', ok=True)
+
+    def _window(self, tk: object, x: int, y: int, size: tuple[int, int], colour: str = OK) -> object:
+        window = tk.Toplevel(self.root, bg=colour)
+        window.overrideredirect(boolean=True)
+        window.attributes('-topmost', True)  # noqa: FBT003 -- Tk's own spelling
+        window.geometry(f'{size[0]}x{size[1]}+{x}+{y}')  # +-N: Tk reads a bare -N from the far edge
+        return window
+
+    def status(self, text: str, *, ok: bool) -> None:
+        """Say ``text`` on the panel; the frame turns green when ``ok``, else red."""
+        self.text.configure(text=text)
+        for edge in self._edges:
+            edge.configure(bg=OK if ok else LOST)
+        self.pump()
+
+    def add(self, rows: np.ndarray) -> None:
+        """Grow the miniature by ``rows``, the capture's newest rows."""
+        if not len(rows):
+            return
+        self.mini.append(np.ascontiguousarray(rows[:: self.step, :: self.step]))
+        shown = np.concatenate(self.mini)[-_MINI[1] :]
+        self.mini = [shown]  # only what is shown is kept: the miniature never grows with the capture
+        self.photo.configure(width=shown.shape[1], height=len(shown))
+        self.photo.configure(data=_photo(shown), format='ppm')
+        self.canvas.coords(self.canvas.find_all()[0], 0, _MINI[1] - len(shown))
+
+    def pump(self) -> None:
+        """Draw what changed; called once per grab."""
+        self.root.update()
+
+    def close(self) -> None:
+        """Take the frame and the panel away."""
+        self.root.destroy()
 
 
 def escape_pressed() -> bool:

@@ -1,6 +1,8 @@
 """The capture command end to end over a fake source: rows stream into the PDF and the PNG as they are stitched, a
 capture that stops short keeps what it has and says so, and nothing is half-written under the real names."""
 
+from typing import ClassVar
+
 import numpy as np
 import pymupdf
 import pytest
@@ -29,9 +31,32 @@ class FakeSource:
         self.view.scroll()
 
 
+class FakeHud:
+    """``desktop.Hud`` without a screen: what was shown, in order."""
+
+    shown: ClassVar[list] = []
+    rows = 0
+
+    def __init__(self, area):
+        FakeHud.shown, FakeHud.rows = [], 0
+
+    def status(self, text, *, ok):
+        FakeHud.shown.append((ok, text))
+
+    def add(self, rows):
+        FakeHud.rows += len(rows)
+
+    def pump(self):
+        return None
+
+    def close(self):
+        FakeHud.shown.append('closed')
+
+
 @pytest.fixture
 def fake(monkeypatch):
     monkeypatch.setattr(desktop, 'Source', FakeSource)
+    monkeypatch.setattr(desktop, 'Hud', FakeHud)
     monkeypatch.setattr(desktop, 'escape_pressed', lambda: False)
     return FakeSource
 
@@ -95,3 +120,15 @@ def test_a_view_the_scroll_did_not_move_is_reported_not_taken_for_the_end(tmp_pa
     monkeypatch.setattr(fake, 'STEP', 0)
     assert auto(tmp_path) == 1
     assert 'leave out --auto' in capsys.readouterr().out
+
+
+def test_the_screen_shows_the_capture_growing_and_which_way_back_when_lost(tmp_path, fake, monkeypatch):
+    hand = Hand(fake.IMAGE, 300, [150, 600, -600, 150])  # on; too far down; back; on
+    monkeypatch.setattr(fake, 'grab', lambda self: hand.grab())
+    monkeypatch.setattr(desktop, 'escape_pressed', hand.esc)
+    assert run(tmp_path, '--page-height', '0') == 0
+    oks = [ok for ok, _ in FakeHud.shown[:-1]]
+    assert oks == [True, False, True]  # growing; lost (red); growing again
+    assert 'UP' in FakeHud.shown[1][1]
+    assert FakeHud.shown[-1] == 'closed'
+    assert FakeHud.rows == 300 + 150 + 150  # the miniature saw every row captured

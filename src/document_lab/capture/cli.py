@@ -13,10 +13,12 @@ from typing import TYPE_CHECKING, Final
 from lab_commons.log import emit
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import numpy as np
 
-    from document_lab.capture.desktop import Region, Window
-    from document_lab.capture.session import Capture
+    from document_lab.capture.desktop import Hud, Region, Window
+    from document_lab.capture.session import Capture, Lost
     from document_lab.capture.stitch import Stitcher
 
 __all__ = ['add_parser', 'run']
@@ -101,15 +103,35 @@ def _target(args: argparse.Namespace) -> Window | Region:
     return desktop.select()
 
 
-def _lost(_: str) -> None:
-    """The view no longer overlaps the last part captured: say so on the progress line."""
-    sys.stderr.write(chr(13) + 'scrolled too far or back up: scroll back to the last part captured'.ljust(78))
+_BACK: Final = {
+    'up': 'Lost: scrolled too far at once. Scroll back UP slowly until the bottom of the picture is in the frame.',
+    'down': 'Lost: scrolled back above what was captured. Scroll DOWN until the bottom of the picture is in the frame.',
+}
+
+
+def _say(text: str) -> None:
+    sys.stderr.write(chr(13) + text[:100].ljust(100))
     sys.stderr.flush()
 
 
-def _progress(stitcher: Stitcher) -> None:
-    sys.stderr.write(f'\rcapturing: {stitcher.height} px (Esc stops and keeps it)')
-    sys.stderr.flush()
+class _Shown:
+    """The capture's callbacks, each also shown on the terminal line and the on-screen :class:`desktop.Hud`."""
+
+    def __init__(self, hud: Hud, escape_pressed: Callable[[], bool]) -> None:
+        self.hud, self.escape_pressed = hud, escape_pressed
+
+    def stopped(self) -> bool:
+        self.hud.pump()  # once per grab: the frame and the panel stay drawn in this one thread
+        return self.escape_pressed()
+
+    def progress(self, stitcher: Stitcher) -> None:
+        text = f'Capturing: {stitcher.height} px. Keep scrolling; press Esc when you are done.'
+        _say(text)
+        self.hud.status(text, ok=True)
+
+    def lost(self, where: Lost) -> None:
+        _say(_BACK[where.back])
+        self.hud.status(_BACK[where.back], ok=False)
 
 
 _SHORT: Final = {
@@ -145,16 +167,20 @@ def run(args: argparse.Namespace) -> int:
 
     if args.list:
         for window in desktop.windows():
-            area = window.client()
-            emit(f'{window.hwnd:#010x}  {area.width}x{area.height}  {window.title}')
+            emit(f'{window.hwnd:#010x}  {window.client().width}x{window.client().height}  {window.title}')
         return 0
     if args.out is None:
         args.out = Path(f'capture-{datetime.now().astimezone():%Y%m%d-%H%M%S}.pdf')
     target = _target(args)
     source = desktop.Source(target, args.notches, args.method)
-    width = (target.client() if isinstance(target, desktop.Window) else target).width
+    area = target.client() if isinstance(target, desktop.Window) else target
+    width = area.width
+    hud = desktop.Hud(area)
+    shown = _Shown(hud, desktop.escape_pressed)
+
     # The writers check page size and OCR before the capture starts, and keep what was written whatever stops it.
     with (
+        contextlib.closing(hud),
         PdfWriter(args.out, width, page_height=args.page_height, dpi=args.dpi, ocr=args.ocr) as pdf,
         PngWriter(args.png, width) if args.png else contextlib.nullcontext() as png,
     ):
@@ -163,6 +189,7 @@ def run(args: argparse.Namespace) -> int:
             pdf.write(rows)
             if png is not None:
                 png.write(rows)
+            hud.add(rows)
 
         limits = Limits(args.max_frames, args.max_height)
         match = Match(args.ignore_top, args.ignore_bottom, args.min_overlap, args.tolerance, args.outliers)
@@ -171,13 +198,13 @@ def run(args: argparse.Namespace) -> int:
             result = follow(
                 source.grab,
                 sink,
-                aborted=desktop.escape_pressed,
+                aborted=shown.stopped,
                 interval=args.settle,
                 limits=limits,
                 match=match,
                 drop_overlays=args.drop_overlays,
-                progress=_progress,
-                lost=_lost,
+                progress=shown.progress,
+                lost=shown.lost,
             )
         else:
             time.sleep(args.delay)
@@ -189,8 +216,8 @@ def run(args: argparse.Namespace) -> int:
                 match=match,
                 settling=Settling(interval=args.settle, end_wait=args.end_wait),
                 drop_overlays=args.drop_overlays,
-                aborted=desktop.escape_pressed,
-                progress=_progress,
+                aborted=shown.stopped,
+                progress=shown.progress,
             )
     status = _report(result)
     emit(f'{args.out.resolve()}: {width}x{result.height} px on {pdf.pages} page(s)')

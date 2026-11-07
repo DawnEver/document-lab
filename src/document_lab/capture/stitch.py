@@ -6,11 +6,14 @@ The scroll between two frames is the one offset at which the rest of the views a
 ``tolerance`` -- the mean absolute grey-level difference (0-255) of the shared rows, each row averaged into
 :data:`BINS` column bins -- so a blinking caret, a hover highlight or anti-aliasing jitter does not break the match.
 An offset that is not unique, or an overlap with no row that could tell offsets apart, is refused -- never guessed.
+
+:class:`Stitcher` holds only the last frame and the rows already placed, so a capture of any length costs the image
+it produces, not every frame grabbed.
 """
 
 from __future__ import annotations
 
-from itertools import pairwise
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
 import numpy as np
@@ -18,10 +21,10 @@ import numpy as np
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-__all__ = ['BINS', 'AmbiguousOverlap', 'NoOverlap', 'Unstitchable', 'assemble', 'offset', 'stitch']
-
+__all__ = ['BINS', 'AmbiguousOverlap', 'Match', 'NoOverlap', 'Stitcher', 'Unstitchable', 'offset', 'stitch']
 
 BINS: Final = 64
+_CHUNK: Final = 128  # rows of the row-distance matrix computed at once: bounds the memory of a tolerant match
 
 
 class Unstitchable(ValueError):
@@ -36,8 +39,18 @@ class AmbiguousOverlap(Unstitchable):
     """More than one offset fits, or the shared rows are all uniform (blank) and fit any offset."""
 
 
-def _content(frame: np.ndarray, top: int, bottom: int) -> np.ndarray:
-    return frame[top : len(frame) - bottom]
+@dataclass(frozen=True)
+class Match:
+    """How frames are matched. ``min_overlap``: fewest shared content rows (default a quarter of the content)."""
+
+    top: int = 0
+    bottom: int = 0
+    min_overlap: int | None = None
+    tolerance: float = 0
+
+
+def _content(frame: np.ndarray, match: Match) -> np.ndarray:
+    return frame[match.top : len(frame) - match.bottom]
 
 
 def _signatures(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -55,80 +68,93 @@ def _profile(frame: np.ndarray) -> np.ndarray:
     return np.add.reduceat(grey, edges[:-1], axis=1) / np.diff(edges)
 
 
+def _costs(ca: np.ndarray, cb: np.ndarray, offsets: int) -> np.ndarray:
+    """Mean profile difference of the shared rows at each offset ``0 .. offsets-1``."""
+    pa, pb = _profile(ca), _profile(cb)
+    height = len(pa)
+    distance = np.empty((height, height), dtype=np.float32)  # distance[i, j]: row i of a against row j of b
+    for start in range(0, height, _CHUNK):
+        distance[start : start + _CHUNK] = np.abs(pa[start : start + _CHUNK, None, :] - pb[None, :, :]).mean(axis=2)
+    return np.array([distance.diagonal(-d).mean() for d in range(offsets)])
+
+
 def _fits(ca: np.ndarray, cb: np.ndarray, least: int, tolerance: float) -> list[int]:
     height = len(ca)
     if not tolerance:
         sa, sb = _signatures(ca, cb)
         return [d for d in range(height - least + 1) if np.array_equal(sa[d:], sb[: height - d])]
-    pa, pb = _profile(ca), _profile(cb)
-    cost = np.array([np.abs(pa[d:] - pb[: height - d]).mean() for d in range(height - least + 1)])
+    cost = _costs(ca, cb, height - least + 1)
     if not len(cost) or cost.min() > tolerance:
         return []
     best = int(cost.argmin())
-    rivals = [d for d in np.flatnonzero(cost <= tolerance) if abs(d - best) > 1]
+    rivals = [int(d) for d in np.flatnonzero(cost <= tolerance) if abs(d - best) > 1]
     return [best, *rivals]
 
 
-def offset(
-    a: np.ndarray,
-    b: np.ndarray,
-    *,
-    top: int = 0,
-    bottom: int = 0,
-    min_overlap: int | None = None,
-    tolerance: float = 0,
-) -> int:
+def offset(a: np.ndarray, b: np.ndarray, match: Match = Match()) -> int:  # noqa: B008 -- frozen
     """Rows the view scrolled from frame ``a`` to frame ``b`` (0: it did not move).
 
-    ``min_overlap`` is the fewest content rows the two views must share (default: a quarter of the content
-    height); ``tolerance`` see the module. Raises :class:`NoOverlap` or :class:`AmbiguousOverlap` rather than
-    return an offset that may be wrong.
+    Raises :class:`NoOverlap` or :class:`AmbiguousOverlap` rather than return an offset that may be wrong.
     """
     if a.shape != b.shape:
         msg = f'frames differ in shape: {a.shape} != {b.shape}'
         raise ValueError(msg)
-    ca, cb = _content(a, top, bottom), _content(b, top, bottom)
+    ca, cb = _content(a, match), _content(b, match)
     height = len(ca)
-    least = max(1, height // 4) if min_overlap is None else min_overlap
-    fits = _fits(ca, cb, least, tolerance)
+    least = max(1, height // 4) if match.min_overlap is None else match.min_overlap
+    fits = _fits(ca, cb, least, match.tolerance)
     if not fits:
         msg = f'no offset leaves {least} shared rows: scroll by less than {height - least} rows per step'
         raise NoOverlap(msg)
     if len(fits) > 1:
         msg = f'{len(fits)} offsets fit ({fits[:5]}...): the overlap repeats; scroll by a different step'
         raise AmbiguousOverlap(msg)
-    shared = ca[fits[0] :]
-    flat = shared.reshape(len(shared), -1)
+    flat = ca[fits[0] :].reshape(height - fits[0], -1)
     if not (flat != flat[:, :1]).any():
         msg = 'the shared rows are all uniform, so any offset fits: scroll by less, or past the blank'
         raise AmbiguousOverlap(msg)
     return fits[0]
 
 
-def assemble(frames: Sequence[np.ndarray], offsets: Sequence[int], *, top: int = 0, bottom: int = 0) -> np.ndarray:
-    """The tall image of ``frames`` whose successive scrolls are ``offsets`` (one fewer than the frames)."""
-    if not frames or len(offsets) != len(frames) - 1:
-        msg = f'{len(frames)} frames need {max(len(frames) - 1, 0)} offsets, got {len(offsets)}'
-        raise ValueError(msg)
-    first, last = frames[0], frames[-1]
-    height = len(first) - top - bottom
-    parts = [first[: len(first) - bottom]]
-    parts += [_content(b, top, bottom)[height - d :] for b, d in zip(frames[1:], offsets, strict=True) if d]
-    parts.append(last[len(last) - bottom :])
-    return np.concatenate(parts)
+@dataclass
+class Stitcher:
+    """The tall image so far: frames are added in scroll order, each contributing the rows it newly shows."""
+
+    first: np.ndarray
+    match: Match = Match()
+    last: np.ndarray = field(init=False)
+    _rows: list[np.ndarray] = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Start from the first frame without its bottom chrome (the last frame's is added at the end)."""
+        self.last = self.first
+        self._rows = [self.first[: len(self.first) - self.match.bottom]]
+
+    @property
+    def height(self) -> int:
+        """Rows of the image so far."""
+        return sum(len(r) for r in self._rows) + self.match.bottom
+
+    def add(self, frame: np.ndarray) -> int:
+        """Place ``frame`` after the last one; the rows it scrolled (0: it adds nothing)."""
+        moved = offset(self.last, frame, self.match)
+        if moved:
+            end = len(frame) - self.match.bottom
+            self._rows.append(frame[end - moved : end])
+            self.last = frame
+        return moved
+
+    def image(self) -> np.ndarray:
+        """The stitched image, the last frame's bottom chrome below it."""
+        return np.concatenate([*self._rows, self.last[len(self.last) - self.match.bottom :]])
 
 
-def stitch(
-    frames: Sequence[np.ndarray],
-    *,
-    top: int = 0,
-    bottom: int = 0,
-    min_overlap: int | None = None,
-    tolerance: float = 0,
-) -> np.ndarray:
-    """The tall image ``frames`` show in order; repeated frames add nothing. See :func:`offset` for the knobs."""
+def stitch(frames: Sequence[np.ndarray], match: Match = Match()) -> np.ndarray:  # noqa: B008 -- frozen
+    """The tall image ``frames`` show in order; repeated frames add nothing."""
     if not frames:
         msg = 'no frames to stitch'
         raise ValueError(msg)
-    knobs = {'top': top, 'bottom': bottom, 'min_overlap': min_overlap, 'tolerance': tolerance}
-    return assemble(frames, [offset(a, b, **knobs) for a, b in pairwise(frames)], top=top, bottom=bottom)
+    stitcher = Stitcher(frames[0], match)
+    for frame in frames[1:]:
+        stitcher.add(frame)
+    return stitcher.image()

@@ -7,13 +7,13 @@ consumers. Modules and usage: `README.md`.
 ## Rules here
 
 - Dependency arrow: `paper`, `ai` -> `extract`; `paper` -> `pdf`; `extract` -> `plot`, `pdf`, `html` -> `numbers`, `ir`;
-  `capture` is apart (`session` -> `stitch`; `desktop`, `export` stand alone) and nothing imports it. The base imports
+  `capture` is apart (`cli` -> `session` -> `stitch`; `cli` -> `desktop`, `export`), imported only by `__main__`. The base imports
   without `ai_lab` (`tests/unit/test_ai.py` proves it in a subprocess).
 - A test that needs expected values builds a SYNTHETIC PDF (`tests/synthetic.py`); vendor PDFs are never
   committed. The three real papers are checked STRUCTURALLY against what each PDF says
   (`tests/paper/structure.py`), every check paired with a planted wrong truth it must report.
 - `gpu` (marker-pdf), `vendor` (`DOCUMENT_LAB_VENDOR_PDF=<pdf>`) and `desktop` (an interactive Windows desktop;
-  `tests/desktop/viewer.py` is the window it captures) are declared resource parts, unproduced on
+  `tests/desktop/viewer.py` is the window it captures) and `ocr` (Tesseract) are declared resource parts, unproduced on
   hosted runners: base never selects them, and they FAIL where their resource is missing, never skip.
 - A value the document does not state is absent, a raster plot raises, an ambiguous match refuses: never a
   silent default.

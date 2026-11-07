@@ -13,12 +13,12 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from document_lab.capture.stitch import assemble, offset
+from document_lab.capture.stitch import Match, Stitcher
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-__all__ = ['Limits', 'Settling', 'Stitching', 'capture']
+__all__ = ['Limits', 'Settling', 'capture']
 
 
 @dataclass(frozen=True)
@@ -30,21 +30,16 @@ class Limits:
 
 
 @dataclass(frozen=True)
-class Stitching:
-    """How frames are matched: see `document_lab.capture.stitch.offset`."""
-
-    top: int = 0
-    bottom: int = 0
-    min_overlap: int | None = None
-    tolerance: float = 0
-
-
-@dataclass(frozen=True)
 class Settling:
-    """After a scroll, grab every ``interval`` seconds until two frames agree, at most ``tries`` times."""
+    """After a scroll, grab every ``interval`` seconds until two frames agree, at most ``tries`` times.
+
+    A view that has not moved is looked at once more after ``end_wait`` seconds before it is taken for the end: a
+    scroll the application handles late (a posted message, a busy view) shows two equal frames first.
+    """
 
     interval: float = 0.12
     tries: int = 15
+    end_wait: float = 0.8
 
 
 def _settled(grab: Callable[[], np.ndarray], settling: Settling, sleep: Callable[[float], None]) -> np.ndarray:
@@ -55,7 +50,7 @@ def _settled(grab: Callable[[], np.ndarray], settling: Settling, sleep: Callable
         if np.array_equal(again, frame):
             return again
         frame = again
-    return frame  # never still (a blinking caret, an animation): Stitching.tolerance is the answer to that
+    return frame  # never still (a blinking caret, an animation): Match.tolerance is the answer to that
 
 
 def _never() -> bool:
@@ -67,25 +62,21 @@ def capture(
     scroll: Callable[[], None] | None,
     *,
     limits: Limits = Limits(),  # noqa: B008 -- frozen
-    stitching: Stitching = Stitching(),  # noqa: B008 -- frozen
+    match: Match = Match(),  # noqa: B008 -- frozen
     settling: Settling = Settling(),  # noqa: B008 -- frozen
     aborted: Callable[[], bool] = _never,
     sleep: Callable[[float], None] = time.sleep,
 ) -> np.ndarray:
     """The tall image the source shows from its current position to its end; one frame when ``scroll`` is None."""
-    frames = [grab()]
-    offsets: list[int] = []
-    height = len(frames[0])
-    chrome = {'top': stitching.top, 'bottom': stitching.bottom}
-    while scroll is not None and len(frames) < limits.max_frames and not aborted():
-        if limits.max_height is not None and height >= limits.max_height:
+    stitcher = Stitcher(grab(), match)
+    frames = 1
+    while scroll is not None and frames < limits.max_frames and not aborted():
+        if limits.max_height is not None and stitcher.height >= limits.max_height:
             break
         scroll()
-        frame = _settled(grab, settling, sleep)
-        moved = offset(frames[-1], frame, min_overlap=stitching.min_overlap, tolerance=stitching.tolerance, **chrome)
-        if not moved:
-            break
-        frames.append(frame)
-        offsets.append(moved)
-        height += moved
-    return assemble(frames, offsets, **chrome)
+        if not stitcher.add(_settled(grab, settling, sleep)):
+            sleep(settling.end_wait)
+            if not stitcher.add(_settled(grab, settling, sleep)):
+                break
+        frames += 1
+    return stitcher.image()

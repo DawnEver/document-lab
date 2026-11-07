@@ -4,7 +4,7 @@ import numpy as np
 import pymupdf
 import pytest
 
-from document_lab.capture.export import MAX_PAGE_PT, a4_page_height, save_png, to_pdf
+from document_lab.capture.export import MAX_PAGE_PT, a4_page_height, check_ocr, save_png, to_pdf
 
 
 def image(height: int, width: int = 80) -> np.ndarray:
@@ -50,3 +50,24 @@ def test_png_keeps_the_pixels(tmp_path):
     tall = image(120)
     pix = pymupdf.Pixmap(str(save_png(tall, tmp_path / 'e.png')))
     assert np.array_equal(np.frombuffer(pix.samples, dtype=np.uint8).reshape(120, 80, 3), tall)
+
+
+def no_tesseract():
+    msg = 'No tessdata specified and Tesseract is not installed'
+    raise RuntimeError(msg)
+
+
+def test_ocr_without_tesseract_refuses_before_writing(tmp_path, monkeypatch):
+    monkeypatch.setattr(pymupdf, 'get_tessdata', no_tesseract)
+    out = tmp_path / 'f.pdf'
+    with pytest.raises(OSError, match='Tesseract'):
+        to_pdf(image(50), out, ocr='eng')
+    assert not out.exists()
+
+
+def test_ocr_without_the_language_refuses(tmp_path, monkeypatch):
+    (tmp_path / 'eng.traineddata').write_bytes(b'')
+    monkeypatch.setattr(pymupdf, 'get_tessdata', lambda: str(tmp_path))
+    check_ocr('eng')
+    with pytest.raises(OSError, match='chi_sim'):
+        check_ocr('chi_sim+eng')

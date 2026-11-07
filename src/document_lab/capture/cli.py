@@ -51,7 +51,12 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     scroll.add_argument('--method', choices=('wheel', 'message', 'keys'), default='wheel', help='how --auto scrolls')
     scroll.add_argument('--notches', type=int, default=1, help='--auto: wheel notches (or Down presses) per step')
     scroll.add_argument('--delay', type=float, default=1.0, help='--auto: seconds to wait before the first frame')
-    scroll.add_argument('--settle', type=float, default=0.12, help='seconds between grabs')
+    scroll.add_argument(
+        '--settle', type=float, default=0.12, help='--auto: seconds between grabs while the view settles'
+    )
+    scroll.add_argument(
+        '--every', type=float, default=0.0, help='seconds between grabs while you scroll (0: as fast as it can match)'
+    )
     scroll.add_argument('--max-frames', type=int, help='stop after this many frames (default: no cap)')
     scroll.add_argument(
         '--end-wait',
@@ -199,7 +204,7 @@ def run(args: argparse.Namespace) -> int:
                 source.grab,
                 sink,
                 aborted=shown.stopped,
-                interval=args.settle,
+                interval=args.every,
                 limits=limits,
                 match=match,
                 drop_overlays=args.drop_overlays,

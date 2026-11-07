@@ -17,7 +17,8 @@ _ROOT: Final = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT / 'scripts'))
 from deny_rules import ADOPTION  # noqa: E402
 
-#: THE FLOOR, BY NAME: the rules document-lab ships (adopted with dev-lab c9eaa7f).
+#: THE FLOOR, BY NAME: the rules document-lab ships (adopted with dev-lab c9eaa7f; HPC-THROUGH-THE-DOOR and
+#: WRITES-STAY-IN-THE-TREE arrived with the 1106 relock).
 _SHIPPED: Final = frozenset(
     {
         'BARE-INTERPRETER',
@@ -30,6 +31,7 @@ _SHIPPED: Final = frozenset(
         'GIT-RESET',
         'GIT-STAGE-EVERYTHING',
         'GIT-STASH',
+        'HPC-THROUGH-THE-DOOR',
         'PUSH-FORCE',
         'PUSH-NO-VERIFY',
         'PUSH-REMOTE-DELETE',
@@ -41,6 +43,7 @@ _SHIPPED: Final = frozenset(
         'TREE-HAS-A-LIVE-RUN',
         'WORKTREE-BASE-IS-EXPLICIT',
         'WORKTREES-STAY-INSIDE',
+        'WRITES-STAY-IN-THE-TREE',
     }
 )
 

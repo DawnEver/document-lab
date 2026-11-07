@@ -28,13 +28,11 @@ class FakeSource:
     def scroll(self):
         self.view.scroll()
 
-    def stopped(self):
-        return False
-
 
 @pytest.fixture
 def fake(monkeypatch):
     monkeypatch.setattr(desktop, 'Source', FakeSource)
+    monkeypatch.setattr(desktop, 'escape_pressed', lambda: False)
     return FakeSource
 
 

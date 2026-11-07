@@ -53,7 +53,8 @@ skipped with a warning until it overlaps the last part captured again, and Esc f
 that loads more time to grow -- and says so, exit 1, if its first scroll moved nothing. Neither has a length cap unless
 `--max-frames`/`--max-height`; the height so far shows while it runs. A window is read
 through `PrintWindow`, so another window over it does not show; the wheel, which does land on whatever covers it,
-refuses then (bring it forward, or `--method message`); `keys` refuses a window it cannot bring forward.
+refuses then (bring it forward, or `--method message` -- which some applications act on only some of the time, so it
+may stop early); `keys` refuses a window it cannot bring forward.
 
 Stitching (`capture.stitch`): what stays put while the page scrolls -- a sticky header, a floating button, a scrollbar
 thumb -- is left out of the match, so no setting is needed for it; the scroll is the one offset at which the rest

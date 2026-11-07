@@ -258,8 +258,8 @@ def window_at(found: list[Window], x: int, y: int) -> Window | None:
 
 START_LABEL: Final = 'Start (Enter)'
 HINT: Final = (
-    'Click a window or drag an area  |  drag its edges, corners or top handle to adjust; arrows nudge  |  '
-    'Enter or Start: capture  |  Esc: cancel'
+    'Click a window or drag an area (drag again, anywhere, to redo)  |  '
+    'drag its edges, corners or top handle; arrows nudge  |  Enter or Start: capture  |  Esc: cancel'
 )
 OVERLAY_TITLE: Final = 'document-lab capture selection'
 _BUTTON: Final = (160, 40)  # the start button's size, beside the mark's lower right corner
@@ -280,6 +280,7 @@ _CURSORS: Final = {
 }
 _DIM: Final = 0.45  # the overlay's opacity: how dark the screen outside the mark goes
 _HOLE: Final = '#ff00fe'  # the colour Windows leaves fully transparent in the overlay: the mark is painted in it
+_GLASS: Final = 0.01  # the opacity of the pane over the mark: invisible, yet it takes the mouse (0 would not)
 _PANEL: Final = '#202020'
 
 
@@ -310,9 +311,9 @@ class _Overlay:
     """A dark, translucent window over every monitor on which a target is marked, then confirmed.
 
     It dims the LIVE screen -- nothing is grabbed or drawn, so it opens at once -- and the mark is painted in
-    :data:`_HOLE`, a colour Windows leaves fully transparent: the marked area shows clear, the rest dim. A click inside
-    that hole reaches the window under it, so a hover only outlines a window, and a new mark is dragged from outside
-    the old one. The hint and the start button are their own small opaque windows, readable above the dim.
+    :data:`_HOLE`, a colour Windows leaves fully transparent: the marked area shows clear, the rest dim. Such a hole
+    also lets clicks through, so a pane of glass -- a window over it at :data:`_GLASS` opacity, unseen -- takes them:
+    a drag inside the mark marks again. The hint and the start button are their own small opaque windows.
     """
 
     def __init__(self, found: list[Window], screen: Region) -> None:
@@ -364,6 +365,20 @@ class _Overlay:
         )
         self.start.pack()
         self.panel.withdraw()
+        self.glass = tk.Toplevel(self.root, bg='black')  # over the hole: unseen, but it hears the mouse
+        self.glass.overrideredirect(boolean=True)
+        self.glass.attributes('-topmost', True, '-alpha', _GLASS)  # noqa: FBT003 -- Tk's own spelling
+        self.glass.configure(cursor='crosshair')
+        for sequence, handler in (
+            ('<Motion>', self.hover),
+            ('<ButtonPress-1>', self.press),
+            ('<B1-Motion>', self.move),
+            ('<ButtonRelease-1>', self.release),
+        ):
+            self.glass.bind(sequence, handler)
+        self.glass.bind('<Return>', self.confirm)
+        self.glass.bind('<Escape>', lambda _: self.root.quit())
+        self.glass.withdraw()
 
     def _window(self, tk: object) -> object:
         window = tk.Toplevel(self.root, bg=_PANEL)
@@ -414,6 +429,9 @@ class _Overlay:
             self.canvas.create_rectangle(0, 0, 0, 0, fill='red', outline='white', tags=('mark', 'grip'))
         for tag, corners in shapes:
             self.canvas.coords(tag, *corners)
+        self.glass.geometry(f'{max(box.width, 1)}x{max(box.height, 1)}+{box.left}+{box.top}')
+        self.glass.deiconify()
+        self.glass.lift()
 
     def grip(self, x: int, y: int) -> str | None:
         """Which part of the mark the screen point ``x, y`` takes hold of: an edge, a corner, ``move``, or None.

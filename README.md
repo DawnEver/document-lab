@@ -43,7 +43,8 @@ document-lab capture --list                        # the capturable windows and 
 ```
 
 Targets: none dims every monitor, live -- the window under the pointer is outlined; a click marks it, a drag marks a
-rectangle (shown clear, the rest dim); its edges, corners and top handle drag to adjust it, arrows nudge it (Shift: 10
+rectangle (shown clear, the rest dim) -- a new drag, inside it or out, marks again; its edges, corners and top handle
+drag to adjust it, arrows nudge it (Shift: 10
 px, Ctrl: resize); Enter or Start confirms, Esc cancels -- or `--window TITLE` (must match
 one), `--hwnd`, `--rect L,T,W,H`.
 

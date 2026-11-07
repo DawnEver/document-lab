@@ -24,7 +24,7 @@ from document_lab.capture.stitch import Match, Stitcher, Unstitchable
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-__all__ = ['Capture', 'Limits', 'Rows', 'Settling', 'capture']
+__all__ = ['Capture', 'Limits', 'Rows', 'Settling', 'capture', 'follow']
 
 
 @dataclass(frozen=True)
@@ -53,12 +53,14 @@ class Settling:
 class Capture:
     """One capture: the ``frames`` it took, the ``height`` it stitched, and why it ``stopped``.
 
-    ``stopped`` is ``end``, ``aborted``, ``max_frames``, ``max_height``, ``one frame`` or ``unstitchable: <reason>``.
+    ``stopped`` is ``end``, ``aborted``, ``max_frames``, ``max_height``, ``one frame`` or ``unstitchable: <reason>``;
+    ``stuck`` is true when the first scroll already moved nothing -- the source did not scroll at all.
     """
 
     frames: int
     height: int
     stopped: str
+    stuck: bool = False
 
     @property
     def complete(self) -> bool:
@@ -142,6 +144,54 @@ def capture(
             progress(stitcher)
     except Unstitchable as error:
         stopped = f'unstitchable: {error}'
+    finally:
+        sink(stitcher.drain(final=True))
+    return Capture(frames, stitcher.height, stopped, stuck=scroll is not None and stopped == 'end' and frames == 1)
+
+
+def _report(_: str) -> None:
+    return None
+
+
+def follow(
+    grab: Callable[[], np.ndarray],
+    sink: Callable[[np.ndarray], None],
+    *,
+    aborted: Callable[[], bool],
+    interval: float = 0.1,
+    limits: Limits = Limits(),  # noqa: B008 -- frozen
+    match: Match = Match(),  # noqa: B008 -- frozen
+    drop_overlays: bool = False,
+    progress: Callable[[Stitcher], None] = _ignore,
+    lost: Callable[[str], None] = _report,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Capture:
+    """What the source shows while the user scrolls it, to ``sink``, until ``aborted`` (the CLI binds Esc).
+
+    A frame is grabbed every ``interval`` seconds and placed if the view moved; standing still ends nothing. A frame
+    that cannot be placed below the last -- scrolled too far at once, or back up -- is skipped and told to ``lost``;
+    the capture goes on from the last placed frame once the view overlaps it again.
+    """
+    stitcher = Stitcher(grab(), match, drop_overlays=drop_overlays)
+    frames, stopped = 1, 'aborted'
+    try:
+        while not aborted():
+            if limits.max_frames is not None and frames >= limits.max_frames:
+                stopped = 'max_frames'
+                break
+            if limits.max_height is not None and stitcher.height >= limits.max_height:
+                stopped = 'max_height'
+                break
+            sleep(interval)
+            try:
+                moved = stitcher.add(grab())
+            except Unstitchable as error:
+                lost(str(error))
+                continue
+            if moved:
+                frames += 1
+                sink(stitcher.drain())
+                progress(stitcher)
     finally:
         sink(stitcher.drain(final=True))
     return Capture(frames, stitcher.height, stopped)

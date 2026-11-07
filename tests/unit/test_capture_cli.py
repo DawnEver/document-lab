@@ -37,7 +37,7 @@ class FakeHud:
     shown: ClassVar[list] = []
     rows = 0
     done = staticmethod(lambda: False)  # what the Finish button says, per test
-    answers: ClassVar[list] = []  # what the panel answers before the capture, in turn; then Start
+    answers: ClassVar[list] = []  # what the panel answers before the capture, in turn; then Start (I scroll)
 
     def __init__(self, area):
         FakeHud.shown, FakeHud.rows = [], 0
@@ -175,3 +175,10 @@ def test_adjust_on_the_panel_reopens_the_selection_on_the_area_set_then_waits_ag
     assert run(tmp_path, '--no-scroll') == 0
     assert asked == [desktop.Region(0, 0, WIDTH, 300)]  # the area set, shown marked to adjust
     assert len(waited) == 2  # the new area waits for Start too
+
+
+def test_auto_scroll_on_the_panel_scrolls_for_the_user_to_the_end(tmp_path, fake, monkeypatch):
+    monkeypatch.setattr(FakeHud, 'answers', ['auto'])
+    assert run(tmp_path, '--page-height', '0') == 0  # no --auto: the panel chose it
+    image, _ = pdf_pixels(tmp_path / 'c.pdf')
+    assert np.array_equal(image, fake.IMAGE)

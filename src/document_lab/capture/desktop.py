@@ -663,7 +663,7 @@ def scroll(target: Window | Region, notches: int, method: str = 'wheel') -> None
 _EDGE: Final = 3  # the frame around a capture: its thickness, drawn just outside the area so it is never grabbed
 _MINI: Final = (180, 360)  # the panel's miniature of the capture: width, and the height of the newest part it shows
 OK, LOST, WAIT = '#1aa34a', '#d93025', '#1a73e8'
-Answer = Literal['start', 'adjust', 'cancel']  # what the waiting panel says: capture, set the area again, quit
+Answer = Literal['start', 'auto', 'adjust', 'cancel']  # the waiting panel: you scroll, it scrolls, re-mark, quit
 
 
 class Hud:
@@ -697,17 +697,28 @@ class Hud:
         self.panel = self._window(tk, 0, 0, None, colour='#202020')
         self.finished = False  # set by the Finish button: a deliberate click ends the capture, a stray key does not
         self.answer: Answer | None = None  # what the panel answered before the capture
-        buttons = tk.Frame(self.panel, bg='#202020')
-        buttons.pack(fill='x', padx=8, pady=(8, 4))  # first, at the top: always in view, whatever the text wraps to
-        style = {'fg': 'white', 'font': ('Segoe UI', 11, 'bold'), 'relief': 'flat', 'pady': 6}
+        starts = tk.Frame(self.panel, bg='#202020')  # first, at the top: always in view, whatever the text wraps to
+        starts.pack(fill='x', padx=8, pady=(8, 4))
+        self.others = tk.Frame(self.panel, bg='#202020')  # what only waiting needs: gone once the capture starts
+        self.others.pack(fill='x', padx=8, pady=(0, 4))
+        style = {'fg': 'white', 'font': ('Segoe UI', 10, 'bold'), 'relief': 'flat', 'pady': 5}
         self.button = tk.Button(
-            buttons, text='Start', command=lambda: self._answer('start'), bg=OK, activebackground='#137d39', **style
+            starts,
+            text='Start (I scroll)',
+            command=lambda: self._answer('start'),
+            bg=OK,
+            activebackground='#137d39',
+            **style,
         )
         self.button.pack(side='left', fill='x', expand=True)
-        self.adjust = tk.Button(buttons, text='Adjust', command=lambda: self._answer('adjust'), bg=WAIT, **style)
-        self.adjust.pack(side='left', padx=(6, 0))
-        self.cancel = tk.Button(buttons, text='Cancel', command=lambda: self._answer('cancel'), bg='#5f6368', **style)
-        self.cancel.pack(side='left', padx=(6, 0))
+        self.auto = tk.Button(starts, text='Auto scroll', command=lambda: self._answer('auto'), bg=OK, **style)
+        self.auto.pack(side='left', fill='x', expand=True, padx=(6, 0))
+        self.adjust = tk.Button(self.others, text='Adjust', command=lambda: self._answer('adjust'), bg=WAIT, **style)
+        self.adjust.pack(side='left', fill='x', expand=True)
+        self.cancel = tk.Button(
+            self.others, text='Cancel', command=lambda: self._answer('cancel'), bg='#5f6368', **style
+        )
+        self.cancel.pack(side='left', fill='x', expand=True, padx=(6, 0))
         self.text = tk.Label(
             self.panel, fg='white', bg='#202020', font=('Segoe UI', 10), wraplength=width - 12, justify='left'
         )
@@ -725,8 +736,8 @@ class Hud:
         self.photo = tk.PhotoImage(master=self.root)
         self.canvas.create_image(0, 0, image=self.photo, anchor='nw')
         self.status(
-            'Area set. Use the desktop freely; bring the area to where to begin, then click Start '
-            '(Adjust: change the area).',
+            'Area set. Use the desktop freely; bring the area to where to begin, then Start (you scroll) or Auto '
+            'scroll (it scrolls). Adjust: change the area.',
             ok=None,
         )
 
@@ -747,13 +758,20 @@ class Hud:
         self.pump()
 
     def ready(self) -> Answer:
-        """Wait, the desktop free, for the panel's answer: Start, Adjust or Cancel. Start turns into Finish."""
+        """Wait, the desktop free, for the panel's answer: Start (you scroll), Auto scroll, Adjust or Cancel.
+
+        Either start turns the first button into Finish, which ends an auto scroll early too.
+        """
         self.root.mainloop()  # left by any button: Tk sleeps meanwhile, nothing polls
-        if self.answer == 'start':
-            self.adjust.pack_forget()
-            self.cancel.pack_forget()
+        if self.answer in {'start', 'auto'}:
+            self.auto.pack_forget()
+            self.others.pack_forget()
             self.button.configure(text='Finish and save', command=self.finish)
-            self.status('Capturing. Scroll down at your own pace; click Finish when you are done.', ok=True)
+            say = {
+                'start': 'Capturing. Scroll down at your own pace; click Finish when you are done.',
+                'auto': 'Scrolling for you to the end; click Finish to stop early.',
+            }
+            self.status(say[self.answer], ok=True)
         return self.answer
 
     def _answer(self, answer: Answer) -> None:

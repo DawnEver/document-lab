@@ -244,15 +244,15 @@ print(o.run())
     assert done.stdout.startswith('Region('), done.stdout
 
 
-def test_the_panel_waits_for_start_adjust_or_cancel_and_start_turns_into_finish():
+def test_the_panel_waits_for_a_start_adjust_or_cancel_and_start_turns_into_finish():
     """After the area is confirmed the HUD waits, nothing over the desktop, until its own buttons answer."""
     script = """
 from document_lab.capture import desktop
-for press, want in (('button', 'start'), ('adjust', 'adjust'), ('cancel', 'cancel')):
+for press, want in (('button', 'start'), ('auto', 'auto'), ('adjust', 'adjust'), ('cancel', 'cancel')):
     hud = desktop.Hud(desktop.Region(200, 200, 300, 200))
     hud.root.after(300, getattr(hud, press).invoke)
     assert hud.ready() == want
-    if want == 'start':
+    if want in {'start', 'auto'}:
         assert hud.button.cget('text') == 'Finish and save'
         hud.button.invoke()
         assert hud.finished

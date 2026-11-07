@@ -46,7 +46,9 @@ Targets: none dims every monitor, live -- the window under the pointer is outlin
 rectangle (shown clear, the rest dim) -- a new drag, inside it or out, marks again; its edges, corners and top handle
 drag to adjust it, arrows nudge it (Shift: 10 px, Ctrl: resize); Enter or Confirm sets it, Esc cancels -- or
 `--window TITLE` (must match one), `--hwnd`, `--rect L,T,W,H`. Once set, nothing covers the desktop: open or arrange
-other windows freely while the area waits, framed in blue, until Start on the panel beside it begins the capture.
+other windows freely while the area waits, framed in blue, until the panel beside it starts the capture:
+**Start (I scroll)** follows your own scrolling, **Auto scroll** scrolls for you to the end (as `--auto`); either way
+Finish ends it.
 Adjust reopens the selection with the area still marked, to drag or redo it (Esc there keeps it as it was); Cancel
 quits, nothing written.
 

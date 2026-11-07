@@ -180,8 +180,8 @@ def _report(result: Capture) -> int:
     return 0
 
 
-def _started(target: Window | Region) -> tuple[Window | Region, Region, Hud] | None:
-    """The area set and its HUD once Start is clicked; None on Cancel.
+def _started(target: Window | Region) -> tuple[Window | Region, Region, Hud, bool] | None:
+    """The area set, its HUD and whether to scroll for the user (Auto scroll) once a start is clicked; None on Cancel.
 
     The desktop is free and nothing is grabbed until then; Adjust reopens the selection on the area.
     """
@@ -191,8 +191,8 @@ def _started(target: Window | Region) -> tuple[Window | Region, Region, Hud] | N
         area = target.client() if isinstance(target, desktop.Window) else target
         hud = desktop.Hud(area)
         answer = hud.ready()
-        if answer == 'start':
-            return target, area, hud
+        if answer in {'start', 'auto'}:
+            return target, area, hud, answer == 'auto'
         hud.close()
         if answer == 'cancel':
             return None
@@ -217,7 +217,7 @@ def run(args: argparse.Namespace) -> int:
     if started is None:
         emit('cancelled')
         return 1
-    target, area, hud = started
+    target, area, hud, auto = started
     source = desktop.Source(target, args.notches, args.method)
     width = area.width
     shown = _Shown(hud, args.keep_lost)
@@ -237,7 +237,7 @@ def run(args: argparse.Namespace) -> int:
 
         limits = Limits(args.max_frames, args.max_height)
         match = Match(args.ignore_top, args.ignore_bottom, args.min_overlap, args.tolerance, args.outliers)
-        if not (args.auto or args.no_scroll):
+        if not (args.auto or auto or args.no_scroll):
             emit('now scroll the area down at your own pace; click Finish on the panel when you are done')
             result = follow(
                 source.grab,

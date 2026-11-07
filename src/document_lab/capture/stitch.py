@@ -30,7 +30,7 @@ import numpy as np
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-__all__ = ['BINS', 'AmbiguousOverlap', 'Match', 'NoOverlap', 'Stitcher', 'Unstitchable', 'offset', 'stitch']
+__all__ = ['BINS', 'AmbiguousOverlap', 'Match', 'NoOverlap', 'Stitcher', 'Unstitchable', 'locate', 'offset', 'stitch']
 
 BINS: Final = 64
 _EDGE: Final = 1 << 16  # a rank: class * _EDGE + the row's distance from the view's middle
@@ -111,6 +111,7 @@ _NEAR: Final = 2  # offsets this close to the best are its neighbours: a fractio
 _UNIQUE: Final = 2.0  # every offset but a neighbour must err at least this many times the best
 _FLOOR: Final = 1.0  # grey levels: errors closer than this are not told apart
 _STILL: Final = 1.0  # grey levels a cell may change in place and still count as unchanged
+_EXACT: Final = 0.25  # grey levels of error under which an offset is a whole-row match, not refined
 _DENSE: Final = 0.3  # an offset is judged only if it compares this share of the evidence the densest offset does
 
 
@@ -151,27 +152,29 @@ def _squared(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return (a2 + b2[overlap - 1] - 2 * cross) / (overlap * a.shape[1])
 
 
-def _errors(ca: np.ndarray, cb: np.ndarray, least: int, outliers: float) -> dict[int, tuple[float, int]]:
-    """The trimmed mean grey error, and the cells compared, at the offsets worth judging.
+class _Pair:
+    """Two frames' cells, laid side by side once, to judge any offset between them."""
 
-    :func:`_squared` ranks every offset; the :data:`_CANDIDATES` best are judged on every row and cell, with the
-    evidence mask and the trimmed mean.
-    """
-    (pa, blank_a), (pb, blank_b) = _cells(ca), _cells(cb)
-    rows, bins = blank_a.shape
-    fine_a, fine_b = pa.reshape(rows, bins, 3), pb.reshape(rows, bins, 3)
-    moving = np.abs(fine_a - fine_b).max(axis=2) > _STILL
-    offsets = np.arange(1, rows - least + 1)
-    if not len(offsets):
-        return {}
-    best = offsets[np.argsort(_squared(fine_a.mean(axis=2), fine_b.mean(axis=2))[offsets])[:_CANDIDATES]]
-    judged = sorted(int(d) for d in best)  # the ranking's best: the true offset's neighbours come with it
-    found = {}
-    for d in judged:
-        kept_d = _evidence(moving[d:], moving[: rows - d], blank_a[d:], blank_b[: rows - d])
-        error = np.abs(fine_a[d:] - fine_b[: rows - d]).mean(axis=2)
-        found[d] = _trimmed(error, kept_d, outliers)
-    return found
+    def __init__(self, ca: np.ndarray, cb: np.ndarray, outliers: float) -> None:
+        (pa, self.blank_a), (pb, self.blank_b) = _cells(ca), _cells(cb)
+        self.rows, bins = self.blank_a.shape
+        self.a, self.b = pa.reshape(self.rows, bins, 3), pb.reshape(self.rows, bins, 3)
+        self.moving = np.abs(self.a - self.b).max(axis=2) > _STILL
+        self.outliers = outliers
+
+    def judge(self, d: int) -> tuple[float, int]:
+        """The trimmed mean grey error at offset ``d``, over the cells that carry evidence, and their count."""
+        n = self.rows - d
+        kept = _evidence(self.moving[d:], self.moving[:n], self.blank_a[d:], self.blank_b[:n])
+        return _trimmed(np.abs(self.a[d:] - self.b[:n]).mean(axis=2), kept, self.outliers)
+
+    def candidates(self, least: int) -> dict[int, tuple[float, int]]:
+        """The :data:`_CANDIDATES` offsets :func:`_squared` ranks best, each judged in full."""
+        offsets = np.arange(1, self.rows - least + 1)
+        if not len(offsets):
+            return {}
+        ranked = _squared(self.a.mean(axis=2), self.b.mean(axis=2))[offsets]
+        return {int(d): self.judge(int(d)) for d in offsets[np.argsort(ranked)[:_CANDIDATES]]}
 
 
 def _repeats(cells: np.ndarray, least: int) -> bool:
@@ -180,16 +183,27 @@ def _repeats(cells: np.ndarray, least: int) -> bool:
     return any((np.abs(cells[d:] - cells[: rows - d]) <= _STILL).all() for d in range(1, rows - least + 1))
 
 
-def _unmoved(cells: np.ndarray, least: int) -> int:
+def _unmoved(cells: np.ndarray, least: int) -> float:
     """0 -- the view did not scroll -- unless it is blank or repeats, when whether it scrolled cannot be told."""
     if _repeats(cells, least):
         msg = 'the view is blank or repeats, so whether it scrolled cannot be told: scroll past it'
         raise AmbiguousOverlap(msg)
-    return 0
+    return 0.0
 
 
 def offset(a: np.ndarray, b: np.ndarray, match: Match = Match()) -> int:  # noqa: B008 -- frozen
-    """Rows the view scrolled from frame ``a`` to frame ``b`` (0: it did not move).
+    """Rows the view scrolled from frame ``a`` to frame ``b`` (0: it did not move), to the nearest row.
+
+    :func:`_place` says how many to the fraction of a row.
+    """
+    return round(_place(a, b, match))
+
+
+def _place(a: np.ndarray, b: np.ndarray, match: Match) -> float:
+    """Rows the view scrolled from frame ``a`` to frame ``b``, to a fraction of a row (0: it did not move).
+
+    At 175% scaling a scroll is a fraction of a row: the whole-row offset that fits best is refined by the parabola
+    through its error and its two neighbours', so a stitcher that adds the fractions up never drifts.
 
     The offset at which the frames are most alike: its trimmed mean error at most ``match.tolerance`` grey levels,
     and every offset but its neighbours erring :data:`_UNIQUE` times as much. Raises :class:`NoOverlap` or
@@ -200,12 +214,13 @@ def offset(a: np.ndarray, b: np.ndarray, match: Match = Match()) -> int:  # noqa
         raise ValueError(msg)
     ca, cb = _content(a, match), _content(b, match)
     rows = len(ca)
-    least = max(1, rows // 4) if match.min_overlap is None else match.min_overlap
+    least = max(1, rows // 6) if match.min_overlap is None else match.min_overlap
     (pa, _), (pb, _) = _cells(ca), _cells(cb)
     changed = np.abs(pa - pb).reshape(rows, -1, 3).max(axis=2) > _STILL
     if not changed.any():
         return _unmoved(pa, least)
-    judged = _errors(ca, cb, least, match.outliers)
+    pair = _Pair(ca, cb, match.outliers)
+    judged = pair.candidates(least)
     densest = max((count / (rows - d) for d, (_, count) in judged.items()), default=0.0)
     found = {
         d: (error, count)
@@ -235,7 +250,71 @@ def offset(a: np.ndarray, b: np.ndarray, match: Match = Match()) -> int:  # noqa
     if rivals:
         msg = f'{1 + len(rivals)} offsets fit ({[best, *rivals][:5]}...): the overlap repeats; scroll by another step'
         raise AmbiguousOverlap(msg)
-    return best
+    lower, upper = (found.get(d) or pair.judge(d) for d in (best - 1, best + 1))
+    curve = lower[0] + upper[0] - 2 * error
+    exact = error <= _EXACT  # a perfect match is a whole-row scroll: nothing fractional to estimate
+    if exact or best <= 1 or not (np.isfinite(lower[0]) and np.isfinite(upper[0])) or curve <= 0:
+        return float(best)
+    return best + min(max(0.5 * (lower[0] - upper[0]) / curve, -0.5), 0.5)
+
+
+def _squared_in(tall: np.ndarray, view: np.ndarray, least: int) -> np.ndarray:
+    """For every position ``p`` of ``view`` in ``tall``, the mean squared difference of the rows they share.
+
+    Both are ``(rows, cells)``; ``view`` overlaps ``tall`` by at least ``least`` rows. By FFT, like :func:`_squared`.
+    """
+    rows, height = len(view), len(tall)
+    size = 1 << (height + rows).bit_length()
+    cross = np.fft.irfft(np.fft.rfft(tall, size, axis=0) * np.conj(np.fft.rfft(view, size, axis=0)), size, axis=0)
+    cross = cross[: height - least + 1].sum(axis=1)  # cross[p] = sum over y, cells of tall[p + y] * view[y]
+    positions = np.arange(height - least + 1)
+    shared = np.minimum(rows, height - positions)
+    tall2 = np.concatenate([[0.0], np.cumsum((tall * tall).sum(axis=1))])
+    view2 = np.concatenate([[0.0], np.cumsum((view * view).sum(axis=1))])
+    return (tall2[positions + shared] - tall2[positions] + view2[shared] - 2 * cross) / (shared * tall.shape[1])
+
+
+def locate(tall: np.ndarray, frame: np.ndarray, match: Match = Match()) -> int:  # noqa: B008 -- frozen
+    """The row of ``tall`` -- the image so far -- at which ``frame`` starts.
+
+    Where a view that lost the last frame is found again: ``frame`` shares at least the least overlap with ``tall``.
+    Refused, never guessed, like :func:`offset`.
+    """
+    view = _content(frame, match)
+    rows = len(view)
+    least = max(1, rows // 6) if match.min_overlap is None else match.min_overlap
+    if len(tall) < least:
+        msg = 'too little captured yet to find the view in'
+        raise NoOverlap(msg)
+    (pt, blank_t), (pv, blank_v) = _cut(tall), _cells(view)
+    bins = blank_t.shape[1]
+    fine_t, fine_v = pt.reshape(len(tall), bins, 3), pv.reshape(rows, bins, 3)
+    ranked = _squared_in(fine_t.mean(axis=2), fine_v.mean(axis=2), least)
+    found = {}
+    for p in (int(p) for p in np.argsort(ranked)[:_CANDIDATES]):
+        shared = min(rows, len(tall) - p)
+        kept = ~(blank_t[p : p + shared] & blank_v[:shared])
+        found[p] = _trimmed(np.abs(fine_t[p : p + shared] - fine_v[:shared]).mean(axis=2), kept, match.outliers)
+    found = {p: e for p, e in found.items() if e[1] >= _LEAST_CELLS}
+    if not found:
+        msg = 'the view shows nothing that tells where it is'
+        raise AmbiguousOverlap(msg)
+    best = min(found, key=lambda p: found[p][0])
+    error = found[best][0]
+    if error > match.tolerance:
+        msg = f'the view is not in what was captured (best errs {error:.1f} grey levels)'
+        raise NoOverlap(msg)
+    bar = max(_UNIQUE * error, error + _FLOOR)
+    low = {p for p, (e, _) in found.items() if e < bar}
+
+    def valley(p: int) -> bool:
+        step = 1 if p > best else -1
+        return all(x in low for x in range(best, p + step, step))
+
+    if any(abs(p - best) > _NEAR and not valley(p) for p in low):
+        msg = 'the view fits more than one place in what was captured'
+        raise AmbiguousOverlap(msg)
+    return best - match.top
 
 
 def _proven(a: np.ndarray, b: np.ndarray, moved: int, known: np.ndarray) -> np.ndarray:
@@ -271,9 +350,16 @@ class Stitcher:
     the lowest rank that has shown it; a spot only overlays have shown keeps one.
     """
 
-    def __init__(self, first: np.ndarray, match: Match = Match(), *, drop_overlays: bool = False) -> None:  # noqa: B008
-        """Start from ``first``; the declared chrome rows of every frame are covered from the start."""
-        self.match, self.drop_overlays, self.last = match, drop_overlays, first
+    def __init__(
+        self,
+        first: np.ndarray,
+        match: Match = Match(),  # noqa: B008 -- frozen
+        *,
+        drop_overlays: bool = False,
+        history: int = 0,
+    ) -> None:
+        """Start from ``first``. ``history``: rows above the current view kept, not drained, for :meth:`relocate`."""
+        self.match, self.drop_overlays, self.last, self.history = match, drop_overlays, first, history
         rows, width = first.shape[:2]
         self._chrome = np.zeros((rows, width), dtype=bool)
         self._chrome[: match.top] = self._chrome[rows - match.bottom :] = True
@@ -283,6 +369,7 @@ class Stitcher:
         self._rank = np.zeros((4 * rows, width), dtype=np.uint32)  # the rank of the view each spot holds
         self._canvas[:rows], self._rank[:rows] = first, self._ranks()
         self._top, self._end = 0, rows  # in buffer rows; the buffer starts at image row self._drained
+        self._at = 0.0  # the last frame's exact top, to a fraction of a row: self._top is it rounded
         self._drained = 0
 
     def _ranks(self) -> np.ndarray:
@@ -301,11 +388,12 @@ class Stitcher:
 
     def drain(self, *, final: bool = False) -> np.ndarray:
         """The rows no later frame can change -- all of them when ``final`` -- handed over and forgotten."""
-        cut = self._end if final else self._top
+        cut = self._end if final else max(self._top - self.history, 0)
         rows = self._canvas[:cut].copy()
         self._canvas[: self._end - cut] = self._canvas[cut : self._end]
         self._rank[: self._end - cut] = self._rank[cut : self._end]
         self._top, self._end, self._drained = max(self._top - cut, 0), self._end - cut, self._drained + cut
+        self._at = max(self._at - cut, 0.0)
         return rows
 
     def _room(self, end: int) -> None:
@@ -317,9 +405,11 @@ class Stitcher:
 
     def add(self, frame: np.ndarray) -> int:
         """Place ``frame`` after the last one; the rows it scrolled (0: it adds nothing)."""
-        moved = offset(self.last, frame, self.match)
+        exact = self._at + _place(self.last, frame, self.match)
+        moved = round(exact) - self._top
         if not moved:
-            return 0
+            return 0  # less than a row so far: the next frame is measured from the same last one, nothing lost
+        self._at = exact
         rows = len(frame)
         if not self.drop_overlays:
             return self._append(frame, moved)
@@ -353,6 +443,29 @@ class Stitcher:
         self._canvas[top + start : end] = frame[start:]
         self._end, self.last = end, frame
         return moved
+
+    def relocate(self, frame: np.ndarray) -> int:
+        """Find ``frame`` anywhere in the rows held (the last ``history`` rows and the view) and go on from there.
+
+        A view that lost the last frame -- scrolled too far, or back -- picks up wherever it overlaps what was
+        captured; the rows it newly shows go below. How many it added (0: it was all captured).
+        """
+        top = locate(self._canvas[: self._end], frame, self.match)
+        rows = len(frame)
+        if top < 0 or top + rows - self.match.bottom <= 0:
+            msg = 'the view is above what is held'
+            raise NoOverlap(msg)
+        self._top, self.last, self._at = top, frame, float(top)
+        end = top + rows
+        added = max(end - self._end, 0)
+        if added:
+            self._room(end)
+            start = self._end - self.match.bottom - top
+            self._canvas[top + start : end] = frame[start:]
+            self._rank[top + start : end] = self._ranks()[start:]
+            self._end = end
+        self._proven[:] = False  # what was proven of the last frame's screen says nothing across a jump
+        return added
 
     def image(self) -> np.ndarray:
         """The rows held, as one image: the whole stitched image while nothing has been drained."""

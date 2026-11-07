@@ -150,14 +150,23 @@ def test_following_the_user_waits_through_pauses_and_ends_on_esc():
     assert np.array_equal(rows.image(), image[: 300 + 120 + 200 + 150 + 200])
 
 
-def test_a_scroll_too_fast_or_back_up_is_skipped_until_the_view_overlaps_again():
+def test_back_up_within_what_was_captured_picks_up_there_and_too_far_is_skipped():
     image = tall(2000)
     lost = []
-    hand = Hand(image, 300, [100, 400, -380, 100, -150, 150, 90])  # too far; back; on; up above it; back; on
+    hand = Hand(image, 300, [100, 400, -380, 100, -150, 150, 90])  # too far; back; on; up into the past; on
     rows = Rows()
     follow(hand.grab, rows, aborted=hand.esc, lost=lost.append, sleep=lambda _: None)
-    assert [x.back for x in lost] == ['up', 'down']  # too far down: back up; above the last frame: back down
-    assert all(x.last.shape == (300, 64, 3) for x in lost)
+    assert [x.back for x in lost] == ['up']  # only the jump past the view is lost; back up, it picked up again
+    assert np.array_equal(rows.image(), image[: hand.top + 300])
+
+
+def test_after_a_flick_too_far_any_part_already_captured_resumes_the_capture():
+    image = tall(3000)
+    lost = []
+    hand = Hand(image, 300, [200, 200, 900, -700, 200, 200])  # a flick past the view, then back into what was held
+    rows = Rows()
+    follow(hand.grab, rows, aborted=hand.esc, lost=lost.append, sleep=lambda _: None)
+    assert len(lost) == 1
     assert np.array_equal(rows.image(), image[: hand.top + 300])
 
 

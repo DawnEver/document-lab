@@ -34,7 +34,7 @@ A `Value` keeps the source `text` beside the typed `value` (a `≈`, `≤` or `�
 ## Capture
 
 ```
-document-lab capture                               # mark an area, Start, then scroll it yourself; Esc: the PDF
+document-lab capture                               # mark an area, Start, scroll it yourself, Finish: the PDF
 document-lab capture out.pdf --drop-overlays       # paint out floating buttons and sticky bars where they recur
 document-lab capture out.pdf --auto                # it scrolls for you, to the end
 document-lab capture out.pdf --no-scroll           # one frame
@@ -43,12 +43,15 @@ document-lab capture --list                        # the capturable windows and 
 ```
 
 Targets: none dims every monitor, live -- the window under the pointer is outlined; a click marks it, a drag marks a
-rectangle (shown clear, the rest dim), a drag from outside it marks again; Enter or Start confirms, Esc cancels -- or `--window TITLE` (must match
+rectangle (shown clear, the rest dim); its edges, corners and top handle drag to adjust it, arrows nudge it (Shift: 10
+px, Ctrl: resize); Enter or Start confirms, Esc cancels -- or `--window TITLE` (must match
 one), `--hwnd`, `--rect L,T,W,H`.
 
 Scrolling: by default you scroll -- wheel, scrollbar, keys, at your own pace -- and it follows, grabbing a frame every
-`--settle` seconds and placing each new position; pauses end nothing, a view scrolled too far at once or back up is
-skipped with a warning until it overlaps the last part captured again, and Esc finishes. `--auto` scrolls for you
+`--every` seconds and placing each new position; pauses end nothing. A view that does not follow the last one -- a
+flick too far, or back up -- is looked for in the last three views captured and picks up wherever it overlaps them;
+only a view outside all of them is skipped, the frame turning red with which way to go back. The Finish button on
+the panel ends it (not a key, which is too easily hit). Frames placed to a fraction of a row add up without drift. `--auto` scrolls for you
 (`--method wheel|message|keys`, `--notches`) until the view stops moving -- `--end-wait` (default 0.8 s) gives a feed
 that loads more time to grow -- and says so, exit 1, if its first scroll moved nothing. Neither has a length cap unless
 `--max-frames`/`--max-height`; the height so far shows while it runs. A window is read

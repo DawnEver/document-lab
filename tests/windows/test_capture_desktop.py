@@ -5,11 +5,10 @@ Its own part, never tests/base: it needs a Windows desktop (and briefly moves th
 skipped.
 """
 
-import ctypes
+import json
 import os
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -113,66 +112,64 @@ def test_a_wheel_onto_a_covered_window_refuses(viewer):
         cover.wait()
 
 
-def _gesture(*steps: tuple) -> threading.Thread:
-    """Real input, played once the overlay is up: ('drag', (x, y), (x, y)), ('click', (x, y)) or ('key', vk)."""
-    user32 = ctypes.WinDLL('user32')
-
-    def play() -> None:
-        deadline = time.monotonic() + 15
-        while not user32.IsWindowVisible(user32.FindWindowW(None, desktop.OVERLAY_TITLE)):
-            assert time.monotonic() < deadline, 'the selection overlay never appeared'
-            time.sleep(0.05)
-        time.sleep(0.3)  # mapped is not yet painted and taking input
-        for kind, *where in steps:
-            if kind == 'key':
-                user32.keybd_event(where[0], 0, 0, 0)
-                user32.keybd_event(where[0], 0, 2, 0)
-            else:
-                start, end = where[0], where[-1]
-                user32.SetCursorPos(*start)
-                time.sleep(0.1)
-                user32.mouse_event(0x2, 0, 0, 0, 0)
-                for i in range(1, 11):
-                    user32.SetCursorPos(
-                        start[0] + (end[0] - start[0]) * i // 10, start[1] + (end[1] - start[1]) * i // 10
-                    )
-                    time.sleep(0.03)
-                user32.mouse_event(0x4, 0, 0, 0, 0)
-            time.sleep(0.4)
-
-    thread = threading.Thread(target=play, daemon=True)
-    thread.start()
-    return thread
+# The selector is driven through Tk's own event dispatch (event_generate), not OS input -- a click Windows did not
+# deliver would leave select() waiting forever -- and in a child with a timeout, so even a hang is a failure.
+SELECT = """
+import json, sys
+from document_lab.capture import desktop
+steps = json.loads(sys.argv[1])
+screen = desktop.virtual_screen()
+o = desktop._Overlay(desktop.windows(), screen, desktop.grab(screen))
+o.canvas.focus_force()
+def at(x, y):
+    return {'x': x - screen.left, 'y': y - screen.top}
+def play():
+    for kind, *where in steps:
+        if kind == 'key':
+            o.canvas.event_generate(where[0])
+        elif kind == 'start':
+            x0, y0, x1, y1 = o.canvas.bbox('start')
+            for event in ('<Motion>', '<ButtonPress-1>', '<ButtonRelease-1>'):
+                o.canvas.event_generate(event, x=(x0 + x1) // 2, y=(y0 + y1) // 2)
+        else:
+            (a, b), (c, d) = where[0], where[-1]
+            o.canvas.event_generate('<ButtonPress-1>', **at(a, b))
+            o.canvas.event_generate('<B1-Motion>', **at(c, d))
+            o.canvas.event_generate('<ButtonRelease-1>', **at(c, d))
+        o.root.update()
+o.root.after(300, play)
+print(repr(o.run()))
+"""
 
 
-ENTER, ESC = 0x0D, 0x1B
+def selected(*steps: tuple) -> str:
+    """What the overlay returns after ``steps``: ('drag', a, b), ('click', a), ('start',) or ('key', sequence)."""
+    done = subprocess.run(
+        [sys.executable, '-c', SELECT, json.dumps(steps)], capture_output=True, text=True, timeout=60, check=False
+    )
+    assert done.returncode == 0, done.stderr
+    return done.stdout.strip()
 
 
 def test_a_drag_confirmed_by_enter_is_the_region(viewer):
     window, _ = viewer
     area = window.client()
     start, end = (area.left + 10, area.top + 20), (area.left + 110, area.top + 70)
-    _gesture(('drag', start, end), ('key', ENTER))
-    assert desktop.select() == desktop.Region(area.left + 10, area.top + 20, 100, 50)
+    assert selected(('drag', start, end), ('key', '<Return>')) == repr(
+        desktop.Region(area.left + 10, area.top + 20, 100, 50)
+    )
 
 
 def test_a_click_marks_the_window_and_start_confirms_it(viewer):
     window, _ = viewer
     area = window.client()
-    right, bottom = area.left + area.width, area.top + area.height
-    _gesture(
-        ('drag', (area.left + 10, area.top + 20), (area.left + 110, area.top + 70)),  # replaced by the click
-        ('click', area.centre),
-        ('click', (right - 80, bottom + 28)),  # the start button, under the mark's right end
-    )
-    assert desktop.select() == window
+    drag = ('drag', (area.left + 10, area.top + 20), (area.left + 110, area.top + 70))  # replaced by the click
+    assert selected(drag, ('click', area.centre), ('start',)) == repr(window)
 
 
 def test_nothing_is_taken_before_it_is_confirmed(viewer):
     window, _ = viewer
-    _gesture(('click', window.client().centre), ('key', ESC))
-    with pytest.raises(KeyboardInterrupt, match='cancelled'):
-        desktop.select()
+    assert selected(('click', window.client().centre), ('key', '<Escape>')) == 'None'
 
 
 def test_confirming_by_the_start_button_does_not_free_the_canvas_under_its_own_event():

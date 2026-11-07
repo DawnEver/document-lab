@@ -37,6 +37,12 @@ dev = [
 [project.scripts]
 document-lab = "document_lab.__main__:main"
 
+[tool.uv]
+# User ruling 2026-11-07: force pillow and filelock past the caps marker-pdf 2.1.0 (`pillow<11`) and surya-ocr 0.23.0
+# (`filelock<4`, `pillow<11`) declare -- both reached only through the `gpu` extra -- to clear 95 OSV advisories
+# (pillow 10.4.0: 82, fixed in 13.0.0; filelock 3.32.7: 13, fixed in 4.2.1). If the gpu tests break, accept instead.
+override-dependencies = ["pillow>=13", "filelock>=4.2.1"]
+
 [tool.setuptools_scm]
 version_file = "src/document_lab/__version__.py"
 fallback_version = "0.0.0"

@@ -60,7 +60,7 @@ testpaths = ["tests"]
 markers = [
     "gpu: converts with marker-pdf on a CUDA GPU: its own part (tests/gpu), never tests/base",
     "vendor: reads the real document DOCUMENT_LAB_VENDOR_PDF names: its own part (tests/vendor), never tests/base",
-    "desktop: drives a real window on an interactive Windows desktop: its own part (tests/desktop), never tests/base",
+    "windows: drives a real window on the Windows desktop: its own part (tests/windows), never tests/base",
     "ocr: lays a Tesseract text layer over a capture: its own part (tests/ocr), never tests/base",
 ]
 
@@ -102,13 +102,13 @@ collect = 'tests'
 [tool.dev_lab.parts]
 output = "output/logs"
 # No resource exists on a hosted runner: `gpu` needs a CUDA GPU and the gpu extra, `vendor` a vendor PDF that may
-# never be committed, `desktop` an interactive Windows desktop, `ocr` Tesseract with English data. Each is produced
+# never be committed, `ocr` Tesseract with English data. Each is produced
 # where it exists, by hand; base never selects them.
-unproduced = ["gpu", "vendor", "desktop", "ocr"]
+unproduced = ["gpu", "vendor", "ocr"]
 
 [tool.lab_commons.tests]
 produce = ["-m", "dev_lab.dev.verify", "--part", "{part}"]
-resources = ["gpu", "vendor", "desktop", "ocr"]
+resources = ["gpu", "vendor", "ocr", "windows"]
 
 # The family branch flow: integrate/main coordinates; main moves only by `integrate promote` (fast-forward).
 [tool.dev_lab.integrator]

@@ -131,6 +131,9 @@ def _dll(name: str) -> ctypes.WinDLL:
                 'SendInput': (u, [u, ctypes.POINTER(_Input), i]),
                 'PostMessageW': (b, [h, u, wintypes.WPARAM, wintypes.LPARAM]),
                 'SetForegroundWindow': (b, [h]),
+                'GetForegroundWindow': (h, []),
+                'GetWindowThreadProcessId': (wintypes.DWORD, [h, ctypes.c_void_p]),
+                'AttachThreadInput': (b, [wintypes.DWORD, wintypes.DWORD, b]),
                 'GetAsyncKeyState': (wintypes.SHORT, [i]),
                 'GetSystemMetrics': (i, [i]),
                 'GetDC': (h, [h]),
@@ -353,6 +356,27 @@ def _require_on_top(target: Window | Region, x: int, y: int) -> None:
             raise OSError(msg)
 
 
+def _bring_to_front(window: int) -> None:
+    """Make ``window`` the keyboard target, or refuse: keys sent elsewhere would end the capture short, silently."""
+    user32 = _dll('user32')
+    front = user32.GetForegroundWindow()
+    if front != window:
+        # Windows refuses the foreground to a background caller; sharing the front window's input state lifts that
+        # without sending a key that the front window could act on.
+        mine = ctypes.WinDLL('kernel32').GetCurrentThreadId()
+        theirs = user32.GetWindowThreadProcessId(front, None)
+        attached = theirs != mine and user32.AttachThreadInput(mine, theirs, 1)
+        try:
+            user32.SetForegroundWindow(window)
+        finally:
+            if attached:
+                user32.AttachThreadInput(mine, theirs, 0)
+        time.sleep(0.05)
+    if user32.GetForegroundWindow() != window:
+        msg = f'{_title(window)!r} could not be brought to the front for method keys: click it first (or method wheel)'
+        raise OSError(msg)
+
+
 def scroll(target: Window | Region, notches: int, method: str = 'wheel') -> None:
     """Scroll the view under ``target``'s centre down by ``notches`` wheel notches (or Down presses)."""
     user32 = _dll('user32')
@@ -380,7 +404,7 @@ def scroll(target: Window | Region, notches: int, method: str = 'wheel') -> None
             if isinstance(target, Window)
             else user32.GetAncestor(user32.WindowFromPoint(wintypes.POINT(x, y)), _GA_ROOT)
         )
-        user32.SetForegroundWindow(window)
+        _bring_to_front(window)
         down = _Input(1, _InputUnion(ki=_KeybdInput(_VK_DOWN, 0, 0, 0, 0)))
         up = _Input(1, _InputUnion(ki=_KeybdInput(_VK_DOWN, 0, _KEYEVENTF_KEYUP, 0, 0)))
         _send(*[event for _ in range(notches) for event in (down, up)])

@@ -12,8 +12,9 @@ consumers. Modules and usage: `README.md`.
 - A test that needs expected values builds a SYNTHETIC PDF (`tests/synthetic.py`); vendor PDFs are never
   committed. The three real papers are checked STRUCTURALLY against what each PDF says
   (`tests/paper/structure.py`), every check paired with a planted wrong truth it must report.
-- `gpu` (marker-pdf), `vendor` (`DOCUMENT_LAB_VENDOR_PDF=<pdf>`) and `desktop` (an interactive Windows desktop;
-  `tests/desktop/viewer.py` is the window it captures) and `ocr` (Tesseract) are declared resource parts, unproduced on
+- `windows` (`tests/windows`: a real window, `viewer.py`, scrolled and captured) is an OS part: CI runs it on the
+  hosted `windows-latest` runner. `gpu` (marker-pdf), `vendor` (`DOCUMENT_LAB_VENDOR_PDF=<pdf>`) and `ocr` (Tesseract)
+  are declared resource parts, unproduced on
   hosted runners: base never selects them, and they FAIL where their resource is missing, never skip.
 - A value the document does not state is absent, a raster plot raises, an ambiguous match refuses: never a
   silent default.

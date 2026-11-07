@@ -1,7 +1,8 @@
-"""The ``desktop`` part: a real window, really scrolled, captured to its end -- pixel for pixel the picture it shows.
+"""The ``windows`` part: a real window, really scrolled, captured to its end -- pixel for pixel the picture it shows.
 
-Its own part, never tests/base: it needs an interactive Windows desktop (and briefly moves the cursor). Where none
-exists it FAILS naming what is missing; it is never skipped.
+Its own part, never tests/base: it needs a Windows desktop (and briefly moves the cursor); GitHub's hosted
+``windows-latest`` runner has one, so CI produces it. Where none exists it FAILS naming what is missing; it is never
+skipped.
 """
 
 import os
@@ -17,15 +18,15 @@ import pytest
 from document_lab.__main__ import main
 from document_lab.capture import desktop
 from document_lab.capture.session import Limits, capture
-from tests.desktop.viewer import HEIGHT, VIEW, WIDTH, picture
+from tests.windows.viewer import HEIGHT, VIEW, WIDTH, picture
 
-pytestmark = pytest.mark.desktop
+pytestmark = pytest.mark.windows
 
 VIEWER = Path(__file__).with_name('viewer.py')
 
 
 def launched(title: str, seed: int) -> subprocess.Popen:
-    assert sys.platform == 'win32', f'the desktop part needs a Windows desktop, not {sys.platform}'
+    assert sys.platform == 'win32', f'the windows part needs a Windows desktop, not {sys.platform}'
     return subprocess.Popen([sys.executable, str(VIEWER), title, str(seed)])
 
 

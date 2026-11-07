@@ -2,10 +2,8 @@
 its caps, and waits for a frame that is still changing to settle."""
 
 import numpy as np
-import pytest
 
 from document_lab.capture.session import Limits, capture
-from document_lab.capture.stitch import NoOverlap
 from tests.unit.test_capture_stitch import tall
 
 
@@ -29,7 +27,7 @@ class Viewport:
 
 
 def run(view: Viewport, **knobs) -> np.ndarray:
-    return capture(view.grab, view.scroll, sleep=lambda _: None, **knobs)
+    return capture(view.grab, view.scroll, sleep=lambda _: None, **knobs).image
 
 
 def test_scrolls_to_the_end_and_stops_there():
@@ -71,7 +69,7 @@ def test_a_scroll_handled_late_is_not_the_end():
 def test_without_scroll_it_is_one_frame():
     image = tall(900)
     view = Viewport(image, 300, 160)
-    assert np.array_equal(capture(view.grab, None), image[:300])
+    assert np.array_equal(capture(view.grab, None).image, image[:300])
     assert view.scrolls == 0
 
 
@@ -91,6 +89,23 @@ def test_abort_stops_with_what_it_has():
     assert len(run(view, aborted=lambda: next(calls))) == 500
 
 
-def test_a_scroll_too_large_to_stitch_raises():
-    with pytest.raises(NoOverlap):
-        run(Viewport(tall(2000), 300, 290))
+def test_a_scroll_too_large_to_stitch_keeps_the_first_frame_and_says_why():
+    view = Viewport(tall(2000), 300, 290)
+    got = capture(view.grab, view.scroll, sleep=lambda _: None)
+    assert got.stopped.startswith('unstitchable: ')
+    assert not got.complete
+    assert np.array_equal(got.image, view.image[:300])
+
+
+def test_it_says_why_it_stopped():
+    image = tall(1234)
+    done = capture((v := Viewport(image, 300, 170)).grab, v.scroll, sleep=lambda _: None)
+    assert (done.stopped, done.complete, done.frames) == ('end', True, 7)
+    capped = capture((v := Viewport(image, 300, 170)).grab, v.scroll, limits=Limits(max_frames=3), sleep=lambda _: None)
+    assert capped.stopped == 'max_frames'
+
+
+def test_progress_sees_every_placed_frame():
+    view, heights = Viewport(tall(1234), 300, 170), []
+    capture(view.grab, view.scroll, sleep=lambda _: None, progress=lambda s: heights.append(s.height))
+    assert heights == [470, 640, 810, 980, 1150, 1234]

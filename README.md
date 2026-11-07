@@ -13,6 +13,7 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 | `extract` | typed values against the caller's `Schema` from key-value (`from_rows`) or column (`from_columns`) tables |
 | `ai` | `ask(responder, schema, page_or_table)`: the same values read by a model through ai-lab (`[ai]` extra) |
 | `paper` | `document-lab paper <pdf> <out>`: a paper as per-section markdown (written from the IR, or marker-pdf on a GPU) plus cropped figures/tables/equations |
+| `capture` | `document-lab capture <out.pdf>`: any window or screen region, scrolled to its end and stitched losslessly, to a PDF -- the stage before `read_pdf` (Windows, `[capture]` extra) |
 
 ```python
 from document_lab.pdf import read_pdf
@@ -30,7 +31,48 @@ for page in doc.pages:
 A `Value` keeps the source `text` beside the typed `value` (a `≈`, `≤` or `±25%` is never lost) and a `basis`:
 `rule` (deterministic code here) or `model`. A field the document does not state is absent, never `None`.
 
+## Capture
+
+```
+document-lab capture                               # mark a window or an area, Enter: capture-<date>-<time>.pdf here
+document-lab capture out.pdf --drop-overlays       # paint out floating buttons and sticky bars where they recur
+document-lab capture out.pdf --manual              # you scroll at your own pace, it follows; Esc ends
+document-lab capture out.pdf --no-scroll           # one frame
+document-lab capture out.pdf --window "Notepad" --tolerance 4 --ocr chi_sim+eng
+document-lab capture --list                        # the capturable windows and their handles
+```
+
+Targets: none shows a dimmed still of every monitor -- the window under the pointer lights up; a click marks it, a drag
+marks a rectangle, marking again replaces it; Enter or Start confirms, Esc cancels -- or `--window TITLE` (must match
+one), `--hwnd`, `--rect L,T,W,H`. Scrolling: `--method wheel|message|keys`, `--notches`, `--settle`; it runs until
+the view stops moving -- no cap unless `--max-frames`/`--max-height` -- and `--end-wait` (default 0.8 s) gives a feed
+that loads more at its end time to grow. The height so far shows while it runs; Esc stops it and
+keeps what was captured. If the first scroll moves nothing, it says so and exits 1 rather than pass one screen off as
+the whole. `--manual` scrolls nothing: you scroll (wheel, scrollbar, keys) at your own pace, pauses end nothing, and a
+view scrolled too far at once or back up is skipped -- with a warning -- until it overlaps the last part captured
+again; only Esc ends it. A window is read
+through `PrintWindow`, so another window over it does not show; the wheel, which does land on whatever covers it,
+refuses then (bring it forward, or `--method message`); `keys` refuses a window it cannot bring forward.
+
+Stitching (`capture.stitch`): what stays put while the page scrolls -- a sticky header, a floating button, a scrollbar
+thumb -- is left out of the match, so no setting is needed for it; the scroll is the one offset at which the rest
+agrees, exactly (`--tolerance` grey levels) but for an `--outliers` share (default 5%). An offset that is not unique,
+or none, stops the capture there: what was stitched is written, the reason is printed and the exit status is 1.
+`--drop-overlays` (off by default) also removes the overlays from where they would recur: each spot of the page is
+taken from the frame that showed it least covered. `--ignore-top/--ignore-bottom` exclude chrome that changes as it
+scrolls. PDF: `--page-height` (pixels; default A4-shaped, `0` one page), `--dpi`, `--ocr [LANGS]` (Tesseract, default
+`eng`), `--png`; page size and OCR are checked before the capture starts.
+
+Any length: frames only move down, so every stitched row above the current view is final and is written at once --
+PDF pages as they fill (saved incrementally), the PNG compressed as it grows -- and a capture holds about one view in
+memory however long the page (`--page-height 0`, one page, is the exception: it is held whole). Both files are written
+as `<name>.part` and renamed into place when the capture ends, however it ends, so a reader never sees half a file.
+Everything runs in one thread, in order -- grab, scroll, stitch, write -- so nothing races. In Python:
+`capture.session.capture(grab, scroll, sink)` takes any source and any sink (`Rows` keeps the image in memory;
+`capture.export.PdfWriter`/`PngWriter` stream it) and returns a `Capture` (frames, height, why it stopped);
+`capture.desktop.Source` is the Windows source.
+
 ## Install
 
 `pip install "document_lab @ git+https://github.com/DawnEver/document-lab.git"`; extras: `gpu` (marker-pdf),
-`ai` (ai-lab). Domain schemas live in the consumers.
+`ai` (ai-lab), `capture` (no packages beyond the base). Domain schemas live in the consumers.

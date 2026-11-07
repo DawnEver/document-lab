@@ -3,7 +3,7 @@ its caps, and waits for a frame that is still changing to settle."""
 
 import numpy as np
 
-from document_lab.capture.session import Limits, Rows, capture
+from document_lab.capture.session import Limits, Rows, capture, follow
 from tests.unit.test_capture_stitch import tall
 
 
@@ -124,3 +124,37 @@ def test_an_endless_view_streams_and_holds_one_view():
     assert got.complete
     assert max(held) <= 3 * 300
     assert np.array_equal(rows.image(), image)
+
+
+class Hand:
+    """A view the user scrolls: ``moves[i]`` rows before the i-th grab (negative: up), then Esc."""
+
+    def __init__(self, image: np.ndarray, height: int, moves: list[int]):
+        self.image, self.height, self.moves, self.top, self.grabs = image, height, moves, 0, 0
+
+    def grab(self) -> np.ndarray:
+        if self.grabs and self.grabs <= len(self.moves):
+            self.top = min(max(self.top + self.moves[self.grabs - 1], 0), len(self.image) - self.height)
+        self.grabs += 1
+        return self.image[self.top : self.top + self.height].copy()
+
+    def esc(self) -> bool:
+        return self.grabs > len(self.moves)
+
+
+def test_following_the_user_waits_through_pauses_and_ends_on_esc():
+    image = tall(1500)
+    hand, rows = Hand(image, 300, [0, 0, 120, 0, 0, 0, 200, 150, 0, 200, 0, 0]), Rows()
+    got = follow(hand.grab, rows, aborted=hand.esc, sleep=lambda _: None)
+    assert got.stopped == 'aborted'
+    assert np.array_equal(rows.image(), image[: 300 + 120 + 200 + 150 + 200])
+
+
+def test_a_scroll_too_fast_or_back_up_is_skipped_until_the_view_overlaps_again():
+    image = tall(2000)
+    lost = []
+    hand = Hand(image, 300, [100, 400, -380, 100, -150, 150, 90])  # too far; back; on; up above it; back; on
+    rows = Rows()
+    follow(hand.grab, rows, aborted=hand.esc, lost=lost.append, sleep=lambda _: None)
+    assert len(lost) == 2  # the jump past the view, and the view scrolled back above the last frame
+    assert np.array_equal(rows.image(), image[: hand.top + 300])

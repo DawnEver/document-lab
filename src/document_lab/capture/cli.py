@@ -43,6 +43,11 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     target.add_argument('--list', action='store_true', help='print the capturable windows and exit')
     scroll = capture.add_argument_group('scrolling')
     scroll.add_argument('--no-scroll', action='store_true', help='one frame: what the target shows now')
+    scroll.add_argument(
+        '--manual',
+        action='store_true',
+        help='you scroll (wheel, scrollbar, keys) at your own pace and it follows; only Esc ends it',
+    )
     scroll.add_argument('--method', choices=('wheel', 'message', 'keys'), default='wheel')
     scroll.add_argument('--notches', type=int, default=3, help='wheel notches (or Down presses) per step')
     scroll.add_argument('--delay', type=float, default=1.0, help='seconds to wait before the first frame')
@@ -98,13 +103,19 @@ def _target(args: argparse.Namespace) -> Window | Region:
     return desktop.select()
 
 
+def _lost(_: str) -> None:
+    """The view no longer overlaps the last part captured: say so on the progress line."""
+    sys.stderr.write(chr(13) + 'scrolled too far or back up: scroll back to the last part captured'.ljust(78))
+    sys.stderr.flush()
+
+
 def _progress(stitcher: Stitcher) -> None:
     sys.stderr.write(f'\rcapturing: {stitcher.height} px (Esc stops and keeps it)')
     sys.stderr.flush()
 
 
 _SHORT: Final = {
-    'aborted': 'stopped by Esc',
+    'aborted': 'ended by Esc',
     'max_frames': 'stopped at --max-frames',
     'max_height': 'stopped at --max-height',
 }
@@ -118,6 +129,10 @@ def _report(result: Capture) -> int:
         emit(f'stopped after {result.frames} frames, short of the end: {reason}')
         emit('what was stitched is written; try --tolerance 8 or fewer --notches')
         return 1
+    if result.stuck:
+        emit('the first scroll moved nothing, so only one screen was captured: what is under the middle of the area')
+        emit('did not scroll. Scroll it yourself with --manual, or try --method keys')
+        return 1
     if result.stopped in _SHORT:
         emit(f'{_SHORT[result.stopped]} after {result.frames} frames')
     return 0
@@ -127,7 +142,7 @@ def run(args: argparse.Namespace) -> int:
     """Run ``document-lab capture`` with the parsed ``args``; the exit status."""
     from document_lab.capture import desktop  # noqa: PLC0415
     from document_lab.capture.export import PdfWriter, PngWriter  # noqa: PLC0415
-    from document_lab.capture.session import Limits, Settling, capture  # noqa: PLC0415
+    from document_lab.capture.session import Limits, Settling, capture, follow  # noqa: PLC0415
     from document_lab.capture.stitch import Match  # noqa: PLC0415
 
     if args.list:
@@ -152,17 +167,33 @@ def run(args: argparse.Namespace) -> int:
                 png.write(rows)
 
         time.sleep(args.delay)
-        result = capture(
-            source.grab,
-            None if args.no_scroll else source.scroll,
-            sink,
-            limits=Limits(args.max_frames, args.max_height),
-            match=Match(args.ignore_top, args.ignore_bottom, args.min_overlap, args.tolerance, args.outliers),
-            settling=Settling(interval=args.settle, end_wait=args.end_wait),
-            drop_overlays=args.drop_overlays,
-            aborted=desktop.escape_pressed,
-            progress=_progress,
-        )
+        limits = Limits(args.max_frames, args.max_height)
+        match = Match(args.ignore_top, args.ignore_bottom, args.min_overlap, args.tolerance, args.outliers)
+        if args.manual:
+            emit('scroll the area yourself; Esc ends the capture')
+            result = follow(
+                source.grab,
+                sink,
+                aborted=desktop.escape_pressed,
+                interval=args.settle,
+                limits=limits,
+                match=match,
+                drop_overlays=args.drop_overlays,
+                progress=_progress,
+                lost=_lost,
+            )
+        else:
+            result = capture(
+                source.grab,
+                None if args.no_scroll else source.scroll,
+                sink,
+                limits=limits,
+                match=match,
+                settling=Settling(interval=args.settle, end_wait=args.end_wait),
+                drop_overlays=args.drop_overlays,
+                aborted=desktop.escape_pressed,
+                progress=_progress,
+            )
     status = _report(result)
     emit(f'{args.out.resolve()}: {width}x{result.height} px on {pdf.pages} page(s)')
     if args.png:

@@ -7,7 +7,7 @@ import pytest
 
 from document_lab.__main__ import main
 from document_lab.capture import desktop
-from tests.unit.test_capture_session import Viewport
+from tests.unit.test_capture_session import Hand, Viewport
 from tests.unit.test_capture_stitch import tall
 
 WIDTH = 64  # the fake view's width: tests.unit.test_capture_stitch.tall's
@@ -76,3 +76,18 @@ def test_a_page_no_reader_accepts_refuses_before_capturing(tmp_path, fake):
     with pytest.raises(ValueError, match='14400'):
         run(tmp_path, '--page-height', '100000')
     assert not list(tmp_path.iterdir())
+
+
+def test_manual_follows_the_users_scrolling_until_esc(tmp_path, fake, monkeypatch):
+    hand = Hand(fake.IMAGE, 300, [0, 150, 0, 0, 200, 220, 0, 100])
+    monkeypatch.setattr(fake, 'grab', lambda self: hand.grab())
+    monkeypatch.setattr(desktop, 'escape_pressed', hand.esc)
+    assert run(tmp_path, '--manual', '--page-height', '0') == 0
+    image, _ = pdf_pixels(tmp_path / 'c.pdf')
+    assert np.array_equal(image, fake.IMAGE[: 300 + 150 + 200 + 220 + 100])
+
+
+def test_a_view_the_scroll_did_not_move_is_reported_not_taken_for_the_end(tmp_path, fake, monkeypatch, capsys):
+    monkeypatch.setattr(fake, 'STEP', 0)
+    assert run(tmp_path) == 1
+    assert '--manual' in capsys.readouterr().out

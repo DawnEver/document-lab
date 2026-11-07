@@ -324,6 +324,7 @@ class _Overlay:
         self.marked: Window | Region | None = None
         self.hovered: Window | None = None
         self.box: Region | None = None  # the mark as a rectangle, edited in place
+        self.cursor = 'crosshair'  # the canvas's, as last set
         self.edit: tuple[str, Region] | None = None  # the part held and the box when the press took it
         self.confirmed: Window | Region | None = None
         self.root = tk.Tk()
@@ -453,7 +454,10 @@ class _Overlay:
     def hover(self, event: object) -> None:
         """Show what a press would do: a resize or move cursor on the mark; before one, outline the window below."""
         held = self.grip(event.x_root, event.y_root)
-        self.canvas.configure(cursor=_CURSORS.get(held, 'crosshair'))
+        cursor = _CURSORS.get(held, 'crosshair')
+        if cursor != self.cursor:  # setting it costs ~50 ms on a window this size, the same value or not
+            self.cursor = cursor
+            self.canvas.configure(cursor=cursor)
         if self.marked is not None:
             return
         under = window_at(self.found, event.x_root, event.y_root)

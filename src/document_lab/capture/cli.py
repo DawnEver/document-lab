@@ -13,8 +13,6 @@ from typing import TYPE_CHECKING, Final
 from lab_commons.log import emit
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     import numpy as np
 
     from document_lab.capture.desktop import Hud, Region, Window
@@ -35,7 +33,7 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         'capture',
         help='a window or screen region, scrolled to its end and stitched, to a PDF (Windows)',
         description='With no target, mark one on the screen: click a window or drag a rectangle, then Enter or Start. '
-        'Esc stops scrolling and keeps what was captured.',
+        'Finish on the panel beside the area ends it and keeps what was captured.',
     )
     capture.add_argument('out', type=Path, nargs='?', help='the PDF to write (default: capture-<date>-<time>.pdf here)')
     target = capture.add_mutually_exclusive_group()  # none: mark it on the screen (a click or a drag), then confirm
@@ -44,7 +42,7 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     target.add_argument('--rect', type=_rect, metavar='L,T,W,H', help='a screen rectangle in physical pixels')
     target.add_argument('--list', action='store_true', help='print the capturable windows and exit')
     scroll = capture.add_argument_group(
-        'scrolling', 'By default you scroll (wheel, scrollbar, keys) at your own pace and it follows; Esc finishes.'
+        'scrolling', 'By default you scroll (wheel, scrollbar, keys) at your own pace and it follows; Finish ends it.'
     )
     scroll.add_argument('--no-scroll', action='store_true', help='one frame: what the target shows now')
     scroll.add_argument('--auto', action='store_true', help='it scrolls for you, to the end of the view')
@@ -115,8 +113,8 @@ def _target(args: argparse.Namespace) -> Window | Region:
 
 
 _BACK: Final = {
-    'up': 'Lost: scrolled too far at once. Scroll back UP slowly until the bottom of the picture is in the frame.',
-    'down': 'Lost: scrolled back above what was captured. Scroll DOWN until the bottom of the picture is in the frame.',
+    'up': 'Lost: scrolled too far at once. Scroll back UP a little, to anything already in the picture below.',
+    'down': 'Lost: scrolled back above what is held. Scroll DOWN to anything already in the picture below.',
 }
 
 
@@ -128,15 +126,15 @@ def _say(text: str) -> None:
 class _Shown:
     """The capture's callbacks, each also shown on the terminal line and the on-screen :class:`desktop.Hud`."""
 
-    def __init__(self, hud: Hud, escape_pressed: Callable[[], bool], keep: Path | None = None) -> None:
-        self.hud, self.escape_pressed, self.keep, self.kept = hud, escape_pressed, keep, 0
+    def __init__(self, hud: Hud, keep: Path | None = None) -> None:
+        self.hud, self.keep, self.kept = hud, keep, 0
 
     def stopped(self) -> bool:
-        self.hud.pump()  # once per grab: the frame and the panel stay drawn in this one thread
-        return self.escape_pressed()
+        self.hud.pump()  # once per grab: the panel stays drawn, and its Finish button is heard, in this one thread
+        return self.hud.finished
 
     def progress(self, stitcher: Stitcher) -> None:
-        text = f'Capturing: {stitcher.height} px. Keep scrolling; press Esc when you are done.'
+        text = f'Capturing: {stitcher.height} px. Keep scrolling; click Finish when you are done.'
         _say(text)
         self.hud.status(text, ok=True)
 
@@ -158,7 +156,7 @@ class _Shown:
 _KEPT: Final = 10  # lost views --keep-lost saves at most
 
 _SHORT: Final = {
-    'aborted': 'ended by Esc',
+    'aborted': 'finished',
     'max_frames': 'stopped at --max-frames',
     'max_height': 'stopped at --max-height',
 }
@@ -199,7 +197,7 @@ def run(args: argparse.Namespace) -> int:
     area = target.client() if isinstance(target, desktop.Window) else target
     width = area.width
     hud = desktop.Hud(area)
-    shown = _Shown(hud, desktop.escape_pressed, args.keep_lost)
+    shown = _Shown(hud, args.keep_lost)
 
     # The writers check page size and OCR before the capture starts, and keep what was written whatever stops it.
     with (
@@ -217,7 +215,7 @@ def run(args: argparse.Namespace) -> int:
         limits = Limits(args.max_frames, args.max_height)
         match = Match(args.ignore_top, args.ignore_bottom, args.min_overlap, args.tolerance, args.outliers)
         if not (args.auto or args.no_scroll):
-            emit('now scroll the area down at your own pace; press Esc when you are done')
+            emit('now scroll the area down at your own pace; click Finish on the panel when you are done')
             result = follow(
                 source.grab,
                 sink,

@@ -257,10 +257,27 @@ def window_at(found: list[Window], x: int, y: int) -> Window | None:
 
 
 START_LABEL: Final = 'Start (Enter)'
-HINT: Final = 'Click a window or drag an area  |  Enter or Start: capture  |  Esc: cancel'
+HINT: Final = (
+    'Click a window or drag an area  |  drag its edges, corners or top handle to adjust; arrows nudge  |  '
+    'Enter or Start: capture  |  Esc: cancel'
+)
 OVERLAY_TITLE: Final = 'document-lab capture selection'
 _BUTTON: Final = (160, 40)  # the start button's size, beside the mark's lower right corner
 _JITTER: Final = 4  # a press that moves no further than this is a click, not a drag
+_GRIP: Final = 12  # pixels outside the box's edge that take hold of it (inside it, clicks pass to the app below)
+_KNOB: Final = 5  # half the side of a handle drawn on an edge or a corner
+_HANDLE: Final = 22  # half the width of the move handle above the top edge
+_CURSORS: Final = {
+    'n': 'sb_v_double_arrow',
+    's': 'sb_v_double_arrow',
+    'e': 'sb_h_double_arrow',
+    'w': 'sb_h_double_arrow',
+    'nw': 'size_nw_se',
+    'se': 'size_nw_se',
+    'ne': 'size_ne_sw',
+    'sw': 'size_ne_sw',
+    'move': 'fleur',
+}
 _DIM: Final = 0.45  # the overlay's opacity: how dark the screen outside the mark goes
 _HOLE: Final = '#ff00fe'  # the colour Windows leaves fully transparent in the overlay: the mark is painted in it
 _PANEL: Final = '#202020'
@@ -270,6 +287,23 @@ def _photo(image: np.ndarray) -> bytes:
     """``image`` (RGB uint8) as the PPM bytes a Tk photo reads."""
     height, width, _ = image.shape
     return f'P6 {width} {height} 255\n'.encode() + np.ascontiguousarray(image).tobytes()
+
+
+def _edited(held: str, box: Region, dx: int, dy: int) -> Region:
+    """``box`` with the part ``held`` (an edge, a corner, or ``move``) dragged by ``dx, dy``; never under 8 pixels."""
+    left, top, right, bottom = box.left, box.top, box.left + box.width, box.top + box.height
+    if held == 'move':
+        return Region(left + dx, top + dy, box.width, box.height)
+    least = 8
+    if 'w' in held:
+        left = min(left + dx, right - least)
+    if 'e' in held:
+        right = max(right + dx, left + least)
+    if 'n' in held:
+        top = min(top + dy, bottom - least)
+    if 's' in held:
+        bottom = max(bottom + dy, top + least)
+    return Region(left, top, right - left, bottom - top)
 
 
 class _Overlay:
@@ -288,6 +322,8 @@ class _Overlay:
         self.drag: tuple[int, int] | None = None
         self.marked: Window | Region | None = None
         self.hovered: Window | None = None
+        self.box: Region | None = None  # the mark as a rectangle, edited in place
+        self.edit: tuple[str, Region] | None = None  # the part held and the box when the press took it
         self.confirmed: Window | Region | None = None
         self.root = tk.Tk()
         self.root.title(OVERLAY_TITLE)
@@ -304,6 +340,10 @@ class _Overlay:
         self.canvas.bind('<ButtonRelease-1>', self.release)
         self.root.bind('<Return>', self.confirm)
         self.root.bind('<Escape>', lambda _: self.root.quit())
+        for key, (dx, dy) in {'Left': (-1, 0), 'Right': (1, 0), 'Up': (0, -1), 'Down': (0, 1)}.items():
+            self.root.bind(f'<{key}>', lambda _, dx=dx, dy=dy: self.nudge(dx, dy))
+            self.root.bind(f'<Shift-{key}>', lambda _, dx=dx, dy=dy: self.nudge(10 * dx, 10 * dy))
+            self.root.bind(f'<Control-{key}>', lambda _, dx=dx, dy=dy: self.nudge(dx, dy, grow=True))
         hint = self._window(tk)
         tk.Label(hint, text=HINT, fg='white', bg=_PANEL, font=('Segoe UI', 13), padx=14, pady=8).pack()
         hint.update_idletasks()
@@ -344,19 +384,62 @@ class _Overlay:
     def local(self, x: int, y: int) -> tuple[int, int]:
         return x - self.screen.left, y - self.screen.top
 
-    def outline(self, area: Region, *, tag: str, width: int = 3, hole: bool = False) -> None:
-        """A red outline just outside ``area`` (screen pixels), the area itself a clear hole when ``hole``."""
+    def outline(self, area: Region, *, tag: str, width: int = 3) -> None:
+        """A red outline just outside ``area`` (screen pixels)."""
         x0, y0 = self.local(area.left, area.top)
         x1, y1 = x0 + area.width, y0 + area.height
-        if hole:
-            self.canvas.create_rectangle(x0, y0, x1, y1, fill=_HOLE, width=0, tags=tag)
         edge = (x0 - width, y0 - width, x1 + width, y1 + width)
         self.canvas.create_rectangle(*edge, outline='red', width=width, tags=tag)
 
+    def draw(self, box: Region) -> None:
+        """Show ``box`` as the mark: a clear hole, a red frame, handles on its edges and corners, a move handle above.
+
+        The shapes are made once and moved after (``coords``), so a drag redraws nothing.
+        """
+        x0, y0 = self.local(box.left, box.top)
+        x1, y1 = x0 + box.width, y0 + box.height
+        xm, ym, k = (x0 + x1) // 2, (y0 + y1) // 2, _KNOB
+        knobs = [(x0, y0), (xm, y0), (x1, y0), (x1, ym), (x1, y1), (xm, y1), (x0, y1), (x0, ym)]
+        shapes = [
+            ('hole', (x0, y0, x1, y1)),
+            ('frame', (x0 - 2, y0 - 2, x1 + 2, y1 + 2)),
+            *((f'knob{i}', (x - k, y - k, x + k, y + k)) for i, (x, y) in enumerate(knobs)),
+            ('grip', (xm - _HANDLE, y0 - _GRIP - 4, xm + _HANDLE, y0 - 6)),
+        ]
+        if not self.canvas.find_withtag('hole'):
+            self.canvas.create_rectangle(0, 0, 0, 0, fill=_HOLE, width=0, tags=('mark', 'hole'))
+            self.canvas.create_rectangle(0, 0, 0, 0, outline='red', width=3, tags=('mark', 'frame'))
+            for i in range(len(knobs)):
+                self.canvas.create_rectangle(0, 0, 0, 0, fill='white', outline='red', tags=('mark', f'knob{i}'))
+            self.canvas.create_rectangle(0, 0, 0, 0, fill='red', outline='white', tags=('mark', 'grip'))
+        for tag, corners in shapes:
+            self.canvas.coords(tag, *corners)
+
+    def grip(self, x: int, y: int) -> str | None:
+        """Which part of the mark the screen point ``x, y`` takes hold of: an edge, a corner, ``move``, or None.
+
+        Only just outside the box: inside it, clicks pass through the hole to the application below.
+        """
+        if self.box is None:
+            return None
+        b, g = self.box, _GRIP
+        left, right, top, bottom = b.left, b.left + b.width, b.top, b.top + b.height
+        if abs(x - (left + b.width // 2)) <= _HANDLE and top - g - 6 <= y < top - 4:
+            return 'move'
+        if not (left - g <= x <= right + g and top - g <= y <= bottom + g):
+            return None
+        vertical = 'n' if y < top else 's' if y > bottom else ''
+        horizontal = 'w' if x < left else 'e' if x > right else ''
+        return (vertical + horizontal) or None
+
     def hover(self, event: object) -> None:
-        """Before anything is marked, outline the window under the pointer as a click would mark it."""
+        """Show what a press would do: a resize or move cursor on the mark; before one, outline the window below."""
+        held = self.grip(event.x_root, event.y_root)
+        self.canvas.configure(cursor=_CURSORS.get(held, 'crosshair'))
+        if self.marked is not None:
+            return
         under = window_at(self.found, event.x_root, event.y_root)
-        if self.marked is not None or under == self.hovered:
+        if under == self.hovered:
             return
         self.hovered = under
         self.canvas.delete('hover')
@@ -364,35 +447,49 @@ class _Overlay:
             self.outline(under.client(), tag='hover', width=2)
 
     def press(self, event: object) -> None:
+        held = self.grip(event.x_root, event.y_root)
         self.drag = (event.x_root, event.y_root)
+        self.edit = (held, self.box) if held else None
 
     def move(self, event: object) -> None:
-        if self.drag is not None:
-            self.canvas.delete('box', 'mark', 'hover')
-            self.panel.withdraw()
-            (x0, x1), (y0, y1) = sorted((self.drag[0], event.x_root)), sorted((self.drag[1], event.y_root))
-            self.outline(Region(x0, y0, x1 - x0, y1 - y0), tag='box')
+        if self.drag is None:
+            return
+        self.panel.withdraw()
+        x, y = event.x_root, event.y_root
+        if self.edit is not None:
+            self.box = _edited(*self.edit, x - self.drag[0], y - self.drag[1])
+            self.draw(self.box)
+            return
+        self.canvas.delete('hover')
+        (x0, x1), (y0, y1) = sorted((self.drag[0], x)), sorted((self.drag[1], y))
+        if x1 - x0 > _JITTER or y1 - y0 > _JITTER:
+            self.box = Region(x0, y0, max(x1 - x0, 1), max(y1 - y0, 1))
+            self.draw(self.box)
 
     def release(self, event: object) -> None:
         if self.drag is None:
             return
         (x0, x1), (y0, y1) = sorted((self.drag[0], event.x_root)), sorted((self.drag[1], event.y_root))
-        self.drag = None
-        self.canvas.delete('box')
-        if x1 - x0 > _JITTER and y1 - y0 > _JITTER:
-            self.mark(Region(x0, y0, x1 - x0, y1 - y0))
+        editing, self.drag, self.edit = self.edit is not None, None, None
+        if editing or (x1 - x0 > _JITTER and y1 - y0 > _JITTER):
+            self.mark(self.box)
         elif (under := window_at(self.found, x0, y0)) is not None:
             self.mark(under)
 
+    def nudge(self, dx: int, dy: int, *, grow: bool = False) -> None:
+        """Move the mark by ``dx, dy`` pixels -- or, with ``grow``, move its right and bottom edges."""
+        if self.box is not None:
+            self.mark(_edited('se' if grow else 'move', self.box, dx, dy))
+
     def mark(self, target: Window | Region) -> None:
         self.marked = target
-        area = target.client() if isinstance(target, Window) else target
-        self.canvas.delete('mark', 'hover')
-        self.outline(area, tag='mark', hole=True)
+        self.box = target.client() if isinstance(target, Window) else target
+        self.canvas.delete('hover')
+        self.draw(self.box)
+        area, screen = self.box, self.screen
         self.panel.deiconify()
         self.panel.update_idletasks()
         w, h = self.panel.winfo_reqwidth(), self.panel.winfo_reqheight()
-        screen = self.screen
         x = min(max(area.left + area.width - w, screen.left), screen.left + screen.width - w)
         below = area.top + area.height + 8
         y = below if below + h <= screen.top + screen.height else max(area.top - 8 - h, screen.top)
@@ -558,7 +655,7 @@ class Hud:
             (area.left + area.width, area.top, e, area.height),
         ):
             self._edges.append(self._window(tk, x, y, (w, h)))
-        width, tall = _MINI[0] + 16, _MINI[1] + 64
+        width, tall = _MINI[0] + 16, _MINI[1] + 110
         right = area.left + area.width + 2 * e
         x = right if right + width <= screen.left + screen.width else max(area.left - 2 * e - width, screen.left)
         y = min(max(area.top, screen.top), screen.top + screen.height - tall)
@@ -568,12 +665,24 @@ class Hud:
         )
         self.text.pack(fill='x', padx=6, pady=(6, 2))
         self.canvas = tk.Canvas(self.panel, width=_MINI[0], height=_MINI[1], bg='black', highlightthickness=0)
-        self.canvas.pack(padx=8, pady=(0, 8))
+        self.canvas.pack(padx=8, pady=(0, 6))
+        self.finished = False  # set by the Finish button: a deliberate click ends the capture, a stray key does not
+        tk.Button(
+            self.panel,
+            text='Finish and save',
+            command=self.finish,
+            fg='white',
+            bg=OK,
+            activebackground='#137d39',
+            font=('Segoe UI', 10, 'bold'),
+            relief='flat',
+            pady=4,
+        ).pack(fill='x', padx=8, pady=(0, 8))
         self.mini: list[np.ndarray] = []
         self.step = max(1, -(-area.width // _MINI[0]))  # every step-th pixel each way: the miniature's scale
         self.photo = tk.PhotoImage(master=self.root)
         self.canvas.create_image(0, 0, image=self.photo, anchor='nw')
-        self.status('Capturing. Scroll down at your own pace; press Esc when you are done.', ok=True)
+        self.status('Capturing. Scroll down at your own pace; click Finish when you are done.', ok=True)
 
     def _window(self, tk: object, x: int, y: int, size: tuple[int, int], colour: str = OK) -> object:
         window = tk.Toplevel(self.root, bg=colour)
@@ -599,6 +708,10 @@ class Hud:
         self.photo.configure(width=shown.shape[1], height=len(shown))
         self.photo.configure(data=_photo(shown), format='ppm')
         self.canvas.coords(self.canvas.find_all()[0], 0, _MINI[1] - len(shown))
+
+    def finish(self) -> None:
+        """The Finish button: the capture ends after the frame in hand."""
+        self.finished = True
 
     def pump(self) -> None:
         """Draw what changed; called once per grab."""

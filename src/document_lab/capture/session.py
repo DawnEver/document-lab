@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import numpy as np
 
@@ -174,6 +174,9 @@ def _report(_: Lost) -> None:
     return None
 
 
+_HISTORY: Final = 3  # views of captured rows kept to find a lost view in
+
+
 def follow(
     grab: Callable[[], np.ndarray],
     sink: Callable[[np.ndarray], None],
@@ -190,11 +193,13 @@ def follow(
     """What the source shows while the user scrolls it, to ``sink``, until ``aborted`` (the CLI binds Esc).
 
     A frame is grabbed every ``interval`` seconds and placed if the view moved; standing still ends nothing. A frame
-    that cannot be placed below the last -- scrolled too far at once, or back up -- is skipped and told to ``lost``
-    with the way back (:class:`Lost`); the capture goes on from the last placed frame once the view overlaps it again.
+    that cannot be placed below the last is looked for in the last :data:`_HISTORY` views captured: found, the capture
+    goes on from there; not found -- scrolled too far at once, or far back -- it is skipped and told to ``lost`` with
+    the way back (:class:`Lost`), until the view overlaps anything held again.
     ``aborted`` is asked once per grab, so a caller can keep its own window responsive there.
     """
-    stitcher = Stitcher(grab(), match, drop_overlays=drop_overlays)
+    first = grab()
+    stitcher = Stitcher(first, match, drop_overlays=drop_overlays, history=_HISTORY * len(first))
     frames, stopped = 1, 'aborted'
     try:
         while not aborted():
@@ -211,8 +216,11 @@ def follow(
             try:
                 moved = stitcher.add(frame)
             except Unstitchable as error:
-                lost(Lost(_where(stitcher.last, frame, match), stitcher.last, frame, str(error)))
-                continue
+                try:  # not below the last frame: anywhere in the history held, it picks up from there
+                    moved = stitcher.relocate(frame)
+                except Unstitchable:
+                    lost(Lost(_where(stitcher.last, frame, match), stitcher.last, frame, str(error)))
+                    continue
             if moved:
                 frames += 1
                 sink(stitcher.drain())

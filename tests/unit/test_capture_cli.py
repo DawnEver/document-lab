@@ -36,6 +36,7 @@ class FakeHud:
 
     shown: ClassVar[list] = []
     rows = 0
+    done = staticmethod(lambda: False)  # what the Finish button says, per test
 
     def __init__(self, area):
         FakeHud.shown, FakeHud.rows = [], 0
@@ -49,6 +50,10 @@ class FakeHud:
     def pump(self):
         return None
 
+    @property
+    def finished(self):
+        return FakeHud.done()
+
     def close(self):
         FakeHud.shown.append('closed')
 
@@ -57,7 +62,7 @@ class FakeHud:
 def fake(monkeypatch):
     monkeypatch.setattr(desktop, 'Source', FakeSource)
     monkeypatch.setattr(desktop, 'Hud', FakeHud)
-    monkeypatch.setattr(desktop, 'escape_pressed', lambda: False)
+    monkeypatch.setattr(FakeHud, 'done', staticmethod(lambda: False))
     return FakeSource
 
 
@@ -121,7 +126,7 @@ def test_a_page_no_reader_accepts_refuses_before_capturing(tmp_path, fake):
 def test_by_default_it_follows_the_users_scrolling_until_esc(tmp_path, fake, monkeypatch):
     hand = Hand(fake.IMAGE, 300, [0, 150, 0, 0, 200, 220, 0, 100])
     monkeypatch.setattr(fake, 'grab', lambda self: hand.grab())
-    monkeypatch.setattr(desktop, 'escape_pressed', hand.esc)
+    monkeypatch.setattr(FakeHud, 'done', staticmethod(hand.esc))
     assert run(tmp_path, '--page-height', '0') == 0
     image, _ = pdf_pixels(tmp_path / 'c.pdf')
     assert np.array_equal(image, fake.IMAGE[: 300 + 150 + 200 + 220 + 100])
@@ -136,7 +141,7 @@ def test_a_view_the_scroll_did_not_move_is_reported_not_taken_for_the_end(tmp_pa
 def test_the_screen_shows_the_capture_growing_and_which_way_back_when_lost(tmp_path, fake, monkeypatch):
     hand = Hand(fake.IMAGE, 300, [150, 600, -600, 150])  # on; too far down; back; on
     monkeypatch.setattr(fake, 'grab', lambda self: hand.grab())
-    monkeypatch.setattr(desktop, 'escape_pressed', hand.esc)
+    monkeypatch.setattr(FakeHud, 'done', staticmethod(hand.esc))
     assert run(tmp_path, '--page-height', '0') == 0
     oks = [ok for ok, _ in FakeHud.shown[:-1]]
     assert oks == [True, False, True]  # growing; lost (red); growing again

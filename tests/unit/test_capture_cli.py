@@ -37,6 +37,7 @@ class FakeHud:
     shown: ClassVar[list] = []
     rows = 0
     done = staticmethod(lambda: False)  # what the Finish button says, per test
+    go = True  # what the panel answers before the capture: Start, or Cancel
 
     def __init__(self, area):
         FakeHud.shown, FakeHud.rows = [], 0
@@ -49,6 +50,10 @@ class FakeHud:
 
     def pump(self):
         return None
+
+    def ready(self):
+        FakeHud.shown.append('ready')
+        return FakeHud.go
 
     @property
     def finished(self):
@@ -143,8 +148,19 @@ def test_the_screen_shows_the_capture_growing_and_which_way_back_when_lost(tmp_p
     monkeypatch.setattr(fake, 'grab', lambda self: hand.grab())
     monkeypatch.setattr(FakeHud, 'done', staticmethod(hand.esc))
     assert run(tmp_path, '--page-height', '0') == 0
-    oks = [ok for ok, _ in FakeHud.shown[:-1]]
+    assert FakeHud.shown[0] == 'ready'  # nothing is shown captured before Start
+    oks = [ok for ok, _ in FakeHud.shown[1:-1]]
     assert oks == [True, False, True]  # growing; lost (red); growing again
-    assert 'UP' in FakeHud.shown[1][1]
+    assert 'UP' in FakeHud.shown[2][1]
     assert FakeHud.shown[-1] == 'closed'
     assert FakeHud.rows == 300 + 150 + 150  # the miniature saw every row captured
+
+
+def test_cancel_on_the_panel_before_start_grabs_and_writes_nothing(tmp_path, fake, monkeypatch):
+    grabbed = []
+    monkeypatch.setattr(fake, 'grab', lambda self: grabbed.append(1))
+    monkeypatch.setattr(FakeHud, 'go', False)
+    assert run(tmp_path) == 1
+    assert not grabbed
+    assert not list(tmp_path.iterdir())
+    assert FakeHud.shown == ['ready', 'closed']

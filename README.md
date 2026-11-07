@@ -34,7 +34,7 @@ A `Value` keeps the source `text` beside the typed `value` (a `≈`, `≤` or `�
 ## Capture
 
 ```
-document-lab capture                               # mark an area, Start, scroll it yourself, Finish: the PDF
+document-lab capture                               # mark an area, Confirm, Start, scroll it yourself, Finish
 document-lab capture out.pdf --drop-overlays       # paint out floating buttons and sticky bars where they recur
 document-lab capture out.pdf --auto                # it scrolls for you, to the end
 document-lab capture out.pdf --no-scroll           # one frame
@@ -44,9 +44,10 @@ document-lab capture --list                        # the capturable windows and 
 
 Targets: none dims every monitor, live -- the window under the pointer is outlined; a click marks it, a drag marks a
 rectangle (shown clear, the rest dim) -- a new drag, inside it or out, marks again; its edges, corners and top handle
-drag to adjust it, arrows nudge it (Shift: 10
-px, Ctrl: resize); Enter or Start confirms, Esc cancels -- or `--window TITLE` (must match
-one), `--hwnd`, `--rect L,T,W,H`.
+drag to adjust it, arrows nudge it (Shift: 10 px, Ctrl: resize); Enter or Confirm sets it, Esc cancels -- or
+`--window TITLE` (must match one), `--hwnd`, `--rect L,T,W,H`. Once set, nothing covers the desktop: open or arrange
+other windows freely while the area waits, framed in blue, until Start on the panel beside it begins the capture
+(Cancel quits, nothing written).
 
 Scrolling: by default you scroll -- wheel, scrollbar, keys, at your own pace -- and it follows, grabbing a frame every
 `--every` seconds and placing each new position; pauses end nothing. A view that does not follow the last one -- a

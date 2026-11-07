@@ -256,13 +256,12 @@ def window_at(found: list[Window], x: int, y: int) -> Window | None:
     return None
 
 
-START_LABEL: Final = 'Start (Enter)'
+CONFIRM_LABEL: Final = 'Confirm area (Enter)'
 HINT: Final = (
     'Click a window or drag an area (drag again, anywhere, to redo)  |  '
-    'drag its edges, corners or top handle; arrows nudge  |  Enter or Start: capture  |  Esc: cancel'
+    'drag its edges, corners or top handle; arrows nudge  |  Enter or Confirm: set the area  |  Esc: cancel'
 )
 OVERLAY_TITLE: Final = 'document-lab capture selection'
-_BUTTON: Final = (160, 40)  # the start button's size, beside the mark's lower right corner
 _JITTER: Final = 4  # a press that moves no further than this is a click, not a drag
 _GRIP: Final = 12  # pixels outside the box's edge that take hold of it (inside it, clicks pass to the app below)
 _KNOB: Final = 5  # half the side of a handle drawn on an edge or a corner
@@ -313,7 +312,7 @@ class _Overlay:
     It dims the LIVE screen -- nothing is grabbed or drawn, so it opens at once -- and the mark is painted in
     :data:`_HOLE`, a colour Windows leaves fully transparent: the marked area shows clear, the rest dim. Such a hole
     also lets clicks through, so a pane of glass -- a window over it at :data:`_GLASS` opacity, unseen -- takes them:
-    a drag inside the mark marks again. The hint and the start button are their own small opaque windows.
+    a drag inside the mark marks again. The hint and the confirm button are their own small opaque windows.
     """
 
     def __init__(self, found: list[Window], screen: Region) -> None:
@@ -352,9 +351,9 @@ class _Overlay:
         primary = _dll('user32').GetSystemMetrics(0)
         hint.geometry(f'+{(primary - hint.winfo_reqwidth()) // 2}+12')
         self.panel = self._window(tk)
-        self.start = tk.Button(
+        self.confirm_button = tk.Button(
             self.panel,
-            text=START_LABEL,
+            text=CONFIRM_LABEL,
             command=self.confirm,
             fg='white',
             bg='#d93025',
@@ -364,7 +363,7 @@ class _Overlay:
             padx=16,
             pady=6,
         )
-        self.start.pack()
+        self.confirm_button.pack()
         self.panel.withdraw()
         self.glass = tk.Toplevel(self.root, bg='black')  # over the hole: unseen, but it hears the mouse
         self.glass.overrideredirect(boolean=True)
@@ -535,8 +534,9 @@ class _Overlay:
 def select() -> Window | Region:
     """What the user marks over every monitor (the rest dimmed, the mark clear), confirmed before it is returned.
 
-    A click marks the window under it, a drag marks a rectangle; marking again replaces the mark. Enter, or the start
-    button by the mark, confirms it; Esc cancels (``KeyboardInterrupt``).
+    A click marks the window under it, a drag marks a rectangle; marking again replaces the mark. Enter, or the
+    confirm button by the mark, confirms it; Esc cancels (``KeyboardInterrupt``). The overlay then goes: the desktop
+    is the user's again, the capture waiting for :meth:`Hud.ready`.
     """
     chosen = _Overlay(windows(), virtual_screen()).run()  # the windows first: the overlay is never a candidate
     if chosen is None:
@@ -656,14 +656,15 @@ def scroll(target: Window | Region, notches: int, method: str = 'wheel') -> None
 
 _EDGE: Final = 3  # the frame around a capture: its thickness, drawn just outside the area so it is never grabbed
 _MINI: Final = (180, 360)  # the panel's miniature of the capture: width, and the height of the newest part it shows
-OK, LOST = '#1aa34a', '#d93025'
+OK, LOST, WAIT = '#1aa34a', '#d93025', '#1a73e8'
 
 
 class Hud:
     """What a capture shows while it runs, around the area and never inside it.
 
-    A frame just outside the area (green: following, red: lost) and, beside it, a panel with a line of status and a
-    live miniature of everything captured so far, its newest rows at the bottom.
+    A frame just outside the area (blue: waiting for Start, green: following, red: lost) and, beside it, a panel with
+    its buttons, a line of status and a live miniature of everything captured so far, its newest rows at the bottom.
+    Nothing of it covers the desktop: before Start, and while it runs, every other window is the user's to use.
 
     It lives in the capture's own thread: :meth:`pump` (called once per grab) keeps it drawn, so nothing is shared.
     Nothing of it is ever inside the area, so it is never in the capture.
@@ -688,17 +689,14 @@ class Hud:
         width = _MINI[0] + 16
         self.panel = self._window(tk, 0, 0, None, colour='#202020')
         self.finished = False  # set by the Finish button: a deliberate click ends the capture, a stray key does not
-        tk.Button(  # first, at the top: always in view, whatever the text below wraps to
-            self.panel,
-            text='Finish and save',
-            command=self.finish,
-            fg='white',
-            bg=OK,
-            activebackground='#137d39',
-            font=('Segoe UI', 11, 'bold'),
-            relief='flat',
-            pady=6,
-        ).pack(fill='x', padx=8, pady=(8, 4))
+        self.started: bool | None = None  # what the panel answered before the capture: Start, Cancel, not yet
+        buttons = tk.Frame(self.panel, bg='#202020')
+        buttons.pack(fill='x', padx=8, pady=(8, 4))  # first, at the top: always in view, whatever the text wraps to
+        style = {'fg': 'white', 'font': ('Segoe UI', 11, 'bold'), 'relief': 'flat', 'pady': 6}
+        self.button = tk.Button(buttons, text='Start', command=self._start, bg=OK, activebackground='#137d39', **style)
+        self.button.pack(side='left', fill='x', expand=True)
+        self.cancel = tk.Button(buttons, text='Cancel', command=self._cancel, bg='#5f6368', **style)
+        self.cancel.pack(side='left', padx=(6, 0))
         self.text = tk.Label(
             self.panel, fg='white', bg='#202020', font=('Segoe UI', 10), wraplength=width - 12, justify='left'
         )
@@ -715,7 +713,7 @@ class Hud:
         self.step = max(1, -(-area.width // _MINI[0]))  # every step-th pixel each way: the miniature's scale
         self.photo = tk.PhotoImage(master=self.root)
         self.canvas.create_image(0, 0, image=self.photo, anchor='nw')
-        self.status('Capturing. Scroll down at your own pace; click Finish when you are done.', ok=True)
+        self.status('Area set. Use the desktop freely; bring the area to where to begin, then click Start.', ok=None)
 
     def _window(self, tk: object, x: int, y: int, size: tuple[int, int] | None, colour: str = OK) -> object:
         """A borderless topmost window at ``x, y``: ``size`` pixels, or as large as what it holds when None."""
@@ -726,12 +724,29 @@ class Hud:
         window.geometry(f'{shape}+{x}+{y}')  # +-N: Tk reads a bare -N from the far edge
         return window
 
-    def status(self, text: str, *, ok: bool) -> None:
-        """Say ``text`` on the panel; the frame turns green when ``ok``, else red."""
+    def status(self, text: str, *, ok: bool | None) -> None:
+        """Say ``text`` on the panel; the frame turns green when ``ok``, red when not, blue when None (waiting)."""
         self.text.configure(text=text)
         for edge in self._edges:
-            edge.configure(bg=OK if ok else LOST)
+            edge.configure(bg=WAIT if ok is None else OK if ok else LOST)
         self.pump()
+
+    def ready(self) -> bool:
+        """Wait, the desktop free, for Start (True) or Cancel (False); Start turns the button into Finish."""
+        self.root.mainloop()  # left by either button: Tk sleeps meanwhile, nothing polls
+        if self.started:
+            self.cancel.pack_forget()
+            self.button.configure(text='Finish and save', command=self.finish)
+            self.status('Capturing. Scroll down at your own pace; click Finish when you are done.', ok=True)
+        return bool(self.started)
+
+    def _start(self) -> None:
+        self.started = True
+        self.root.quit()
+
+    def _cancel(self) -> None:
+        self.started = False
+        self.root.quit()
 
     def add(self, rows: np.ndarray) -> None:
         """Grow the miniature by ``rows``, the capture's newest rows."""

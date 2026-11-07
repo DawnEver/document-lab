@@ -179,8 +179,8 @@ def play():
     for kind, *where in steps:
         if kind == 'key':
             o.canvas.event_generate(where[0])
-        elif kind == 'start':
-            o.start.invoke()  # what a click runs; a generated click would go where the real pointer is
+        elif kind == 'confirm':
+            o.confirm_button.invoke()  # what a click runs; a generated click would go where the real pointer is
         else:
             (a, b), (c, d) = where[0], where[-1]
             o.canvas.event_generate('<ButtonPress-1>', **at(a, b))
@@ -193,7 +193,7 @@ print(repr(o.run()))
 
 
 def selected(*steps: tuple) -> str:
-    """What the overlay returns after ``steps``: ('drag', a, b), ('click', a), ('start',) or ('key', sequence)."""
+    """What the overlay returns after ``steps``: ('drag', a, b), ('click', a), ('confirm',) or ('key', sequence)."""
     done = subprocess.run(
         [sys.executable, '-c', SELECT, json.dumps(steps)], capture_output=True, text=True, timeout=60, check=False
     )
@@ -214,7 +214,7 @@ def test_a_click_marks_the_window_and_start_confirms_it(viewer):
     window, _ = viewer
     area = window.client()
     drag = ('drag', (area.left + 10, area.top + 20), (area.left + 110, area.top + 70))  # replaced by the click
-    assert selected(drag, ('click', area.centre), ('start',)) == repr(window)
+    assert selected(drag, ('click', area.centre), ('confirm',)) == repr(window)
 
 
 def test_nothing_is_taken_before_it_is_confirmed(viewer):
@@ -222,9 +222,9 @@ def test_nothing_is_taken_before_it_is_confirmed(viewer):
     assert selected(('click', window.client().centre), ('key', '<Escape>')) == 'None'
 
 
-def test_confirming_by_the_start_button_does_not_free_the_canvas_under_its_own_event():
-    """Regression: Start destroyed the window inside its click handler; the canvas's own release binding then ran on
-    freed memory and Tcl aborted the process ("alloc: invalid block"). Run in a child so an abort is a failure."""
+def test_confirming_by_the_confirm_button_does_not_free_the_canvas_under_its_own_event():
+    """Regression: confirming destroyed the window inside its click handler; the canvas's own release binding then ran
+    on freed memory and Tcl aborted the process ("alloc: invalid block"). Run in a child so an abort is a failure."""
     script = """
 import types
 from document_lab.capture import desktop
@@ -235,10 +235,31 @@ ev = types.SimpleNamespace
 o.press(ev(x_root=screen.left + 100, y_root=screen.top + 100))
 o.release(ev(x_root=screen.left + 500, y_root=screen.top + 400))
 o.root.update()
-o.root.after(300, o.start.invoke)  # inside the loop, as a click: the handler must not destroy what runs it
+o.root.after(300, o.confirm_button.invoke)  # inside the loop, as a click: the handler must not destroy what runs it
 print(o.run())
 """
     with the_desktop():
         done = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=60, check=False)
     assert done.returncode == 0, done.stderr
     assert done.stdout.startswith('Region('), done.stdout
+
+
+def test_the_panel_waits_for_start_or_cancel_and_start_turns_into_finish():
+    """After the area is confirmed the HUD waits, nothing over the desktop, until its own buttons answer."""
+    script = """
+from document_lab.capture import desktop
+for press, want in (('button', True), ('cancel', False)):
+    hud = desktop.Hud(desktop.Region(200, 200, 300, 200))
+    hud.root.after(300, getattr(hud, press).invoke)
+    assert hud.ready() is want
+    if want:
+        assert hud.button.cget('text') == 'Finish and save'
+        hud.button.invoke()
+        assert hud.finished
+    hud.close()
+print('ok')
+"""
+    with the_desktop():
+        done = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=60, check=False)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == 'ok', done.stdout

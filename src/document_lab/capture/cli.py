@@ -32,7 +32,8 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     capture = sub.add_parser(
         'capture',
         help='a window or screen region, scrolled to its end and stitched, to a PDF (Windows)',
-        description='With no target, mark one on the screen: click a window or drag a rectangle, then Enter or Start. '
+        description='With no target, mark one on the screen: click a window or drag a rectangle, then Enter or '
+        'Confirm; the desktop stays usable until Start on the panel beside the area begins. '
         'Finish on the panel beside the area ends it and keeps what was captured.',
     )
     capture.add_argument('out', type=Path, nargs='?', help='the PDF to write (default: capture-<date>-<time>.pdf here)')
@@ -108,7 +109,7 @@ def _target(args: argparse.Namespace) -> Window | Region:
         return desktop.window(args.hwnd)
     if args.rect is not None:
         return desktop.Region(*args.rect)
-    emit('click a window or drag a rectangle, then Enter or Start (Esc cancels)')
+    emit('click a window or drag a rectangle, then Enter or Confirm (Esc cancels); then Start on the panel')
     return desktop.select()
 
 
@@ -197,6 +198,10 @@ def run(args: argparse.Namespace) -> int:
     area = target.client() if isinstance(target, desktop.Window) else target
     width = area.width
     hud = desktop.Hud(area)
+    if not hud.ready():  # the area is set and the desktop free until Start: nothing is grabbed before it
+        hud.close()
+        emit('cancelled')
+        return 1
     shown = _Shown(hud, args.keep_lost)
 
     # The writers check page size and OCR before the capture starts, and keep what was written whatever stops it.

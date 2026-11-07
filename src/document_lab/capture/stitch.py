@@ -70,15 +70,34 @@ def _content(frame: np.ndarray, match: Match) -> np.ndarray:
     return frame[match.top : len(frame) - match.bottom]
 
 
+_RECENT: list[tuple[tuple[object, ...], np.ndarray, tuple[np.ndarray, np.ndarray]]] = []  # the last frames' cells
+
+
 def _cells(frame: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """:func:`_cut`, kept for the last two frames: consecutive pairs share a frame, which is cut once.
+
+    A frame is known by the pixels it views (address, shape, strides), not by the array object: the matcher is
+    handed a fresh view of the same frame each time. The frame is held with its cells, so its memory is not reused.
+    """
+    key = (frame.__array_interface__['data'][0], frame.shape, frame.strides)
+    for seen, _, cut in _RECENT:
+        if seen == key:
+            return cut
+    cut = _cut(frame)
+    _RECENT[:] = [*_RECENT[-1:], (key, frame, cut)]
+    return cut
+
+
+def _cut(frame: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Each row cut into at most :data:`BINS` column bins.
 
     Per channel the bin's mean, ``(rows, bins * 3)``, and whether the bin is blank -- one value across it and the
     same as its neighbours on the row -- ``(rows, bins)``.
     """
-    pixels = frame.astype(np.float32)
-    edges = np.linspace(0, pixels.shape[1], min(BINS, pixels.shape[1]) + 1).astype(int)[:-1]
-    means = np.add.reduceat(pixels, edges, axis=1) / np.diff([*edges, pixels.shape[1]])[None, :, None]
+    width = frame.shape[1]
+    edges = np.linspace(0, width, min(BINS, width) + 1).astype(int)[:-1]
+    sums = np.add.reduceat(frame, edges, axis=1, dtype=np.uint32)  # summed as integers: no float copy of the frame
+    means = sums.astype(np.float32) / np.diff([*edges, width]).astype(np.float32)[None, :, None]
     blank = (np.maximum.reduceat(frame, edges, axis=1) == np.minimum.reduceat(frame, edges, axis=1)).all(axis=2)
     same = (means[:, 1:] == means[:, :-1]).all(axis=2)  # a bin and its right neighbour
     blank[:, 1:] &= same
@@ -95,6 +114,32 @@ class _Cells:
     blank_a: np.ndarray
     blank_b: np.ndarray
     moving: np.ndarray
+
+    def screen(self, offsets: np.ndarray, tolerance: float, stride: int) -> tuple[np.ndarray, np.ndarray]:
+        """Roughly :meth:`shares`, to rule offsets out: every ``stride``-th row, coarse grey cells, one array pass.
+
+        A row has :data:`_COARSE` grey cells; all ``offsets`` are judged at once. A coarse cell agrees wherever its
+        fine cells do, so the true offset passes; a wrong one it lets through, :meth:`shares` judges in full.
+        """
+        rows, bins = self.moving.shape
+        group = max(1, bins // _COARSE)
+        cut = bins // group * group
+
+        def coarse(values: np.ndarray, reduce: np.ufunc) -> np.ndarray:
+            return reduce.reduce(values[:, :cut].reshape(rows, -1, group), axis=2)
+
+        grey_a = self.a.reshape(rows, bins, 3)[:, :cut].mean(axis=2).reshape(rows, -1, group).mean(axis=2)
+        grey_b = self.b.reshape(rows, bins, 3)[:, :cut].mean(axis=2).reshape(rows, -1, group).mean(axis=2)
+        moving = coarse(self.moving, np.logical_or)
+        blank_a, blank_b = coarse(self.blank_a, np.logical_and), coarse(self.blank_b, np.logical_and)
+        b_rows = np.arange(0, rows, stride)
+        a_rows = b_rows[None, :] + offsets[:, None]
+        valid = (a_rows < rows)[..., None]
+        a_rows = np.minimum(a_rows, rows - 1)
+        compared = valid & moving[a_rows] & moving[b_rows] & ~(blank_a[a_rows] & blank_b[b_rows])
+        wrong = (np.abs(grey_a[a_rows] - grey_b[b_rows]) > tolerance) & compared
+        counts = compared.sum(axis=(1, 2))
+        return np.where(counts > 0, wrong.sum(axis=(1, 2)) / np.maximum(counts, 1), 1.0), counts * group
 
     def shares(self, offsets: np.ndarray, tolerance: float, stride: int) -> tuple[np.ndarray, np.ndarray]:
         """The share of compared cells that disagree at each of ``offsets``, and how many, over every ``stride``-th row.
@@ -115,7 +160,8 @@ class _Cells:
         return shares, counts
 
 
-_STRIDE: Final = 8  # rows a first pass over every offset looks at; only offsets it cannot rule out are looked at whole
+_STRIDE: Final = 12  # rows a first pass over every offset looks at; only offsets it cannot rule out are looked at whole
+_COARSE: Final = 16  # grey cells a row in that first pass
 _SCREEN: Final = 0.5  # the share a first pass may show and still be looked at whole
 
 
@@ -132,7 +178,7 @@ def _disagreement(ca: np.ndarray, cb: np.ndarray, least: int, match: Match) -> t
     shares, counts = np.ones(rows - least + 1), np.zeros(rows - least + 1, dtype=int)
     shares[0], counts[0] = moving.mean(), moving.size
     offsets = np.arange(1, rows - least + 1)
-    rough, seen = cells.shares(offsets, match.tolerance, _STRIDE)
+    rough, seen = cells.screen(offsets, match.tolerance, _STRIDE)
     counts[offsets] = seen * _STRIDE  # the evidence an offset ruled out had, roughly
     keep = offsets[rough <= max(_SCREEN, match.outliers)]
     shares[keep], counts[keep] = cells.shares(keep, match.tolerance, 1)
@@ -261,11 +307,12 @@ class Stitcher:
         if not moved:
             return 0
         rows = len(frame)
-        if self.drop_overlays:
-            self._proven = _proven(self.last, frame, moved, self._proven)
-            placed = slice(self._top, self._top + rows)
-            came = (self._canvas[placed] == self.last).all(axis=2)  # spots the last frame's view holds: re-ranked
-            self._rank[placed] = np.where(came, np.maximum(self._rank[placed], self._ranks()), self._rank[placed])
+        if not self.drop_overlays:
+            return self._append(frame, moved)
+        self._proven = _proven(self.last, frame, moved, self._proven)
+        placed = slice(self._top, self._top + rows)
+        came = (self._canvas[placed] == self.last).all(axis=2)  # spots the last frame's view holds: re-ranked
+        self._rank[placed] = np.where(came, np.maximum(self._rank[placed], self._ranks()), self._rank[placed])
         self._top += moved
         top, end = self._top, self._top + rows
         self._room(end)
@@ -273,10 +320,23 @@ class Stitcher:
         fresh = np.zeros((rows, frame.shape[1]), dtype=bool)
         fresh[self._end - top :] = True  # rows below the image so far
         held = self._rank[top:end]
-        # without drop_overlays nothing is proven: only a frame's chrome yields its spot, to the next frame's content
-        better = rank < held if self.drop_overlays else rank // _EDGE < held // _EDGE
-        take = fresh | better
+        take = fresh | (rank < held)
         self._canvas[top:end][take], held[take] = frame[take], rank[take]
+        self._end, self.last = end, frame
+        return moved
+
+    def _append(self, frame: np.ndarray, moved: int) -> int:
+        """Without ``drop_overlays``, rows only: what ``frame`` newly shows goes below.
+
+        The last frame's bottom chrome -- a footer that does not scroll -- gives way to the content ``frame`` shows
+        there; nothing else is ranked or replaced.
+        """
+        rows, bottom = len(frame), self.match.bottom
+        self._top += moved
+        top, end = self._top, self._top + rows
+        self._room(end)
+        start = self._end - bottom - top  # the frame row at the last frame's footer, or the first row it newly shows
+        self._canvas[top + start : end] = frame[start:]
         self._end, self.last = end, frame
         return moved
 

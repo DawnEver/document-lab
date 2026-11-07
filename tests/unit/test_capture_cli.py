@@ -62,7 +62,18 @@ def fake(monkeypatch):
 
 
 def run(tmp_path, *more):
-    argv = ['capture', str(tmp_path / 'c.pdf'), '--rect', f'0,0,{WIDTH},300', '--delay', '0', '--settle', '0']
+    argv = [
+        'capture',
+        str(tmp_path / 'c.pdf'),
+        '--rect',
+        f'0,0,{WIDTH},300',
+        '--delay',
+        '0',
+        '--settle',
+        '0',
+        '--every',
+        '0',
+    ]
     return main([*argv, '--end-wait', '0', *more])
 
 

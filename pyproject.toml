@@ -26,6 +26,10 @@ dependencies = [
 gpu = ["marker-pdf"]
 # Values a model reads out of a document (`document_lab.ai`), through the family's one model interface.
 ai = ["ai_lab @ git+https://github.com/DawnEver/ai-lab.git"]
+# `document_lab.capture` / `document-lab capture`: a window or screen region, scrolled and stitched, to a PDF. Windows
+# only, and it needs nothing beyond the base: ctypes drives the desktop, tkinter draws the region overlay, PyMuPDF
+# writes the PDF. The extra names the capability so a consumer can depend on it explicitly.
+capture = []
 # The family's development kit: rules registry, rendered configs, shared test bodies, verify entry.
 dev = [
     "dev-lab[test] @ git+https://github.com/DawnEver/dev-lab.git",
@@ -50,6 +54,7 @@ testpaths = ["tests"]
 markers = [
     "gpu: converts with marker-pdf on a CUDA GPU: its own part (tests/gpu), never tests/base",
     "vendor: reads the real document DOCUMENT_LAB_VENDOR_PDF names: its own part (tests/vendor), never tests/base",
+    "desktop: drives a real window on an interactive Windows desktop: its own part (tests/desktop), never tests/base",
 ]
 
 [tool.ruff]
@@ -89,13 +94,14 @@ collect = 'tests'
 
 [tool.dev_lab.parts]
 output = "output/logs"
-# Neither resource exists on a hosted runner: `gpu` needs a CUDA GPU and the gpu extra, `vendor` a vendor PDF that
-# may never be committed. Each is produced where it exists, by hand; base never selects them.
-unproduced = ["gpu", "vendor"]
+# No resource exists on a hosted runner: `gpu` needs a CUDA GPU and the gpu extra, `vendor` a vendor PDF that may
+# never be committed, `desktop` an interactive Windows desktop. Each is produced where it exists, by hand; base never
+# selects them.
+unproduced = ["gpu", "vendor", "desktop"]
 
 [tool.lab_commons.tests]
 produce = ["-m", "dev_lab.dev.verify", "--part", "{part}"]
-resources = ["gpu", "vendor"]
+resources = ["gpu", "vendor", "desktop"]
 
 # The family branch flow: integrate/main coordinates; main moves only by `integrate promote` (fast-forward).
 [tool.dev_lab.integrator]

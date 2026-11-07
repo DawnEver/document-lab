@@ -40,7 +40,7 @@ document-lab capture out.pdf --no-scroll           # the same, one frame
 document-lab capture out.pdf --window "Notepad" --tolerance 4 --ignore-top 48 --ocr chi_sim+eng
 ```
 
-Targets: none marks one on a dimmed overlay (a click: the window under it; a drag: a rectangle; mark again to
+Targets: none marks one on a dimmed still of the screen (the mark shows clear) (a click: the window under it; a drag: a rectangle; mark again to
 change it; Enter or Start confirms, Esc cancels), or `--window TITLE` (must match one), `--hwnd`, `--rect L,T,W,H`. Scrolling:
 `--method wheel|message|keys`, `--notches`, `--settle`, `--max-frames`, `--max-height`; Esc stops and keeps what
 was captured. A window is read through `PrintWindow`, so another window over it does not show; the wheel, which

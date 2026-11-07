@@ -259,12 +259,23 @@ START_LABEL: Final = 'Start (Enter)'
 OVERLAY_TITLE: Final = 'document-lab capture selection'
 _BUTTON: Final = (160, 40)  # the start button's size, beside the mark's lower right corner
 _JITTER: Final = 4  # a press that moves no further than this is a click, not a drag
+_DIM: Final = 0.45  # the brightness left outside the mark
+
+
+def _photo(image: np.ndarray) -> bytes:
+    """``image`` (RGB uint8) as the PPM bytes a Tk photo reads."""
+    height, width, _ = image.shape
+    return f'P6 {width} {height} 255\n'.encode() + np.ascontiguousarray(image).tobytes()
 
 
 class _Overlay:
-    """A dimmed overlay of every monitor on which a target is marked, then confirmed."""
+    """The screen as it was, dimmed, on which a target is marked -- shown undimmed -- then confirmed.
 
-    def __init__(self, found: list[Window], screen: Region) -> None:
+    A still of the screen rather than a translucent window: a window's opacity is one value, so only a still lets the
+    mark show clear while the rest stays dim, and the overlay stays opaque to the clicks that mark.
+    """
+
+    def __init__(self, found: list[Window], screen: Region, still: np.ndarray) -> None:
         import tkinter as tk  # noqa: PLC0415 -- only selection opens a window
 
         self.found, self.screen = found, screen
@@ -274,11 +285,15 @@ class _Overlay:
         self.root = tk.Tk()
         self.root.title(OVERLAY_TITLE)
         self.root.overrideredirect(boolean=True)
-        self.root.attributes('-topmost', True, '-alpha', 0.35)  # noqa: FBT003 -- Tk's own spelling
+        self.root.attributes('-topmost', True)  # noqa: FBT003 -- Tk's own spelling
         # A Tk offset of -N counts from the far edge: a monitor left of or above the primary needs +-N.
         self.root.geometry(f'{screen.width}x{screen.height}+{screen.left}+{screen.top}')
-        self.canvas = tk.Canvas(self.root, cursor='crosshair', bg='grey', highlightthickness=0)
+        self.canvas = tk.Canvas(self.root, cursor='crosshair', bg='black', highlightthickness=0)
         self.canvas.pack(fill='both', expand=True)
+        self.bright = tk.PhotoImage(master=self.root, data=_photo(still), format='ppm')
+        self.dim = tk.PhotoImage(master=self.root, data=_photo((still * _DIM).astype(np.uint8)), format='ppm')
+        self.lit = tk.PhotoImage(master=self.root)
+        self.canvas.create_image(0, 0, image=self.dim, anchor='nw')
         self.canvas.bind('<ButtonPress-1>', self.press)
         self.canvas.bind('<B1-Motion>', self.move)
         self.canvas.bind('<ButtonRelease-1>', self.release)
@@ -300,9 +315,9 @@ class _Overlay:
 
     def move(self, event: object) -> None:
         if self.drag is not None:
-            self.canvas.delete('box')
-            corners = (*self.local(*self.drag), *self.local(event.x_root, event.y_root))
-            self.canvas.create_rectangle(*corners, outline='red', width=2, tags='box')
+            self.canvas.delete('box', 'mark')
+            (x0, x1), (y0, y1) = sorted((self.drag[0], event.x_root)), sorted((self.drag[1], event.y_root))
+            self.light(*self.local(x0, y0), *self.local(x1, y1), tag='box')
 
     def release(self, event: object) -> None:
         if self.drag is None:
@@ -324,9 +339,20 @@ class _Overlay:
         bx = min(max(x1 - w, 0), screen.width - w)
         by = y1 + 8 if y1 + 8 + h <= screen.height else max(y0 - 8 - h, 0)
         self.canvas.delete('mark')
-        self.canvas.create_rectangle(x0, y0, x1, y1, outline='red', width=3, tags='mark')
+        self.light(x0, y0, x1, y1, tag='mark')
         self.canvas.create_rectangle(bx, by, bx + w, by + h, fill='red', outline='white', tags=('mark', 'start'))
         self.canvas.create_text(bx + w // 2, by + h // 2, text=START_LABEL, fill='white', tags=('mark', 'start'))
+
+    def light(self, x0: int, y0: int, x1: int, y1: int, tag: str) -> None:
+        """Show ``x0, y0 .. x1, y1`` (overlay pixels) undimmed inside a red outline."""
+        x0, x1 = (min(max(x, 0), self.screen.width) for x in (x0, x1))
+        y0, y1 = (min(max(y, 0), self.screen.height) for y in (y0, y1))
+        if x1 > x0 and y1 > y0:
+            self.lit.blank()
+            self.lit.configure(width=x1 - x0, height=y1 - y0)
+            self.lit.tk.call(self.lit, 'copy', self.bright, '-from', x0, y0, x1, y1, '-to', 0, 0)
+            self.canvas.create_image(x0, y0, image=self.lit, anchor='nw', tags=tag)
+        self.canvas.create_rectangle(x0, y0, x1, y1, outline='red', width=3, tags=tag)
 
     def confirm(self, _: object = None) -> None:
         if self.marked is not None:
@@ -335,12 +361,14 @@ class _Overlay:
 
 
 def select() -> Window | Region:
-    """What the user marks on a dimmed overlay of every monitor, confirmed before it is returned.
+    """What the user marks on a dimmed still of every monitor (the mark undimmed), confirmed before it is returned.
 
     A click marks the window under it, a drag marks a rectangle; marking again replaces the mark. Enter, or the
     start button under the mark's lower right corner, confirms it; Esc cancels (``KeyboardInterrupt``).
     """
-    chosen = _Overlay(windows(), virtual_screen()).run()  # windows first: the overlay is never a candidate
+    screen = virtual_screen()
+    # The windows and the still are taken first: the overlay is never a candidate, nor in the picture.
+    chosen = _Overlay(windows(), screen, grab(screen)).run()
     if chosen is None:
         msg = 'selection cancelled'
         raise KeyboardInterrupt(msg)

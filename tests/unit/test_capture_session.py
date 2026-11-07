@@ -158,3 +158,11 @@ def test_a_scroll_too_fast_or_back_up_is_skipped_until_the_view_overlaps_again()
     follow(hand.grab, rows, aborted=hand.esc, lost=lost.append, sleep=lambda _: None)
     assert len(lost) == 2  # the jump past the view, and the view scrolled back above the last frame
     assert np.array_equal(rows.image(), image[: hand.top + 300])
+
+
+def test_a_pause_over_a_blank_view_is_not_lost():
+    image = np.full((1200, 64, 3), 255, dtype=np.uint8)
+    image[:400] = tall(400)
+    hand, rows, lost = Hand(image, 300, [0, 0, 0, 0]), Rows(), []
+    follow(hand.grab, rows, aborted=hand.esc, lost=lost.append, sleep=lambda _: None)
+    assert lost == []

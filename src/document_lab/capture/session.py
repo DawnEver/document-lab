@@ -183,8 +183,11 @@ def follow(
                 stopped = 'max_height'
                 break
             sleep(interval)
+            frame = grab()
+            if np.array_equal(frame, stitcher.last):
+                continue  # a pause: nothing to place, and a blank view must not read as lost
             try:
-                moved = stitcher.add(grab())
+                moved = stitcher.add(frame)
             except Unstitchable as error:
                 lost(str(error))
                 continue

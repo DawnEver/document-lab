@@ -41,17 +41,15 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     target.add_argument('--hwnd', type=lambda v: int(v, 0), help='the window with this handle (see --list)')
     target.add_argument('--rect', type=_rect, metavar='L,T,W,H', help='a screen rectangle in physical pixels')
     target.add_argument('--list', action='store_true', help='print the capturable windows and exit')
-    scroll = capture.add_argument_group('scrolling')
-    scroll.add_argument('--no-scroll', action='store_true', help='one frame: what the target shows now')
-    scroll.add_argument(
-        '--manual',
-        action='store_true',
-        help='you scroll (wheel, scrollbar, keys) at your own pace and it follows; only Esc ends it',
+    scroll = capture.add_argument_group(
+        'scrolling', 'By default you scroll (wheel, scrollbar, keys) at your own pace and it follows; Esc finishes.'
     )
-    scroll.add_argument('--method', choices=('wheel', 'message', 'keys'), default='wheel')
-    scroll.add_argument('--notches', type=int, default=3, help='wheel notches (or Down presses) per step')
-    scroll.add_argument('--delay', type=float, default=1.0, help='seconds to wait before the first frame')
-    scroll.add_argument('--settle', type=float, default=0.12, help='seconds between grabs while the view settles')
+    scroll.add_argument('--no-scroll', action='store_true', help='one frame: what the target shows now')
+    scroll.add_argument('--auto', action='store_true', help='it scrolls for you, to the end of the view')
+    scroll.add_argument('--method', choices=('wheel', 'message', 'keys'), default='wheel', help='how --auto scrolls')
+    scroll.add_argument('--notches', type=int, default=1, help='--auto: wheel notches (or Down presses) per step')
+    scroll.add_argument('--delay', type=float, default=1.0, help='--auto: seconds to wait before the first frame')
+    scroll.add_argument('--settle', type=float, default=0.12, help='seconds between grabs')
     scroll.add_argument('--max-frames', type=int, help='stop after this many frames (default: no cap)')
     scroll.add_argument(
         '--end-wait',
@@ -127,11 +125,11 @@ def _report(result: Capture) -> int:
     if result.stopped.startswith('unstitchable: '):
         reason = result.stopped.removeprefix('unstitchable: ')
         emit(f'stopped after {result.frames} frames, short of the end: {reason}')
-        emit('what was stitched is written; try --tolerance 8 or fewer --notches')
+        emit('what was stitched is written; try --tolerance 8, or scroll yourself (leave out --auto)')
         return 1
     if result.stuck:
         emit('the first scroll moved nothing, so only one screen was captured: what is under the middle of the area')
-        emit('did not scroll. Scroll it yourself with --manual, or try --method keys')
+        emit('did not scroll. Scroll it yourself (leave out --auto), or try --method keys')
         return 1
     if result.stopped in _SHORT:
         emit(f'{_SHORT[result.stopped]} after {result.frames} frames')
@@ -166,11 +164,10 @@ def run(args: argparse.Namespace) -> int:
             if png is not None:
                 png.write(rows)
 
-        time.sleep(args.delay)
         limits = Limits(args.max_frames, args.max_height)
         match = Match(args.ignore_top, args.ignore_bottom, args.min_overlap, args.tolerance, args.outliers)
-        if args.manual:
-            emit('scroll the area yourself; Esc ends the capture')
+        if not (args.auto or args.no_scroll):
+            emit('now scroll the area down at your own pace; press Esc when you are done')
             result = follow(
                 source.grab,
                 sink,
@@ -183,6 +180,7 @@ def run(args: argparse.Namespace) -> int:
                 lost=_lost,
             )
         else:
+            time.sleep(args.delay)
             result = capture(
                 source.grab,
                 None if args.no_scroll else source.scroll,

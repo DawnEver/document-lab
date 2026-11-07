@@ -121,7 +121,19 @@ def test_a_region_is_the_screen_under_it(viewer):
 def test_the_cli_writes_the_pdf(viewer, tmp_path):
     window, image = viewer
     out = tmp_path / 'capture.pdf'
-    argv = ['capture', str(out), '--hwnd', hex(window.hwnd), '--delay', '0', '--page-height', '0']
+    argv = [
+        'capture',
+        str(out),
+        '--hwnd',
+        hex(window.hwnd),
+        '--auto',
+        '--notches',
+        '3',
+        '--delay',
+        '0',
+        '--page-height',
+        '0',
+    ]
     assert main(argv) == 0
     with pymupdf.open(out) as doc:
         assert doc.page_count == 1

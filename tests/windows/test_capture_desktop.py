@@ -244,15 +244,15 @@ print(o.run())
     assert done.stdout.startswith('Region('), done.stdout
 
 
-def test_the_panel_waits_for_start_or_cancel_and_start_turns_into_finish():
+def test_the_panel_waits_for_start_adjust_or_cancel_and_start_turns_into_finish():
     """After the area is confirmed the HUD waits, nothing over the desktop, until its own buttons answer."""
     script = """
 from document_lab.capture import desktop
-for press, want in (('button', True), ('cancel', False)):
+for press, want in (('button', 'start'), ('adjust', 'adjust'), ('cancel', 'cancel')):
     hud = desktop.Hud(desktop.Region(200, 200, 300, 200))
     hud.root.after(300, getattr(hud, press).invoke)
-    assert hud.ready() is want
-    if want:
+    assert hud.ready() == want
+    if want == 'start':
         assert hud.button.cget('text') == 'Finish and save'
         hud.button.invoke()
         assert hud.finished
@@ -263,3 +263,18 @@ print('ok')
         done = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=60, check=False)
     assert done.returncode == 0, done.stderr
     assert done.stdout.strip() == 'ok', done.stdout
+
+
+def test_adjusting_opens_the_overlay_with_the_area_set_already_marked():
+    """Adjust reopens the selection on the area set: confirmed untouched, it comes back as it was."""
+    script = """
+from document_lab.capture import desktop
+area = desktop.Region(150, 120, 400, 250)
+o = desktop._Overlay(desktop.windows(), desktop.virtual_screen(), area)
+o.root.after(300, o.confirm_button.invoke)
+print(repr(o.run()))
+"""
+    with the_desktop():
+        done = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=60, check=False)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == repr(desktop.Region(150, 120, 400, 250)), done.stdout

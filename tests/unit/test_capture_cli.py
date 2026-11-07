@@ -37,7 +37,7 @@ class FakeHud:
     shown: ClassVar[list] = []
     rows = 0
     done = staticmethod(lambda: False)  # what the Finish button says, per test
-    go = True  # what the panel answers before the capture: Start, or Cancel
+    answers: ClassVar[list] = []  # what the panel answers before the capture, in turn; then Start
 
     def __init__(self, area):
         FakeHud.shown, FakeHud.rows = [], 0
@@ -53,7 +53,7 @@ class FakeHud:
 
     def ready(self):
         FakeHud.shown.append('ready')
-        return FakeHud.go
+        return FakeHud.answers.pop(0) if FakeHud.answers else 'start'
 
     @property
     def finished(self):
@@ -159,8 +159,19 @@ def test_the_screen_shows_the_capture_growing_and_which_way_back_when_lost(tmp_p
 def test_cancel_on_the_panel_before_start_grabs_and_writes_nothing(tmp_path, fake, monkeypatch):
     grabbed = []
     monkeypatch.setattr(fake, 'grab', lambda self: grabbed.append(1))
-    monkeypatch.setattr(FakeHud, 'go', False)
+    monkeypatch.setattr(FakeHud, 'answers', ['cancel'])
     assert run(tmp_path) == 1
     assert not grabbed
     assert not list(tmp_path.iterdir())
     assert FakeHud.shown == ['ready', 'closed']
+
+
+def test_adjust_on_the_panel_reopens_the_selection_on_the_area_set_then_waits_again(tmp_path, fake, monkeypatch):
+    asked, waited = [], []
+    monkeypatch.setattr(desktop, 'select', lambda marked: asked.append(marked) or marked)
+    answer = FakeHud.ready
+    monkeypatch.setattr(FakeHud, 'ready', lambda self: waited.append(1) or answer(self))
+    monkeypatch.setattr(FakeHud, 'answers', ['adjust'])
+    assert run(tmp_path, '--no-scroll') == 0
+    assert asked == [desktop.Region(0, 0, WIDTH, 300)]  # the area set, shown marked to adjust
+    assert len(waited) == 2  # the new area waits for Start too

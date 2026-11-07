@@ -180,6 +180,25 @@ def _report(result: Capture) -> int:
     return 0
 
 
+def _started(target: Window | Region) -> tuple[Window | Region, Region, Hud] | None:
+    """The area set and its HUD once Start is clicked; None on Cancel.
+
+    The desktop is free and nothing is grabbed until then; Adjust reopens the selection on the area.
+    """
+    from document_lab.capture import desktop  # noqa: PLC0415
+
+    while True:
+        area = target.client() if isinstance(target, desktop.Window) else target
+        hud = desktop.Hud(area)
+        answer = hud.ready()
+        if answer == 'start':
+            return target, area, hud
+        hud.close()
+        if answer == 'cancel':
+            return None
+        target = desktop.select(target)
+
+
 def run(args: argparse.Namespace) -> int:
     """Run ``document-lab capture`` with the parsed ``args``; the exit status."""
     from document_lab.capture import desktop  # noqa: PLC0415
@@ -194,14 +213,13 @@ def run(args: argparse.Namespace) -> int:
     if args.out is None:
         args.out = Path(f'capture-{datetime.now().astimezone():%Y%m%d-%H%M%S}.pdf')
     target = _target(args)
-    source = desktop.Source(target, args.notches, args.method)
-    area = target.client() if isinstance(target, desktop.Window) else target
-    width = area.width
-    hud = desktop.Hud(area)
-    if not hud.ready():  # the area is set and the desktop free until Start: nothing is grabbed before it
-        hud.close()
+    started = _started(target)
+    if started is None:
         emit('cancelled')
         return 1
+    target, area, hud = started
+    source = desktop.Source(target, args.notches, args.method)
+    width = area.width
     shown = _Shown(hud, args.keep_lost)
 
     # The writers check page size and OCR before the capture starts, and keep what was written whatever stops it.

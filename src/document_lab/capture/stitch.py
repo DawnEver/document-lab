@@ -15,8 +15,9 @@ the view moves is an overlay pixel, and where a later frame shows the same spot 
 pixel replaces it; a spot no frame shows uncovered keeps the overlay (a sticky header at the very top, a footer at
 the end).
 
-:class:`Stitcher` holds only the last frame and the image so far, so a capture of any length costs the image it
-produces, not every frame grabbed.
+:class:`Stitcher` holds only the last frame and the rows a later frame may still change: frames only move down, so
+every row above the last frame's top is final, and :meth:`Stitcher.drain` hands those over. A capture of any length
+costs about one view of memory.
 """
 
 from __future__ import annotations
@@ -221,7 +222,8 @@ class Stitcher:
         self._canvas = np.empty((4 * rows, width, 3), dtype=np.uint8)
         self._rank = np.zeros((4 * rows, width), dtype=np.uint32)  # the rank of the view each spot holds
         self._canvas[:rows], self._rank[:rows] = first, self._ranks()
-        self._top, self._end = 0, rows
+        self._top, self._end = 0, rows  # in buffer rows; the buffer starts at image row self._drained
+        self._drained = 0
 
     def _ranks(self) -> np.ndarray:
         kind = np.where(self._chrome, CHROME, np.where(self._proven, OVERLAID, CLEAR)).astype(np.uint32)
@@ -229,8 +231,22 @@ class Stitcher:
 
     @property
     def height(self) -> int:
-        """Rows of the image so far."""
+        """Rows of the image so far, drained or held."""
+        return self._drained + self._end
+
+    @property
+    def held(self) -> int:
+        """Rows held in memory, not yet drained."""
         return self._end
+
+    def drain(self, *, final: bool = False) -> np.ndarray:
+        """The rows no later frame can change -- all of them when ``final`` -- handed over and forgotten."""
+        cut = self._end if final else self._top
+        rows = self._canvas[:cut].copy()
+        self._canvas[: self._end - cut] = self._canvas[cut : self._end]
+        self._rank[: self._end - cut] = self._rank[cut : self._end]
+        self._top, self._end, self._drained = max(self._top - cut, 0), self._end - cut, self._drained + cut
+        return rows
 
     def _room(self, end: int) -> None:
         if end > len(self._canvas):
@@ -265,7 +281,7 @@ class Stitcher:
         return moved
 
     def image(self) -> np.ndarray:
-        """The stitched image."""
+        """The rows held, as one image: the whole stitched image while nothing has been drained."""
         return self._canvas[: self._end].copy()
 
 

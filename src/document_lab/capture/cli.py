@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 import time
 from datetime import datetime
@@ -46,7 +47,13 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     scroll.add_argument('--notches', type=int, default=3, help='wheel notches (or Down presses) per step')
     scroll.add_argument('--delay', type=float, default=1.0, help='seconds to wait before the first frame')
     scroll.add_argument('--settle', type=float, default=0.12, help='seconds between grabs while the view settles')
-    scroll.add_argument('--max-frames', type=int, default=500)
+    scroll.add_argument('--max-frames', type=int, help='stop after this many frames (default: no cap)')
+    scroll.add_argument(
+        '--end-wait',
+        type=float,
+        default=0.8,
+        help='seconds a view that stopped moving gets to move again before it is the end (a feed loading more)',
+    )
     scroll.add_argument('--max-height', type=int, help='stop once the image is this many pixels tall')
     match = capture.add_argument_group('stitching')
     match.add_argument(
@@ -65,7 +72,7 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help='share of cells that may disagree at the true scroll (a scrollbar thumb, a caret); 0: none',
     )
     pdf = capture.add_argument_group('pdf')
-    pdf.add_argument('--page-height', type=int, help='pixels per page (default: A4-shaped; 0: one page)')
+    pdf.add_argument('--page-height', type=int, help='pixels per page (default: A4-shaped; 0: one page, held whole)')
     pdf.add_argument('--dpi', type=float, default=96)
     pdf.add_argument(
         '--ocr',
@@ -92,12 +99,12 @@ def _target(args: argparse.Namespace) -> Window | Region:
 
 
 def _progress(stitcher: Stitcher) -> None:
-    sys.stderr.write(f'\rcapturing: {stitcher.height} px tall (Esc stops and keeps it)')
+    sys.stderr.write(f'\rcapturing: {stitcher.height} px (Esc or a mouse move stops and keeps it)')
     sys.stderr.flush()
 
 
 _SHORT: Final = {
-    'aborted': 'stopped by Esc',
+    'aborted': 'stopped by Esc or a mouse move',
     'max_frames': 'stopped at --max-frames',
     'max_height': 'stopped at --max-height',
 }
@@ -116,27 +123,10 @@ def _report(result: Capture) -> int:
     return 0
 
 
-def _write(image: np.ndarray, args: argparse.Namespace) -> None:
-    import pymupdf  # noqa: PLC0415
-
-    from document_lab.capture.export import save_png, to_pdf  # noqa: PLC0415
-
-    if args.png:
-        save_png(image, args.png)
-    try:
-        to_pdf(image, args.out, page_height=args.page_height, dpi=args.dpi, ocr=args.ocr)
-    except (OSError, ValueError):
-        kept = save_png(image, args.png or args.out.with_suffix('.png'))
-        emit(f'the PDF was not written; the capture is kept in {kept}')
-        raise
-    with pymupdf.open(args.out) as doc:
-        emit(f'{args.out.resolve()}: {image.shape[1]}x{image.shape[0]} px on {doc.page_count} page(s)')
-
-
 def run(args: argparse.Namespace) -> int:
     """Run ``document-lab capture`` with the parsed ``args``; the exit status."""
     from document_lab.capture import desktop  # noqa: PLC0415
-    from document_lab.capture.export import check_ocr, check_page  # noqa: PLC0415
+    from document_lab.capture.export import PdfWriter, PngWriter  # noqa: PLC0415
     from document_lab.capture.session import Limits, Settling, capture  # noqa: PLC0415
     from document_lab.capture.stitch import Match  # noqa: PLC0415
 
@@ -149,22 +139,32 @@ def run(args: argparse.Namespace) -> int:
         args.out = Path(f'capture-{datetime.now().astimezone():%Y%m%d-%H%M%S}.pdf')
     target = _target(args)
     source = desktop.Source(target, args.notches, args.method)
-    area = target.client() if isinstance(target, desktop.Window) else target
-    if args.page_height != 0:  # refuse what cannot be written before the capture, not after it
-        check_page(area.width, args.page_height, args.dpi)
-    if args.ocr:
-        check_ocr(args.ocr)
-    time.sleep(args.delay)
-    result = capture(
-        source.grab,
-        None if args.no_scroll else source.scroll,
-        limits=Limits(args.max_frames, args.max_height),
-        match=Match(args.ignore_top, args.ignore_bottom, args.min_overlap, args.tolerance, args.outliers),
-        settling=Settling(interval=args.settle),
-        drop_overlays=args.drop_overlays,
-        aborted=desktop.escape_pressed,
-        progress=_progress,
-    )
+    width = (target.client() if isinstance(target, desktop.Window) else target).width
+    # The writers check page size and OCR before the capture starts, and keep what was written whatever stops it.
+    with (
+        PdfWriter(args.out, width, page_height=args.page_height, dpi=args.dpi, ocr=args.ocr) as pdf,
+        PngWriter(args.png, width) if args.png else contextlib.nullcontext() as png,
+    ):
+
+        def sink(rows: np.ndarray) -> None:
+            pdf.write(rows)
+            if png is not None:
+                png.write(rows)
+
+        time.sleep(args.delay)
+        result = capture(
+            source.grab,
+            None if args.no_scroll else source.scroll,
+            sink,
+            limits=Limits(args.max_frames, args.max_height),
+            match=Match(args.ignore_top, args.ignore_bottom, args.min_overlap, args.tolerance, args.outliers),
+            settling=Settling(interval=args.settle, end_wait=args.end_wait),
+            drop_overlays=args.drop_overlays,
+            aborted=source.stopped,
+            progress=_progress,
+        )
     status = _report(result)
-    _write(result.image, args)
+    emit(f'{args.out.resolve()}: {width}x{result.height} px on {pdf.pages} page(s)')
+    if args.png:
+        emit(f'{args.png.resolve()}: the same, as one image')
     return status

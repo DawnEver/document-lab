@@ -266,3 +266,17 @@ def test_a_browsed_page_by_default_keeps_what_each_frame_showed():
     assert len(got) == len(image)
     for top in tops[1:-1]:  # every frame's button, where its new rows were taken
         assert (got[top + 410 : top + 460, -80:-20] == (30, 120, 250)).all()
+
+
+def test_drained_rows_are_final_and_memory_stays_one_view():
+    image = page(6000, 300, seed=14)
+    shots, _ = browsed(image, 400, 150)
+    stitcher, parts = Stitcher(shots[0], drop_overlays=True), []
+    for shot in shots[1:]:
+        stitcher.add(shot)
+        parts.append(stitcher.drain())
+        assert stitcher.held <= 3 * 400  # what is kept is bounded by the view, not the page
+    parts.append(stitcher.drain(final=True))
+    streamed = np.concatenate(parts)
+    assert np.array_equal(streamed, stitch(shots, drop_overlays=True))
+    assert stitcher.height == len(streamed) == len(image)

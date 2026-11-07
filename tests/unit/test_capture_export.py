@@ -4,7 +4,16 @@ import numpy as np
 import pymupdf
 import pytest
 
-from document_lab.capture.export import MAX_PAGE_PT, a4_page_height, check_ocr, save_png, to_pdf
+from document_lab.capture.export import (
+    MAX_PAGE_PT,
+    PAGES_PER_SAVE,
+    PdfWriter,
+    PngWriter,
+    a4_page_height,
+    check_ocr,
+    save_png,
+    to_pdf,
+)
 
 
 def image(height: int, width: int = 80) -> np.ndarray:
@@ -71,3 +80,45 @@ def test_ocr_without_the_language_refuses(tmp_path, monkeypatch):
     check_ocr('eng')
     with pytest.raises(OSError, match='chi_sim'):
         check_ocr('chi_sim+eng')
+
+
+def test_rows_written_in_pieces_make_the_same_pdf_across_incremental_saves(tmp_path):
+    tall = image(100 * (PAGES_PER_SAVE * 2 + 3) + 37)
+    with PdfWriter(tmp_path / 'g.pdf', 80, page_height=100) as pdf:
+        for start in range(0, len(tall), 73):
+            pdf.write(tall[start : start + 73])
+    with pymupdf.open(tmp_path / 'g.pdf') as doc:
+        assert doc.page_count == PAGES_PER_SAVE * 2 + 4
+        assert np.array_equal(np.concatenate([pixels(p) for p in doc]), tall)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['g.pdf']  # no .part left
+
+
+def test_a_png_written_in_pieces_keeps_the_pixels(tmp_path):
+    tall = image(531)
+    with PngWriter(tmp_path / 'h.png', 80) as png:
+        for start in range(0, len(tall), 50):
+            png.write(tall[start : start + 50])
+    pix = pymupdf.Pixmap(str(tmp_path / 'h.png'))
+    assert np.array_equal(np.frombuffer(pix.samples, dtype=np.uint8).reshape(531, 80, 3), tall)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['h.png']
+
+
+def fail_midway(path, tall):
+    with PdfWriter(path, 80, page_height=100) as pdf:
+        pdf.write(tall)
+        msg = 'lost the window'
+        raise RuntimeError(msg)
+
+
+def test_what_was_written_before_a_failure_is_kept_under_the_real_name(tmp_path):
+    tall = image(250)
+    with pytest.raises(RuntimeError, match='lost the window'):
+        fail_midway(tmp_path / 'i.pdf', tall)
+    with pymupdf.open(tmp_path / 'i.pdf') as doc:
+        assert np.array_equal(np.concatenate([pixels(p) for p in doc]), tall)
+
+
+def test_nothing_written_leaves_no_file(tmp_path):
+    PdfWriter(tmp_path / 'j.pdf', 80).close()
+    PngWriter(tmp_path / 'j.png', 80).close()
+    assert not list(tmp_path.iterdir())

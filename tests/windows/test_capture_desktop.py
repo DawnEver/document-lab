@@ -19,7 +19,7 @@ import pytest
 
 from document_lab.__main__ import main
 from document_lab.capture import desktop
-from document_lab.capture.session import Limits, capture
+from document_lab.capture.session import Limits, Rows, capture
 from tests.windows.viewer import HEIGHT, VIEW, WIDTH, picture
 
 pytestmark = pytest.mark.windows
@@ -61,7 +61,9 @@ def viewer():
 def test_a_scrolled_window_is_captured_whole(viewer, method):
     window, image = viewer
     source = desktop.Source(window, notches=3, method=method)
-    assert np.array_equal(capture(source.grab, source.scroll).image, image)
+    rows = Rows()
+    capture(source.grab, source.scroll, rows)
+    assert np.array_equal(rows.image(), image)
 
 
 def test_the_first_frame_is_the_view(viewer):
@@ -91,7 +93,9 @@ def test_the_cli_writes_the_pdf(viewer, tmp_path):
 def test_max_height_stops_early(viewer):
     window, image = viewer
     source = desktop.Source(window)
-    got = capture(source.grab, source.scroll, limits=Limits(max_height=700)).image
+    rows = Rows()
+    capture(source.grab, source.scroll, rows, limits=Limits(max_height=700))
+    got = rows.image()
     assert 700 <= len(got) < HEIGHT
     assert np.array_equal(got, image[: len(got)])
 

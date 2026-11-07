@@ -13,10 +13,13 @@ presses the Down arrow (for views that ignore the wheel).
 from __future__ import annotations
 
 import ctypes
+import json
+import os
 import sys
 import time
 from ctypes import wintypes
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Final, Literal
 
 import numpy as np
@@ -537,19 +540,52 @@ class _Overlay:
 def select(marked: Window | Region | None = None) -> Window | Region:
     """What the user marks over every monitor (the rest dimmed, the mark clear), confirmed before it is returned.
 
-    ``marked``: an area set before, shown marked to adjust; Esc then keeps it rather than cancelling.
+    ``marked``: an area set before, shown marked to adjust; Esc then keeps it rather than cancelling. Without it the
+    overlay opens on the last area confirmed (:func:`recall`), if it is still on the screen; Esc cancels as ever.
 
     A click marks the window under it, a drag marks a rectangle; marking again replaces the mark. Enter, or the
     confirm button by the mark, confirms it; Esc cancels (``KeyboardInterrupt``). The overlay then goes: the desktop
     is the user's again, the capture waiting for :meth:`Hud.ready`.
     """
-    found = windows()  # first: the overlay is never a candidate
-    chosen = _Overlay(found, virtual_screen(), marked).run() or marked
+    found, screen = windows(), virtual_screen()  # the windows first: the overlay is never a candidate
+    chosen = _Overlay(found, screen, marked or recall(screen)).run() or marked
     if chosen is None:
         msg = 'selection cancelled'
         raise KeyboardInterrupt(msg)
+    remember(chosen.client() if isinstance(chosen, Window) else chosen)
     time.sleep(0.2)  # the overlay is repainted away before the first grab
     return chosen
+
+
+def _memory() -> Path:
+    """Where the last area confirmed is kept: this user's, on this machine."""
+    return Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'document-lab' / 'capture-area.json'
+
+
+def remember(area: Region) -> None:
+    """Keep ``area`` as the last confirmed, for the next selection to open on."""
+    path = _memory()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    part = path.with_suffix('.part')
+    part.write_text(json.dumps(asdict(area)), encoding='utf-8')
+    part.replace(path)  # whole or not at all: two captures at once never leave half a file
+
+
+def recall(screen: Region) -> Region | None:
+    """The last area confirmed, if one was and it still lies wholly on ``screen`` (monitors change); else None."""
+    try:
+        area = Region(**json.loads(_memory().read_text(encoding='utf-8')))
+    except (OSError, ValueError, TypeError):  # none yet, or not one this code wrote: nothing to open on
+        return None
+    inside = (
+        area.width > 0
+        and area.height > 0
+        and screen.left <= area.left
+        and screen.top <= area.top
+        and area.left + area.width <= screen.left + screen.width
+        and area.top + area.height <= screen.top + screen.height
+    )
+    return area if inside else None
 
 
 def _pixels(memdc: int, bitmap: int, width: int, height: int) -> np.ndarray:

@@ -42,7 +42,9 @@ document-lab capture out.pdf --window "Notepad" --ocr chi_sim+eng
 document-lab capture --list                        # the capturable windows and their handles
 ```
 
-Targets: none dims every monitor, live -- the window under the pointer is outlined; a click marks it, a drag marks a
+Targets: none dims every monitor, live, the last area confirmed already marked (kept in
+`%LOCALAPPDATA%\document-lab\capture-area.json`; not if it is off the screen now) -- the window under the pointer
+is outlined; a click marks it, a drag marks a
 rectangle (shown clear, the rest dim) -- a new drag, inside it or out, marks again; its edges, corners and top handle
 drag to adjust it, arrows nudge it (Shift: 10 px, Ctrl: resize); Enter or Confirm sets it, Esc cancels -- or
 `--window TITLE` (must match one), `--hwnd`, `--rect L,T,W,H`. Once set, nothing covers the desktop: open or arrange

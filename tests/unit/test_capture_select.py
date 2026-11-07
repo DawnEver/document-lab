@@ -2,7 +2,7 @@
 
 import pytest
 
-from document_lab.capture.desktop import Region, _edited
+from document_lab.capture.desktop import Region, _edited, recall, remember
 
 BOX = Region(100, 200, 300, 150)
 
@@ -26,3 +26,23 @@ def test_a_held_part_moves_by_the_drag(held, dx, dy, expected):
 def test_an_edge_dragged_past_the_other_stops_short_of_collapsing():
     assert _edited('e', BOX, -1000, 0).width == 8
     assert _edited('n', BOX, 0, 1000).height == 8
+
+
+SCREEN = Region(-1920, 0, 3840, 1080)  # two monitors, the second left of the primary
+
+
+def test_the_last_area_confirmed_is_recalled_while_it_is_on_the_screen(tmp_path, monkeypatch):
+    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path))
+    assert recall(SCREEN) is None  # nothing confirmed yet
+    remember(Region(-500, 100, 800, 600))
+    remember(BOX)  # the last one wins
+    assert recall(SCREEN) == BOX
+    assert recall(Region(0, 0, 350, 300)) is None  # a smaller screen no longer holds it: not opened on
+
+
+def test_a_memory_this_code_did_not_write_is_ignored(tmp_path, monkeypatch):
+    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path))
+    (tmp_path / 'document-lab').mkdir()
+    for junk in ('{', '{"left": 1}', '[1, 2]'):
+        (tmp_path / 'document-lab' / 'capture-area.json').write_text(junk, encoding='utf-8')
+        assert recall(SCREEN) is None

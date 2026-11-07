@@ -307,11 +307,14 @@ class _Overlay:
         self.canvas.bind('<ButtonRelease-1>', self.release)
         self.canvas.tag_bind('start', '<ButtonRelease-1>', self.confirm)
         self.root.bind('<Return>', self.confirm)
-        self.root.bind('<Escape>', lambda _: self.root.destroy())
+        self.root.bind('<Escape>', lambda _: self.root.quit())
 
     def run(self) -> Window | Region | None:
         self.root.focus_force()
         self.root.mainloop()
+        # Destroyed only once the loop is left: destroying it inside a handler frees the canvas while the same event
+        # still runs its other bindings on it (Tcl: "alloc: invalid block").
+        self.root.destroy()
         return self.confirmed
 
     def local(self, x: int, y: int) -> tuple[int, int]:
@@ -378,7 +381,7 @@ class _Overlay:
     def confirm(self, _: object = None) -> None:
         if self.marked is not None:
             self.confirmed = self.marked
-            self.root.destroy()
+            self.root.quit()
 
 
 def select() -> Window | Region:

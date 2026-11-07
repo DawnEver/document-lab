@@ -169,3 +169,28 @@ def test_nothing_is_taken_before_it_is_confirmed(viewer):
     _gesture(('click', window.client().centre), ('key', ESC))
     with pytest.raises(KeyboardInterrupt, match='cancelled'):
         desktop.select()
+
+
+def test_confirming_by_the_start_button_does_not_free_the_canvas_under_its_own_event():
+    """Regression: Start destroyed the window inside its click handler; the canvas's own release binding then ran on
+    freed memory and Tcl aborted the process ("alloc: invalid block"). Run in a child so an abort is a failure."""
+    script = """
+import types
+from document_lab.capture import desktop
+screen = desktop.virtual_screen()
+o = desktop._Overlay(desktop.windows(), screen, desktop.grab(screen))
+o.root.update()
+ev = types.SimpleNamespace
+o.press(ev(x_root=screen.left + 100, y_root=screen.top + 100))
+o.release(ev(x_root=screen.left + 500, y_root=screen.top + 400))
+o.root.update()
+x0, y0, x1, y1 = o.canvas.bbox('start')
+def click():
+    for kind in ('<Motion>', '<ButtonPress-1>', '<ButtonRelease-1>'):
+        o.canvas.event_generate(kind, x=(x0 + x1) // 2, y=(y0 + y1) // 2)
+o.root.after(300, click)
+print(o.run())
+"""
+    done = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=60, check=False)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.startswith('Region('), done.stdout

@@ -34,9 +34,9 @@ A `Value` keeps the source `text` beside the typed `value` (a `≈`, `≤` or `�
 ## Capture
 
 ```
-document-lab capture                               # mark a window or an area, Enter: capture-<date>-<time>.pdf here
+document-lab capture                               # mark an area, Start, then scroll it yourself; Esc: the PDF
 document-lab capture out.pdf --drop-overlays       # paint out floating buttons and sticky bars where they recur
-document-lab capture out.pdf --manual              # you scroll at your own pace, it follows; Esc ends
+document-lab capture out.pdf --auto                # it scrolls for you, to the end
 document-lab capture out.pdf --no-scroll           # one frame
 document-lab capture out.pdf --window "Notepad" --tolerance 4 --ocr chi_sim+eng
 document-lab capture --list                        # the capturable windows and their handles
@@ -44,13 +44,14 @@ document-lab capture --list                        # the capturable windows and 
 
 Targets: none shows a dimmed still of every monitor -- the window under the pointer lights up; a click marks it, a drag
 marks a rectangle, marking again replaces it; Enter or Start confirms, Esc cancels -- or `--window TITLE` (must match
-one), `--hwnd`, `--rect L,T,W,H`. Scrolling: `--method wheel|message|keys`, `--notches`, `--settle`; it runs until
-the view stops moving -- no cap unless `--max-frames`/`--max-height` -- and `--end-wait` (default 0.8 s) gives a feed
-that loads more at its end time to grow. The height so far shows while it runs; Esc stops it and
-keeps what was captured. If the first scroll moves nothing, it says so and exits 1 rather than pass one screen off as
-the whole. `--manual` scrolls nothing: you scroll (wheel, scrollbar, keys) at your own pace, pauses end nothing, and a
-view scrolled too far at once or back up is skipped -- with a warning -- until it overlaps the last part captured
-again; only Esc ends it. A window is read
+one), `--hwnd`, `--rect L,T,W,H`.
+
+Scrolling: by default you scroll -- wheel, scrollbar, keys, at your own pace -- and it follows, grabbing a frame every
+`--settle` seconds and placing each new position; pauses end nothing, a view scrolled too far at once or back up is
+skipped with a warning until it overlaps the last part captured again, and Esc finishes. `--auto` scrolls for you
+(`--method wheel|message|keys`, `--notches`) until the view stops moving -- `--end-wait` (default 0.8 s) gives a feed
+that loads more time to grow -- and says so, exit 1, if its first scroll moved nothing. Neither has a length cap unless
+`--max-frames`/`--max-height`; the height so far shows while it runs. A window is read
 through `PrintWindow`, so another window over it does not show; the wheel, which does land on whatever covers it,
 refuses then (bring it forward, or `--method message`); `keys` refuses a window it cannot bring forward.
 

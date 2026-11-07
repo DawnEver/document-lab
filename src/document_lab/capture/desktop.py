@@ -467,12 +467,20 @@ class _Overlay:
             self.draw(self.box)
 
     def release(self, event: object) -> None:
+        """End a press: an edit lands where the release is, a drag marks the rectangle, a click marks the window.
+
+        All from the press and the release points alone: a motion event in between may never have come.
+        """
         if self.drag is None:
             return
-        (x0, x1), (y0, y1) = sorted((self.drag[0], event.x_root)), sorted((self.drag[1], event.y_root))
-        editing, self.drag, self.edit = self.edit is not None, None, None
-        if editing or (x1 - x0 > _JITTER and y1 - y0 > _JITTER):
-            self.mark(self.box)
+        (px, py), x, y = self.drag, event.x_root, event.y_root
+        held, self.drag, self.edit = self.edit, None, None
+        if held is not None:
+            self.mark(_edited(held[0], held[1], x - px, y - py))
+            return
+        (x0, x1), (y0, y1) = sorted((px, x)), sorted((py, y))
+        if x1 - x0 > _JITTER and y1 - y0 > _JITTER:
+            self.mark(Region(x0, y0, x1 - x0, y1 - y0))
         elif (under := window_at(self.found, x0, y0)) is not None:
             self.mark(under)
 

@@ -151,7 +151,7 @@ def capture(
 
 @dataclass(frozen=True)
 class Lost:
-    """A view :func:`follow` could not place below the last frame: which way to scroll back, and that last frame.
+    """A view :func:`follow` could not place below the last frame: which way back, both frames, and why.
 
     ``back`` is ``down`` when the view is above the last frame (scrolled back up past it), else ``up`` (scrolled down
     too far at once, past what one view can overlap).
@@ -159,6 +159,7 @@ class Lost:
 
     back: str
     last: np.ndarray
+    frame: np.ndarray
     reason: str
 
 
@@ -210,7 +211,7 @@ def follow(
             try:
                 moved = stitcher.add(frame)
             except Unstitchable as error:
-                lost(Lost(_where(stitcher.last, frame, match), stitcher.last, str(error)))
+                lost(Lost(_where(stitcher.last, frame, match), stitcher.last, frame, str(error)))
                 continue
             if moved:
                 frames += 1

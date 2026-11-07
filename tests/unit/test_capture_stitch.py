@@ -108,7 +108,7 @@ def test_a_blinking_caret_is_an_outlier_the_match_absorbs():
     assert offset(shots[1], shots[2]) == 70
     assert stitch(shots).shape == image[:420].shape
     with pytest.raises(NoOverlap):
-        offset(shots[1], shots[2], Match(outliers=0))
+        offset(shots[1], shots[2], Match(tolerance=0, outliers=0))  # held to exact, the caret breaks it
 
 
 def test_a_tolerant_match_still_refuses_a_periodic_overlap():
@@ -280,3 +280,17 @@ def test_drained_rows_are_final_and_memory_stays_one_view():
     streamed = np.concatenate(parts)
     assert np.array_equal(streamed, stitch(shots, drop_overlays=True))
     assert stitcher.height == len(streamed) == len(image)
+
+
+def rendered(image: np.ndarray, top: float, view: int) -> np.ndarray:
+    """The view at a fractional ``top``, as an application re-renders it: rows blended (175% scaling scrolls so)."""
+    whole, part = int(top), top - int(top)
+    rows = image[whole : whole + view + 1].astype(np.float32)
+    return np.round(rows[:-1] * (1 - part) + rows[1:] * part).astype(np.uint8)
+
+
+@pytest.mark.parametrize('step', [1.75 * 3, 1.75 * 41, 1.75 * 97, 1.75 * 160])
+def test_a_fractional_scroll_is_placed_within_a_row_never_refused(step):
+    image = page(3000, 600, seed=15)
+    for top in np.arange(0, 3000 - 500 - step - 1, 3 * step):
+        assert abs(offset(rendered(image, top, 500), rendered(image, top + step, 500)) - step) <= 1

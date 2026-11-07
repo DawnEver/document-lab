@@ -261,7 +261,9 @@ HINT: Final = 'Click a window or drag an area  |  Enter or Start: capture  |  Es
 OVERLAY_TITLE: Final = 'document-lab capture selection'
 _BUTTON: Final = (160, 40)  # the start button's size, beside the mark's lower right corner
 _JITTER: Final = 4  # a press that moves no further than this is a click, not a drag
-_DIM: Final = 0.45  # the brightness left outside the mark
+_DIM: Final = 0.45  # the overlay's opacity: how dark the screen outside the mark goes
+_HOLE: Final = '#ff00fe'  # the colour Windows leaves fully transparent in the overlay: the mark is painted in it
+_PANEL: Final = '#202020'
 
 
 def _photo(image: np.ndarray) -> bytes:
@@ -271,13 +273,15 @@ def _photo(image: np.ndarray) -> bytes:
 
 
 class _Overlay:
-    """The screen as it was, dimmed, on which a target is marked -- shown undimmed -- then confirmed.
+    """A dark, translucent window over every monitor on which a target is marked, then confirmed.
 
-    A still of the screen rather than a translucent window: a window's opacity is one value, so only a still lets the
-    mark show clear while the rest stays dim, and the overlay stays opaque to the clicks that mark.
+    It dims the LIVE screen -- nothing is grabbed or drawn, so it opens at once -- and the mark is painted in
+    :data:`_HOLE`, a colour Windows leaves fully transparent: the marked area shows clear, the rest dim. A click inside
+    that hole reaches the window under it, so a hover only outlines a window, and a new mark is dragged from outside
+    the old one. The hint and the start button are their own small opaque windows, readable above the dim.
     """
 
-    def __init__(self, found: list[Window], screen: Region, still: np.ndarray) -> None:
+    def __init__(self, found: list[Window], screen: Region) -> None:
         import tkinter as tk  # noqa: PLC0415 -- only selection opens a window
 
         self.found, self.screen = found, screen
@@ -288,27 +292,46 @@ class _Overlay:
         self.root = tk.Tk()
         self.root.title(OVERLAY_TITLE)
         self.root.overrideredirect(boolean=True)
-        self.root.attributes('-topmost', True)  # noqa: FBT003 -- Tk's own spelling
+        self.root.configure(bg='black')
+        self.root.attributes('-topmost', True, '-alpha', _DIM, '-transparentcolor', _HOLE)  # noqa: FBT003
         # A Tk offset of -N counts from the far edge: a monitor left of or above the primary needs +-N.
         self.root.geometry(f'{screen.width}x{screen.height}+{screen.left}+{screen.top}')
         self.canvas = tk.Canvas(self.root, cursor='crosshair', bg='black', highlightthickness=0)
         self.canvas.pack(fill='both', expand=True)
-        self.bright = tk.PhotoImage(master=self.root, data=_photo(still), format='ppm')
-        self.dim = tk.PhotoImage(master=self.root, data=_photo((still * _DIM).astype(np.uint8)), format='ppm')
-        self.lit = tk.PhotoImage(master=self.root)
-        self.canvas.create_image(0, 0, image=self.dim, anchor='nw')
-        middle, _ = self.local(_dll('user32').GetSystemMetrics(0) // 2, 0)  # over the primary monitor's top
-        text = self.canvas.create_text(middle, 28, text=HINT, fill='white', font=('Segoe UI', 13), tags='hint')
-        left, top, right, bottom = self.canvas.bbox(text)
-        self.canvas.create_rectangle(left - 14, top - 8, right + 14, bottom + 8, fill='#202020', width=0, tags='hint')
-        self.canvas.tag_raise(text)  # the text over its box; raising 'hint' later keeps that order
         self.canvas.bind('<Motion>', self.hover)
         self.canvas.bind('<ButtonPress-1>', self.press)
         self.canvas.bind('<B1-Motion>', self.move)
         self.canvas.bind('<ButtonRelease-1>', self.release)
-        self.canvas.tag_bind('start', '<ButtonRelease-1>', self.confirm)
         self.root.bind('<Return>', self.confirm)
         self.root.bind('<Escape>', lambda _: self.root.quit())
+        hint = self._window(tk)
+        tk.Label(hint, text=HINT, fg='white', bg=_PANEL, font=('Segoe UI', 13), padx=14, pady=8).pack()
+        hint.update_idletasks()
+        primary = _dll('user32').GetSystemMetrics(0)
+        hint.geometry(f'+{(primary - hint.winfo_reqwidth()) // 2}+12')
+        self.panel = self._window(tk)
+        self.start = tk.Button(
+            self.panel,
+            text=START_LABEL,
+            command=self.confirm,
+            fg='white',
+            bg='#d93025',
+            activebackground='#b3261e',
+            font=('Segoe UI', 11, 'bold'),
+            relief='flat',
+            padx=16,
+            pady=6,
+        )
+        self.start.pack()
+        self.panel.withdraw()
+
+    def _window(self, tk: object) -> object:
+        window = tk.Toplevel(self.root, bg=_PANEL)
+        window.overrideredirect(boolean=True)
+        window.attributes('-topmost', True)  # noqa: FBT003 -- Tk's own spelling
+        window.bind('<Return>', self.confirm)
+        window.bind('<Escape>', lambda _: self.root.quit())
+        return window
 
     def run(self) -> Window | Region | None:
         self.root.focus_force()
@@ -321,27 +344,34 @@ class _Overlay:
     def local(self, x: int, y: int) -> tuple[int, int]:
         return x - self.screen.left, y - self.screen.top
 
+    def outline(self, area: Region, *, tag: str, width: int = 3, hole: bool = False) -> None:
+        """A red outline just outside ``area`` (screen pixels), the area itself a clear hole when ``hole``."""
+        x0, y0 = self.local(area.left, area.top)
+        x1, y1 = x0 + area.width, y0 + area.height
+        if hole:
+            self.canvas.create_rectangle(x0, y0, x1, y1, fill=_HOLE, width=0, tags=tag)
+        edge = (x0 - width, y0 - width, x1 + width, y1 + width)
+        self.canvas.create_rectangle(*edge, outline='red', width=width, tags=tag)
+
     def hover(self, event: object) -> None:
-        """Before anything is marked, show the window under the pointer as a click would mark it."""
+        """Before anything is marked, outline the window under the pointer as a click would mark it."""
         under = window_at(self.found, event.x_root, event.y_root)
         if self.marked is not None or under == self.hovered:
             return
         self.hovered = under
         self.canvas.delete('hover')
         if under is not None:
-            area = under.client()
-            x0, y0 = self.local(area.left, area.top)
-            self.light(x0, y0, x0 + area.width, y0 + area.height, tag='hover', width=1)
+            self.outline(under.client(), tag='hover', width=2)
 
     def press(self, event: object) -> None:
-        on_start = 'start' in self.canvas.gettags('current')
-        self.drag = None if on_start else (event.x_root, event.y_root)
+        self.drag = (event.x_root, event.y_root)
 
     def move(self, event: object) -> None:
         if self.drag is not None:
             self.canvas.delete('box', 'mark', 'hover')
+            self.panel.withdraw()
             (x0, x1), (y0, y1) = sorted((self.drag[0], event.x_root)), sorted((self.drag[1], event.y_root))
-            self.light(*self.local(x0, y0), *self.local(x1, y1), tag='box')
+            self.outline(Region(x0, y0, x1 - x0, y1 - y0), tag='box')
 
     def release(self, event: object) -> None:
         if self.drag is None:
@@ -357,27 +387,17 @@ class _Overlay:
     def mark(self, target: Window | Region) -> None:
         self.marked = target
         area = target.client() if isinstance(target, Window) else target
-        x0, y0 = self.local(area.left, area.top)
-        x1, y1 = x0 + area.width, y0 + area.height
-        (w, h), screen = _BUTTON, self.screen
-        bx = min(max(x1 - w, 0), screen.width - w)
-        by = y1 + 8 if y1 + 8 + h <= screen.height else max(y0 - 8 - h, 0)
         self.canvas.delete('mark', 'hover')
-        self.light(x0, y0, x1, y1, tag='mark')
-        self.canvas.create_rectangle(bx, by, bx + w, by + h, fill='red', outline='white', tags=('mark', 'start'))
-        self.canvas.create_text(bx + w // 2, by + h // 2, text=START_LABEL, fill='white', tags=('mark', 'start'))
-
-    def light(self, x0: int, y0: int, x1: int, y1: int, *, tag: str, width: int = 3) -> None:
-        """Show ``x0, y0 .. x1, y1`` (overlay pixels) undimmed inside a red outline ``width`` wide."""
-        x0, x1 = (min(max(x, 0), self.screen.width) for x in (x0, x1))
-        y0, y1 = (min(max(y, 0), self.screen.height) for y in (y0, y1))
-        if x1 > x0 and y1 > y0:
-            self.lit.blank()
-            self.lit.configure(width=x1 - x0, height=y1 - y0)
-            self.lit.tk.call(self.lit, 'copy', self.bright, '-from', x0, y0, x1, y1, '-to', 0, 0)
-            self.canvas.create_image(x0, y0, image=self.lit, anchor='nw', tags=tag)
-        self.canvas.create_rectangle(x0, y0, x1, y1, outline='red', width=width, tags=tag)
-        self.canvas.tag_raise('hint')
+        self.outline(area, tag='mark', hole=True)
+        self.panel.deiconify()
+        self.panel.update_idletasks()
+        w, h = self.panel.winfo_reqwidth(), self.panel.winfo_reqheight()
+        screen = self.screen
+        x = min(max(area.left + area.width - w, screen.left), screen.left + screen.width - w)
+        below = area.top + area.height + 8
+        y = below if below + h <= screen.top + screen.height else max(area.top - 8 - h, screen.top)
+        self.panel.geometry(f'+{x}+{y}')
+        self.panel.lift()
 
     def confirm(self, _: object = None) -> None:
         if self.marked is not None:
@@ -386,14 +406,12 @@ class _Overlay:
 
 
 def select() -> Window | Region:
-    """What the user marks on a dimmed still of every monitor (the mark undimmed), confirmed before it is returned.
+    """What the user marks over every monitor (the rest dimmed, the mark clear), confirmed before it is returned.
 
-    A click marks the window under it, a drag marks a rectangle; marking again replaces the mark. Enter, or the
-    start button under the mark's lower right corner, confirms it; Esc cancels (``KeyboardInterrupt``).
+    A click marks the window under it, a drag marks a rectangle; marking again replaces the mark. Enter, or the start
+    button by the mark, confirms it; Esc cancels (``KeyboardInterrupt``).
     """
-    screen = virtual_screen()
-    # The windows and the still are taken first: the overlay is never a candidate, nor in the picture.
-    chosen = _Overlay(windows(), screen, grab(screen)).run()
+    chosen = _Overlay(windows(), virtual_screen()).run()  # the windows first: the overlay is never a candidate
     if chosen is None:
         msg = 'selection cancelled'
         raise KeyboardInterrupt(msg)

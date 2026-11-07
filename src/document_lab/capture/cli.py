@@ -59,6 +59,12 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     )
     scroll.add_argument('--max-frames', type=int, help='stop after this many frames (default: no cap)')
     scroll.add_argument(
+        '--keep-lost',
+        type=Path,
+        metavar='DIR',
+        help='save each view it could not place (and the last one it did) here, with the reason: for a report',
+    )
+    scroll.add_argument(
         '--end-wait',
         type=float,
         default=0.8,
@@ -122,8 +128,8 @@ def _say(text: str) -> None:
 class _Shown:
     """The capture's callbacks, each also shown on the terminal line and the on-screen :class:`desktop.Hud`."""
 
-    def __init__(self, hud: Hud, escape_pressed: Callable[[], bool]) -> None:
-        self.hud, self.escape_pressed = hud, escape_pressed
+    def __init__(self, hud: Hud, escape_pressed: Callable[[], bool], keep: Path | None = None) -> None:
+        self.hud, self.escape_pressed, self.keep, self.kept = hud, escape_pressed, keep, 0
 
     def stopped(self) -> bool:
         self.hud.pump()  # once per grab: the frame and the panel stay drawn in this one thread
@@ -137,7 +143,19 @@ class _Shown:
     def lost(self, where: Lost) -> None:
         _say(_BACK[where.back])
         self.hud.status(_BACK[where.back], ok=False)
+        if self.keep is not None and self.kept < _KEPT:
+            from document_lab.capture.export import save_png  # noqa: PLC0415
 
+            self.keep.mkdir(parents=True, exist_ok=True)
+            self.kept += 1
+            save_png(where.last, self.keep / f'lost-{self.kept:02d}-last.png')
+            save_png(where.frame, self.keep / f'lost-{self.kept:02d}-view.png')
+            (self.keep / f'lost-{self.kept:02d}.txt').write_text(
+                f'{where.back}: {where.reason}' + chr(10), encoding='utf-8'
+            )
+
+
+_KEPT: Final = 10  # lost views --keep-lost saves at most
 
 _SHORT: Final = {
     'aborted': 'ended by Esc',
@@ -181,7 +199,7 @@ def run(args: argparse.Namespace) -> int:
     area = target.client() if isinstance(target, desktop.Window) else target
     width = area.width
     hud = desktop.Hud(area)
-    shown = _Shown(hud, desktop.escape_pressed)
+    shown = _Shown(hud, desktop.escape_pressed, args.keep_lost)
 
     # The writers check page size and OCR before the capture starts, and keep what was written whatever stops it.
     with (

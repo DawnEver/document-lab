@@ -55,14 +55,15 @@ class Match:
     """How frames are matched.
 
     ``top``/``bottom``: chrome rows left out of the match. ``min_overlap``: fewest shared content rows (default a
-    quarter of the content). ``tolerance``: grey levels a cell may differ by and still agree. ``outliers``: the share
-    of compared cells that may disagree at the true offset (a scrollbar thumb, a caret, an animation).
+    quarter of the content). ``tolerance``: the mean grey error the true offset may show -- a view an application
+    re-renders at a fractional scroll (175% scaling) never matches exactly. ``outliers``: the share of compared cells
+    left out of that mean, the worst ones (a scrollbar thumb, a caret, an overlay's edge).
     """
 
     top: int = 0
     bottom: int = 0
     min_overlap: int | None = None
-    tolerance: float = 0
+    tolerance: float = 8.0
     outliers: float = 0.05
 
 
@@ -105,96 +106,94 @@ def _cut(frame: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return means.reshape(len(frame), -1), blank
 
 
-@dataclass(frozen=True)
-class _Cells:
-    """Two frames' cells side by side: their means, their blanks, and which cells changed in place."""
-
-    a: np.ndarray
-    b: np.ndarray
-    blank_a: np.ndarray
-    blank_b: np.ndarray
-    moving: np.ndarray
-
-    def screen(self, offsets: np.ndarray, tolerance: float, stride: int) -> tuple[np.ndarray, np.ndarray]:
-        """Roughly :meth:`shares`, to rule offsets out: every ``stride``-th row, coarse grey cells, one array pass.
-
-        A row has :data:`_COARSE` grey cells; all ``offsets`` are judged at once. A coarse cell agrees wherever its
-        fine cells do, so the true offset passes; a wrong one it lets through, :meth:`shares` judges in full.
-        """
-        rows, bins = self.moving.shape
-        group = max(1, bins // _COARSE)
-        cut = bins // group * group
-
-        def coarse(values: np.ndarray, reduce: np.ufunc) -> np.ndarray:
-            return reduce.reduce(values[:, :cut].reshape(rows, -1, group), axis=2)
-
-        grey_a = self.a.reshape(rows, bins, 3)[:, :cut].mean(axis=2).reshape(rows, -1, group).mean(axis=2)
-        grey_b = self.b.reshape(rows, bins, 3)[:, :cut].mean(axis=2).reshape(rows, -1, group).mean(axis=2)
-        moving = coarse(self.moving, np.logical_or)
-        blank_a, blank_b = coarse(self.blank_a, np.logical_and), coarse(self.blank_b, np.logical_and)
-        b_rows = np.arange(0, rows, stride)
-        a_rows = b_rows[None, :] + offsets[:, None]
-        valid = (a_rows < rows)[..., None]
-        a_rows = np.minimum(a_rows, rows - 1)
-        compared = valid & moving[a_rows] & moving[b_rows] & ~(blank_a[a_rows] & blank_b[b_rows])
-        wrong = (np.abs(grey_a[a_rows] - grey_b[b_rows]) > tolerance) & compared
-        counts = compared.sum(axis=(1, 2))
-        return np.where(counts > 0, wrong.sum(axis=(1, 2)) / np.maximum(counts, 1), 1.0), counts * group
-
-    def shares(self, offsets: np.ndarray, tolerance: float, stride: int) -> tuple[np.ndarray, np.ndarray]:
-        """The share of compared cells that disagree at each of ``offsets``, and how many, over every ``stride``-th row.
-
-        A cell is evidence only where it changed in place on both sides of the pair -- so an overlay, which stays put,
-        is never held against the true offset -- and is not blank on both, so blank against blank (most of a sparse
-        page) is counted for no offset.
-        """
-        rows, bins = self.moving.shape
-        shares, counts = np.ones(len(offsets)), np.zeros(len(offsets), dtype=int)
-        for i, d in enumerate(offsets):
-            a, b = slice(d, None, stride), slice(0, rows - d, stride)
-            compared = self.moving[a] & self.moving[b] & ~(self.blank_a[a] & self.blank_b[b])
-            count = int(compared.sum())
-            if count:
-                differ = (np.abs(self.a[a] - self.b[b]) > tolerance).reshape(-1, bins, 3).any(axis=2)
-                shares[i], counts[i] = (differ & compared).sum() / count, count
-        return shares, counts
+_CANDIDATES: Final = 15  # offsets the squared-difference ranking hands on to be judged in full
+_NEAR: Final = 2  # offsets this close to the best are its neighbours: a fractional scroll makes them nearly as good
+_UNIQUE: Final = 2.0  # every offset but a neighbour must err at least this many times the best
+_FLOOR: Final = 1.0  # grey levels: errors closer than this are not told apart
+_STILL: Final = 1.0  # grey levels a cell may change in place and still count as unchanged
+_DENSE: Final = 0.3  # an offset is judged only if it compares this share of the evidence the densest offset does
 
 
-_STRIDE: Final = 12  # rows a first pass over every offset looks at; only offsets it cannot rule out are looked at whole
-_COARSE: Final = 16  # grey cells a row in that first pass
-_SCREEN: Final = 0.5  # the share a first pass may show and still be looked at whole
+def _evidence(moving_a: np.ndarray, moving_b: np.ndarray, blank_a: np.ndarray, blank_b: np.ndarray) -> np.ndarray:
+    """Cells that can tell offsets apart.
+
+    Changed in place on both sides of the pair -- an overlay, which stays put, is never held against the true offset
+    -- and not blank on both, which agrees with any offset.
+    """
+    return moving_a & moving_b & ~(blank_a & blank_b)
 
 
-def _disagreement(ca: np.ndarray, cb: np.ndarray, least: int, match: Match) -> tuple[np.ndarray, np.ndarray]:
-    """For each offset ``0 .. rows-least``: the share of compared cells that disagree, and how many were compared.
+def _trimmed(errors: np.ndarray, kept: np.ndarray, outliers: float) -> tuple[float, int]:
+    """The mean of the ``kept`` errors with the worst ``outliers`` share left out, and how many were kept."""
+    chosen = errors[kept]
+    count = len(chosen)
+    if not count:
+        return float('inf'), 0
+    take = max(1, int(np.ceil(count * (1 - outliers))))
+    if take < count:
+        chosen = np.partition(chosen, take - 1)[:take]  # the take smallest, in linear time
+    return float(chosen.mean()), count
 
-    Share 0 is the share of cells that changed in place at all. An offset a pass over every :data:`_STRIDE`-th row
-    rules out keeps share 1 and that pass's count, scaled to every row.
+
+def _squared(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """For every offset ``d``, the mean squared difference of rows ``a[d:]`` and ``b[:-d]`` (``(rows, cells)`` each).
+
+    Over every row and cell at once: the cross term is a cross-correlation along the rows, computed by FFT, so ranking
+    all offsets costs a few milliseconds and misses no row -- sparse content (a few lines on a blank page) included.
+    """
+    rows = len(a)
+    size = 1 << (2 * rows - 1).bit_length()
+    cross = np.fft.irfft(np.fft.rfft(a, size, axis=0) * np.conj(np.fft.rfft(b, size, axis=0)), size, axis=0)
+    cross = cross[:rows].sum(axis=1)  # cross[d] = sum over y, cells of a[y + d] * b[y]
+    a2 = np.cumsum((a * a).sum(axis=1)[::-1])[::-1]  # a2[d] = sum of a[d:] squared
+    b2 = np.cumsum((b * b).sum(axis=1))  # b2[n - 1] = sum of b[:n] squared
+    overlap = rows - np.arange(rows)
+    return (a2 + b2[overlap - 1] - 2 * cross) / (overlap * a.shape[1])
+
+
+def _errors(ca: np.ndarray, cb: np.ndarray, least: int, outliers: float) -> dict[int, tuple[float, int]]:
+    """The trimmed mean grey error, and the cells compared, at the offsets worth judging.
+
+    :func:`_squared` ranks every offset; the :data:`_CANDIDATES` best are judged on every row and cell, with the
+    evidence mask and the trimmed mean.
     """
     (pa, blank_a), (pb, blank_b) = _cells(ca), _cells(cb)
     rows, bins = blank_a.shape
-    moving = (np.abs(pa - pb) > match.tolerance).reshape(rows, bins, 3).any(axis=2)
-    cells = _Cells(pa, pb, blank_a, blank_b, moving)
-    shares, counts = np.ones(rows - least + 1), np.zeros(rows - least + 1, dtype=int)
-    shares[0], counts[0] = moving.mean(), moving.size
+    fine_a, fine_b = pa.reshape(rows, bins, 3), pb.reshape(rows, bins, 3)
+    moving = np.abs(fine_a - fine_b).max(axis=2) > _STILL
     offsets = np.arange(1, rows - least + 1)
-    rough, seen = cells.screen(offsets, match.tolerance, _STRIDE)
-    counts[offsets] = seen * _STRIDE  # the evidence an offset ruled out had, roughly
-    keep = offsets[rough <= max(_SCREEN, match.outliers)]
-    shares[keep], counts[keep] = cells.shares(keep, match.tolerance, 1)
-    return shares, counts
+    if not len(offsets):
+        return {}
+    best = offsets[np.argsort(_squared(fine_a.mean(axis=2), fine_b.mean(axis=2))[offsets])[:_CANDIDATES]]
+    judged = sorted(int(d) for d in best)  # the ranking's best: the true offset's neighbours come with it
+    found = {}
+    for d in judged:
+        kept_d = _evidence(moving[d:], moving[: rows - d], blank_a[d:], blank_b[: rows - d])
+        error = np.abs(fine_a[d:] - fine_b[: rows - d]).mean(axis=2)
+        found[d] = _trimmed(error, kept_d, outliers)
+    return found
 
 
-def _repeats(cells: np.ndarray, least: int, tolerance: float) -> bool:
+def _repeats(cells: np.ndarray, least: int) -> bool:
     """Does the view equal itself shifted by some offset (a blank or a repeating pattern)?"""
     rows = len(cells)
-    return any((np.abs(cells[d:] - cells[: rows - d]) <= tolerance).all() for d in range(1, rows - least + 1))
+    return any((np.abs(cells[d:] - cells[: rows - d]) <= _STILL).all() for d in range(1, rows - least + 1))
+
+
+def _unmoved(cells: np.ndarray, least: int) -> int:
+    """0 -- the view did not scroll -- unless it is blank or repeats, when whether it scrolled cannot be told."""
+    if _repeats(cells, least):
+        msg = 'the view is blank or repeats, so whether it scrolled cannot be told: scroll past it'
+        raise AmbiguousOverlap(msg)
+    return 0
 
 
 def offset(a: np.ndarray, b: np.ndarray, match: Match = Match()) -> int:  # noqa: B008 -- frozen
     """Rows the view scrolled from frame ``a`` to frame ``b`` (0: it did not move).
 
-    Raises :class:`NoOverlap` or :class:`AmbiguousOverlap` rather than return an offset that may be wrong.
+    The offset at which the frames are most alike: its trimmed mean error at most ``match.tolerance`` grey levels,
+    and every offset but its neighbours erring :data:`_UNIQUE` times as much. Raises :class:`NoOverlap` or
+    :class:`AmbiguousOverlap` rather than return an offset that may be wrong.
     """
     if a.shape != b.shape:
         msg = f'frames differ in shape: {a.shape} != {b.shape}'
@@ -202,22 +201,37 @@ def offset(a: np.ndarray, b: np.ndarray, match: Match = Match()) -> int:  # noqa
     ca, cb = _content(a, match), _content(b, match)
     rows = len(ca)
     least = max(1, rows // 4) if match.min_overlap is None else match.min_overlap
-    shares, counts = _disagreement(ca, cb, least, match)
-    usable = np.flatnonzero(counts[1:] >= _LEAST_CELLS) + 1
-    fits = usable[shares[usable] <= match.outliers]
-    if not len(fits):
-        if shares[0] <= match.outliers:  # all but an outlier share is unchanged: no scroll (a caret, an animation)
-            if _repeats(_cells(ca)[0], least, match.tolerance):
-                msg = 'the view is blank or repeats, so whether it scrolled cannot be told: scroll past it'
-                raise AmbiguousOverlap(msg)
-            return 0
-        if not len(usable):
+    (pa, _), (pb, _) = _cells(ca), _cells(cb)
+    changed = np.abs(pa - pb).reshape(rows, -1, 3).max(axis=2) > _STILL
+    if not changed.any():
+        return _unmoved(pa, least)
+    judged = _errors(ca, cb, least, match.outliers)
+    densest = max((count / (rows - d) for d, (_, count) in judged.items()), default=0.0)
+    found = {
+        d: (error, count)
+        for d, (error, count) in judged.items()
+        if count >= _LEAST_CELLS and count / (rows - d) >= _DENSE * densest
+    }
+    best = min(found, key=lambda d: found[d][0]) if found else None
+    if best is None or found[best][0] > match.tolerance:
+        # Nothing explains the change: a small one is something moving inside a still view (a caret, an animation);
+        # a sparse view that really scrolled is explained by its offset above, so it never reaches here.
+        if changed.mean() <= match.outliers:
+            return _unmoved(pa, least)
+        if best is None:
             msg = 'the shared rows hold nothing that moved, so any offset fits: scroll by less, or past the blank'
             raise AmbiguousOverlap(msg)
-        msg = f'no offset leaves {least} shared rows that agree: scroll by less than {rows - least} rows per step'
+        msg = f'no offset leaves {least} shared rows alike (best errs {found[best][0]:.1f} grey levels): scroll by less'
         raise NoOverlap(msg)
-    best = int(fits[np.argmin(shares[fits])])
-    rivals = [int(d) for d in fits if abs(d - best) > 1]
+    error = found[best][0]
+    bar = max(_UNIQUE * error, error + _FLOOR)
+    low = {d for d, (e, _) in found.items() if e < bar}
+
+    def valley(d: int) -> bool:  # every offset from best to d fits: one flat valley, not a repetition
+        step = 1 if d > best else -1
+        return all(x in low for x in range(best, d + step, step))
+
+    rivals = sorted(d for d in low if abs(d - best) > _NEAR and not valley(d))
     if rivals:
         msg = f'{1 + len(rivals)} offsets fit ({[best, *rivals][:5]}...): the overlap repeats; scroll by another step'
         raise AmbiguousOverlap(msg)

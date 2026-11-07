@@ -38,12 +38,12 @@ document-lab capture                               # mark an area, Start, then s
 document-lab capture out.pdf --drop-overlays       # paint out floating buttons and sticky bars where they recur
 document-lab capture out.pdf --auto                # it scrolls for you, to the end
 document-lab capture out.pdf --no-scroll           # one frame
-document-lab capture out.pdf --window "Notepad" --tolerance 4 --ocr chi_sim+eng
+document-lab capture out.pdf --window "Notepad" --ocr chi_sim+eng
 document-lab capture --list                        # the capturable windows and their handles
 ```
 
-Targets: none shows a dimmed still of every monitor -- the window under the pointer lights up; a click marks it, a drag
-marks a rectangle, marking again replaces it; Enter or Start confirms, Esc cancels -- or `--window TITLE` (must match
+Targets: none dims every monitor, live -- the window under the pointer is outlined; a click marks it, a drag marks a
+rectangle (shown clear, the rest dim), a drag from outside it marks again; Enter or Start confirms, Esc cancels -- or `--window TITLE` (must match
 one), `--hwnd`, `--rect L,T,W,H`.
 
 Scrolling: by default you scroll -- wheel, scrollbar, keys, at your own pace -- and it follows, grabbing a frame every
@@ -57,9 +57,11 @@ refuses then (bring it forward, or `--method message` -- which some applications
 may stop early); `keys` refuses a window it cannot bring forward.
 
 Stitching (`capture.stitch`): what stays put while the page scrolls -- a sticky header, a floating button, a scrollbar
-thumb -- is left out of the match, so no setting is needed for it; the scroll is the one offset at which the rest
-agrees, exactly (`--tolerance` grey levels) but for an `--outliers` share (default 5%). An offset that is not unique,
-or none, stops the capture there: what was stitched is written, the reason is printed and the exit status is 1.
+thumb -- is left out of the match, so no setting is needed for it. The scroll is the offset at which the frames are
+most alike -- not exactly alike: at 175% scaling an application scrolls by fractions of a pixel and re-renders the text,
+so no offset ever matches pixel for pixel. Its mean grey error, the worst `--outliers` share (default 5%) left out, must
+be at most `--tolerance` (default 8) and clearly below every offset that is not its neighbour; candidates come from the
+mean squared difference of every row at every offset, by FFT. An offset that is not unique (a repeating view), or none, stops the capture there: what was stitched is written, the reason is printed and the exit status is 1.
 `--drop-overlays` (off by default) also removes the overlays from where they would recur: each spot of the page is
 taken from the frame that showed it least covered. `--ignore-top/--ignore-bottom` exclude chrome that changes as it
 scrolls. PDF: `--page-height` (pixels; default A4-shaped, `0` one page), `--dpi`, `--ocr [LANGS]` (Tesseract, default

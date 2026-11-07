@@ -171,7 +171,7 @@ import json, sys
 from document_lab.capture import desktop
 steps = json.loads(sys.argv[1])
 screen = desktop.virtual_screen()
-o = desktop._Overlay(desktop.windows(), screen, desktop.grab(screen))
+o = desktop._Overlay(desktop.windows(), screen)
 o.canvas.focus_force()
 def at(x, y):
     return {'x': x - screen.left, 'y': y - screen.top}
@@ -180,9 +180,7 @@ def play():
         if kind == 'key':
             o.canvas.event_generate(where[0])
         elif kind == 'start':
-            x0, y0, x1, y1 = o.canvas.bbox('start')
-            for event in ('<Motion>', '<ButtonPress-1>', '<ButtonRelease-1>'):
-                o.canvas.event_generate(event, x=(x0 + x1) // 2, y=(y0 + y1) // 2)
+            o.start.invoke()  # what a click runs; a generated click would go where the real pointer is
         else:
             (a, b), (c, d) = where[0], where[-1]
             o.canvas.event_generate('<ButtonPress-1>', **at(a, b))
@@ -231,17 +229,13 @@ def test_confirming_by_the_start_button_does_not_free_the_canvas_under_its_own_e
 import types
 from document_lab.capture import desktop
 screen = desktop.virtual_screen()
-o = desktop._Overlay(desktop.windows(), screen, desktop.grab(screen))
+o = desktop._Overlay(desktop.windows(), screen)
 o.root.update()
 ev = types.SimpleNamespace
 o.press(ev(x_root=screen.left + 100, y_root=screen.top + 100))
 o.release(ev(x_root=screen.left + 500, y_root=screen.top + 400))
 o.root.update()
-x0, y0, x1, y1 = o.canvas.bbox('start')
-def click():
-    for kind in ('<Motion>', '<ButtonPress-1>', '<ButtonRelease-1>'):
-        o.canvas.event_generate(kind, x=(x0 + x1) // 2, y=(y0 + y1) // 2)
-o.root.after(300, click)
+o.root.after(300, o.start.invoke)  # inside the loop, as a click: the handler must not destroy what runs it
 print(o.run())
 """
     with the_desktop():

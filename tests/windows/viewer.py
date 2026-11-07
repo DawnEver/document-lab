@@ -1,4 +1,4 @@
-"""A real scrollable window for the ``desktop`` part: a known tall image in a Tk canvas, run as its own process.
+"""A real scrollable window for the ``windows`` part: a known tall image in a Tk canvas, run as its own process.
 
 ``python viewer.py <title> <seed>`` shows :func:`picture` ``(seed)`` at physical pixels (the process is made
 per-monitor DPI aware, so Windows does not rescale it). The wheel scrolls :data:`NOTCH` pixels per notch and the Down
@@ -7,7 +7,6 @@ arrow :data:`ARROW` pixels, both stopping at the end, as a document viewer does.
 
 import ctypes
 import sys
-import tkinter as tk
 
 import numpy as np
 
@@ -21,6 +20,8 @@ def picture(seed: int) -> np.ndarray:
 
 
 def main(title: str, seed: int) -> None:
+    import tkinter as tk  # noqa: PLC0415 -- only the window needs Tk; Linux collects this module without it
+
     ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
     root = tk.Tk()
     root.title(title)

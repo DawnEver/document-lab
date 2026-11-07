@@ -43,8 +43,10 @@ document-lab capture --list                        # the capturable windows and 
 
 Targets: none shows a dimmed still of every monitor -- the window under the pointer lights up; a click marks it, a drag
 marks a rectangle, marking again replaces it; Enter or Start confirms, Esc cancels -- or `--window TITLE` (must match
-one), `--hwnd`, `--rect L,T,W,H`. Scrolling: `--method wheel|message|keys`, `--notches`, `--settle`, `--max-frames`,
-`--max-height`; the height so far shows while it runs, and Esc stops and keeps what was captured. A window is read
+one), `--hwnd`, `--rect L,T,W,H`. Scrolling: `--method wheel|message|keys`, `--notches`, `--settle`; it runs until
+the view stops moving -- no cap unless `--max-frames`/`--max-height` -- and `--end-wait` (default 0.8 s) gives a feed
+that loads more at its end time to grow. The height so far shows while it runs; Esc or moving the mouse stops it and
+keeps what was captured. A window is read
 through `PrintWindow`, so another window over it does not show; the wheel, which does land on whatever covers it,
 refuses then (bring it forward, or `--method message`); `keys` refuses a window it cannot bring forward.
 
@@ -55,9 +57,16 @@ or none, stops the capture there: what was stitched is written, the reason is pr
 `--drop-overlays` (off by default) also removes the overlays from where they would recur: each spot of the page is
 taken from the frame that showed it least covered. `--ignore-top/--ignore-bottom` exclude chrome that changes as it
 scrolls. PDF: `--page-height` (pixels; default A4-shaped, `0` one page), `--dpi`, `--ocr [LANGS]` (Tesseract, default
-`eng`), `--png`; page size and OCR are checked before the capture starts, and a PDF that still fails to write leaves the
-capture as a PNG beside it. In Python: `capture.session.capture(grab, scroll)` takes any source, holds one frame at a
-time and returns a `Capture` (image, frames, why it stopped); `capture.desktop.Source` is the Windows one.
+`eng`), `--png`; page size and OCR are checked before the capture starts.
+
+Any length: frames only move down, so every stitched row above the current view is final and is written at once --
+PDF pages as they fill (saved incrementally), the PNG compressed as it grows -- and a capture holds about one view in
+memory however long the page (`--page-height 0`, one page, is the exception: it is held whole). Both files are written
+as `<name>.part` and renamed into place when the capture ends, however it ends, so a reader never sees half a file.
+Everything runs in one thread, in order -- grab, scroll, stitch, write -- so nothing races. In Python:
+`capture.session.capture(grab, scroll, sink)` takes any source and any sink (`Rows` keeps the image in memory;
+`capture.export.PdfWriter`/`PngWriter` stream it) and returns a `Capture` (frames, height, why it stopped);
+`capture.desktop.Source` is the Windows source.
 
 ## Install
 

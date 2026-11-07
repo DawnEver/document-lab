@@ -30,11 +30,9 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         description='Esc stops scrolling and keeps what was captured.',
     )
     capture.add_argument('out', type=Path, nargs='?', help='the PDF to write (not with --list)')
-    target = capture.add_mutually_exclusive_group(required=True)
+    target = capture.add_mutually_exclusive_group()  # none: mark it on the screen (a click or a drag), then confirm
     target.add_argument('--window', metavar='TITLE', help='the one window whose title contains TITLE')
     target.add_argument('--hwnd', type=lambda v: int(v, 0), help='the window with this handle (see --list)')
-    target.add_argument('--pick', action='store_true', help='the window you click next')
-    target.add_argument('--region', action='store_true', help='a rectangle you drag on the screen')
     target.add_argument('--rect', type=_rect, metavar='L,T,W,H', help='a screen rectangle in physical pixels')
     target.add_argument('--list', action='store_true', help='print the capturable windows and exit')
     scroll = capture.add_argument_group('scrolling')
@@ -71,12 +69,10 @@ def _target(args: argparse.Namespace) -> Window | Region:
         return desktop.find_window(args.window)
     if args.hwnd is not None:
         return desktop.window(args.hwnd)
-    if args.pick:
-        emit('click the window to capture (Esc cancels)')
-        return desktop.pick_window()
-    if args.region:
-        return desktop.select_region()
-    return desktop.Region(*args.rect)
+    if args.rect is not None:
+        return desktop.Region(*args.rect)
+    emit('click a window or drag a rectangle, then Enter or Start (Esc cancels)')
+    return desktop.select()
 
 
 def _write(image: np.ndarray, args: argparse.Namespace) -> None:

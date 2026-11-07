@@ -22,6 +22,7 @@ from typing import Final
 import numpy as np
 
 __all__ = [
+    'OVERLAY_TITLE',
     'SCROLL_METHODS',
     'Region',
     'Source',
@@ -29,11 +30,11 @@ __all__ = [
     'escape_pressed',
     'find_window',
     'grab',
-    'pick_window',
     'scroll',
-    'select_region',
+    'select',
     'virtual_screen',
     'window',
+    'window_at',
     'windows',
 ]
 
@@ -239,70 +240,112 @@ def window(hwnd: int) -> Window:
     return Window(hwnd, _title(hwnd))
 
 
-def pick_window(timeout: float = 30) -> Window:
-    """The top-level window the user clicks next."""
-    user32 = _dll('user32')
-    deadline = time.monotonic() + timeout
-    while user32.GetAsyncKeyState(_VK_LBUTTON) & 0x8000:  # a button already down is not the pick
-        time.sleep(0.02)
-    while time.monotonic() < deadline:
-        if user32.GetAsyncKeyState(_VK_LBUTTON) & 0x8000:
-            point = wintypes.POINT()
-            user32.GetCursorPos(ctypes.byref(point))
-            root = user32.GetAncestor(user32.WindowFromPoint(point), _GA_ROOT)
-            return Window(root, _title(root))
-        if escape_pressed():
-            break
-        time.sleep(0.02)
-    msg = 'no window was clicked'
-    raise TimeoutError(msg)
-
-
 def virtual_screen() -> Region:
     """The rectangle covering every monitor."""
     user32 = _dll('user32')
     return Region(*(user32.GetSystemMetrics(m) for m in _SM_VIRTUAL))
 
 
-def select_region() -> Region:
-    """A rectangle the user drags on a dimmed overlay of every monitor (Esc cancels)."""
-    import tkinter as tk  # noqa: PLC0415 -- only region selection opens a window
+def window_at(found: list[Window], x: int, y: int) -> Window | None:
+    """The front-most of ``found`` (front to back, as :func:`windows` lists them) whose client area holds ``x, y``."""
+    for candidate in found:
+        area = candidate.client()
+        if area.left <= x < area.left + area.width and area.top <= y < area.top + area.height:
+            return candidate
+    return None
 
-    screen = virtual_screen()
-    root = tk.Tk()
-    root.overrideredirect(boolean=True)
-    root.attributes('-topmost', True, '-alpha', 0.3)  # noqa: FBT003 -- Tk's own spelling
-    root.geometry(f'{screen.width}x{screen.height}{screen.left:+d}{screen.top:+d}')
-    canvas = tk.Canvas(root, cursor='crosshair', bg='grey', highlightthickness=0)
-    canvas.pack(fill='both', expand=True)
-    drag: dict[str, int] = {}
-    chosen: list[Region] = []
 
-    def press(event: tk.Event) -> None:
-        drag.update(x=event.x, y=event.y)
-        canvas.delete('box')
+START_LABEL: Final = 'Start (Enter)'
+OVERLAY_TITLE: Final = 'document-lab capture selection'
+_BUTTON: Final = (160, 40)  # the start button's size, beside the mark's lower right corner
+_JITTER: Final = 4  # a press that moves no further than this is a click, not a drag
 
-    def move(event: tk.Event) -> None:
-        canvas.delete('box')
-        canvas.create_rectangle(drag['x'], drag['y'], event.x, event.y, outline='red', width=2, tags='box')
 
-    def release(event: tk.Event) -> None:
-        x0, x1 = sorted((drag['x'], event.x))
-        y0, y1 = sorted((drag['y'], event.y))
-        if x1 - x0 > 1 and y1 - y0 > 1:
-            chosen.append(Region(screen.left + x0, screen.top + y0, x1 - x0, y1 - y0))
-            root.destroy()
+class _Overlay:
+    """A dimmed overlay of every monitor on which a target is marked, then confirmed."""
 
-    canvas.bind('<ButtonPress-1>', press)
-    canvas.bind('<B1-Motion>', move)
-    canvas.bind('<ButtonRelease-1>', release)
-    root.bind('<Escape>', lambda _: root.destroy())
-    root.focus_force()
-    root.mainloop()
-    if not chosen:
-        msg = 'region selection cancelled'
+    def __init__(self, found: list[Window], screen: Region) -> None:
+        import tkinter as tk  # noqa: PLC0415 -- only selection opens a window
+
+        self.found, self.screen = found, screen
+        self.drag: tuple[int, int] | None = None
+        self.marked: Window | Region | None = None
+        self.confirmed: Window | Region | None = None
+        self.root = tk.Tk()
+        self.root.title(OVERLAY_TITLE)
+        self.root.overrideredirect(boolean=True)
+        self.root.attributes('-topmost', True, '-alpha', 0.35)  # noqa: FBT003 -- Tk's own spelling
+        # A Tk offset of -N counts from the far edge: a monitor left of or above the primary needs +-N.
+        self.root.geometry(f'{screen.width}x{screen.height}+{screen.left}+{screen.top}')
+        self.canvas = tk.Canvas(self.root, cursor='crosshair', bg='grey', highlightthickness=0)
+        self.canvas.pack(fill='both', expand=True)
+        self.canvas.bind('<ButtonPress-1>', self.press)
+        self.canvas.bind('<B1-Motion>', self.move)
+        self.canvas.bind('<ButtonRelease-1>', self.release)
+        self.canvas.tag_bind('start', '<ButtonRelease-1>', self.confirm)
+        self.root.bind('<Return>', self.confirm)
+        self.root.bind('<Escape>', lambda _: self.root.destroy())
+
+    def run(self) -> Window | Region | None:
+        self.root.focus_force()
+        self.root.mainloop()
+        return self.confirmed
+
+    def local(self, x: int, y: int) -> tuple[int, int]:
+        return x - self.screen.left, y - self.screen.top
+
+    def press(self, event: object) -> None:
+        on_start = 'start' in self.canvas.gettags('current')
+        self.drag = None if on_start else (event.x_root, event.y_root)
+
+    def move(self, event: object) -> None:
+        if self.drag is not None:
+            self.canvas.delete('box')
+            corners = (*self.local(*self.drag), *self.local(event.x_root, event.y_root))
+            self.canvas.create_rectangle(*corners, outline='red', width=2, tags='box')
+
+    def release(self, event: object) -> None:
+        if self.drag is None:
+            return
+        (x0, x1), (y0, y1) = sorted((self.drag[0], event.x_root)), sorted((self.drag[1], event.y_root))
+        self.drag = None
+        self.canvas.delete('box')
+        if x1 - x0 > _JITTER and y1 - y0 > _JITTER:
+            self.mark(Region(x0, y0, x1 - x0, y1 - y0))
+        elif (under := window_at(self.found, x0, y0)) is not None:
+            self.mark(under)
+
+    def mark(self, target: Window | Region) -> None:
+        self.marked = target
+        area = target.client() if isinstance(target, Window) else target
+        x0, y0 = self.local(area.left, area.top)
+        x1, y1 = x0 + area.width, y0 + area.height
+        (w, h), screen = _BUTTON, self.screen
+        bx = min(max(x1 - w, 0), screen.width - w)
+        by = y1 + 8 if y1 + 8 + h <= screen.height else max(y0 - 8 - h, 0)
+        self.canvas.delete('mark')
+        self.canvas.create_rectangle(x0, y0, x1, y1, outline='red', width=3, tags='mark')
+        self.canvas.create_rectangle(bx, by, bx + w, by + h, fill='red', outline='white', tags=('mark', 'start'))
+        self.canvas.create_text(bx + w // 2, by + h // 2, text=START_LABEL, fill='white', tags=('mark', 'start'))
+
+    def confirm(self, _: object = None) -> None:
+        if self.marked is not None:
+            self.confirmed = self.marked
+            self.root.destroy()
+
+
+def select() -> Window | Region:
+    """What the user marks on a dimmed overlay of every monitor, confirmed before it is returned.
+
+    A click marks the window under it, a drag marks a rectangle; marking again replaces the mark. Enter, or the
+    start button under the mark's lower right corner, confirms it; Esc cancels (``KeyboardInterrupt``).
+    """
+    chosen = _Overlay(windows(), virtual_screen()).run()  # windows first: the overlay is never a candidate
+    if chosen is None:
+        msg = 'selection cancelled'
         raise KeyboardInterrupt(msg)
-    return chosen[0]
+    time.sleep(0.2)  # the overlay is repainted away before the first grab
+    return chosen
 
 
 def _pixels(memdc: int, bitmap: int, width: int, height: int) -> np.ndarray:

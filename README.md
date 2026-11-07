@@ -35,12 +35,13 @@ A `Value` keeps the source `text` beside the typed `value` (a `≈`, `≤` or `�
 
 ```
 document-lab capture --list                        # the capturable windows and their handles
-document-lab capture out.pdf --pick                # click a window; it is scrolled to its end
-document-lab capture out.pdf --region --no-scroll  # drag a rectangle; one frame
+document-lab capture out.pdf                       # click a window or drag a rectangle, then Enter/Start
+document-lab capture out.pdf --no-scroll           # the same, one frame
 document-lab capture out.pdf --window "Notepad" --tolerance 4 --ignore-top 48 --ocr chi_sim+eng
 ```
 
-Targets: `--window TITLE` (must match one), `--hwnd`, `--pick`, `--region` (drag), `--rect L,T,W,H`. Scrolling:
+Targets: none marks one on a dimmed overlay (a click: the window under it; a drag: a rectangle; mark again to
+change it; Enter or Start confirms, Esc cancels), or `--window TITLE` (must match one), `--hwnd`, `--rect L,T,W,H`. Scrolling:
 `--method wheel|message|keys`, `--notches`, `--settle`, `--max-frames`, `--max-height`; Esc stops and keeps what
 was captured. A window is read through `PrintWindow`, so another window over it does not show; the wheel, which
 does land on whatever covers it, refuses then (bring it forward, or `--method message`). A view that seems not to have

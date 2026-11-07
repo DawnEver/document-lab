@@ -5,9 +5,11 @@ Its own part, never tests/base: it needs a Windows desktop (and briefly moves th
 skipped.
 """
 
+import ctypes
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -105,3 +107,65 @@ def test_a_wheel_onto_a_covered_window_refuses(viewer):
     finally:
         cover.kill()
         cover.wait()
+
+
+def _gesture(*steps: tuple) -> threading.Thread:
+    """Real input, played once the overlay is up: ('drag', (x, y), (x, y)), ('click', (x, y)) or ('key', vk)."""
+    user32 = ctypes.WinDLL('user32')
+
+    def play() -> None:
+        deadline = time.monotonic() + 15
+        while not user32.IsWindowVisible(user32.FindWindowW(None, desktop.OVERLAY_TITLE)):
+            assert time.monotonic() < deadline, 'the selection overlay never appeared'
+            time.sleep(0.05)
+        time.sleep(0.3)  # mapped is not yet painted and taking input
+        for kind, *where in steps:
+            if kind == 'key':
+                user32.keybd_event(where[0], 0, 0, 0)
+                user32.keybd_event(where[0], 0, 2, 0)
+            else:
+                start, end = where[0], where[-1]
+                user32.SetCursorPos(*start)
+                time.sleep(0.1)
+                user32.mouse_event(0x2, 0, 0, 0, 0)
+                for i in range(1, 11):
+                    user32.SetCursorPos(
+                        start[0] + (end[0] - start[0]) * i // 10, start[1] + (end[1] - start[1]) * i // 10
+                    )
+                    time.sleep(0.03)
+                user32.mouse_event(0x4, 0, 0, 0, 0)
+            time.sleep(0.4)
+
+    thread = threading.Thread(target=play, daemon=True)
+    thread.start()
+    return thread
+
+
+ENTER, ESC = 0x0D, 0x1B
+
+
+def test_a_drag_confirmed_by_enter_is_the_region(viewer):
+    window, _ = viewer
+    area = window.client()
+    start, end = (area.left + 10, area.top + 20), (area.left + 110, area.top + 70)
+    _gesture(('drag', start, end), ('key', ENTER))
+    assert desktop.select() == desktop.Region(area.left + 10, area.top + 20, 100, 50)
+
+
+def test_a_click_marks_the_window_and_start_confirms_it(viewer):
+    window, _ = viewer
+    area = window.client()
+    right, bottom = area.left + area.width, area.top + area.height
+    _gesture(
+        ('drag', (area.left + 10, area.top + 20), (area.left + 110, area.top + 70)),  # replaced by the click
+        ('click', area.centre),
+        ('click', (right - 80, bottom + 28)),  # the start button, under the mark's right end
+    )
+    assert desktop.select() == window
+
+
+def test_nothing_is_taken_before_it_is_confirmed(viewer):
+    window, _ = viewer
+    _gesture(('click', window.client().centre), ('key', ESC))
+    with pytest.raises(KeyboardInterrupt, match='cancelled'):
+        desktop.select()

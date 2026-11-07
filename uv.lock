@@ -666,7 +666,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "ruff", marker = "extra == 'dev'" },
 ]
-provides-extras = ["gpu", "ai", "dev"]
+provides-extras = ["gpu", "ai", "capture", "dev"]
 
 [[package]]
 name = "execnet"

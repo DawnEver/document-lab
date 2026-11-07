@@ -13,6 +13,7 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 | `extract` | typed values against the caller's `Schema` from key-value (`from_rows`) or column (`from_columns`) tables |
 | `ai` | `ask(responder, schema, page_or_table)`: the same values read by a model through ai-lab (`[ai]` extra) |
 | `paper` | `document-lab paper <pdf> <out>`: a paper as per-section markdown (written from the IR, or marker-pdf on a GPU) plus cropped figures/tables/equations |
+| `capture` | `document-lab capture <out.pdf>`: any window or screen region, scrolled to its end and stitched losslessly, to a PDF -- the stage before `read_pdf` (Windows, `[capture]` extra) |
 
 ```python
 from document_lab.pdf import read_pdf
@@ -30,7 +31,27 @@ for page in doc.pages:
 A `Value` keeps the source `text` beside the typed `value` (a `≈`, `≤` or `±25%` is never lost) and a `basis`:
 `rule` (deterministic code here) or `model`. A field the document does not state is absent, never `None`.
 
+## Capture
+
+```
+document-lab capture --list                        # the capturable windows and their handles
+document-lab capture out.pdf --pick                # click a window; it is scrolled to its end
+document-lab capture out.pdf --region --no-scroll  # drag a rectangle; one frame
+document-lab capture out.pdf --window "Notepad" --tolerance 4 --ignore-top 48 --ocr
+```
+
+Targets: `--window TITLE` (must match one), `--hwnd`, `--pick`, `--region` (drag), `--rect L,T,W,H`. Scrolling:
+`--method wheel|message|keys`, `--notches`, `--settle`, `--max-frames`, `--max-height`; Esc stops and keeps what
+was captured. A window is read through `PrintWindow`, so another window over it does not show.
+
+Frames are stitched where their shared rows agree -- exactly by default; `--tolerance` (mean grey difference,
+0-255) absorbs a blinking caret or hover highlight. `--ignore-top/--ignore-bottom` keep fixed chrome once. An overlap
+that fits more than one offset, or none, stops the capture with an error rather than a wrong image: scroll by fewer
+`--notches`, or raise `--min-overlap`. PDF: `--page-height` (pixels; default A4-shaped, `0` one page), `--dpi`,
+`--ocr` (Tesseract), `--png`. In Python: `capture.session.capture(grab, scroll)` takes any source;
+`capture.desktop.Source` is the Windows one.
+
 ## Install
 
 `pip install "document_lab @ git+https://github.com/DawnEver/document-lab.git"`; extras: `gpu` (marker-pdf),
-`ai` (ai-lab). Domain schemas live in the consumers.
+`ai` (ai-lab), `capture` (no packages beyond the base). Domain schemas live in the consumers.

@@ -5,6 +5,7 @@ Its own part, never tests/base: it needs a Windows desktop (and briefly moves th
 skipped.
 """
 
+import contextlib
 import json
 import os
 import subprocess
@@ -45,15 +46,42 @@ def shown(title: str) -> desktop.Window:
     pytest.fail(f'the viewer window {title!r} never appeared: is there an interactive desktop?')
 
 
+LOCK = Path(__file__).resolve().parents[2] / 'output' / 'locks' / 'desktop.lock'
+
+
+@contextlib.contextmanager
+def the_desktop(wait: float = 900):
+    """Hold the one desktop: pytest workers run in parallel, but two windows on one screen cover each other and take
+    each other's input, so a test that shows one waits for this lock across processes."""
+    import msvcrt  # noqa: PLC0415 -- Windows only, like the part
+
+    LOCK.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + wait
+    with LOCK.open('a+b') as handle:
+        while True:
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except OSError:
+                assert time.monotonic() < deadline, f'the desktop stayed held for {wait} s'
+                time.sleep(0.2)
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 @pytest.fixture
 def viewer():
     title, seed = f'document-lab capture fixture {os.getpid()}', 7
-    process = launched(title, seed)
-    try:
-        yield shown(title), picture(seed)
-    finally:
-        process.kill()
-        process.wait()
+    with the_desktop():
+        process = launched(title, seed)
+        try:
+            yield shown(title), picture(seed)
+        finally:
+            process.kill()
+            process.wait()
 
 
 @pytest.mark.parametrize('method', ['wheel', 'message', 'keys'])
@@ -192,6 +220,7 @@ def click():
 o.root.after(300, click)
 print(o.run())
 """
-    done = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=60, check=False)
+    with the_desktop():
+        done = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=60, check=False)
     assert done.returncode == 0, done.stderr
     assert done.stdout.startswith('Region('), done.stdout

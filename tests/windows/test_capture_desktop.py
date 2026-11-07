@@ -84,13 +84,26 @@ def viewer():
             process.wait()
 
 
-@pytest.mark.parametrize('method', ['wheel', 'message', 'keys'])
+@pytest.mark.parametrize('method', ['wheel', 'keys'])
 def test_a_scrolled_window_is_captured_whole(viewer, method):
     window, image = viewer
     source = desktop.Source(window, notches=3, method=method)
     rows = Rows()
     capture(source.grab, source.scroll, rows)
     assert np.array_equal(rows.image(), image)
+
+
+def test_a_posted_wheel_captures_whole_or_says_it_did_not_scroll(viewer):
+    """``message`` posts the wheel without moving the pointer, and Tk routes a wheel to the window under the pointer:
+    where the pointer is elsewhere the viewer ignores it. What is promised is never a short image passed off whole."""
+    window, image = viewer
+    source = desktop.Source(window, notches=3, method='message')
+    rows = Rows()
+    got = capture(source.grab, source.scroll, rows)
+    if got.stuck:
+        assert np.array_equal(rows.image(), image[:VIEW])
+    else:
+        assert np.array_equal(rows.image(), image)
 
 
 def test_the_first_frame_is_the_view(viewer):

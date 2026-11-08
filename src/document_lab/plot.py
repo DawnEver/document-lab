@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Final, Literal
 
 import numpy as np
 
+from document_lab.glyphs import Glyph, UnreadableGlyph, rasterise, read_number
 from document_lab.ir import BBox, Page, Provenance, TextSpan, VectorPath, union
 from document_lab.numbers import parse_number
 
@@ -78,6 +79,12 @@ JOIN_DIGITS: Final = 2
 SAMPLE_MAX: Final = 40.0
 #: The widest gap (points) between a legend sample line and its label.
 SAMPLE_GAP: Final = 10.0
+#: The largest glyph (points, either side) an outlined tick label is set in.
+GLYPH_MAX: Final = 12.0
+#: A glyph below this fraction of a word's height whose bottom sits above it by the rest is raised (an exponent).
+RAISED: Final = 0.85
+#: The widest gap between two glyphs of one outlined label, as a fraction of the label's height.
+WORD_GAP: Final = 0.6
 #: The share of the frame an image must cover for a curve-less plot to count as a raster plot.
 RASTER_COVER: Final = 0.25
 
@@ -170,6 +177,7 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
     """Every vector plot on ``page``; ``x_scale``/``y_scale`` force an axis scale instead of inferring it."""
     edges = _edges(page.paths)
     labels = _labels(page.spans, [e for e in edges if not e.vertical and e.length <= DASH_MAX])
+    labels += _outline_labels(page.paths, [e for e in edges if not e.vertical and e.length <= DASH_MAX])
     # A grid line may stop short of the far edge (a legend sits there), so a long rule anchored on an edge counts.
     found = []
     for frame in _frames(edges):
@@ -201,7 +209,7 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
         )
         if not curves:
             _refuse_raster(page, frame)
-        found.append(Plot(frame, x_axis, y_axis, curves, tuple(legend), page.spans[0].provenance.at(bbox=frame)))
+        found.append(Plot(frame, x_axis, y_axis, curves, tuple(legend), page.paths[0].provenance.at(bbox=frame)))
     return found
 
 
@@ -266,6 +274,98 @@ def _labels(spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> list[_Label]:
             value, box = -value, union([box, minus])
         out.append(_Label(value, box, span.size))
     return out
+
+
+def _outline_labels(paths: Sequence[VectorPath], dashes: Sequence[_Edge]) -> list[_Label]:
+    """Numbers set as filled glyph OUTLINES (a sheet exported with its text converted to paths).
+
+    A glyph is a small filled shape plus the subpaths whose centres it encloses (a ``0``'s hole); a word is a row of
+    glyphs no further apart than ``WORD_GAP`` of its height, and a raised smaller glyph starts a word of its own (an
+    exponent). A word reading ``10`` followed by a raised integer word is that power of ten, as with text labels; a
+    drawn dash before a label (or between ``10`` and its exponent) is its minus. A word the reader cannot read is no
+    label.
+    """
+    words = [w for w in _outline_words(paths) if w[0] is not None]
+    used: set[int] = set()
+    out = []
+    for i, (value, box) in enumerate(words):
+        if i in used:
+            continue
+        if value == 10:  # noqa: PLR2004 -- a power-of-ten base
+            power = _outline_exponent(box, words, dashes)
+            if power is not None:
+                j, exponent = power
+                used.add(j)
+                out.append(_Label(10.0**exponent, union([box, words[j][1]]), round(box.height, 1)))
+                continue
+        minus = _minus_before(box, (), dashes) if value > 0 else None
+        signed = (value, box) if minus is None else (-value, union([box, minus]))
+        out.append(_Label(signed[0], signed[1], round(box.height, 1)))
+    return out
+
+
+def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, BBox]]:
+    """Each row of outlined glyphs with the number it reads as (``None`` when it reads as none)."""
+    shapes = [
+        p
+        for p in paths
+        if p.stroke is None
+        and p.provenance.bbox is not None
+        and len(p.points) > 2  # noqa: PLR2004 -- a fill needs an area
+        and max(p.provenance.bbox.width, p.provenance.bbox.height) <= GLYPH_MAX
+    ]
+    shapes.sort(key=lambda p: -p.provenance.bbox.width * p.provenance.bbox.height)
+    glyphs: list[tuple[BBox, list[tuple[tuple[float, float], ...]]]] = []
+    for shape in shapes:
+        box = shape.provenance.bbox
+        cx, cy = (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2
+        host = next((g for g in glyphs if g[0].contains(cx, cy) and g[0] != box), None)
+        if host is None:
+            glyphs.append((box, [shape.points]))
+        else:
+            host[1].append(shape.points)
+    glyphs.sort(key=lambda g: g[0].x0)
+    words: list[list[tuple[BBox, list]]] = []
+    for glyph in glyphs:
+        box = glyph[0]
+        cy = (box.y0 + box.y1) / 2
+        for word in words:
+            wb = union([g[0] for g in word])
+            same_row = wb.y0 <= cy <= wb.y1 or box.y0 <= (wb.y0 + wb.y1) / 2 <= box.y1
+            raised = box.height < RAISED * wb.height and box.y1 < wb.y1 - (1 - RAISED) * wb.height
+            if same_row and not raised and -EDGE_TOL <= box.x0 - wb.x1 <= WORD_GAP * max(wb.height, box.height):
+                word.append(glyph)
+                break
+        else:
+            words.append([glyph])
+    out: list[tuple[float | None, BBox]] = []
+    for word in words:
+        try:
+            value = read_number([Glyph(rasterise(polys, tuple(box)), tuple(box)) for box, polys in word])
+        except UnreadableGlyph:
+            value = None
+        out.append((value, union([g[0] for g in word])))
+    return out
+
+
+def _outline_exponent(
+    base: BBox, words: Sequence[tuple[float | None, BBox]], dashes: Sequence[_Edge]
+) -> tuple[int, int] | None:
+    """The raised smaller integer word just right of an outlined ``10``, negative when a drawn dash is between."""
+    for j, (power, box) in enumerate(words):
+        if power is None or power != int(power) or box.height >= RAISED * base.height:
+            continue
+        if not (box.y1 < base.y1 - (1 - RAISED) * base.height and box.y1 > base.y0):
+            continue
+        gap = box.x0 - base.x1
+        if -EDGE_TOL <= gap <= EDGE_TOL:
+            return j, int(power)
+        dashed = any(
+            base.x1 - EDGE_TOL <= d.lo and d.hi <= box.x0 + EDGE_TOL and base.y0 <= d.at <= box.y1 for d in dashes
+        )
+        if 0 < gap <= DASH_MAX + EDGE_TOL and dashed and power > 0:
+            return j, -int(power)
+    return None
 
 
 def _glyph_runs(spans: Sequence[TextSpan]) -> list[TextSpan]:

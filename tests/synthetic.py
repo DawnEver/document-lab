@@ -210,10 +210,18 @@ def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
         page.insert_text((x + 24, y + FONT_SIZE * 0.35), text, fontname='helv', fontsize=FONT_SIZE)
 
 
-def plot_pdf(path: Path, *specs: PlotSpec) -> Path:
+def plot_pdf(path: Path, *specs: PlotSpec, outlined: bool = False) -> Path:
+    """One page per spec; ``outlined`` sets every glyph as a filled outline (no text), as some sheets are exported."""
     doc = pymupdf.open()
     for spec in specs:
         draw_plot(doc.new_page(width=612, height=792), spec)
+    if outlined:
+        out = pymupdf.open()
+        for page in doc:
+            svg = pymupdf.open('svg', page.get_svg_image(text_as_path=True).encode())
+            out.insert_pdf(pymupdf.open('pdf', svg.convert_to_pdf()))
+        doc.close()
+        doc = out
     doc.save(path)
     doc.close()
     return path

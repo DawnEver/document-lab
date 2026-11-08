@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, NamedTuple
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
+    import numpy as np
+
 __all__ = [
     'BBox',
     'Cell',
@@ -20,6 +22,7 @@ __all__ = [
     'Figure',
     'Page',
     'Provenance',
+    'Raster',
     'Table',
     'TextSpan',
     'VectorPath',
@@ -154,6 +157,23 @@ class Figure:
 
     provenance: Provenance
     caption: str | None = None
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class Raster:
+    """A page region as pixels: RGB ``uint8`` rows top-down, spanning ``provenance.bbox`` edge to edge."""
+
+    pixels: np.ndarray
+    provenance: Provenance
+
+    def __post_init__(self) -> None:
+        """Refuse pixels that are not rows x columns x RGB, and a raster that cites no box."""
+        if self.pixels.ndim != 3 or self.pixels.shape[2] != 3:  # noqa: PLR2004 -- RGB
+            msg = f'pixels of shape {self.pixels.shape}: need rows x columns x 3'
+            raise ValueError(msg)
+        if self.provenance.bbox is None:
+            msg = 'a raster must cite the box it covers'
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)

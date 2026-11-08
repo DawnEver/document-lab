@@ -30,7 +30,12 @@ class Axis:
     labels: Sequence[str] | None = None  # defaults to the tick values' shortest spelling
     power_labels: bool = False  # draw "10" plus a raised exponent span instead of the value
     vector_minus: bool = False  # a negative exponent's minus is a drawn dash, not a glyph
-    span_minus: bool = False  # a negative label's minus is its own span (another font), apart from its digits
+    #: A negative label's (or exponent's) minus is its own span (another font), apart from its digits.
+    span_minus: bool = False
+    #: Each glyph of an x label is its own span (alternating fonts), as some typesetters emit them.
+    glyph_spans: bool = False
+    #: Points between a drawn minus and its digits' box; negative when the dash runs into the box.
+    minus_gap: float = 1.0
     label_drop: float = 0.0  # points a y label sits below its tick, as real sheets' labels do
     at: Sequence[float] | None = None  # each tick's fraction along the frame; a broken axis changes scale at one
 
@@ -77,19 +82,34 @@ def _centered(page: pymupdf.Page, text: str, cx: float, cy: float, size: float =
     page.insert_text((cx - width / 2, cy + size * 0.35), text, fontname='helv', fontsize=size)
 
 
-def _power_label(page: pymupdf.Page, value: float, right: float, cy: float, *, vector_minus: bool) -> None:
+def _power_label(
+    page: pymupdf.Page, value: float, right: float, cy: float, *, vector_minus: bool, span_minus: bool = False
+) -> None:
     exp = str(round(math.log10(value)))
     small = FONT_SIZE * 0.6
     dash = vector_minus and exp.startswith('-')
-    shown = exp[1:] if dash else exp
+    glyph = span_minus and exp.startswith('-')
+    shown = exp[1:] if dash or glyph else exp
     base_w = pymupdf.get_text_length('10', fontname='helv', fontsize=FONT_SIZE)
-    dash_w = 3.5 if dash else 0.0
+    dash_w = 3.5 if dash else pymupdf.get_text_length('-', fontname='tiro', fontsize=small) if glyph else 0.0
     exp_w = pymupdf.get_text_length(shown, fontname='helv', fontsize=small)
     x0 = right - base_w - dash_w - exp_w
     page.insert_text((x0, cy + FONT_SIZE * 0.35), '10', fontname='helv', fontsize=FONT_SIZE)
     if dash:
         page.draw_line((x0 + base_w + 0.5, cy - 2.6), (x0 + base_w + 3.0, cy - 2.6), color=(0, 0, 0), width=0.4)
+    if glyph:
+        page.insert_text((x0 + base_w, cy - FONT_SIZE * 0.3), '-', fontname='tiro', fontsize=small)
     page.insert_text((x0 + base_w + dash_w, cy - FONT_SIZE * 0.3), shown, fontname='helv', fontsize=small)
+
+
+def _glyphs(page: pymupdf.Page, text: str, cx: float, cy: float) -> None:
+    """``text`` centred on ``cx``, one span per glyph: neighbours alternate font, so no reader merges them."""
+    fonts = ('helv', 'cour')
+    widths = [pymupdf.get_text_length(ch, fontname=fonts[i % 2], fontsize=FONT_SIZE) for i, ch in enumerate(text)]
+    x = cx - sum(widths) / 2
+    for i, (ch, w) in enumerate(zip(text, widths, strict=True)):
+        page.insert_text((x, cy + FONT_SIZE * 0.35), ch, fontname=fonts[i % 2], fontsize=FONT_SIZE)
+        x += w
 
 
 def _minor(ticks: Sequence[float]) -> list[float]:
@@ -125,6 +145,9 @@ def _minus_span(page: pymupdf.Page, text: str, cx: float, cy: float) -> None:
 def _x_label(page: pymupdf.Page, spec: PlotSpec, text: str, px: float) -> None:
     """A label centred on its tick; a drawn minus is part of the centred whole, as typeset labels are."""
     y = spec.frame.y1 + 10
+    if spec.x.glyph_spans:
+        _glyphs(page, text, px, y)
+        return
     if spec.x.span_minus and text.startswith('-'):
         _minus_span(page, text, px, y)
         return
@@ -133,9 +156,10 @@ def _x_label(page: pymupdf.Page, spec: PlotSpec, text: str, px: float) -> None:
         return
     digits = text[1:]
     width = pymupdf.get_text_length(digits, fontname='helv', fontsize=FONT_SIZE)
-    start = px - (3.5 + width) / 2
+    lead = 2.5 + spec.x.minus_gap
+    start = px - (lead + width) / 2
     page.draw_line((start, y - 0.5), (start + 2.5, y - 0.5), color=(0, 0, 0), width=0.5)
-    _centered(page, digits, start + 3.5 + width / 2, y)
+    _centered(page, digits, start + lead + width / 2, y)
 
 
 def _y_axis(page: pymupdf.Page, spec: PlotSpec) -> None:
@@ -148,7 +172,7 @@ def _y_axis(page: pymupdf.Page, spec: PlotSpec) -> None:
             page.draw_line((f.x0, py), (f.x0 + spec.grid_reach * f.width, py), color=(0.7, 0.7, 0.7), width=0.3)
         py += spec.y.label_drop
         if spec.y.power_labels:
-            _power_label(page, v, f.x0 - 4, py, vector_minus=spec.y.vector_minus)
+            _power_label(page, v, f.x0 - 4, py, vector_minus=spec.y.vector_minus, span_minus=spec.y.span_minus)
             continue
         text = spec.y.labels[i] if spec.y.labels else _label(v)
         width = pymupdf.get_text_length(text, fontname='helv', fontsize=FONT_SIZE)

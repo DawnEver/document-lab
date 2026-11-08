@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Final
 
 from lab_commons.log import emit
 
+from document_lab.capture.session import Pace
+
 if TYPE_CHECKING:
     import numpy as np
 
@@ -48,7 +50,16 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     scroll.add_argument('--no-scroll', action='store_true', help='one frame: what the target shows now')
     scroll.add_argument('--auto', action='store_true', help='it scrolls for you, to the end of the view')
     scroll.add_argument('--method', choices=('wheel', 'message', 'keys'), default='wheel', help='how --auto scrolls')
-    scroll.add_argument('--notches', type=int, default=1, help='--auto: wheel notches (or Down presses) per step')
+    scroll.add_argument(
+        '--notches', type=int, default=Pace.first, help='--auto: wheel notches (or Down presses) of the first step'
+    )
+    scroll.add_argument(
+        '--stride',
+        type=float,
+        default=Pace.stride,
+        help='--auto: the share of the view each step scrolls, its notches measured and grown to it (0: --notches '
+        'every step; nearer 1 is faster, and riskier where a notch varies)',
+    )
     scroll.add_argument('--delay', type=float, default=1.0, help='--auto: seconds to wait before the first frame')
     scroll.add_argument(
         '--settle', type=float, default=0.12, help='--auto: seconds between grabs while the view settles'
@@ -259,6 +270,7 @@ def run(args: argparse.Namespace) -> int:
                 limits=limits,
                 match=match,
                 settling=Settling(interval=args.settle, end_wait=args.end_wait),
+                pace=Pace(args.notches, args.stride),
                 drop_overlays=args.drop_overlays,
                 aborted=shown.stopped,
                 progress=shown.progress,

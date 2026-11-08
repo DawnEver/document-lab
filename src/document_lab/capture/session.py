@@ -24,7 +24,7 @@ from document_lab.capture.stitch import Match, Stitcher, Unstitchable, offset
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-__all__ = ['Capture', 'Limits', 'Lost', 'Rows', 'Settling', 'capture', 'follow']
+__all__ = ['Capture', 'Limits', 'Lost', 'Pace', 'Rows', 'Settling', 'capture', 'follow']
 
 
 @dataclass(frozen=True)
@@ -47,6 +47,25 @@ class Settling:
     interval: float = 0.12
     tries: int = 15
     end_wait: float = 0.8
+
+
+@dataclass(frozen=True)
+class Pace:
+    """How far each automatic scroll goes: ``first`` notches, then as many as move ``stride`` of the view.
+
+    A notch scrolls however far the application makes it -- a few rows at one zoom, a screenful at another -- so it is
+    measured, not assumed: each step's rows per notch set the next step's notches, at most doubling, so a step never
+    outruns what consecutive frames must share. ``stride`` 0 keeps ``first`` notches every step.
+    """
+
+    first: int = 1
+    stride: float = 0.5
+
+    def next(self, notches: int, moved: int, rows: int) -> int:
+        """The notches for the step after one of ``notches`` that moved ``moved`` of a ``rows``-row view."""
+        if not (self.stride and moved):
+            return notches
+        return max(1, min(2 * notches, round(self.stride * rows * notches / moved)))
 
 
 @dataclass(frozen=True)
@@ -106,12 +125,13 @@ def _ignore(_: Stitcher) -> None:
 
 def capture(
     grab: Callable[[], np.ndarray],
-    scroll: Callable[[], None] | None,
+    scroll: Callable[[int], None] | None,
     sink: Callable[[np.ndarray], None],
     *,
     limits: Limits = Limits(),  # noqa: B008 -- frozen
     match: Match = Match(),  # noqa: B008 -- frozen
     settling: Settling = Settling(),  # noqa: B008 -- frozen
+    pace: Pace = Pace(),  # noqa: B008 -- frozen
     drop_overlays: bool = False,
     aborted: Callable[[], bool] = _never,
     progress: Callable[[Stitcher], None] = _ignore,
@@ -119,9 +139,12 @@ def capture(
 ) -> Capture:
     """What the source shows from its current position to its end, to ``sink``; one frame when ``scroll`` is None.
 
-    ``progress`` sees the stitcher after every frame it placed.
+    ``scroll(n)`` scrolls ``n`` notches down, as many as ``pace`` says. ``progress`` sees the stitcher after every
+    frame it placed.
     """
-    stitcher = Stitcher(grab(), match, drop_overlays=drop_overlays)
+    first = grab()
+    stitcher = Stitcher(first, match, drop_overlays=drop_overlays)
+    notches = pace.first
     frames, stopped = 1, 'one frame' if scroll is None else 'end'
     try:
         while scroll is not None:
@@ -134,11 +157,13 @@ def capture(
             if aborted():
                 stopped = 'aborted'
                 break
-            scroll()
-            if not stitcher.add(_settled(grab, settling, sleep)):
+            scroll(notches)
+            moved = stitcher.add(_settled(grab, settling, sleep))
+            if not moved:
                 sleep(settling.end_wait)
-                if not stitcher.add(_settled(grab, settling, sleep)):
+                if not (moved := stitcher.add(_settled(grab, settling, sleep))):
                     break
+            notches = pace.next(notches, moved, len(first))
             frames += 1
             sink(stitcher.drain())
             progress(stitcher)

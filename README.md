@@ -59,7 +59,8 @@ Scrolling: by default you scroll -- wheel, scrollbar, keys, at your own pace -- 
 flick too far, or back up -- is looked for in the last three views captured and picks up wherever it overlaps them;
 only a view outside all of them is skipped, the frame turning red with which way to go back. The Finish button on
 the panel ends it (not a key, which is too easily hit). Frames placed to a fraction of a row add up without drift. `--auto` scrolls for you
-(`--method wheel|message|keys`, `--notches`) until the view stops moving -- `--end-wait` (default 0.8 s) gives a feed
+(`--method wheel|message|keys`) until the view stops moving, each step about half the view: a notch is measured, not
+assumed, and the notches grow to `--stride` of the view (default 0.5; 0 keeps `--notches`, the first step, every step) -- `--end-wait` (default 0.8 s) gives a feed
 that loads more time to grow -- and says so, exit 1, if its first scroll moved nothing. Neither has a length cap unless
 `--max-frames`/`--max-height`; the height so far shows while it runs. A window is read
 through `PrintWindow`, so another window over it does not show; the wheel, which does land on whatever covers it,

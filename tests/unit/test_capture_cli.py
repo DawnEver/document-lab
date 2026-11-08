@@ -27,8 +27,8 @@ class FakeSource:
     def grab(self):
         return self.view.grab()
 
-    def scroll(self):
-        self.view.scroll()
+    def scroll(self, notches=1):
+        self.view.scroll(notches)
 
 
 class FakeHud:

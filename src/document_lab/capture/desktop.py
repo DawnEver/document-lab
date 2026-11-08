@@ -861,6 +861,6 @@ class Source:
         """The target's pixels now."""
         return grab(self.target)
 
-    def scroll(self) -> None:
-        """Scroll the target down one step."""
-        scroll(self.target, self.notches, self.method)
+    def scroll(self, notches: int | None = None) -> None:
+        """Scroll the target down ``notches`` notches (or Down presses); ``self.notches`` when None."""
+        scroll(self.target, self.notches if notches is None else notches, self.method)

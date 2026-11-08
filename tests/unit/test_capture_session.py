@@ -3,7 +3,7 @@ its caps, and waits for a frame that is still changing to settle."""
 
 import numpy as np
 
-from document_lab.capture.session import Limits, Rows, capture, follow
+from document_lab.capture.session import Limits, Pace, Rows, capture, follow
 from tests.unit.test_capture_stitch import tall
 
 
@@ -19,10 +19,10 @@ class Viewport:
         self.pending = max(self.pending - 1, 0)
         return self.image[top : top + self.height].copy()
 
-    def scroll(self) -> None:
+    def scroll(self, notches: int = 1) -> None:
         self.scrolls += 1
         before = self.top
-        self.top = min(self.top + self.step, len(self.image) - self.height)
+        self.top = min(self.top + self.step * notches, len(self.image) - self.height)
         self.moved, self.pending = self.top - before, self.lag
 
 
@@ -58,8 +58,8 @@ class LateViewport(Viewport):
             self.shown = self.top
         return self.image[self.shown : self.shown + self.height].copy()
 
-    def scroll(self) -> None:
-        super().scroll()
+    def scroll(self, notches: int = 1) -> None:
+        super().scroll(notches)
         self.waiting = self.late
 
 
@@ -79,7 +79,7 @@ def test_without_scroll_it_is_one_frame():
 
 def test_max_frames_caps_it():
     view = Viewport(tall(2000), 300, 100)
-    assert len(run(view, limits=Limits(max_frames=3))) == 500
+    assert len(run(view, limits=Limits(max_frames=3), pace=Pace(stride=0))) == 500  # 100 rows a step
 
 
 def test_max_height_caps_it():
@@ -90,7 +90,7 @@ def test_max_height_caps_it():
 def test_abort_stops_with_what_it_has():
     view = Viewport(tall(2000), 300, 100)
     calls = iter([False, False, True])
-    assert len(run(view, aborted=lambda: next(calls))) == 500
+    assert len(run(view, aborted=lambda: next(calls), pace=Pace(stride=0))) == 500
 
 
 def test_a_scroll_too_large_to_stitch_keeps_the_first_frame_and_says_why():
@@ -176,3 +176,17 @@ def test_a_pause_over_a_blank_view_is_not_lost():
     hand, rows, lost = Hand(image, 300, [0, 0, 0, 0]), Rows(), []
     follow(hand.grab, rows, aborted=hand.esc, lost=lost.append, sleep=lambda _: None)
     assert lost == []
+
+
+def test_a_small_notch_is_measured_and_the_steps_grow_to_half_the_view():
+    image = tall(3000)
+    paced, fixed = Viewport(image, 300, 30), Viewport(image, 300, 30)  # a notch scrolls only 30 rows
+    assert np.array_equal(run(paced), image)
+    assert np.array_equal(run(fixed, pace=Pace(stride=0)), image)
+    assert paced.scrolls < fixed.scrolls // 4  # 1, 2, 4, then 5 notches (150 rows) a step
+
+
+def test_a_large_notch_is_cut_down_to_half_the_view():
+    assert Pace().next(4, 280, 300) == 2  # 70 rows a notch: two make 140, about half of 300
+    assert Pace().next(3, 0, 300) == 3  # nothing moved: nothing measured
+    assert Pace(stride=0).next(3, 30, 300) == 3

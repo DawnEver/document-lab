@@ -3,6 +3,7 @@ from pathlib import Path
 
 from document_lab.paper.output import build_index, write_paper_output, write_section_files
 
+EN_DASH = chr(0x2013)  # the dash a standard's caption prints: "Figure 1 - Title" with an en dash
 LONG_BODY = 'Long body text that passes all thresholds. ' * 20
 
 
@@ -95,6 +96,43 @@ class TestBuildIndex:
             _, _ = build_index(out_dir, md_dir, sections, figure_images)
             content = (out_dir / 'INDEX.md').read_text(encoding='utf-8')
             assert 'img/sec01/page-04-figure-3.png' in content
+
+    def _index(self, body: str, figure_images: dict[str, str] | None = None) -> str:
+        sections = [('## Shapes', body)]
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            md_dir = out_dir / 'md'
+            write_section_files(sections, md_dir)
+            build_index(out_dir, md_dir, sections, figure_images or {})
+            return (out_dir / 'INDEX.md').read_text(encoding='utf-8')
+
+    def test_a_scanned_figure_is_the_converter_image_above_its_caption(self):
+        # A scanned page has no text layer to crop by: the image the converter placed above the caption is the figure.
+        body = (
+            'Figure 1 shows the core.\n\n![](../img/sec01/_page_3_Picture_4.jpeg)\n\n'
+            f'Figure 1 {EN_DASH} Location of main core parts\n\nText.\n'
+        )
+        content = self._index(body)
+        row = '| Figure 1 | img/sec01/_page_3_Picture_4.jpeg | md/01-shapes.md | Location of main core parts |'
+        assert row in content
+
+    def test_an_image_above_an_earlier_caption_is_not_the_next_figure(self):
+        body = (
+            f'![](../img/sec01/a.jpeg)\n\nFigure 1 {EN_DASH} First\n\nFigure 2 shows nothing drawn.\n\n'
+            'Figure 2 - Second, with no image of its own\n'
+        )
+        content = self._index(body)
+        assert '| Figure 1 | img/sec01/a.jpeg | md/01-shapes.md | First |' in content
+        assert '| Figure 2 | — | md/01-shapes.md | Second, with no image of its own |' in content
+
+    def test_a_table_caption_is_indexed_with_its_title(self):
+        content = self._index(f'Table 3 {EN_DASH} Dimensions of RM-cores\n\n| a | b |\n|---|---|\n| 1 | 2 |\n')
+        assert '| Table 3 | — | md/01-shapes.md | Dimensions of RM-cores |' in content
+
+    def test_a_cropped_render_wins_over_the_converter_image(self):
+        body = '![](../img/sec01/a.jpeg)\n\nFigure 1: First\n'
+        content = self._index(body, {'Figure 1': 'img/sec01/page-02-figure-1.png'})
+        assert '| Figure 1 | img/sec01/page-02-figure-1.png | md/01-shapes.md | First |' in content
 
 
 class TestWritePaperOutput:

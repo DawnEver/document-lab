@@ -187,6 +187,35 @@ def clean_all_sections(out_dir: Path, body_sections: list[tuple[str, str]]) -> i
 
 # ── INDEX.md builder ─────────────────────────────────────────────────────────
 
+#: A caption line: ``Figure 1 - Title`` (any dash, colon or stop) alone on its line, bold or italic marks allowed.
+_CAPTION_LINE = re.compile(
+    r'^[*_ ]*(Figure\s+\d+|Fig\.\s*\d+|Table\s+(?:\d+|'
+    + _RN
+    + r'))[*_ ]*\s*['
+    + chr(0x2013)  # en dash
+    + chr(0x2014)  # em dash
+    + r':.-]\s*(.+?)[*_ ]*$',
+    re.MULTILINE,
+)
+_IMAGE_REF = re.compile(r'!\[[^\]]*\]\((?:\.\./)?([^)\s]+)[^)]*\)')
+
+
+def caption_images(content: str) -> dict[str, tuple[str, str | None]]:
+    """Each caption line's label -> (title, the image the converter placed above it, else ``None``).
+
+    A figure's image is the last image reference between the previous caption line and its own: on a page with no
+    text layer to crop by (a scan) that converter image IS the figure. A table carries no image here.
+    """
+    found: dict[str, tuple[str, str | None]] = {}
+    start = 0
+    for m in _CAPTION_LINE.finditer(content):
+        label = re.sub(r'(?i)^Fig\.\s*', 'Figure ', re.sub(r'\s+', ' ', m.group(1)))
+        images = _IMAGE_REF.findall(content, start, m.start())
+        image = images[-1] if images and label.lower().startswith('figure') else None
+        found.setdefault(label, (m.group(2).strip().replace('|', '\\|'), image))
+        start = m.end()
+    return found
+
 
 def build_index(
     out_dir: Path,
@@ -200,20 +229,25 @@ def build_index(
         '|--------|------|---------------|---------|',
     ]
     fig_pattern = re.compile(rf'(Figure\s+\d+|Fig\.\s*\d+|Table\s+(?:\d+|{_RN}))', re.IGNORECASE)
-    seen: dict[str, str] = {}
+    contents: list[tuple[str, str]] = []
     for idx_s, (heading, _) in enumerate(body_sections, 1):
         s = slug(heading) or 'body'
         sec_file = md_dir / f'{idx_s:02d}-{s}.md'
-        if not sec_file.exists():
-            continue
-        content = sec_file.read_text(encoding='utf-8')
+        if sec_file.exists():
+            contents.append((f'md/{idx_s:02d}-{s}.md', sec_file.read_text(encoding='utf-8')))
+    captioned: dict[str, tuple[str, str | None]] = {}
+    for _, content in contents:
+        for label, found in caption_images(content).items():
+            captioned.setdefault(label, found)
+    seen: set[str] = set()
+    for where, content in contents:
         for m in fig_pattern.finditer(content):
-            label = m.group(1)
-            normalized_label = re.sub(r'(?i)^Fig\.\s*', 'Figure ', label)
+            normalized_label = re.sub(r'(?i)^Fig\.\s*', 'Figure ', m.group(1))
             if normalized_label not in seen:
-                seen[normalized_label] = f'md/{idx_s:02d}-{s}.md'
-                img_path = figure_images.get(normalized_label, '—')
-                index_rows.append(f'| {normalized_label} | {img_path} | md/{idx_s:02d}-{s}.md | — |')
+                seen.add(normalized_label)
+                caption, image = captioned.get(normalized_label, ('—', None))
+                img_path = figure_images.get(normalized_label) or image or '—'
+                index_rows.append(f'| {normalized_label} | {img_path} | {where} | {caption} |')
 
     (out_dir / 'INDEX.md').write_text('# Figure / Table Index\n\n' + '\n'.join(index_rows) + '\n', encoding='utf-8')
 

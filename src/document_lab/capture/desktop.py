@@ -49,6 +49,7 @@ _WM_MOUSEWHEEL: Final = 0x020A
 _MOUSEEVENTF_WHEEL: Final = 0x0800
 _KEYEVENTF_KEYUP: Final = 0x0002
 _VK_DOWN: Final = 0x28
+_VK_UP: Final = 0x26
 _VK_ESCAPE: Final = 0x1B
 _VK_LBUTTON: Final = 0x01
 _GA_ROOT: Final = 2
@@ -284,6 +285,7 @@ _DIM: Final = 0.45  # the overlay's opacity: how dark the screen outside the mar
 _HOLE: Final = '#ff00fe'  # the colour Windows leaves fully transparent in the overlay: the mark is painted in it
 _GLASS: Final = 0.01  # the opacity of the pane over the mark: invisible, yet it takes the mouse (0 would not)
 _PANEL: Final = '#202020'
+_SHOWN_MS: Final = 150  # how long the overlay takes to be shown and active, before a remembered mark
 
 
 def _photo(image: np.ndarray) -> bytes:
@@ -383,8 +385,7 @@ class _Overlay:
         self.glass.bind('<Return>', self.confirm)
         self.glass.bind('<Escape>', lambda _: self.root.quit())
         self.glass.withdraw()
-        if marked is not None:
-            self.mark(marked)
+        self.premarked = marked  # marked in run(), once the overlay is up: marked now, it would cover the button
 
     def _window(self, tk: object) -> object:
         window = tk.Toplevel(self.root, bg=_PANEL)
@@ -395,7 +396,9 @@ class _Overlay:
         return window
 
     def run(self) -> Window | Region | None:
-        self.root.focus_force()
+        self.root.focus_force()  # raises the overlay: before the mark, whose button and glass must end above it
+        if self.premarked is not None:
+            self.root.after(_SHOWN_MS, self.mark, self.premarked)  # once the overlay is up and active
         self.root.mainloop()
         # Destroyed only once the loop is left: destroying it inside a handler frees the canvas while the same event
         # still runs its other bindings on it (Tcl: "alloc: invalid block").
@@ -661,7 +664,7 @@ def _bring_to_front(window: int) -> None:
 
 
 def scroll(target: Window | Region, notches: int, method: str = 'wheel') -> None:
-    """Scroll the view under ``target``'s centre down by ``notches`` wheel notches (or Down presses)."""
+    """Scroll the view under ``target``'s centre by ``notches`` wheel notches (or arrow presses): down, up if < 0."""
     user32 = _dll('user32')
     area = target.client() if isinstance(target, Window) else target
     x, y = area.centre
@@ -688,9 +691,10 @@ def scroll(target: Window | Region, notches: int, method: str = 'wheel') -> None
             else user32.GetAncestor(user32.WindowFromPoint(wintypes.POINT(x, y)), _GA_ROOT)
         )
         _bring_to_front(window)
-        down = _Input(1, _InputUnion(ki=_KeybdInput(_VK_DOWN, 0, 0, 0, 0)))
-        up = _Input(1, _InputUnion(ki=_KeybdInput(_VK_DOWN, 0, _KEYEVENTF_KEYUP, 0, 0)))
-        _send(*[event for _ in range(notches) for event in (down, up)])
+        key = _VK_DOWN if notches > 0 else _VK_UP
+        down = _Input(1, _InputUnion(ki=_KeybdInput(key, 0, 0, 0, 0)))
+        up = _Input(1, _InputUnion(ki=_KeybdInput(key, 0, _KEYEVENTF_KEYUP, 0, 0)))
+        _send(*[event for _ in range(abs(notches)) for event in (down, up)])
     else:
         msg = f'scroll method {method!r} is not one of {SCROLL_METHODS}'
         raise ValueError(msg)

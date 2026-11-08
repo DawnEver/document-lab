@@ -182,3 +182,19 @@ def test_auto_scroll_on_the_panel_scrolls_for_the_user_to_the_end(tmp_path, fake
     assert run(tmp_path, '--page-height', '0') == 0  # no --auto: the panel chose it
     image, _ = pdf_pixels(tmp_path / 'c.pdf')
     assert np.array_equal(image, fake.IMAGE)
+
+
+def test_an_existing_output_is_refused_before_anything_unless_overwrite(tmp_path, fake, monkeypatch):
+    for name in ('c.pdf', 'c.png'):
+        (tmp_path / name).write_bytes(b'the document on screen')
+    asked = []
+    monkeypatch.setattr(FakeHud, 'ready', lambda self: asked.append(1) or 'start')
+    with pytest.raises(FileExistsError, match='--overwrite'):
+        run(tmp_path, '--no-scroll', '--png', str(tmp_path / 'c.png'))
+    (tmp_path / 'c.pdf').unlink()
+    with pytest.raises(FileExistsError, match=r'c\.png'):
+        run(tmp_path, '--no-scroll', '--png', str(tmp_path / 'c.png'))
+    assert not asked  # refused before the area was even waited on
+    assert (tmp_path / 'c.png').read_bytes() == b'the document on screen'
+    assert run(tmp_path, '--no-scroll', '--png', str(tmp_path / 'c.png'), '--overwrite') == 0
+    assert (tmp_path / 'c.png').read_bytes() != b'the document on screen'

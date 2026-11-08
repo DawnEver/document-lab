@@ -22,7 +22,7 @@ class Viewport:
     def scroll(self, notches: int = 1) -> None:
         self.scrolls += 1
         before = self.top
-        self.top = min(self.top + self.step * notches, len(self.image) - self.height)
+        self.top = min(max(self.top + self.step * notches, 0), len(self.image) - self.height)
         self.moved, self.pending = self.top - before, self.lag
 
 
@@ -117,12 +117,12 @@ def test_progress_sees_every_placed_frame():
     assert heights == [470, 640, 810, 980, 1150, 1234]
 
 
-def test_an_endless_view_streams_and_holds_one_view():
+def test_an_endless_view_streams_and_holds_a_bounded_history():
     image = tall(30000)
     view, rows, held = Viewport(image, 300, 170), Rows(), []
     got = capture(view.grab, view.scroll, rows, sleep=lambda _: None, progress=lambda s: held.append(s.held))
     assert got.complete
-    assert max(held) <= 3 * 300
+    assert max(held) <= 4 * 300  # three views of history, kept to recover in, and the view
     assert np.array_equal(rows.image(), image)
 
 
@@ -190,3 +190,53 @@ def test_a_large_notch_is_cut_down_to_half_the_view():
     assert Pace().next(4, 280, 300) == 2  # 70 rows a notch: two make 140, about half of 300
     assert Pace().next(3, 0, 300) == 3  # nothing moved: nothing measured
     assert Pace(stride=0).next(3, 30, 300) == 3
+
+
+class Glitchy(Viewport):
+    """A view whose ``bad``-th scroll goes ``jump`` rows further at once, or shows ``noise`` rendering for one grab."""
+
+    def __init__(self, image, height, step, bad, *, jump=0, noise=False):
+        super().__init__(image, height, step)
+        self.bad, self.jump, self.noise, self.ups = bad, jump, noise, 0
+
+    def scroll(self, notches=1):
+        self.ups += notches < 0
+        super().scroll(notches)
+        if self.scrolls == self.bad and notches > 0:
+            self.top = min(self.top + self.jump, len(self.image) - self.height)
+            self.noisy = self.noise
+
+    def grab(self):
+        frame = super().grab()
+        if getattr(self, 'noisy', False):
+            self.noisy = False
+            frame = np.random.default_rng(0).integers(0, 256, frame.shape, dtype=np.uint8)
+        return frame
+
+
+def test_a_frame_caught_mid_render_is_looked_at_again_not_the_end():
+    image = tall(1500)
+    view = Glitchy(image, 300, 150, bad=3, noise=True)
+    assert np.array_equal(run(view, pace=Pace(stride=0)), image)
+    assert not view.ups  # looking again was enough
+
+
+def test_a_step_that_outran_the_overlap_scrolls_back_and_goes_on():
+    image = tall(2000)
+    view = Glitchy(image, 300, 150, bad=3, jump=300)  # 450 rows at once: nothing shared with a 300-row view
+    lost = []
+    assert np.array_equal(run(view, pace=Pace(stride=0), lost=lost.append), image)
+    assert view.ups and not lost
+
+
+def test_a_view_that_cannot_be_recovered_is_told_lost_and_ends_the_capture():
+    image = tall(2000)
+    view = Glitchy(image, 300, 150, bad=3, jump=300)
+    lost = []
+    rows = Rows()
+    done = capture(
+        view.grab, lambda n: view.scroll(max(n, 1)), rows, pace=Pace(stride=0), lost=lost.append, sleep=lambda _: None
+    )  # a scroll that cannot go back up
+    assert done.stopped.startswith('unstitchable: ')
+    assert len(lost) == 1
+    assert np.array_equal(rows.image(), image[: done.height])

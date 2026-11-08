@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Final
 from lab_commons.log import emit
 
 from document_lab.capture.session import Pace
+from document_lab.capture.stitch import Match
 
 if TYPE_CHECKING:
     import numpy as np
@@ -90,7 +91,12 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     match.add_argument('--ignore-top', type=int, default=0, help='rows at the top never matched (changing chrome)')
     match.add_argument('--ignore-bottom', type=int, default=0, help='rows at the bottom never matched')
     match.add_argument('--min-overlap', type=int, help='fewest rows two frames must share (default: 1/4 view)')
-    match.add_argument('--tolerance', type=float, default=0, help='grey levels a cell may differ by (0: exact)')
+    match.add_argument(
+        '--tolerance',
+        type=float,
+        default=Match.tolerance,
+        help=f'mean grey levels the shared rows may differ by (default {Match.tolerance:g}; 0: exact)',
+    )
     match.add_argument(
         '--outliers',
         type=float,
@@ -108,6 +114,9 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="add a searchable text layer in Tesseract's LANGS (default eng; e.g. chi_sim+eng)",
     )
     pdf.add_argument('--png', type=Path, help='also write the stitched image here')
+    pdf.add_argument(
+        '--overwrite', action='store_true', help='replace an existing PDF or PNG (default: refuse, before anything)'
+    )
     return capture
 
 
@@ -180,7 +189,7 @@ def _report(result: Capture) -> int:
     if result.stopped.startswith('unstitchable: '):
         reason = result.stopped.removeprefix('unstitchable: ')
         emit(f'stopped after {result.frames} frames, short of the end: {reason}')
-        emit('what was stitched is written; try --tolerance 8, or scroll yourself (leave out --auto)')
+        emit('what was stitched is written; try a larger --tolerance, or scroll yourself (leave out --auto)')
         return 1
     if result.stuck:
         emit('the first scroll moved nothing, so only one screen was captured: what is under the middle of the area')
@@ -210,12 +219,19 @@ def _started(target: Window | Region) -> tuple[Window | Region, Region, Hud, boo
         target = desktop.select(target)
 
 
+def _refuse_existing(args: argparse.Namespace) -> None:
+    """Refuse an output that exists, unless ``--overwrite``: it may be the very document on screen."""
+    for path in (args.out, args.png):
+        if path is not None and path.exists() and not args.overwrite:
+            msg = f'{path} exists: name another output, or add --overwrite to replace it'
+            raise FileExistsError(msg)
+
+
 def run(args: argparse.Namespace) -> int:
     """Run ``document-lab capture`` with the parsed ``args``; the exit status."""
     from document_lab.capture import desktop  # noqa: PLC0415
     from document_lab.capture.export import PdfWriter, PngWriter  # noqa: PLC0415
     from document_lab.capture.session import Limits, Settling, capture, follow  # noqa: PLC0415
-    from document_lab.capture.stitch import Match  # noqa: PLC0415
 
     if args.list:
         for window in desktop.windows():
@@ -223,6 +239,7 @@ def run(args: argparse.Namespace) -> int:
         return 0
     if args.out is None:
         args.out = Path(f'capture-{datetime.now().astimezone():%Y%m%d-%H%M%S}.pdf')
+    _refuse_existing(args)
     target = _target(args)
     started = _started(target)
     if started is None:
@@ -274,6 +291,7 @@ def run(args: argparse.Namespace) -> int:
                 drop_overlays=args.drop_overlays,
                 aborted=shown.stopped,
                 progress=shown.progress,
+                lost=shown.lost,
             )
     status = _report(result)
     emit(f'{args.out.resolve()}: {width}x{result.height} px on {pdf.pages} page(s)')

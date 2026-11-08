@@ -62,7 +62,10 @@ the panel ends it (not a key, which is too easily hit). Frames placed to a fract
 (`--method wheel|message|keys`) until the view stops moving, each step about half the view: a notch is measured, not
 assumed, and the notches grow to `--stride` of the view (default 0.5; 0 keeps `--notches`, the first step, every step) -- `--end-wait` (default 0.8 s) gives a feed
 that loads more time to grow -- and says so, exit 1, if its first scroll moved nothing. Neither has a length cap unless
-`--max-frames`/`--max-height`; the height so far shows while it runs. A window is read
+`--max-frames`/`--max-height`; the height so far shows while it runs. A frame `--auto` cannot place -- caught
+mid-render, or a step past the overlap -- is looked at again, then found by scrolling back, the steps halved; only
+one it cannot recover ends it (kept by `--keep-lost`). An output that exists is refused before anything unless
+`--overwrite`: it may be the very document on screen. A window is read
 through `PrintWindow`, so another window over it does not show; the wheel, which does land on whatever covers it,
 refuses then (bring it forward, or `--method message` -- which some applications act on only some of the time, so it
 may stop early); `keys` refuses a window it cannot bring forward.

@@ -269,28 +269,34 @@ def _labels(spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> list[_Label]:
 
 
 def _glyph_runs(spans: Sequence[TextSpan]) -> list[TextSpan]:
-    """Digit spans abutting on one baseline in one size, joined: a typesetter may emit ``250`` as three spans."""
-    boxed = sorted(
-        (s for s in spans if s.provenance.bbox is not None),
-        key=lambda s: (round(s.provenance.bbox.y1), s.provenance.bbox.x0),
-    )
-    out: list[TextSpan] = [s for s in spans if s.provenance.bbox is None]
-    for span in boxed:
-        prev = out[-1] if out and out[-1].provenance.bbox is not None else None
-        box = span.provenance.bbox
+    """Digit spans abutting on one baseline in one size, joined: a typesetter may emit ``250`` as three spans.
+
+    Every other span keeps its place in the page's order, and a run takes its leftmost piece's place: the readers
+    downstream pair a ``10`` with its exponent in that order, so the join must not reorder what it does not join.
+    """
+    digits = [i for i, s in enumerate(spans) if s.provenance.bbox is not None and _DIGITS.fullmatch(s.text)]
+    digits.sort(key=lambda i: (round(spans[i].provenance.bbox.y1), spans[i].provenance.bbox.x0))
+    joined: dict[int, TextSpan] = {}
+    absorbed: set[int] = set()
+    head = None
+    for i in digits:
+        span, box = spans[i], spans[i].provenance.bbox
+        prev = joined[head] if head is not None else None
         pb = prev.provenance.bbox if prev is not None else None
         if (
             prev is not None
-            and _DIGITS.fullmatch(span.text)
-            and _DIGITS.fullmatch(prev.text)
             and abs(span.size - prev.size) <= SIZE_TOL
             and abs(box.y1 - pb.y1) <= AXIS_TOL
             and abs(box.x0 - pb.x1) <= GLYPH_GAP
         ):
-            out[-1] = replace(prev, text=prev.text + span.text, provenance=prev.provenance.at(bbox=union([pb, box])))
+            joined[head] = replace(
+                prev, text=prev.text + span.text, provenance=prev.provenance.at(bbox=union([pb, box]))
+            )
+            absorbed.add(i)
         else:
-            out.append(span)
-    return out
+            head = i
+            joined[i] = span
+    return [joined.get(i, s) for i, s in enumerate(spans) if i not in absorbed]
 
 
 def _minus_before(box: BBox, spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> BBox | None:

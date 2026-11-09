@@ -49,6 +49,10 @@ def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> Ingested:
     out_dir.mkdir(parents=True, exist_ok=True)
     md_text, used = convert(pdf, out_dir, tool=tool)
     main, appended = clean_sections(split_sections(md_text))
+    if not main and md_text.strip():
+        # A drawing or data sheet, not a paper: every fragment is too short for the paper filters, so the
+        # whole text is its one section rather than nothing.
+        main, appended = [(f'# {pdf.stem}', md_text)], []
     if not main:
         msg = f'{pdf.name}: the converted markdown has no section'
         raise NoSections(msg)

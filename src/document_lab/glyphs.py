@@ -107,9 +107,13 @@ class Glyph:
 
 
 def rasterise(polygons: Sequence[Sequence[tuple[float, float]]], box: tuple[float, float, float, float]) -> np.ndarray:
-    """The even-odd fill of ``polygons`` (a glyph's subpaths, holes too) over ``box``, ``RASTER_ROWS`` high."""
+    """The even-odd fill of ``polygons`` (a glyph's subpaths, holes too) over ``box``, ``RASTER_ROWS`` high.
+
+    A box flatter than one column per row (a rule or a minus drawn as a fill) is scaled by its width instead, so a
+    zero-height fill rasterises to a blank of at most ``RASTER_ROWS`` columns rather than one per nanopoint.
+    """
     x0, y0, x1, y1 = box
-    scale = RASTER_ROWS / max(y1 - y0, 1e-9)
+    scale = RASTER_ROWS / max(y1 - y0, (x1 - x0) / RASTER_ROWS, 1e-9)
     cols = max(1, round((x1 - x0) * scale))
     x, y = np.meshgrid(x0 + (np.arange(cols) + 0.5) / scale, y0 + (np.arange(RASTER_ROWS) + 0.5) / scale)
     ink = np.zeros(x.shape, dtype=bool)

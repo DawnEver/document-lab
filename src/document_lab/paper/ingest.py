@@ -15,6 +15,8 @@ import shutil
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import pymupdf
+
 from document_lab.paper.convert import convert
 from document_lab.paper.output import write_paper_output
 from document_lab.paper.sections import clean_sections, split_sections
@@ -43,6 +45,38 @@ class Ingested:
     appended: tuple[Path, ...]
 
 
+#: Render scale of a scanned page: 3x (216 dpi) keeps a catalogue's 6 pt table digits legible.
+_SCAN_ZOOM = 3.0
+
+
+def _scanned_pages(pdf: Path, out_dir: Path) -> int:
+    """Write a document with ink but no text layer as page images; the count written (0: nothing inked).
+
+    Raster scans and outlined glyphs: each inked page becomes ``img/pages/page-NNN.png`` with one section
+    ``md/NN-page-N.md`` linking it.
+    """
+    doc = pymupdf.open(pdf)
+    inked = [i for i, page in enumerate(doc) if page.get_images() or page.get_drawings()]
+    if not inked:
+        return 0
+    img_dir, md_dir = out_dir / 'img' / 'pages', out_dir / 'md'
+    img_dir.mkdir(parents=True, exist_ok=True)
+    md_dir.mkdir(parents=True, exist_ok=True)
+    links = []
+    for k, i in enumerate(inked, 1):
+        name = f'page-{i + 1:03d}.png'
+        doc[i].get_pixmap(matrix=pymupdf.Matrix(_SCAN_ZOOM, _SCAN_ZOOM)).save(str(img_dir / name))
+        section = f'{k:02d}-page-{i + 1}.md'
+        (md_dir / section).write_text(
+            f'# {pdf.stem} page {i + 1}\n\nno text layer: the page is the image\n\n'
+            f'![page {i + 1}](../img/pages/{name})\n',
+            encoding='utf-8',
+        )
+        links.append(f'- [page {i + 1}](md/{section})')
+    (out_dir / 'paper.md').write_text(f'# {pdf.stem}\n\n' + '\n'.join(links) + '\n', encoding='utf-8')
+    return len(inked)
+
+
 def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> Ingested:
     """Convert ``pdf`` (with ``tool``, else the best available) and write its paper layout into ``out_dir``."""
     pdf = pdf.resolve()
@@ -54,6 +88,9 @@ def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> Ingested:
         # whole text is its one section rather than nothing.
         main, appended = [(f'# {pdf.stem}', md_text)], []
     if not main:
+        scanned = _scanned_pages(pdf, out_dir)
+        if scanned:
+            return Ingested(used, scanned, scanned, 0, ())
         msg = f'{pdf.name}: the converted markdown has no section'
         raise NoSections(msg)
     n_sec, n_fig, n_tbl = write_paper_output(main, out_dir, md_text, pdf_path=pdf)

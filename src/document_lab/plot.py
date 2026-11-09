@@ -590,7 +590,10 @@ def _aligned(labels: list[_Label], *, vertical: bool) -> list[_Label]:
 
 
 def _marks(frame: BBox, edges: Sequence[_Edge], *, vertical: bool) -> list[float]:
-    """Positions of tick marks (short, on a frame edge) and grid lines (spanning the frame) across one axis."""
+    """Positions of tick marks (short, on a frame edge) and grid lines (spanning the frame) across one axis.
+
+    A grid line spans THIS frame: a line as long as the frame but beside it is another plot's (N97 p3 stacks two).
+    """
     lo_edge, hi_edge, span = (frame.y0, frame.y1, frame.height) if vertical else (frame.x0, frame.x1, frame.width)
     first, last = (frame.x0, frame.x1) if vertical else (frame.y0, frame.y1)
     marks = []
@@ -598,7 +601,8 @@ def _marks(frame: BBox, edges: Sequence[_Edge], *, vertical: bool) -> list[float
         if e.vertical != vertical or not first - EDGE_TOL <= e.at <= last + EDGE_TOL:
             continue
         on_edge = any(abs(b - e.lo) <= EDGE_TOL or abs(b - e.hi) <= EDGE_TOL for b in (lo_edge, hi_edge))
-        if (on_edge and e.length <= TICK_MAX) or e.length >= GRID_SPAN * span:
+        inside = min(e.hi, hi_edge) - max(e.lo, lo_edge)
+        if (on_edge and e.length <= TICK_MAX) or inside >= GRID_SPAN * span:
             marks.append(e.at)
     return marks
 

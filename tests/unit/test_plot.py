@@ -113,6 +113,34 @@ def test_a_raster_plot_is_refused_not_skipped(tmp_path):
         plots(read_pdf(tmp_path / 'r.pdf').page(1))
 
 
+def test_the_grid_of_a_plot_above_is_not_a_mark_of_the_plot_below(tmp_path):
+    """TDK SIFERRIT N97 p3: the log plot's grid lines, as long as the frame below but above it, snapped its labels."""
+    upper = PlotSpec(
+        Axis([1, 10, 100, 1000, 1e4, 1e5, 1e6], log=True),  # N97's ~40 grid lines over the frame's width
+        Axis([0, 50, 100]),
+        [(lambda x: 50.0, [1.0, 1e6], BLUE)],
+        frame=pymupdf.Rect(100, 80, 400, 280),
+        grid=True,
+        minor_grid=True,
+    )
+    lower = PlotSpec(
+        Axis([0, 100, 200, 300, 400, 500]),
+        Axis([0, 50, 100]),
+        [(lambda x: x / 5, [100.0, 300.0, 450.0], RED)],
+        frame=pymupdf.Rect(111, 380, 411, 580),  # offset so the grid above lands near some labels (292 for 300)
+        tick_marks=False,  # N97's grid is cut by its legend: no mark of its own near most labels
+    )
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    draw_plot(page, upper)
+    draw_plot(page, lower)
+    doc.save(tmp_path / 'two.pdf')
+    found = plots(read_pdf(tmp_path / 'two.pdf').page(1))
+    (below,) = [p for p in found if p.frame.y0 > 300]
+    (curve,) = below.curves
+    assert curve.x == pytest.approx([100, 300, 450], abs=0.5)  # data units of x
+
+
 def test_the_tick_values_are_the_label_values(tmp_path):
     spec = PlotSpec(Axis([0, 20, 40]), Axis([-1, 0, 1]), [(math.sin, XS[:5], RED)])
     plot = _one_plot(tmp_path, spec)

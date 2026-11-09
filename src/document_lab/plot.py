@@ -233,8 +233,16 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
         ys = _decade_mantissas(_aligned(_one_size(_y_labels(frame, labels)), vertical=True), vertical=True)
         if len(xs) < 2 or len(ys) < 2:  # noqa: PLR2004 -- a line needs two points
             continue
-        x_ticks = _snap([((lb.box.x0 + lb.box.x1) / 2, lb.value) for lb in xs], _marks(frame, edges, vertical=True))
-        y_ticks = _snap([((lb.box.y0 + lb.box.y1) / 2, lb.value) for lb in ys], _marks(frame, edges, vertical=False))
+        x_ticks = _snap(
+            [((lb.box.x0 + lb.box.x1) / 2, lb.value) for lb in xs],
+            _marks(frame, edges, vertical=True),
+            max(lb.box.width for lb in xs) / 2,
+        )
+        y_ticks = _snap(
+            [((lb.box.y0 + lb.box.y1) / 2, lb.value) for lb in ys],
+            _marks(frame, edges, vertical=False),
+            max(lb.box.height for lb in ys) / 2,
+        )
         x_axis, y_axis = _fit(x_ticks, x_scale), _fit(y_ticks, y_scale)
         legend, paths = [], []
         for path in _joined(_curve_paths(frame, page.paths)):
@@ -607,16 +615,20 @@ def _marks(frame: BBox, edges: Sequence[_Edge], *, vertical: bool) -> list[float
     return marks
 
 
-def _snap(ticks: list[tuple[float, float]], marks: list[float]) -> tuple[tuple[float, float], ...]:
+def _snap(
+    ticks: list[tuple[float, float]], marks: list[float], half_extent: float = math.inf
+) -> tuple[tuple[float, float], ...]:
     """Labels moved onto their marks by ONE shared offset, the one that lands the most labels on a mark.
 
     A label sits a constant distance from its tick (same font, same alignment), so the offset is a property of
     the axis, not of each label; snapping each to its nearest mark instead lets a dense minor grid capture it.
-    A label with no mark at its shifted position keeps its own position.
+    The offset is at most ``half_extent``, half the labels' own extent along the axis: a label overlaps the tick
+    it names, and a larger shift lands it on a minor line instead (N49 p5). A label with no mark at its shifted
+    position keeps its own position.
     """
     positions = sorted(p for p, _ in ticks)
     spacing = min((b - a for a, b in itertools.pairwise(positions) if b > a), default=LABEL_REACH)
-    reach = 0.4 * spacing
+    reach = min(0.4 * spacing, half_extent)
     shifts = [m - p for p in positions for m in marks if abs(m - p) <= reach]
     if not shifts:
         return tuple(sorted(ticks))

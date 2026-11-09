@@ -288,6 +288,68 @@ def test_an_exponent_minus_set_as_its_own_span_makes_the_power_negative(tmp_path
     assert sorted(v for _, v in plot.y.ticks) == pytest.approx([0.01, 0.1, 1, 10], rel=1e-12, abs=0)
 
 
+def test_an_underscore_minus_span_makes_a_label_and_a_power_negative(tmp_path):
+    """TDK SIFERRIT N97 p3: ``10`` ``_`` ``2`` is 10^-2 and ``_`` ``60`` is -60, the minus an underscore of its own."""
+    xs = [-60.0, -30.0, 0.0, 30.0, 60.0]
+    spec = PlotSpec(
+        Axis([-60, -20, 20, 60], span_minus=True, minus_glyph='_'),
+        Axis([0.01, 0.1, 1, 10], log=True, power_labels=True, span_minus=True, minus_glyph='_'),
+        [(lambda x: 10 ** (x / 40 - 0.5), xs, RED)],
+    )
+    plot = _one_plot(tmp_path, spec)
+    assert sorted(v for _, v in plot.x.ticks) == [-60, -20, 20, 60]
+    assert sorted(v for _, v in plot.y.ticks) == pytest.approx([0.01, 0.1, 1, 10], rel=1e-12, abs=0)
+
+
+def test_a_bare_mantissa_between_power_of_ten_labels_is_that_multiple_of_the_decade_below(tmp_path):
+    """TDK SIFERRIT N97 p4: ``10^0 5 10^1 5 10^2 5`` reads 1, 5, 10, 50, 100, 500 -- not a refusal, not 5 thrice."""
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([1, 5, 10, 50, 100, 500], log=True, power_labels=True),
+        [(lambda x: 10 ** (x / 50), XS, RED)],
+    )
+    plot = _one_plot(tmp_path, spec)
+    assert sorted(v for _, v in plot.y.ticks) == pytest.approx([1, 5, 10, 50, 100, 500], rel=1e-12, abs=0)
+    (curve,) = plot.curves
+    # decades; a quarter point on this frame (about 0.013 decade per point): the label boxes snap to the tick marks
+    assert np.log10(curve.y) == pytest.approx([x / 50 for x in XS], abs=3e-3)
+
+
+def test_a_bare_mantissa_past_a_missing_decade_label_reads_its_own_decade(tmp_path):
+    """N97 p4 prints no 10^3: ``10^2 5 5 10^4`` reads 500 and 5000 by position, not 500 twice."""
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([1, 10, 100, 500, 5000, 10000], log=True, power_labels=True),
+        [(lambda x: 10 ** (x / 25), XS, RED)],
+    )
+    plot = _one_plot(tmp_path, spec)
+    assert sorted(v for _, v in plot.y.ticks) == pytest.approx([1, 10, 100, 500, 5000, 10000], rel=1e-12, abs=0)
+
+
+def test_a_bare_digit_without_power_of_ten_labels_still_refuses_a_non_monotone_axis(tmp_path):
+    """The planted control: ``1 5 10 5 100`` with no power labels is not a log axis to repair."""
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([1, 3, 10, 30, 100], log=True, labels=['1', '5', '10', '5', '100']),
+        [(lambda x: 10 ** (x / 50), XS, RED)],
+    )
+    doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec), tables=False)
+    with pytest.raises(ValueError, match='not monotone'):
+        plots(doc.page(1))
+
+
+def test_an_outlined_exponent_set_a_point_apart_is_still_the_power(tmp_path):
+    """TDK SIFERRIT N97 p5: outlines carry no side bearing; ``10`` and ``1`` set 1 pt apart are 2.6 pt apart in ink."""
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([1, 10, 100, 1000], log=True, power_labels=True, exponent_gap=1.0),
+        [(lambda x: 10 ** (x / 50), XS, RED)],
+    )
+    doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False)
+    (plot,) = plots(doc.page(1))
+    assert sorted(v for _, v in plot.y.ticks) == pytest.approx([1, 10, 100, 1000], rel=1e-12, abs=0)
+
+
 def test_a_non_uniform_axis_maps_linearly_between_each_pair_of_labelled_ticks(tmp_path):
     # 4S2F's B-H loop: -50..100 every 50 over 60 % of the axis, then 100, 500, 1000 over the rest.
     x = Axis([-50, 0, 50, 100, 500, 1000], at=[0, 0.2, 0.4, 0.6, 0.8, 1])

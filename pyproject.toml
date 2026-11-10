@@ -84,6 +84,7 @@ ignore = ["COM812", "D203", "D213", "D400", "D401", "N818", "PLR0913", "Q000", "
 [tool.dev_lab.branchset]
 trunk = 'main'
 sessions = ['integrate/main']
+ephemeral = ['pr/*']
 prune_merged = true
 
 [tool.lab_commons.hpc]
@@ -107,7 +108,14 @@ resources = ["gpu", "vendor"]
 [tool.dev_lab.integrator]
 trunk = "main"
 integration = "integrate/main"
+pr_merges_since = "d9199c9cf905a0e21bea1d43746a3caeeff07d24"  # INTEGRATION-TAKES-ONLY-FORGE-MERGES after this sha
 merges_only_since = "bd7950d9a35321edef37c71f40c85a22fd009e00"  # INTEGRATION-IS-MERGES-ONLY from the first publication
+
+# FORGE-PROTECTION-DECLARED (dev_lab.dev.forgeprotect): the ONE bypass identity per forge; on GitHub the
+# repo admin (integrator ruling 2026-11-10). `python -m dev_lab.dev.forge protect plan|check|apply`.
+[tool.dev_lab.protection]
+[tool.dev_lab.protection.forges."github.com"]
+breakglass = "role:admin"
 
 # GitHub Actions: the family's one PR lifecycle (dev_lab/dev/ci_base.toml) as is; rendered to
 # .github/workflows/ci.yml by `python -m dev_lab.dev.ciworkflows render`, never hand-edited.

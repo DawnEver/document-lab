@@ -14,6 +14,7 @@ from document_lab.capture.export import (
     save_png,
     to_pdf,
 )
+from document_lab.capture.pages import page_rhythm
 
 
 def image(height: int, width: int = 80) -> np.ndarray:
@@ -122,3 +123,84 @@ def test_nothing_written_leaves_no_file(tmp_path):
     PdfWriter(tmp_path / 'j.pdf', 80).close()
     PngWriter(tmp_path / 'j.png', 80).close()
     assert not list(tmp_path.iterdir())
+
+
+# --page-height auto: a reader's long image -- pages of text lines between grey separator bands, as Acrobat draws
+# them in continuous scroll -- cut on its separators. The three cases measured on a real capture: a 1775-row pitch,
+# the same starting 37 rows into a page, and 1284 rows at another zoom (the page narrower than the view).
+
+WIDE = 400
+
+
+def scroll_border(out: np.ndarray, last_step: int) -> None:
+    """A viewer border line the stitcher let through: once a step, the steps growing from one notch to ``last_step``."""
+    at, step = 0, 7
+    while at < len(out):
+        if not (out[at] == 128).all():  # a separator row stays one
+            out[at] = 60
+        at += step
+        step = min(2 * step, last_step)
+
+
+def reader(pitch: int, pages: int, *, offset: int = 0, margin: int = 0, border_step: int = 0) -> np.ndarray:
+    """A long reader image: ``pages`` pages ``pitch`` rows apart, each starting with a 6-row grey separator band
+    (the first ``offset`` rows down), with a running header rule, text lines, ``margin`` grey columns each side, and a
+    viewer border at ``border_step`` (0: none)."""
+    rng = np.random.default_rng(pitch + offset)
+    height = offset + pitch * pages
+    out = np.full((height, WIDE, 3), 255, dtype=np.uint8)
+    out[:, :margin] = 128
+    out[:, WIDE - margin :] = 128
+    text = slice(margin + 30, WIDE - margin - 30)
+    for top in range(offset - pitch, height, pitch):
+        if top >= 0:
+            out[top : top + 6] = 128  # the separator: the whole width
+        if 0 <= top + 40 < height:
+            out[top + 40, text] = 0  # the running header rule: the text width
+        for line in range(max(top + 60, 0), min(top + pitch - 30, height - 8), 14):
+            out[line : line + 8, text] = rng.integers(0, 2, text.stop - text.start)[:, None] * 255  # never alike
+    if border_step:
+        scroll_border(out, border_step)
+    return out
+
+
+def page_tops(path) -> list[int]:
+    with pymupdf.open(path) as doc:
+        heights = [pixels(p).shape[0] for p in doc]
+    return [int(t) for t in np.cumsum([0, *heights])[:-1]]
+
+
+@pytest.mark.parametrize(
+    ('pitch', 'offset', 'margin'),
+    [(1775, 0, 0), (1775, 37, 0), (1284, 0, 60)],
+    ids=['1775', '1775-offset-37', '1284-narrow'],
+)
+def test_auto_cuts_every_page_on_its_separator(tmp_path, pitch, offset, margin):
+    long = reader(pitch, 8, offset=offset, margin=margin, border_step=500)
+    out = tmp_path / 'auto.pdf'
+    with PdfWriter(out, WIDE, page_height='auto') as pdf:
+        for start in range(0, len(long), 700):  # streamed, as a capture writes it
+            pdf.write(long[start : start + 700])
+    assert pdf.rhythm is not None
+    assert pdf.rhythm.pitch == pytest.approx(pitch, abs=0.01)
+    assert page_tops(out) == sorted({0, *range(offset, len(long), pitch)})  # every page starts on its separator
+    with pymupdf.open(out) as doc:
+        assert np.array_equal(np.concatenate([pixels(p) for p in doc]), long)
+
+
+def test_auto_without_separators_cuts_a4_pages_and_says_so(tmp_path):
+    out = tmp_path / 'noise.pdf'
+    with PdfWriter(out, WIDE, page_height='auto') as pdf:
+        pdf.write(image(6000, WIDE))
+    assert pdf.rhythm is None
+    assert page_tops(out) == list(range(0, 6000, a4_page_height(WIDE)))
+
+
+def test_a_border_line_at_the_scroll_step_is_not_taken_for_the_page():
+    plain = np.full((5000, WIDE, 3), 255, dtype=np.uint8)
+    scroll_border(plain, 400)
+    assert page_rhythm(plain) is None  # the control: a scroll-step border alone is no page rhythm
+    plain[1::1000] = 128
+    rhythm = page_rhythm(plain)
+    assert rhythm is not None
+    assert (rhythm.pitch, rhythm.offset) == (pytest.approx(1000, abs=0.01), 1)

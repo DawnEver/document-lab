@@ -1,6 +1,7 @@
 """A captured image to a PDF or a PNG, written as its rows arrive: a capture of any length costs a page of memory.
 
-:class:`PdfWriter` cuts pages at a page height, one image per page, pixels kept losslessly; it saves every
+:class:`PdfWriter` cuts pages at a page height -- or, ``'auto'``, on the reader's own page separators
+(`document_lab.capture.pages`) -- one image per page, pixels kept losslessly; it saves every
 :data:`PAGES_PER_SAVE` pages incrementally, so the document is never held whole. :class:`PngWriter` compresses rows as
 they come and fills the height in at the end. Both write ``<name>.part`` beside the target and rename it into place
 when closed -- also when the capture stopped early -- so a reader never sees a half-written file under the real name.
@@ -15,10 +16,12 @@ from __future__ import annotations
 import struct
 import zlib
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, Final, Self
+from typing import TYPE_CHECKING, BinaryIO, Final, Literal, Self
 
 import numpy as np
 import pymupdf
+
+from document_lab.capture.pages import Rhythm, page_rhythm
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -38,6 +41,8 @@ __all__ = [
 MAX_PAGE_PT: Final = 14400  # the largest page side a PDF reader must accept (ISO 32000, 200 inches)
 SCREEN_DPI: Final = 96
 PAGES_PER_SAVE: Final = 16  # pages added between incremental saves: what a PDF holds in memory at most
+AUTO_LOOK: Final = 4  # A4 pages of rows 'auto' holds before it looks for the separators, and each time again
+AUTO_GIVE_UP: Final = 12  # A4 pages of rows after which 'auto' stops looking and cuts A4-shaped pages
 
 
 def a4_page_height(width: int) -> int:
@@ -80,22 +85,35 @@ class PdfWriter:
     """A PDF at ``path`` of the rows written to it, ``width`` pixels wide.
 
     ``page_height`` in pixels: ``None`` cuts A4-shaped pages, ``0`` puts everything on one page (held until closed,
-    so not for an unbounded capture). Closing writes the last, shorter page and moves the file into place.
+    so not for an unbounded capture), ``'auto'`` cuts on the reader's page separators: it holds rows until it finds
+    them (:func:`~document_lab.capture.pages.page_rhythm`) -- ``rhythm`` then says where -- and cuts A4-shaped pages
+    if there are none in the first :data:`AUTO_GIVE_UP` pages' worth (``rhythm`` stays None). Closing writes the last,
+    shorter page and moves the file into place.
     """
 
     def __init__(
-        self, path: Path, width: int, *, page_height: int | None = None, dpi: float = SCREEN_DPI, ocr: str | None = None
+        self,
+        path: Path,
+        width: int,
+        *,
+        page_height: int | Literal['auto'] | None = None,
+        dpi: float = SCREEN_DPI,
+        ocr: str | None = None,
     ) -> None:
         """Check the page size and OCR before anything is written."""
         self.path, self.width, self.dpi, self.ocr = path, width, dpi, ocr
-        self.step = a4_page_height(width) if page_height is None else page_height
+        self.auto = page_height == 'auto'
+        self.step = a4_page_height(width) if page_height is None or self.auto else int(page_height)
         if self.step:
             check_page(width, self.step, dpi)
         if ocr:
             check_ocr(ocr)
+        self.rhythm: Rhythm | None = None
         self.pages = 0
         self._rows: list[np.ndarray] = []
         self._held = 0
+        self._written = 0  # rows already laid out on pages
+        self._look = AUTO_LOOK * self.step  # held rows at which 'auto' next looks for the separators
         self._doc: pymupdf.Document | None = None
         self._saved = False
 
@@ -115,12 +133,36 @@ class PdfWriter:
             return
         self._rows.append(rows)
         self._held += len(rows)
-        while self.step and self._held >= self.step:
-            self._page(self._take(self.step))
+        if self.auto and self._held >= self._look:
+            self._find_rhythm(final=False)
+        self._lay_out()
+
+    def _find_rhythm(self, *, final: bool) -> None:
+        held = np.concatenate(self._rows)
+        self._rows = [held]
+        self.rhythm = page_rhythm(held)
+        if self.rhythm is not None:
+            check_page(self.width, round(self.rhythm.pitch), self.dpi)
+        if self.rhythm is not None or final or self._held >= AUTO_GIVE_UP * self.step:
+            self.auto = False  # found, or A4-shaped from here
+        else:
+            self._look += AUTO_LOOK * self.step
+
+    def _next_cut(self) -> int | None:
+        if self.auto or not self.step:
+            return None
+        if self.rhythm is None:
+            return self._written + self.step
+        return self.rhythm.cuts(self._written, self._written + 2 * round(self.rhythm.pitch))[0]
+
+    def _lay_out(self) -> None:
+        while (cut := self._next_cut()) is not None and self._written + self._held >= cut:
+            self._page(self._take(cut - self._written))
 
     def _take(self, count: int) -> np.ndarray:
         held = np.concatenate(self._rows)
         self._rows, self._held = [held[count:]], len(held) - count
+        self._written += count
         return held[:count]
 
     def _page(self, image: np.ndarray) -> None:
@@ -150,6 +192,9 @@ class PdfWriter:
 
     def close(self) -> Path | None:
         """Lay out the last page, save, and move the PDF into place; the path, or None if nothing was written."""
+        if self.auto and self._held:
+            self._find_rhythm(final=True)
+            self._lay_out()
         if self._held:
             last = self._take(self._held)
             if not self.step:
@@ -219,7 +264,12 @@ class PngWriter:
 
 
 def to_pdf(
-    image: np.ndarray, path: Path, *, page_height: int | None = None, dpi: float = SCREEN_DPI, ocr: str | None = None
+    image: np.ndarray,
+    path: Path,
+    *,
+    page_height: int | Literal['auto'] | None = None,
+    dpi: float = SCREEN_DPI,
+    ocr: str | None = None,
 ) -> Path:
     """Write ``image`` (``(h, w, 3)`` uint8) to ``path`` through a :class:`PdfWriter` and return it."""
     with PdfWriter(path, image.shape[1], page_height=page_height, dpi=dpi, ocr=ocr) as pdf:

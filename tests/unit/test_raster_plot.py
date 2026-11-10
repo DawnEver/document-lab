@@ -1,6 +1,7 @@
 """Curves recovered from RASTER plots: a known vector plot rendered to pixels, so every expected value is known."""
 
 import numpy as np
+import pymupdf
 import pytest
 
 from document_lab.glyphs import UnreadableGlyph
@@ -129,3 +130,28 @@ def test_a_colour_no_curve_is_drawn_in_raises_by_name(tmp_path):
         raster_plot(raster, colour=(0.0, 0.6, 0.0))
     with pytest.raises(NoCurveOfColour):
         raster_plot(raster, colour=(0.0, 0.0, 0.0))  # dark ink: the frame is no curve
+
+
+def test_raster_axes_drawn_through_the_corner_still_frame_the_plot(tmp_path):
+    """VITROPERM MF/SST fig 2: one curve, axes running on past the origin -- no ends meet, and no frame was found."""
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], overhang=6.0)
+    plot = raster_plot(_raster(tmp_path, spec, dpi=300))
+    assert tuple(plot.frame) == pytest.approx((100, 100, 400, 300), abs=1.0)  # points
+    (curve,) = plot.curves
+    assert _within_pixels(curve, lambda x: x, 1).all()
+
+
+def test_a_border_box_around_the_figure_is_not_its_frame(tmp_path):
+    """DMEGC: a box around the figure, with numbers below and left of it, was taken as the frame (the largest)."""
+    stray = [('1', 120.0, 358.0, 8.0), ('2', 300.0, 358.0, 8.0), ('3', 62.0, 120.0, 8.0), ('4', 62.0, 250.0, 8.0)]
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([0, 50, 100]),
+        [(lambda x: x, XS, RED)],
+        border=pymupdf.Rect(70, 85, 410, 345),
+        stray=stray,
+    )
+    path, clip = raster_pdf(tmp_path / 'raster.pdf', spec, 300, margin=60.0)
+    plot = raster_plot(read_raster(path, 1, BBox(*clip)))
+    assert tuple(plot.frame) == pytest.approx((100, 100, 400, 300), abs=1.0)  # points
+    assert sorted(v for _, v in plot.x.ticks) == [0, 50, 100]

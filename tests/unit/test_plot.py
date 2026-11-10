@@ -502,3 +502,29 @@ def test_an_outlined_number_before_min_or_max_is_one_bound_span(tmp_path):
     (span,) = outline_text(page)  # the lone 3 stays a number
     assert span.text == '12.5 min.'
     assert bound(span.text) == ('min', 12.5)
+
+
+def test_a_curve_drawn_past_its_frame_is_read_inside_it(tmp_path):
+    """DMEGC: curves are drawn past the frame and clipped there; a curve with any point outside was dropped whole."""
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: 1.5 * x - 25, XS, RED)])
+    (curve,) = _one_plot(tmp_path, spec).curves
+    assert curve.y == pytest.approx(1.5 * curve.x - 25, abs=0.02)  # data units of y
+    assert curve.x.min() == pytest.approx(50 / 3, abs=0.05)  # data units of x: where it enters at y = 0
+    assert curve.x.max() == pytest.approx(250 / 3, abs=0.05)  # and leaves at y = 100
+
+
+@pytest.mark.parametrize('grid', [False, True])
+def test_axes_drawn_through_the_corner_still_frame_the_plot(tmp_path, grid):
+    """Axes that run on past the origin (an outward tick at the corner) meet nowhere at their ends.
+
+    With a grid, the grid lines cross the axes near the corner too: the lowest and leftmost crossing lines frame it.
+    """
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], overhang=6.0, grid=grid)
+    (plot,) = _one_plot_list(tmp_path, spec)
+    assert tuple(plot.frame) == pytest.approx((100, 100, 400, 300), abs=0.5)  # points: not a grid line's frame
+    (curve,) = plot.curves
+    assert curve.y == pytest.approx(curve.x, abs=0.05)  # data units of y
+
+
+def _one_plot_list(tmp_path, spec):
+    return plots(read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec), tables=False).page(1))

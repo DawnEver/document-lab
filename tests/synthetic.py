@@ -66,6 +66,10 @@ class PlotSpec:
     grid_grey: float = 0.7  # the major grid's grey level (0 black .. 1 white)
     minor_grid: bool = False  # a log axis also gets grid lines at 2..9 x each decade
     frame_as_lines: bool = False  # the frame is four separate segments, not one rectangle
+    #: Points the x axis runs on left of the corner and the y axis below it (axes drawn through the origin).
+    overhang: float = 0.0
+    #: A rectangle drawn around the whole figure (a border box), or None.
+    border: pymupdf.Rect | None = None
     grid_reach: float = 1.0  # the fraction of the frame width a horizontal grid line spans (a legend cuts it)
     stray: Sequence[tuple[str, float, float, float]] = ()  # extra text: (text, x, y, size)
     fragments: int = 1  # each curve drawn as this many polylines meeting end to end, every other one reversed
@@ -142,7 +146,14 @@ def _minor(ticks: Sequence[float]) -> list[float]:
 
 def _draw_frame(page: pymupdf.Page, spec: PlotSpec) -> None:
     f = spec.frame
-    if spec.frame_as_lines:
+    if spec.border is not None:
+        page.draw_rect(spec.border, color=(0, 0, 0), width=0.8)
+    if spec.overhang:
+        o = spec.overhang
+        lines = ((f.tl, f.tr), ((f.x0 - o, f.y1), f.br), (f.tl, (f.x0, f.y1 + o)), (f.tr, f.br))
+        for a, b in lines:
+            page.draw_line(a, b, color=(0, 0, 0), width=0.8)
+    elif spec.frame_as_lines:
         for a, b in ((f.tl, f.tr), (f.bl, f.br), (f.tl, f.bl), (f.tr, f.br)):
             page.draw_line(a, b, color=(0, 0, 0), width=0.8)
     else:
@@ -264,14 +275,15 @@ def plot_pdf(path: Path, *specs: PlotSpec, outlined: bool = False) -> Path:
 RASTER_MARGIN = 40.0
 
 
-def raster_pdf(path: Path, spec: PlotSpec | None, dpi: float) -> tuple[Path, pymupdf.Rect]:
+def raster_pdf(
+    path: Path, spec: PlotSpec | None, dpi: float, margin: float = RASTER_MARGIN
+) -> tuple[Path, pymupdf.Rect]:
     """A page whose only content is ``spec``'s plot rendered to pixels at ``dpi`` (blank when ``spec`` is None).
 
-    Returns the PDF and the image's rectangle on the page.
+    The image keeps ``margin`` points around the frame left and below, half of it above and right. Returns the PDF and
+    the image's rectangle on the page.
     """
-    clip = pymupdf.Rect(
-        FRAME.x0 - RASTER_MARGIN, FRAME.y0 - RASTER_MARGIN / 2, FRAME.x1 + RASTER_MARGIN / 2, FRAME.y1 + RASTER_MARGIN
-    )
+    clip = pymupdf.Rect(FRAME.x0 - margin, FRAME.y0 - margin / 2, FRAME.x1 + margin / 2, FRAME.y1 + margin)
     with pymupdf.open() as source:
         page = source.new_page(width=612, height=792)
         if spec is not None:

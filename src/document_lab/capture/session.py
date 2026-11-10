@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Final
 
 import numpy as np
 
-from document_lab.capture.stitch import Match, Stitcher, Unstitchable, offset
+from document_lab.capture.stitch import Match, NoOverlap, Stitcher, Unstitchable, offset
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -39,6 +39,11 @@ class Limits:
 class Settling:
     """After a scroll, grab every ``interval`` seconds until two frames agree, at most ``tries`` times.
 
+    ``interval`` is the least gap between the two: a reader that renders slowly shows the same unfinished frame twice
+    in a short gap, so a frame taken for settled that a second look then places (it had changed after all) doubles
+    the gap for every later step, up to ``max_interval`` -- the gap grows to the renderer's pace instead of the
+    capture bouncing between two pages.
+
     A view that has not moved is looked at once more after ``end_wait`` seconds before it is taken for the end: a
     scroll the application handles late (a posted message, a busy view) shows two equal frames first, and a page that
     loads more as it nears its end (an infinite feed) needs that long to grow.
@@ -47,6 +52,7 @@ class Settling:
     interval: float = 0.12
     tries: int = 15
     end_wait: float = 0.8
+    max_interval: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -76,14 +82,17 @@ class Pace:
 class Capture:
     """One capture: the ``frames`` it took, the ``height`` it stitched, and why it ``stopped``.
 
-    ``stopped`` is ``end``, ``aborted``, ``max_frames``, ``max_height``, ``one frame`` or ``unstitchable: <reason>``;
-    ``stuck`` is true when the first scroll already moved nothing -- the source did not scroll at all.
+    ``stopped`` is ``end``, ``aborted``, ``max_frames``, ``max_height``, ``one frame``, ``unstitchable: <reason>``
+    or ``blocked: <reason>`` (the scroll was refused: the input went nowhere); ``stuck`` is true when the first scroll
+    already moved nothing -- the source did not scroll at all. ``error``: for a frame that overlapped nothing, the
+    mean grey error of its best offset.
     """
 
     frames: int
     height: int
     stopped: str
     stuck: bool = False
+    error: float | None = None
 
     @property
     def complete(self) -> bool:
@@ -108,10 +117,12 @@ class Rows:
         return np.concatenate(self._parts)
 
 
-def _settled(grab: Callable[[], np.ndarray], settling: Settling, sleep: Callable[[float], None]) -> np.ndarray:
+def _settled(
+    grab: Callable[[], np.ndarray], settling: Settling, sleep: Callable[[float], None], gap: float | None = None
+) -> np.ndarray:
     frame = grab()
     for _ in range(settling.tries):
-        sleep(settling.interval)
+        sleep(settling.interval if gap is None else gap)
         again = grab()
         if np.array_equal(again, frame):
             return again
@@ -138,22 +149,24 @@ def _recover(
     notches: int,
     settling: Settling,
     sleep: Callable[[float], None],
-) -> np.ndarray | None:
-    """Place the view again after a frame that could not be: None when it worked, else the last view seen.
+    gap: float,
+) -> np.ndarray | bool:
+    """Place the view again after a frame that could not be: True, False or the last view seen.
 
-    Each try first waits and looks again -- a page still rendering settles into what it shows -- then scrolls back up
-    half the last step, each time further, and finds the view anywhere in the rows held.
+    True: looking again placed it (the frame was taken mid-render); False: scrolling back did. Each try first waits
+    and looks again -- a page still rendering settles into what it shows -- then scrolls back up half the last step,
+    each time further, and finds the view anywhere in the rows held.
     """
     back = 0
     for _ in range(_RECOVERIES):
         sleep(settling.end_wait)
-        frame = _settled(grab, settling, sleep)
+        frame = _settled(grab, settling, sleep, gap)
         for place in (stitcher.add, stitcher.relocate):
             try:
                 place(frame)
             except Unstitchable:
                 continue
-            return None
+            return not back
         step = max(1, notches // 2)
         scroll(-step)
         back += step
@@ -162,13 +175,41 @@ def _recover(
 
 
 def _moved(
-    stitcher: Stitcher, grab: Callable[[], np.ndarray], settling: Settling, sleep: Callable[[float], None]
+    stitcher: Stitcher, grab: Callable[[], np.ndarray], settling: Settling, sleep: Callable[[float], None], gap: float
 ) -> int:
     """The rows the settled view moved, looked at once more after ``end_wait`` when none: 0 is the end."""
-    if moved := stitcher.add(_settled(grab, settling, sleep)):
+    if moved := stitcher.add(_settled(grab, settling, sleep, gap)):
         return moved
     sleep(settling.end_wait)
-    return stitcher.add(_settled(grab, settling, sleep))
+    return stitcher.add(_settled(grab, settling, sleep, gap))
+
+
+class _Blocked(Exception):
+    """The source refused a scroll (the OS dropped the input): the capture ends there, like any other stop."""
+
+
+def _refusing(scroll: Callable[[int], None]) -> Callable[[int], None]:
+    """``scroll``, its ``OSError`` (the input refused) raised as :class:`_Blocked`."""
+
+    def step(notches: int) -> None:
+        try:
+            scroll(notches)
+        except OSError as refused:
+            raise _Blocked(str(refused)) from refused
+
+    return step
+
+
+def _cap(limits: Limits, frames: int, height: int, aborted: Callable[[], bool]) -> str | None:
+    """Why to stop before the next scroll, if anything says so."""
+    if limits.max_frames is not None and frames >= limits.max_frames:
+        return 'max_frames'
+    if limits.max_height is not None and height >= limits.max_height:
+        return 'max_height'
+    return 'aborted' if aborted() else None
+
+
+_LEAST_GAP: Final = 0.05  # seconds a settle gap grows from when --settle is 0
 
 
 @dataclass(frozen=True)
@@ -219,45 +260,48 @@ def capture(
     ``scroll(n)`` scrolls ``n`` notches, down as many as ``pace`` says, up when ``n`` is negative. A frame that cannot
     be placed -- caught mid-render, or a step that outran the overlap -- is recovered (:func:`_recover`), the steps
     capped at half the one that lost it; only one that cannot be recovered ends the capture, told to ``lost`` first.
-    ``progress`` sees the stitcher after every frame it placed.
+    ``progress`` sees the stitcher after every frame it placed. A ``scroll`` that raises ``OSError`` (Windows refused
+    the input) stops it as ``blocked: <reason>``, what was stitched kept.
     """
     first = grab()
     stitcher = Stitcher(first, match, drop_overlays=drop_overlays, history=_HISTORY * len(first))
     notches, ceiling, lapses = pace.first, None, 0  # lapses: recoveries in a row, no step placed between
-    frames, stopped = 1, 'one frame' if scroll is None else 'end'
+    gap = settling.interval  # grows when a frame taken for settled was still rendering
+    frames, stopped, error = 1, 'one frame' if scroll is None else 'end', None
+    step = None if scroll is None else _refusing(scroll)
     try:
-        while scroll is not None:
-            if limits.max_frames is not None and frames >= limits.max_frames:
-                stopped = 'max_frames'
+        while step is not None:
+            if capped := _cap(limits, frames, stitcher.height, aborted):
+                stopped = capped
                 break
-            if limits.max_height is not None and stitcher.height >= limits.max_height:
-                stopped = 'max_height'
-                break
-            if aborted():
-                stopped = 'aborted'
-                break
-            scroll(notches)
+            step(notches)
             last = stitcher.last
             try:
-                if not (moved := _moved(stitcher, grab, settling, sleep)):
+                if not (moved := _moved(stitcher, grab, settling, sleep, gap)):
                     break
                 notches, lapses = pace.next(notches, moved, len(first), ceiling), 0
-            except Unstitchable as error:
-                seen = _recover(stitcher, grab, scroll, notches=notches, settling=settling, sleep=sleep)
+            except Unstitchable as failure:
+                seen = _recover(stitcher, grab, step, notches=notches, settling=settling, sleep=sleep, gap=gap)
                 lapses += 1
-                if seen is not None or lapses > _RECOVERIES:  # lost, or back where it was with no smaller step
-                    seen = stitcher.last if seen is None else seen
-                    lost(Lost(_where(last, seen, match), last, seen, str(error)))
+                if seen is True:  # looking again placed it: it was still rendering, so wait longer from now on
+                    gap = min(max(2 * gap, _LEAST_GAP), max(settling.max_interval, settling.interval))
+                if not isinstance(seen, bool) or lapses > _RECOVERIES:  # lost, or back where it was, no smaller step
+                    seen = stitcher.last if isinstance(seen, bool) else seen
+                    lost(Lost(_where(last, seen, match), last, seen, str(failure)))
                     raise
                 ceiling = notches = max(1, notches // 2)
             frames += 1
             sink(stitcher.drain())
             progress(stitcher)
-    except Unstitchable as error:
-        stopped = f'unstitchable: {error}'
+    except Unstitchable as failure:
+        stopped = f'unstitchable: {failure}'
+        error = failure.error if isinstance(failure, NoOverlap) else None
+    except _Blocked as refused:
+        stopped = f'blocked: {refused}'
     finally:
         sink(stitcher.drain(final=True))
-    return Capture(frames, stitcher.height, stopped, stuck=scroll is not None and stopped == 'end' and frames == 1)
+    stuck = scroll is not None and stopped == 'end' and frames == 1
+    return Capture(frames, stitcher.height, stopped, stuck=stuck, error=error)
 
 
 def follow(

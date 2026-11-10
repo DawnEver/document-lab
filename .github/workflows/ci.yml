@@ -347,7 +347,7 @@
         },
         {
           "name": "Sync the environment",
-          "run": "uv sync --frozen --all-extras"
+          "run": "uv sync --frozen --extra dev"
         },
         {
           "id": "ready",
@@ -396,7 +396,7 @@
         },
         {
           "name": "Sync the environment",
-          "run": "uv sync --frozen --all-extras"
+          "run": "uv sync --frozen --extra dev"
         },
         {
           "id": "ready",

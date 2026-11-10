@@ -23,6 +23,7 @@ _SHIPPED: Final = frozenset(
         'BARE-INTERPRETER',
         'BARE-PYTHON',
         'BARE-TEST-INVOCATION',
+        'CONSENT-CODE-FROM-THE-USER',
         'FORGE-WRITE-VIA-CLI',
         'FORGE-WRITE-VIA-GH-API',
         'FORGE-WRITE-VIA-HTTP',
@@ -30,17 +31,20 @@ _SHIPPED: Final = frozenset(
         'GIT-RESET',
         'GIT-STAGE-EVERYTHING',
         'GIT-STASH',
+        'HPC-THROUGH-THE-DOOR',  # gained 2026-11-07 with dev-lab 8c4ab734
         'PUSH-FORCE',
         'PUSH-NO-VERIFY',
         'PUSH-REMOTE-DELETE',
         'RECURSIVE-DELETE',
         'RECURSIVE-GREP',
+        'REMOTE-WRITE-THROUGH-A-DOOR',
         'REPORTS-LIVE-IN-MEMORY',
         'STATUS-VIA-DOORS',
         'SUBAGENT-NO-PUSH',
         'TREE-HAS-A-LIVE-RUN',
         'WORKTREE-BASE-IS-EXPLICIT',
         'WORKTREES-STAY-INSIDE',
+        'WRITES-STAY-IN-THE-TREE',  # gained 2026-11-07 with dev-lab 8c4ab734
     }
 )
 

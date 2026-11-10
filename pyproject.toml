@@ -37,6 +37,12 @@ dev = [
 [project.scripts]
 document-lab = "document_lab.__main__:main"
 
+[tool.uv]
+# User ruling 2026-11-07: force pillow and filelock past the caps marker-pdf 2.1.0 (`pillow<11`) and surya-ocr 0.23.0
+# (`filelock<4`, `pillow<11`) declare -- both reached only through the `gpu` extra -- to clear 95 OSV advisories
+# (pillow 10.4.0: 82, fixed in 13.0.0; filelock 3.32.7: 13, fixed in 4.2.1). If the gpu tests break, accept instead.
+override-dependencies = ["pillow>=13", "filelock>=4.2.1"]
+
 [tool.setuptools_scm]
 version_file = "src/document_lab/__version__.py"
 fallback_version = "0.0.0"
@@ -101,11 +107,28 @@ resources = ["gpu", "vendor"]
 [tool.dev_lab.integrator]
 trunk = "main"
 integration = "integrate/main"
+pr_merges_since = "d9199c9cf905a0e21bea1d43746a3caeeff07d24"  # INTEGRATION-TAKES-ONLY-FORGE-MERGES after this sha
 merges_only_since = "bd7950d9a35321edef37c71f40c85a22fd009e00"  # INTEGRATION-IS-MERGES-ONLY from the first publication
+
+# FORGE-PROTECTION-DECLARED (dev_lab.dev.forgeprotect): the ONE bypass identity per forge; on GitHub the
+# repo admin (integrator ruling 2026-11-10). `python -m dev_lab.dev.forge protect plan|check|apply`.
+[tool.dev_lab.protection]
+[tool.dev_lab.protection.forges."github.com"]
+breakglass = "role:admin"
 
 # GitHub Actions: the family's one PR lifecycle (dev_lab/dev/ci_base.toml) as is; rendered to
 # .github/workflows/ci.yml by `python -m dev_lab.dev.ciworkflows render`, never hand-edited.
 [tool.dev_lab.ci."ci.yml"]
+
+# The setup every job shares, with the base's `--all-extras` narrowed to the extras a HOSTED runner uses: `dev`
+# (which carries `ai`). `gpu` is an unproduced part ([tool.dev_lab.parts]); installing it on a hosted runner only
+# built marker-pdf's pillow from source and failed `parts` (e0b6e02). The same install [tool.lab_commons.hpc] runs.
+[tool.dev_lab.ci._steps]
+setup = [
+    { uses = "actions/checkout@v4", with = { ref = "${{ env.HEAD_SHA }}", fetch-depth = 0 } },
+    { name = "Install uv", uses = "astral-sh/setup-uv@v5", with = { enable-cache = true } },
+    { name = "Sync the environment", run = "uv sync --frozen --extra dev" },
+]
 
 # Git hooks: the family base (dev_lab/dev/githooks/base.toml) plus one merged row. The lock is generated and
 # measures 532 KB because the `gpu` extra (marker-pdf -> torch) resolves in it; the size check guards against
@@ -122,3 +145,8 @@ BARE-TEST-INVOCATION = "<venv python> -m dev_lab.dev.verify [-- <pytest args>]  
 PUSH-NO-VERIFY = "<venv python> -m dev_lab.dev.verify, then push without skipping the hook"
 NETWORK-VERB = "<venv python> -m dev_lab.dev.netverb -- <git push|fetch|pull|clone|ls-remote|submodule update ...  or  uv lock|add|remove ...>  (retries 3x, then reports a diagnosis); an environment change is <venv python> -m dev_lab.dev.dep --sync, which retries inside"
 ENV-MUTATION-THROUGH-THE-DOOR = "<any family venv python> -m dev_lab.dev.dep --bootstrap <this checkout> --extra dev  (run from this checkout)"
+
+[tool.dev_lab.render]
+# What the family renderers read from this repo (dev_lab.dev.famfiles.RENDERERS); a relock re-runs each one due.
+deltas = "tests/architecture/_famconfig.py"
+adoption = "scripts/deny_rules.py"

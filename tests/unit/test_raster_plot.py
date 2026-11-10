@@ -155,3 +155,13 @@ def test_a_border_box_around_the_figure_is_not_its_frame(tmp_path):
     plot = raster_plot(read_raster(path, 1, BBox(*clip)))
     assert tuple(plot.frame) == pytest.approx((100, 100, 400, 300), abs=1.0)  # points
     assert sorted(v for _, v in plot.x.ticks) == [0, 50, 100]
+
+
+def test_stated_values_a_readable_label_contradicts_are_refused(tmp_path):
+    """Stated values are checked against the page: a label that reads 50 is not 40 because the caller says so."""
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)])
+    raster = _raster(tmp_path, spec, dpi=300)
+    with pytest.raises(UnreadableTickLabels, match='reads 50'):
+        raster_plot(raster, x_values=[0, 40, 100])
+    plot = raster_plot(raster, x_values=[0, 50, 100])  # the control: the stated values the labels agree with
+    assert sorted(v for _, v in plot.x.ticks) == [0, 50, 100]

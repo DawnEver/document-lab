@@ -59,6 +59,7 @@ class PlotSpec:
     frame: pymupdf.Rect = field(default_factory=lambda: pymupdf.Rect(FRAME))
     tick_marks: bool = True
     grid: bool = False
+    grid_grey: float = 0.7  # the major grid's grey level (0 black .. 1 white)
     minor_grid: bool = False  # a log axis also gets grid lines at 2..9 x each decade
     frame_as_lines: bool = False  # the frame is four separate segments, not one rectangle
     grid_reach: float = 1.0  # the fraction of the frame width a horizontal grid line spans (a legend cuts it)
@@ -169,7 +170,7 @@ def _y_axis(page: pymupdf.Page, spec: PlotSpec) -> None:
         if spec.tick_marks:
             page.draw_line((f.x0, py), (f.x0 + 4, py), color=(0, 0, 0), width=0.5)
         if spec.grid:
-            page.draw_line((f.x0, py), (f.x0 + spec.grid_reach * f.width, py), color=(0.7, 0.7, 0.7), width=0.3)
+            page.draw_line((f.x0, py), (f.x0 + spec.grid_reach * f.width, py), color=(spec.grid_grey,) * 3, width=0.3)
         py += spec.y.label_drop
         if spec.y.power_labels:
             _power_label(page, v, f.x0 - 4, py, vector_minus=spec.y.vector_minus, span_minus=spec.y.span_minus)
@@ -190,7 +191,7 @@ def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
         if spec.tick_marks:
             page.draw_line((px, f.y1), (px, f.y1 - 4), color=(0, 0, 0), width=0.5)
         if spec.grid:
-            page.draw_line((px, f.y0), (px, f.y1), color=(0.7, 0.7, 0.7), width=0.3)
+            page.draw_line((px, f.y0), (px, f.y1), color=(spec.grid_grey,) * 3, width=0.3)
         _x_label(page, spec, spec.x.labels[i] if spec.x.labels else _label(v), px)
     _y_axis(page, spec)
     for text, x, y, size in spec.stray:
@@ -210,13 +211,45 @@ def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
         page.insert_text((x + 24, y + FONT_SIZE * 0.35), text, fontname='helv', fontsize=FONT_SIZE)
 
 
-def plot_pdf(path: Path, *specs: PlotSpec) -> Path:
+def plot_pdf(path: Path, *specs: PlotSpec, outlined: bool = False) -> Path:
+    """One page per spec; ``outlined`` sets every glyph as a filled outline (no text), as some sheets are exported."""
     doc = pymupdf.open()
     for spec in specs:
         draw_plot(doc.new_page(width=612, height=792), spec)
+    if outlined:
+        out = pymupdf.open()
+        for page in doc:
+            svg = pymupdf.open('svg', page.get_svg_image(text_as_path=True).encode())
+            out.insert_pdf(pymupdf.open('pdf', svg.convert_to_pdf()))
+        doc.close()
+        doc = out
     doc.save(path)
     doc.close()
     return path
+
+
+#: Points around the frame a rasterised plot keeps, so its tick labels are inside the image.
+RASTER_MARGIN = 40.0
+
+
+def raster_pdf(path: Path, spec: PlotSpec | None, dpi: float) -> tuple[Path, pymupdf.Rect]:
+    """A page whose only content is ``spec``'s plot rendered to pixels at ``dpi`` (blank when ``spec`` is None).
+
+    Returns the PDF and the image's rectangle on the page.
+    """
+    clip = pymupdf.Rect(
+        FRAME.x0 - RASTER_MARGIN, FRAME.y0 - RASTER_MARGIN / 2, FRAME.x1 + RASTER_MARGIN / 2, FRAME.y1 + RASTER_MARGIN
+    )
+    with pymupdf.open() as source:
+        page = source.new_page(width=612, height=792)
+        if spec is not None:
+            draw_plot(page, spec)
+        pix = page.get_pixmap(clip=clip, dpi=dpi, alpha=False)
+    doc = pymupdf.open()
+    doc.new_page(width=612, height=792).insert_image(clip, pixmap=pix)
+    doc.save(path)
+    doc.close()
+    return path, clip
 
 
 TABLE_ROWS = (('Parameter', 'Value', 'Unit'), ('alpha', '1.25', 'mm'), ('beta', '-3', 'kg'), ('gamma', '4.5e2', 's'))

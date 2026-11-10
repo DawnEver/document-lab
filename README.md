@@ -5,10 +5,11 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 
 | module | does |
 |---|---|
-| `ir` | frozen IR: `Provenance`, `TextSpan`, `VectorPath`, `Table`/`Cell`, `Figure`, `Page`, `Document` |
-| `pdf` | `read_pdf(path)`: spans, vector paths, ruled tables with per-cell boxes, image figures and captions (PyMuPDF) |
+| `ir` | frozen IR: `Provenance`, `TextSpan`, `VectorPath`, `Table`/`Cell`, `Figure`, `Raster`, `Page`, `Document` |
+| `pdf` | `read_pdf(path)`: spans, vector paths, ruled tables with per-cell boxes, image figures and captions (PyMuPDF); `read_raster(path, page, bbox)`: a region's pixels at its images' native resolution |
 | `html` | `read_html(path)`: every `<table>` as a `Table` (standard-library parser) |
-| `plot` | `plots(page)`: curves digitised from VECTOR plots (axes linear or log10, piecewise at a break; fragments joined; legend samples apart); a raster plot raises `RasterPlot` |
+| `plot` | `plots(page)`: curves digitised from VECTOR plots (axes linear, log10, or piecewise between labelled ticks; labels as text or glyph outlines; fragments joined; legend samples apart); a raster plot raises `RasterPlot`. `raster_plot(raster)`: one plot traced from pixels, each point with its pixel uncertainty; unreadable labels raise `UnreadableTickLabels` unless stated (`x_values=`, `y_values=`) |
+| `glyphs` | digits read from glyph shapes (outlines or pixels) against Helvetica; a near tie or a glyph under 14 px raises `UnreadableGlyph` |
 | `numbers` | the one number grammar: `parse_number` (whole text) and `first_number` (a cell's leading value) |
 | `extract` | typed values against the caller's `Schema` from key-value (`from_rows`) or column (`from_columns`) tables |
 | `ai` | `ask(responder, schema, page_or_table)`: the same values read by a model through ai-lab (`[ai]` extra) |
@@ -25,6 +26,12 @@ for page in doc.pages:
             print(curve.axis_scales, curve.x, curve.y, curve.dashes, curve.provenance.page, curve.provenance.bbox)
         for sample in plot.legend:  # a legend's sample line: its label and the style of the curve it names
             print(sample.label, sample.stroke, sample.dashes)
+
+# A raster plot: its pixels, read at the images' native resolution; labels too coarse to read are stated.
+raster = read_raster('sheet.pdf', 2, figure_bbox)  # from document_lab.pdf
+plot = raster_plot(raster, x_values=[-25, 0, 25, 50, 150, 250], y_values=[0, 100, 200, 300, 400, 500])
+for curve in plot.curves:  # curve.basis == 'raster'
+    print(curve.x, curve.y, curve.x_uncertainty, curve.y_uncertainty)  # one pixel, in data units, per point
 ```
 
 A `Value` keeps the source `text` beside the typed `value` (a `≈`, `≤` or `±25%` is never lost) and a `basis`:

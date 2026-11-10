@@ -8,6 +8,9 @@ from document_lab.paper.render import render_equation_images, render_figure_page
 from document_lab.paper.text import RN_PATTERN as _RN
 from document_lab.paper.text import extract_title_from_preamble, slug
 
+#: The head of a heading-less preamble paper.md keeps as the abstract when the paper states none.
+ABSTRACT_FALLBACK_CHARS = 800
+
 # ── Section file I/O ─────────────────────────────────────────────────────────
 
 
@@ -187,6 +190,35 @@ def clean_all_sections(out_dir: Path, body_sections: list[tuple[str, str]]) -> i
 
 # ── INDEX.md builder ─────────────────────────────────────────────────────────
 
+#: A caption line: ``Figure 1 - Title`` (any dash, colon or stop) alone on its line, bold or italic marks allowed.
+_CAPTION_LINE = re.compile(
+    r'^[*_ ]*(Figure\s+\d+|Fig\.\s*\d+|Table\s+(?:\d+|'
+    + _RN
+    + r'))[*_ ]*\s*['
+    + chr(0x2013)  # en dash
+    + chr(0x2014)  # em dash
+    + r':.-]\s*(.+?)[*_ ]*$',
+    re.MULTILINE,
+)
+_IMAGE_REF = re.compile(r'!\[[^\]]*\]\((?:\.\./)?([^)\s]+)[^)]*\)')
+
+
+def caption_images(content: str) -> dict[str, tuple[str, str | None]]:
+    """Each caption line's label -> (title, the image the converter placed above it, else ``None``).
+
+    A figure's image is the last image reference between the previous caption line and its own: on a page with no
+    text layer to crop by (a scan) that converter image IS the figure. A table carries no image here.
+    """
+    found: dict[str, tuple[str, str | None]] = {}
+    start = 0
+    for m in _CAPTION_LINE.finditer(content):
+        label = re.sub(r'(?i)^Fig\.\s*', 'Figure ', re.sub(r'\s+', ' ', m.group(1)))
+        images = _IMAGE_REF.findall(content, start, m.start())
+        image = images[-1] if images and label.lower().startswith('figure') else None
+        found.setdefault(label, (m.group(2).strip().replace('|', '\\|'), image))
+        start = m.end()
+    return found
+
 
 def build_index(
     out_dir: Path,
@@ -200,20 +232,25 @@ def build_index(
         '|--------|------|---------------|---------|',
     ]
     fig_pattern = re.compile(rf'(Figure\s+\d+|Fig\.\s*\d+|Table\s+(?:\d+|{_RN}))', re.IGNORECASE)
-    seen: dict[str, str] = {}
+    contents: list[tuple[str, str]] = []
     for idx_s, (heading, _) in enumerate(body_sections, 1):
         s = slug(heading) or 'body'
         sec_file = md_dir / f'{idx_s:02d}-{s}.md'
-        if not sec_file.exists():
-            continue
-        content = sec_file.read_text(encoding='utf-8')
+        if sec_file.exists():
+            contents.append((f'md/{idx_s:02d}-{s}.md', sec_file.read_text(encoding='utf-8')))
+    captioned: dict[str, tuple[str, str | None]] = {}
+    for _, content in contents:
+        for label, found in caption_images(content).items():
+            captioned.setdefault(label, found)
+    seen: set[str] = set()
+    for where, content in contents:
         for m in fig_pattern.finditer(content):
-            label = m.group(1)
-            normalized_label = re.sub(r'(?i)^Fig\.\s*', 'Figure ', label)
+            normalized_label = re.sub(r'(?i)^Fig\.\s*', 'Figure ', m.group(1))
             if normalized_label not in seen:
-                seen[normalized_label] = f'md/{idx_s:02d}-{s}.md'
-                img_path = figure_images.get(normalized_label, '—')
-                index_rows.append(f'| {normalized_label} | {img_path} | md/{idx_s:02d}-{s}.md | — |')
+                seen.add(normalized_label)
+                caption, image = captioned.get(normalized_label, ('—', None))
+                img_path = figure_images.get(normalized_label) or image or '—'
+                index_rows.append(f'| {normalized_label} | {img_path} | {where} | {caption} |')
 
     (out_dir / 'INDEX.md').write_text('# Figure / Table Index\n\n' + '\n'.join(index_rows) + '\n', encoding='utf-8')
 
@@ -223,6 +260,26 @@ def build_index(
 
 
 # ── Main paper output ────────────────────────────────────────────────────────
+
+
+def _abstract(sections: list[tuple[str, str]], md_text: str) -> tuple[str, bool]:
+    """paper.md's abstract, and whether it is only the head of a heading-less preamble (no abstract stated)."""
+    abstract_m = re.search(
+        r'(?:^#{1,3}\s*abstract\s*\n)(.*?)(?=^#{1,3}\s|\Z)',
+        md_text,
+        re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
+    if abstract_m:
+        return abstract_m.group(1).strip(), False
+    inline_m = re.search(
+        r'(?:_?\*{0,2}Abstract\*{0,2}_?)\s*(?:\*{0,2})?[—\-](?:\*{0,2})?\s*(.+?)(?=\n\n|\Z)',
+        md_text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if inline_m:
+        return re.sub(r'\*{1,2}|_{1,2}', '', inline_m.group(1)).strip()[:1200], False
+    preamble_body = sections[0][1] if sections and sections[0][0] == '' else ''
+    return preamble_body[:ABSTRACT_FALLBACK_CHARS], True
 
 
 def write_paper_output(
@@ -240,7 +297,10 @@ def write_paper_output(
     img_flat = out_dir / 'img' / 'flat'
     img_flat.mkdir(parents=True, exist_ok=True)
 
-    body_sections = [s for s in sections if s[0] != '']
+    # The preamble (no heading) is paper.md's title and abstract; one longer than the abstract paper.md keeps from
+    # it -- a handbook's contents and tables before its first heading -- is a section too, never dropped.
+    abstract, abstract_is_head = _abstract(sections, md_text)
+    body_sections = [s for s in sections if s[0] != '' or (abstract_is_head and len(s[1]) > len(abstract))]
     if not body_sections:
         body_sections = sections
 
@@ -282,26 +342,6 @@ def write_paper_output(
     if title == 'Untitled':
         preamble = sections[0][1] if sections and sections[0][0] == '' else ''
         title = extract_title_from_preamble(preamble or md_text)
-
-    # ── Abstract ──
-    abstract_m = re.search(
-        r'(?:^#{1,3}\s*abstract\s*\n)(.*?)(?=^#{1,3}\s|\Z)',
-        md_text,
-        re.IGNORECASE | re.MULTILINE | re.DOTALL,
-    )
-    if abstract_m:
-        abstract = abstract_m.group(1).strip()
-    else:
-        inline_m = re.search(
-            r'(?:_?\*{0,2}Abstract\*{0,2}_?)\s*(?:\*{0,2})?[—\-](?:\*{0,2})?\s*(.+?)(?=\n\n|\Z)',
-            md_text,
-            re.IGNORECASE | re.DOTALL,
-        )
-        if inline_m:
-            abstract = re.sub(r'\*{1,2}|_{1,2}', '', inline_m.group(1)).strip()[:1200]
-        else:
-            preamble_body = sections[0][1] if sections and sections[0][0] == '' else ''
-            abstract = preamble_body[:800]
 
     paper_md = f'# {title}\n\n## Abstract\n{abstract}\n\n## Sections\n' + '\n'.join(section_links) + '\n'
     (out_dir / 'paper.md').write_text(paper_md, encoding='utf-8')

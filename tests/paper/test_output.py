@@ -154,6 +154,19 @@ class TestWritePaperOutput:
             assert '## Abstract' in content
             assert '## Sections' in content
 
+    def test_a_front_matter_paper_md_cannot_hold_is_a_section(self):
+        # A handbook's first pages (contents, material tables) precede its first heading: paper.md keeps only an
+        # abstract-sized head of them, so the rest is a section of its own -- never dropped.
+        front = 'Specific heat 750 J/(kg K). ' * 100
+        sections = [('', front), ('## Introduction', LONG_BODY)]
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            n_sec, _n_fig, _n_tbl = write_paper_output(sections, out_dir, f'{front}\n\n## Introduction\n{LONG_BODY}')
+
+            assert n_sec == 2
+            written = ''.join(f.read_text(encoding='utf-8') for f in sorted((out_dir / 'md').iterdir()))
+            assert front.strip() in written
+
     def test_title_override(self):
         sections = [('## Intro', LONG_BODY)]
         md_text = f'## Intro\n{LONG_BODY}'

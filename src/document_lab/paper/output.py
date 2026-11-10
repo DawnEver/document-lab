@@ -8,6 +8,9 @@ from document_lab.paper.render import render_equation_images, render_figure_page
 from document_lab.paper.text import RN_PATTERN as _RN
 from document_lab.paper.text import extract_title_from_preamble, slug
 
+#: The head of a heading-less preamble paper.md keeps as the abstract when the paper states none.
+ABSTRACT_FALLBACK_CHARS = 800
+
 # ── Section file I/O ─────────────────────────────────────────────────────────
 
 
@@ -259,6 +262,26 @@ def build_index(
 # ── Main paper output ────────────────────────────────────────────────────────
 
 
+def _abstract(sections: list[tuple[str, str]], md_text: str) -> tuple[str, bool]:
+    """paper.md's abstract, and whether it is only the head of a heading-less preamble (no abstract stated)."""
+    abstract_m = re.search(
+        r'(?:^#{1,3}\s*abstract\s*\n)(.*?)(?=^#{1,3}\s|\Z)',
+        md_text,
+        re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
+    if abstract_m:
+        return abstract_m.group(1).strip(), False
+    inline_m = re.search(
+        r'(?:_?\*{0,2}Abstract\*{0,2}_?)\s*(?:\*{0,2})?[—\-](?:\*{0,2})?\s*(.+?)(?=\n\n|\Z)',
+        md_text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if inline_m:
+        return re.sub(r'\*{1,2}|_{1,2}', '', inline_m.group(1)).strip()[:1200], False
+    preamble_body = sections[0][1] if sections and sections[0][0] == '' else ''
+    return preamble_body[:ABSTRACT_FALLBACK_CHARS], True
+
+
 def write_paper_output(
     sections: list[tuple[str, str]],
     out_dir: Path,
@@ -274,7 +297,10 @@ def write_paper_output(
     img_flat = out_dir / 'img' / 'flat'
     img_flat.mkdir(parents=True, exist_ok=True)
 
-    body_sections = [s for s in sections if s[0] != '']
+    # The preamble (no heading) is paper.md's title and abstract; one longer than the abstract paper.md keeps from
+    # it -- a handbook's contents and tables before its first heading -- is a section too, never dropped.
+    abstract, abstract_is_head = _abstract(sections, md_text)
+    body_sections = [s for s in sections if s[0] != '' or (abstract_is_head and len(s[1]) > len(abstract))]
     if not body_sections:
         body_sections = sections
 
@@ -316,26 +342,6 @@ def write_paper_output(
     if title == 'Untitled':
         preamble = sections[0][1] if sections and sections[0][0] == '' else ''
         title = extract_title_from_preamble(preamble or md_text)
-
-    # ── Abstract ──
-    abstract_m = re.search(
-        r'(?:^#{1,3}\s*abstract\s*\n)(.*?)(?=^#{1,3}\s|\Z)',
-        md_text,
-        re.IGNORECASE | re.MULTILINE | re.DOTALL,
-    )
-    if abstract_m:
-        abstract = abstract_m.group(1).strip()
-    else:
-        inline_m = re.search(
-            r'(?:_?\*{0,2}Abstract\*{0,2}_?)\s*(?:\*{0,2})?[—\-](?:\*{0,2})?\s*(.+?)(?=\n\n|\Z)',
-            md_text,
-            re.IGNORECASE | re.DOTALL,
-        )
-        if inline_m:
-            abstract = re.sub(r'\*{1,2}|_{1,2}', '', inline_m.group(1)).strip()[:1200]
-        else:
-            preamble_body = sections[0][1] if sections and sections[0][0] == '' else ''
-            abstract = preamble_body[:800]
 
     paper_md = f'# {title}\n\n## Abstract\n{abstract}\n\n## Sections\n' + '\n'.join(section_links) + '\n'
     (out_dir / 'paper.md').write_text(paper_md, encoding='utf-8')

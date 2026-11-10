@@ -255,3 +255,34 @@ def test_a_short_sample_line_beside_a_label_is_a_legend_entry_not_a_curve(tmp_pa
     plot = _one_plot(tmp_path, spec)
     assert sorted(c.stroke for c in plot.curves) == sorted([RED, BLUE])
     assert [(e.label, e.stroke, e.dashes) for e in plot.legend] == [('25 C', RED, ()), ('100 C', BLUE, (3.0, 1.5))]
+
+
+def test_a_label_set_one_glyph_per_span_reads_as_one_number(tmp_path):
+    """Handbook 2013 p99: ``250`` is three spans ``2``, ``5``, ``0`` abutting on one baseline -- one label."""
+    spec = PlotSpec(Axis([0, 150, 250], glyph_spans=True), Axis([0, 50, 100]), [(lambda x: x / 5, [0.0, 250.0], RED)])
+    plot = _one_plot(tmp_path, spec)
+    assert sorted(v for _, v in plot.x.ticks) == [0, 150, 250]
+    (curve,) = plot.curves
+    assert curve.y == pytest.approx([0, 50], abs=0.05)  # data units of y
+
+
+def test_a_drawn_minus_running_into_its_digits_box_still_makes_the_label_negative(tmp_path):
+    """Handbook 2013 p126: the dash of ``-50`` ends 0.6 pt INSIDE the ``50`` span's box."""
+    spec = PlotSpec(
+        Axis([-50, 0, 50, 100], vector_minus=True, minus_gap=-0.6),
+        Axis([0, 50, 100]),
+        [(lambda x: x / 2 + 25, XS, RED)],
+    )
+    plot = _one_plot(tmp_path, spec)
+    assert sorted(v for _, v in plot.x.ticks) == [-50, 0, 50, 100]
+
+
+def test_an_exponent_minus_set_as_its_own_span_makes_the_power_negative(tmp_path):
+    """Handbook 2013 p108: ``10`` then ``-`` then ``2``, the minus a span of its own -- 10^-2, not 10^2 or 10."""
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([0.01, 0.1, 1, 10], log=True, power_labels=True, span_minus=True),
+        [(lambda x: 10 ** (x / 50 - 2), XS, RED)],
+    )
+    plot = _one_plot(tmp_path, spec)
+    assert sorted(v for _, v in plot.y.ticks) == pytest.approx([0.01, 0.1, 1, 10], rel=1e-12, abs=0)

@@ -286,3 +286,56 @@ def test_an_exponent_minus_set_as_its_own_span_makes_the_power_negative(tmp_path
     )
     plot = _one_plot(tmp_path, spec)
     assert sorted(v for _, v in plot.y.ticks) == pytest.approx([0.01, 0.1, 1, 10], rel=1e-12, abs=0)
+
+
+def test_a_non_uniform_axis_maps_linearly_between_each_pair_of_labelled_ticks(tmp_path):
+    # 4S2F's B-H loop: -50..100 every 50 over 60 % of the axis, then 100, 500, 1000 over the rest.
+    x = Axis([-50, 0, 50, 100, 500, 1000], at=[0, 0.2, 0.4, 0.6, 0.8, 1])
+    xs = [-50.0, -20.0, 0.0, 70.0, 100.0, 300.0, 750.0, 1000.0]
+    spec = PlotSpec(x, Axis([0, 50, 100]), [(lambda v: v / 20 + 50, xs, RED)])
+    plot = _one_plot(tmp_path, spec)
+    (curve,) = plot.curves
+    assert curve.x == pytest.approx(xs, abs=0.05)  # data units of x
+    assert len(plot.x.pieces) == 3  # 50 per fifth, 400 per fifth, 500 per fifth
+
+
+def test_a_uniform_axis_still_reads_as_one_linear_piece(tmp_path):
+    spec = PlotSpec(Axis([0, 20, 40, 60, 80, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)])
+    plot = _one_plot(tmp_path, spec)
+    assert (plot.x.scale, len(plot.x.pieces)) == ('linear', 1)
+
+
+def test_a_log_axis_still_reads_as_one_log10_piece(tmp_path):
+    spec = PlotSpec(Axis([1, 10, 100, 1000], log=True), Axis([0, 50, 100]), [(lambda x: x / 20, [1.0, 1000.0], RED)])
+    plot = _one_plot(tmp_path, spec)
+    assert (plot.x.scale, len(plot.x.pieces)) == ('log10', 1)
+
+
+def test_labels_set_as_glyph_outlines_calibrate_the_axes(tmp_path):
+    """4S2F p5 fig 4: every tick label is a filled glyph outline, no text -- the plot read as having no labels."""
+    x = Axis([-50, 0, 50, 100, 500, 1000], at=[0, 0.2, 0.4, 0.6, 0.8, 1])
+    xs = [-50.0, 0.0, 70.0, 300.0, 1000.0]
+    spec = PlotSpec(x, Axis([0, 100, 200, 300, 400, 500]), [(lambda v: v / 4 + 200, xs, RED)])
+    doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False)
+    assert not doc.page(1).spans  # the planted premise: nothing here is text
+    (plot,) = plots(doc.page(1))
+    assert sorted(v for _, v in plot.x.ticks) == [-50, 0, 50, 100, 500, 1000]
+    assert sorted(v for _, v in plot.y.ticks) == [0, 100, 200, 300, 400, 500]
+    (curve,) = plot.curves
+    assert curve.x == pytest.approx(xs, abs=0.5)  # data units of x; a glyph box centre is not its tick
+    assert curve.y == pytest.approx([v / 4 + 200 for v in xs], abs=1.0)  # data units of y
+
+
+def test_outlined_powers_of_ten_and_a_drawn_minus_read_as_their_values(tmp_path):
+    """4S2F p5 fig 1: ``10`` and its raised exponent are outlines a hair apart; a drawn dash makes it negative."""
+    spec = PlotSpec(
+        Axis([-50, 0, 50, 100], vector_minus=True),
+        Axis([0.01, 0.1, 1, 10, 100], log=True, power_labels=True, vector_minus=True),
+        [(lambda x: 10 ** (x / 50), [-50.0, 0.0, 100.0], RED)],
+    )
+    doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False)
+    (plot,) = plots(doc.page(1))
+    assert sorted(v for _, v in plot.x.ticks) == [-50, 0, 50, 100]
+    assert sorted(v for _, v in plot.y.ticks) == pytest.approx([0.01, 0.1, 1, 10, 100], rel=1e-12, abs=0)
+    (curve,) = plot.curves
+    assert np.log10(curve.y) == pytest.approx([-1, 0, 2], abs=0.01)  # decades

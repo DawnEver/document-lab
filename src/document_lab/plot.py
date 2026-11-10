@@ -119,6 +119,10 @@ BLOB_MAX: Final = 3 * GLYPH_MAX
 BOUND_GAP: Final = 1.5
 #: A glyph at most this fraction of its neighbour's height is a mark (a dot, a prime), not a letter or digit.
 MARK_HEIGHT_PT: Final = 0.45
+#: A fill thinner than this (points) is a sliver (an arrowhead's cut apex), never a glyph: a minus is 0.5 thick at 8.
+SLIVER: Final = 0.1
+#: Corners of a fill closer than this fraction of its larger side are one corner (:func:`_arrowhead`).
+CORNER_MERGE: Final = 0.15
 #: The widest gap between a dot and the glyph below it (an ``i``), as a fraction of that glyph's height.
 DOT_GAP: Final = 0.5
 #: The widest gap between two glyphs of one outlined label, as a fraction of the label's height.
@@ -262,17 +266,22 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
     outlined = _outline_words(page.paths)
     labels += _outline_labels(outlined, dashes)
     unread = [box for value, text, box in outlined if value is None and text is None]
+    lettering = _stroked_words(page.paths)
     words = [*page.spans, *_text_spans(page, outlined)]  # a legend may be outlined
     # A grid line may stop short of the far edge (a legend sits there), so a long rule anchored on an edge counts.
-    found, unread_frames = [], []
+    found, unread_frames, stroked = [], [], []
     for frame in _frames(edges):
-        xs = _decade_mantissas(_aligned(_one_size(_x_labels(frame, labels)), vertical=False), vertical=False)
-        ys = _decade_mantissas(_aligned(_one_size(_y_labels(frame, labels)), vertical=True), vertical=True)
-        _refuse_unread(
-            page, frame, (xs, ys), unread, (_marks(frame, edges, vertical=True), _marks(frame, edges, vertical=False))
-        )
+        x_marks, y_marks = _marks(frame, edges, vertical=True), _marks(frame, edges, vertical=False)
+        xs = _aligned(_one_size(_x_labels(frame, labels)), vertical=False)
+        ys = _aligned(_one_size(_y_labels(frame, labels)), vertical=True)
+        xs = _decade_mantissas(_multiplied(xs, x_marks, vertical=False), vertical=False)
+        ys = _decade_mantissas(_multiplied(ys, y_marks, vertical=True), vertical=True)
+        _refuse_unread(page, frame, (xs, ys), unread, (x_marks, y_marks))
         if len(xs) < 2 or len(ys) < 2:  # noqa: PLR2004 -- a line needs two points
-            if xs or ys:
+            box = _stroked_label(frame, lettering, (x_marks, y_marks))
+            if box is not None:
+                stroked.append((frame, box))
+            elif xs or ys:
                 unread_frames.append((frame, len(xs), len(ys)))
             continue
         x_ticks = _snap(
@@ -311,6 +320,16 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
         if not curves:
             _refuse_raster(page, frame)
         found.append(Plot(frame, x_axis, y_axis, curves, tuple(legend), page.paths[0].provenance.at(bbox=frame)))
+    if not found and stroked:
+        named = '; '.join(
+            f'{tuple(round(v, 1) for v in frame)} (first at {tuple(round(v, 1) for v in box)})'
+            for frame, box in stroked
+        )
+        msg = (
+            f'page {page.number}: no frame reads as a plot, and these draw their tick labels as stroked lines '
+            f'(stroke-font lettering), which the glyph reader does not read: {named}: an unrecognised frame'
+        )
+        raise UnrecognisedFrame(msg)
     if not found and unread_frames:
         named = '; '.join(
             f'{tuple(round(v, 1) for v in frame)} with {nx} x and {ny} y tick labels' for frame, nx, ny in unread_frames
@@ -362,6 +381,65 @@ def _refuse_unread(
                 f'{tuple(round(v, 1) for v in box)} whose glyphs read as no number or word: an unrecognised frame'
             )
             raise UnrecognisedFrame(msg)
+
+
+def _stroked_label(
+    frame: BBox, lettering: Sequence[BBox], marks: tuple[Sequence[float], Sequence[float]]
+) -> BBox | None:
+    """The first stroked word where a tick label of ``frame`` belongs, or None.
+
+    Older SIFERRIT sheets (N72 p3) draw labels as stroke-font polylines: no text and no fill, so nothing reads, and a
+    page of such frames would return no plot, exactly like a page that holds none (:func:`plots` refuses it by name).
+    Where a label belongs is the x-label band below the frame or the y-label band left of it, on a tick mark or grid
+    line as :func:`_refuse_unread` asks.
+    """
+    for box in lettering:
+        probe = [_Label(math.nan, box, round(box.height, 1))]
+        cx, cy = (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2
+        on_row = bool(_x_labels(frame, probe)) and _on_a_mark(cx, box.width / 2, marks[0])
+        on_col = bool(_y_labels(frame, probe)) and _on_a_mark(cy, box.height / 2, marks[1])
+        if on_row or on_col:
+            return box
+    return None
+
+
+def _stroked_words(paths: Sequence[VectorPath]) -> list[BBox]:
+    """Each row of glyph-sized stroked polylines (three or more points: not a tick, rule or arrow shaft), as a box."""
+    boxes = [
+        p.provenance.bbox
+        for p in paths
+        if p.stroke is not None
+        and p.provenance.bbox is not None
+        and len(p.points) > 2  # noqa: PLR2004 -- a bend: a straight stroke is a tick, rule or shaft
+        and max(p.provenance.bbox.width, p.provenance.bbox.height) <= GLYPH_MAX
+    ]
+    return [union([boxes[i] for i in word]) for word in _words(boxes)]
+
+
+def _multiplied(labels: list[_Label], marks: Sequence[float], *, vertical: bool) -> list[_Label]:
+    """An axis whose one power-of-ten label is stacked against its end label, scaled by it (a unit multiplier).
+
+    TDK SIFERRIT sheets set ``250`` over ``10^-6`` at the top of a temperature-factor axis (N48 p3): the axis is in
+    units of 10^-6, and the power labels no tick. It is a multiplier when it is the axis' only power label, its box
+    abuts or overlaps (within ``EDGE_TOL`` along the axis) the first or last other label's, and it sits on no
+    tick mark or grid line; every other label is then multiplied by it. Any other power label is a tick.
+    """
+    powers = [lb for lb in labels if lb.power]
+    if len(powers) != 1 or len(labels) < 3:  # noqa: PLR2004 -- a multiplier and two ticks
+        return labels
+
+    def at(lb: _Label) -> float:
+        return (lb.box.y0 + lb.box.y1) / 2 if vertical else (lb.box.x0 + lb.box.x1) / 2
+
+    (power,) = powers
+    rest = sorted((lb for lb in labels if lb is not power), key=at)
+    neighbour = min((rest[0], rest[-1]), key=lambda lb: abs(at(lb) - at(power)))
+    lo, hi = ('y0', 'y1') if vertical else ('x0', 'x1')
+    gap = max(getattr(power.box, lo) - getattr(neighbour.box, hi), getattr(neighbour.box, lo) - getattr(power.box, hi))
+    half = (getattr(power.box, hi) - getattr(power.box, lo)) / 2
+    if gap > EDGE_TOL or (marks and _on_a_mark(at(power), half, marks)):
+        return labels
+    return [_Label(lb.value * power.value, lb.box, lb.size) for lb in rest]
 
 
 def _on_a_mark(centre: float, half: float, marks: Sequence[float]) -> bool:
@@ -520,6 +598,7 @@ def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, str 
         and p.provenance.bbox is not None
         and len(p.points) > 2  # noqa: PLR2004 -- a fill needs an area
         and max(p.provenance.bbox.width, p.provenance.bbox.height) <= GLYPH_MAX
+        and min(p.provenance.bbox.width, p.provenance.bbox.height) >= SLIVER
     ]
     shapes.sort(key=lambda p: -p.provenance.bbox.width * p.provenance.bbox.height)
     glyphs: list[tuple[BBox, list[tuple[tuple[float, float], ...]]]] = []
@@ -531,7 +610,7 @@ def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, str 
             glyphs.append((box, [shape.points]))
         else:
             host[1].append(shape.points)
-    glyphs = _dotted(glyphs)
+    glyphs = _dotted([g for g in glyphs if not (len(g[1]) == 1 and _arrowhead(g[1][0], g[0]))])
     out: list[tuple[float | None, str | None, BBox]] = []
     for word in _words([g[0] for g in glyphs]):
         members = [glyphs[i] for i in word]
@@ -547,6 +626,20 @@ def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, str 
             continue
         out.append((value, text, union([g[0] for g in members])))
     return out
+
+
+def _arrowhead(points: Sequence[tuple[float, float]], box: BBox) -> bool:
+    """Whether a glyph's one fill is a triangle: an arrowhead (SIFERRIT N48 p4 heads its axis-title arrow so).
+
+    Only a fill with no hole: a ``4``'s counter is a triangle too. Corners closer than ``CORNER_MERGE`` of the
+    fill's larger side are one (a head's apex is cut 0.3 points wide).
+    """
+    reach = CORNER_MERGE * max(box.width, box.height)
+    corners: list[tuple[float, float]] = []
+    for x, y in points:
+        if all(math.hypot(x - cx, y - cy) > reach for cx, cy in corners):
+            corners.append((x, y))
+    return len(corners) == 3  # noqa: PLR2004 -- a triangle
 
 
 def _dotted(
@@ -709,14 +802,14 @@ def _exponent_of(i: int, spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> 
         if not raised:
             continue
         gap = ob.x0 - bb.x1
-        if -EDGE_TOL <= gap <= EDGE_TOL:
-            return j, int(power)
         minus = _minus_before(ob, spans, ())
         if 0 < gap <= DASH_MAX + EDGE_TOL and minus is not None and minus.x0 >= bb.x1 - EDGE_TOL and power > 0:
             return j, -int(power)
         dashed = any(bb.x1 - EDGE_TOL <= d.lo and d.hi <= ob.x0 + EDGE_TOL and bb.y0 <= d.at <= ob.y1 for d in dashes)
         if 0 < gap <= DASH_MAX + EDGE_TOL and dashed and power > 0:
             return j, -int(power)
+        if -EDGE_TOL <= gap <= max(EDGE_TOL, WORD_GAP * base.size):  # TDK sets the exponent a space apart (N48 p4)
+            return j, int(power)
     return None
 
 

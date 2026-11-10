@@ -51,6 +51,7 @@ __all__ = [
     'Basis',
     'Curve',
     'LegendSample',
+    'NoCurveOfColour',
     'NoPlotFrame',
     'Plot',
     'RasterPlot',
@@ -140,6 +141,10 @@ class UnrecognisedFrame(ValueError):
     Calibrating from the labels that did read would silently drop one (older SIFERRIT sheets set labels in glyphs
     the reader does not know), so the frame is refused by name instead.
     """
+
+
+class NoCurveOfColour(ValueError):
+    """A raster plot holds no curve of the colour the caller asked :func:`raster_plot` for."""
 
 
 class UnreadableTickLabels(ValueError):
@@ -850,6 +855,7 @@ def raster_plot(
     y_values: Sequence[float] | None = None,
     x_scale: Scale | None = None,
     y_scale: Scale | None = None,
+    colour: tuple[float, float, float] | None = None,
 ) -> Plot:
     """The plot in a RASTER image: its frame, axes calibrated from its tick labels, and its curves traced.
 
@@ -866,6 +872,9 @@ def raster_plot(
     pixel column at each run's centre, or every stroke width along a run longer than two (a steep stretch); a curve
     that folds back over x (a loop) keeps both branches' samples, in column order. Each point carries one pixel's
     extent in data units as its uncertainty.
+
+    ``colour`` (RGB, 0..1) keeps only the curves drawn in it: those of its ``HUE_SECTOR`` when it is coloured, the
+    dark ones when it is not; when none is, :class:`NoCurveOfColour` is raised rather than an empty plot returned.
     """
     box = raster.provenance.bbox
     rgb = raster.pixels.astype(float) / 255
@@ -888,6 +897,12 @@ def raster_plot(
     x_axis = _raster_axis('x', frame, values=x_values, scale=x_scale, **found)
     y_axis = _raster_axis('y', frame, values=y_values, scale=y_scale, **found)
     masks, occluders = _curve_masks(ink, chroma, rgb, frame=frame, box=box, scale=scale)
+    if colour is not None:
+        masks = [m for m in masks if _sector(rgb[m].mean(axis=0)) == _sector(np.asarray(colour, dtype=float))]
+        if not masks:
+            where = tuple(round(v, 1) for v in frame)
+            msg = f'no curve drawn in colour {tuple(colour)} inside the plot framed at {where}'
+            raise NoCurveOfColour(msg)
     traced = (
         _traced(mask, occluders & ~mask, rgb=rgb, here=raster.provenance, scale=scale, axes=(x_axis, y_axis))
         for mask in masks
@@ -1077,6 +1092,13 @@ def _bridged(mask: np.ndarray, grid_rows: np.ndarray, grid_cols: np.ndarray) -> 
             reach = [np.roll(above, s) for s in (-1, 0, 1)], [np.roll(below, s) for s in (-1, 0, 1)]
             view[lo:hi] |= (np.logical_or.reduce(reach[0]) & np.logical_or.reduce(reach[1]))[None, :]
     return out
+
+
+def _sector(rgb: np.ndarray) -> int:
+    """The ``HUE_SECTOR`` a colour falls in (as :func:`_curve_masks` sorts curves), or -1 when it is not coloured."""
+    if float(rgb.max() - rgb.min()) <= CHROMA_MIN:
+        return -1
+    return int(np.floor(((float(_hue(rgb)) + HUE_SECTOR / 2) % 360) / HUE_SECTOR))
 
 
 def _hue(rgb: np.ndarray) -> np.ndarray:

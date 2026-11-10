@@ -29,7 +29,7 @@ import pymupdf
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-__all__ = ['ALPHABET', 'Glyph', 'UnreadableGlyph', 'rasterise', 'read_glyph', 'read_number', 'read_word']
+__all__ = ['ALPHABET', 'Glyph', 'UnreadableGlyph', 'has_letter', 'rasterise', 'read_glyph', 'read_number', 'read_word']
 
 #: The font the reference digits are rendered in (PyMuPDF's built-in Helvetica).
 REFERENCE_FONT: Final = 'helv'
@@ -115,23 +115,41 @@ def read_word(glyphs: Sequence[Glyph]) -> str:
 
     Raises :class:`UnreadableGlyph` when a glyph matches no character clearly.
     """
+    text = ''
+    for char in _word_chars(glyphs):
+        if isinstance(char, UnreadableGlyph):
+            raise char
+        text += char
+    return text
+
+
+def has_letter(glyphs: Sequence[Glyph]) -> bool:
+    """Whether a glyph of the row reads clearly as a letter, however the rest read: the row is a word, not a number."""
+    return any(isinstance(char, str) and char.isalpha() for char in _word_chars(glyphs))
+
+
+def _word_chars(glyphs: Sequence[Glyph]) -> list[str | UnreadableGlyph]:
+    """Per glyph left to right, the character it reads as in its word, else the reader's refusal."""
     ordered = sorted(glyphs, key=lambda g: g.box[0])
     tall = max(g.box[3] - g.box[1] for g in ordered)
     baseline = float(np.median([g.box[3] for g in ordered]))
     em = (baseline - min(g.box[1] for g in ordered)) / ASCENT
-    text = ''
+    out: list[str | UnreadableGlyph] = []
     for glyph in ordered:
         x0, y0, x1, y1 = glyph.box
         if y1 - y0 > MARK_HEIGHT * tall:
-            text += _read_char(glyph.ink, ((baseline - y0) / em, (baseline - y1) / em))
+            try:
+                out.append(_read_char(glyph.ink, ((baseline - y0) / em, (baseline - y1) / em)))
+            except UnreadableGlyph as refused:
+                out.append(refused)
         elif x1 - x0 > y1 - y0 and baseline - ASCENT * em < (y0 + y1) / 2 < baseline:
-            text += '-'
+            out.append('-')
         elif y1 >= baseline - 0.1 * em:
-            text += '.'
+            out.append('.')
         else:
             msg = f'a mark at {tuple(round(v, 1) for v in glyph.box)} is neither a minus nor a point'
-            raise UnreadableGlyph(msg)
-    return text
+            out.append(UnreadableGlyph(msg))
+    return out
 
 
 def _read_char(ink: np.ndarray, place: tuple[float, float]) -> str:

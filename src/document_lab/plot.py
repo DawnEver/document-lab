@@ -25,8 +25,9 @@ from __future__ import annotations
 
 import itertools
 import math
+import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Literal
 
 import numpy as np
@@ -59,6 +60,10 @@ DASH_MAX: Final = 5.0
 DASH_GAP: Final = 2.5
 #: A span holding only one of these is a minus sign set apart from its digits.
 MINUS_GLYPHS: Final = frozenset({'-', chr(0x2212), chr(0x2013), chr(0x2010)})
+#: The widest gap (points) between two digit spans of one number set glyph by glyph.
+GLYPH_GAP: Final = 0.3
+#: A span of digits only (a glyph run's piece).
+_DIGITS: Final = re.compile(r'\d+')
 #: Font sizes (points) closer than this are one size.
 SIZE_TOL: Final = 0.25
 #: How close (points) a shifted label must land to a mark to count as on it.
@@ -240,6 +245,7 @@ def _frames(edges: Sequence[_Edge]) -> list[BBox]:
 
 def _labels(spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> list[_Label]:
     """Numeric spans, with ``10`` plus a raised smaller integer span merged into a power of ten."""
+    spans = _glyph_runs(spans)
     out, used = [], set()
     for i, span in enumerate(spans):
         box = span.provenance.bbox
@@ -262,14 +268,46 @@ def _labels(spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> list[_Label]:
     return out
 
 
+def _glyph_runs(spans: Sequence[TextSpan]) -> list[TextSpan]:
+    """Digit spans abutting on one baseline in one size, joined: a typesetter may emit ``250`` as three spans.
+
+    Every other span keeps its place in the page's order, and a run takes its leftmost piece's place: the readers
+    downstream pair a ``10`` with its exponent in that order, so the join must not reorder what it does not join.
+    """
+    digits = [i for i, s in enumerate(spans) if s.provenance.bbox is not None and _DIGITS.fullmatch(s.text)]
+    digits.sort(key=lambda i: (round(spans[i].provenance.bbox.y1), spans[i].provenance.bbox.x0))
+    joined: dict[int, TextSpan] = {}
+    absorbed: set[int] = set()
+    head = None
+    for i in digits:
+        span, box = spans[i], spans[i].provenance.bbox
+        prev = joined[head] if head is not None else None
+        pb = prev.provenance.bbox if prev is not None else None
+        if (
+            prev is not None
+            and abs(span.size - prev.size) <= SIZE_TOL
+            and abs(box.y1 - pb.y1) <= AXIS_TOL
+            and abs(box.x0 - pb.x1) <= GLYPH_GAP
+        ):
+            joined[head] = replace(
+                prev, text=prev.text + span.text, provenance=prev.provenance.at(bbox=union([pb, box]))
+            )
+            absorbed.add(i)
+        else:
+            head = i
+            joined[i] = span
+    return [joined.get(i, s) for i, s in enumerate(spans) if i not in absorbed]
+
+
 def _minus_before(box: BBox, spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> BBox | None:
     """The box of a minus sign ending just left of the label, within its height.
 
     It is a drawn short horizontal stroke, or a span of its own holding only a minus glyph (a minus set in another
-    font than its digits).
+    font than its digits). A drawn dash may end up to ``EDGE_TOL`` inside the label's box (a glyph box carries
+    side bearing) but must START left of it.
     """
     for d in dashes:
-        if box.x0 - DASH_GAP <= d.hi <= box.x0 + EDGE_TOL / 3 and box.y0 < d.at < box.y1:
+        if d.lo < box.x0 and box.x0 - DASH_GAP <= d.hi <= box.x0 + EDGE_TOL and box.y0 < d.at < box.y1:
             return BBox(d.lo, box.y0, d.hi, box.y1)
     for span in spans:
         sb = span.provenance.bbox
@@ -307,6 +345,9 @@ def _exponent_of(i: int, spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> 
         gap = ob.x0 - bb.x1
         if -EDGE_TOL <= gap <= EDGE_TOL:
             return j, int(power)
+        minus = _minus_before(ob, spans, ())
+        if 0 < gap <= DASH_MAX + EDGE_TOL and minus is not None and minus.x0 >= bb.x1 - EDGE_TOL and power > 0:
+            return j, -int(power)
         dashed = any(bb.x1 - EDGE_TOL <= d.lo and d.hi <= ob.x0 + EDGE_TOL and bb.y0 <= d.at <= ob.y1 for d in dashes)
         if 0 < gap <= DASH_MAX + EDGE_TOL and dashed and power > 0:
             return j, -int(power)

@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Final, Literal
 
 import numpy as np
 
-from document_lab.glyphs import Glyph, UnreadableGlyph, rasterise, read_number, read_word
+from document_lab.glyphs import Glyph, UnreadableGlyph, has_letter, rasterise, read_number, read_word
 from document_lab.ir import BBox, Page, Provenance, Raster, TextSpan, VectorPath, union
 from document_lab.numbers import parse_number
 
@@ -250,7 +250,9 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
     for frame in _frames(edges):
         xs = _decade_mantissas(_aligned(_one_size(_x_labels(frame, labels)), vertical=False), vertical=False)
         ys = _decade_mantissas(_aligned(_one_size(_y_labels(frame, labels)), vertical=True), vertical=True)
-        _refuse_unread(page, frame, xs, ys, unread)
+        _refuse_unread(
+            page, frame, (xs, ys), unread, (_marks(frame, edges, vertical=True), _marks(frame, edges, vertical=False))
+        )
         if len(xs) < 2 or len(ys) < 2:  # noqa: PLR2004 -- a line needs two points
             continue
         x_ticks = _snap(
@@ -292,23 +294,39 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
     return found
 
 
-def _refuse_unread(page: Page, frame: BBox, xs: Sequence[_Label], ys: Sequence[_Label], unread: Sequence[BBox]) -> None:
+def _refuse_unread(
+    page: Page,
+    frame: BBox,
+    read: tuple[Sequence[_Label], Sequence[_Label]],
+    unread: Sequence[BBox],
+    marks: tuple[Sequence[float], Sequence[float]],
+) -> None:
     """Raise :class:`UnrecognisedFrame` when an unreadable outlined word sits among the frame's tick labels.
 
     Among means on the x-label row (between the read labels' top and bottom) or the y-label column (within the read
-    labels' extent across); an unreadable word farther out is a title, not a label.
+    labels' extent across); an unreadable word farther out is a title, not a label. On an axis that draws tick marks
+    or grid lines (``marks``: x positions, y positions), a word with no mark within half its own extent along the
+    axis labels no tick (a unit or title set between labels, as SIFERRIT Pv figures set ``kW/m3``), and is not one.
     """
+    xs, ys = read
     for box in unread:
         probe = [_Label(math.nan, box, round(box.height, 1))]
         cy, cx = (box.y0 + box.y1) / 2, (box.x0 + box.x1) / 2
         on_row = xs and _x_labels(frame, probe) and min(b.box.y0 for b in xs) <= cy <= max(b.box.y1 for b in xs)
         on_col = ys and _y_labels(frame, probe) and min(b.box.x0 for b in ys) <= cx <= max(b.box.x1 for b in ys)
+        on_row = on_row and _on_a_mark(cx, box.width / 2, marks[0])
+        on_col = on_col and _on_a_mark(cy, box.height / 2, marks[1])
         if on_row or on_col:
             msg = (
                 f'page {page.number}: the plot framed at {tuple(round(v, 1) for v in frame)} has a tick label at '
                 f'{tuple(round(v, 1) for v in box)} whose glyphs read as no number or word: an unrecognised frame'
             )
             raise UnrecognisedFrame(msg)
+
+
+def _on_a_mark(centre: float, half: float, marks: Sequence[float]) -> bool:
+    """Whether a word centred at ``centre`` could label a mark: one lies within ``half`` of it, or none is drawn."""
+    return not marks or any(abs(m - centre) <= half + SNAP_TOL for m in marks)
 
 
 def _edges(paths: Sequence[VectorPath]) -> list[_Edge]:
@@ -420,7 +438,11 @@ def _text_spans(page: Page, outlined: Sequence[tuple[float | None, str | None, B
 
 
 def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, str | None, BBox]]:
-    """Each row of outlined glyphs with the number it reads as, else the text it reads as (each ``None`` if not)."""
+    """Each row of outlined glyphs with the number it reads as, else the text it reads as (each ``None`` if not).
+
+    A row that reads as neither but holds a glyph that reads clearly as a letter is a word (a unit such as ``kW/m3``
+    whose ``/`` the reader lacks), never a tick label: it is left out, so it can neither refuse a frame nor be text.
+    """
     shapes = [
         p
         for p in paths
@@ -450,6 +472,8 @@ def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, str 
         except UnreadableGlyph:
             with contextlib.suppress(UnreadableGlyph):
                 text = read_word(shapes)
+        if value is None and text is None and has_letter(shapes):
+            continue
         out.append((value, text, union([g[0] for g in members])))
     return out
 

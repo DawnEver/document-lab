@@ -29,6 +29,7 @@ axes are not read.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import math
 import re
@@ -38,7 +39,7 @@ from typing import TYPE_CHECKING, Final, Literal
 
 import numpy as np
 
-from document_lab.glyphs import Glyph, UnreadableGlyph, rasterise, read_number
+from document_lab.glyphs import Glyph, UnreadableGlyph, rasterise, read_number, read_word
 from document_lab.ir import BBox, Page, Provenance, Raster, TextSpan, VectorPath, union
 from document_lab.numbers import parse_number
 
@@ -55,6 +56,7 @@ __all__ = [
     'RasterPlot',
     'Scale',
     'UnreadableTickLabels',
+    'outline_text',
     'plots',
     'raster_plot',
 ]
@@ -226,6 +228,7 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
     edges = _edges(page.paths)
     labels = _labels(page.spans, [e for e in edges if not e.vertical and e.length <= DASH_MAX])
     labels += _outline_labels(page.paths, [e for e in edges if not e.vertical and e.length <= DASH_MAX])
+    words = [*page.spans, *outline_text(page)] if page.paths else list(page.spans)  # a legend may be outlined
     # A grid line may stop short of the far edge (a legend sits there), so a long rule anchored on an edge counts.
     found = []
     for frame in _frames(edges):
@@ -246,7 +249,7 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
         x_axis, y_axis = _fit(x_ticks, x_scale), _fit(y_ticks, y_scale)
         legend, paths = [], []
         for path in _joined(_curve_paths(frame, page.paths)):
-            label = _sample_label(path, page.spans)
+            label = _sample_label(path, words)
             if label is None:
                 paths.append(path)
             else:
@@ -344,7 +347,7 @@ def _outline_labels(paths: Sequence[VectorPath], dashes: Sequence[_Edge]) -> lis
     drawn dash before a label (or between ``10`` and its exponent) is its minus. A word the reader cannot read is no
     label.
     """
-    words = [w for w in _outline_words(paths) if w[0] is not None]
+    words = [(value, box) for value, _, box in _outline_words(paths) if value is not None]
     used: set[int] = set()
     out = []
     for i, (value, box) in enumerate(words):
@@ -363,8 +366,21 @@ def _outline_labels(paths: Sequence[VectorPath], dashes: Sequence[_Edge]) -> lis
     return out
 
 
-def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, BBox]]:
-    """Each row of outlined glyphs with the number it reads as (``None`` when it reads as none)."""
+def outline_text(page: Page) -> list[TextSpan]:
+    """Each word ``page`` sets as filled glyph OUTLINES that reads as text (a unit, a grade), as a span.
+
+    A word that spells a number is a tick label (read by :func:`plots`), not text; a word the reader refuses is
+    absent. The span's size is the word's ink height and its font ``outline``.
+    """
+    return [
+        TextSpan(text, round(box.height, 1), 'outline', page.paths[0].provenance.at(bbox=box))
+        for value, text, box in _outline_words(page.paths)
+        if value is None and text is not None
+    ]
+
+
+def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, str | None, BBox]]:
+    """Each row of outlined glyphs with the number it reads as, else the text it reads as (each ``None`` if not)."""
     shapes = [
         p
         for p in paths
@@ -383,21 +399,25 @@ def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, BBox
             glyphs.append((box, [shape.points]))
         else:
             host[1].append(shape.points)
-    out: list[tuple[float | None, BBox]] = []
+    out: list[tuple[float | None, str | None, BBox]] = []
     for word in _words([g[0] for g in glyphs]):
         members = [glyphs[i] for i in word]
+        shapes = [Glyph(rasterise(polys, tuple(box)), tuple(box)) for box, polys in members]
+        value: float | None = None
+        text: str | None = None
         try:
-            value = read_number([Glyph(rasterise(polys, tuple(box)), tuple(box)) for box, polys in members])
+            value = read_number(shapes)
         except UnreadableGlyph:
-            value = None
-        out.append((value, union([g[0] for g in members])))
+            with contextlib.suppress(UnreadableGlyph):
+                text = read_word(shapes)
+        out.append((value, text, union([g[0] for g in members])))
     return out
 
 
 def _words(boxes: Sequence[BBox]) -> list[list[int]]:
     """Glyph boxes grouped into words, as indices left to right: one row, gaps under ``WORD_GAP`` of the height.
 
-    A raised smaller glyph (an exponent) starts a word of its own.
+    A raised smaller glyph (an exponent) starts a word of its own: raised above the word's median glyph bottom.
     """
     words: list[list[int]] = []
     for i in sorted(range(len(boxes)), key=lambda k: boxes[k].x0):
@@ -406,7 +426,8 @@ def _words(boxes: Sequence[BBox]) -> list[list[int]]:
         for word in words:
             wb = union([boxes[k] for k in word])
             same_row = wb.y0 <= cy <= wb.y1 or box.y0 <= (wb.y0 + wb.y1) / 2 <= box.y1
-            raised = box.height < RAISED * wb.height and box.y1 < wb.y1 - (1 - RAISED) * wb.height
+            base = float(np.median([boxes[k].y1 for k in word]))  # a descender (``g``) is not the baseline
+            raised = box.height < RAISED * wb.height and box.y1 < base - (1 - RAISED) * wb.height
             if same_row and not raised and -EDGE_TOL <= box.x0 - wb.x1 <= WORD_GAP * max(wb.height, box.height):
                 word.append(i)
                 break

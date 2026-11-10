@@ -24,7 +24,9 @@ within ``SAMPLE_GAP`` right of it, at its height, is a legend sample: it goes to
 not to ``Plot.curves``.
 
 In :func:`plots`, a frame whose curves are a RASTER image raises :class:`RasterPlot` (a silent empty result would
-read as "this plot has no curves"): read it with :func:`raster_plot` over ``pdf.read_raster``. Secondary (right/top)
+read as "this plot has no curves"): read it with :func:`raster_plot` over ``pdf.read_raster``. A page on which
+frames carry tick labels but none reads as a plot raises :class:`UnreadFrame` naming each. A drawn minus is a path
+that is wholly one short flat stroke: a flat stretch of a curve beside a label is not one. Secondary (right/top)
 axes are not read.
 """
 
@@ -57,6 +59,7 @@ __all__ = [
     'Plot',
     'RasterPlot',
     'Scale',
+    'UnreadFrame',
     'UnreadableTickLabels',
     'UnrecognisedFrame',
     'outline_text',
@@ -140,6 +143,13 @@ class RasterPlot(ValueError):
 
 class NoPlotFrame(ValueError):
     """A raster holds no plot frame: no long horizontal line meets a long vertical one at a bottom-left corner."""
+
+
+class UnreadFrame(ValueError):
+    """Every frame on a page that carries a tick label failed to read as a plot (an axis with under two labels).
+
+    Returning no plot would look exactly like a page that holds none, so the page and its frames are named instead.
+    """
 
 
 class UnrecognisedFrame(ValueError):
@@ -247,13 +257,14 @@ class _Edge:
 def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = None) -> list[Plot]:
     """Every vector plot on ``page``; ``x_scale``/``y_scale`` force an axis scale instead of inferring it."""
     edges = _edges(page.paths)
-    labels = _labels(page.spans, [e for e in edges if not e.vertical and e.length <= DASH_MAX])
+    dashes = _dashes(page.paths)
+    labels = _labels(page.spans, dashes)
     outlined = _outline_words(page.paths)
-    labels += _outline_labels(outlined, [e for e in edges if not e.vertical and e.length <= DASH_MAX])
+    labels += _outline_labels(outlined, dashes)
     unread = [box for value, text, box in outlined if value is None and text is None]
     words = [*page.spans, *_text_spans(page, outlined)]  # a legend may be outlined
     # A grid line may stop short of the far edge (a legend sits there), so a long rule anchored on an edge counts.
-    found = []
+    found, unread_frames = [], []
     for frame in _frames(edges):
         xs = _decade_mantissas(_aligned(_one_size(_x_labels(frame, labels)), vertical=False), vertical=False)
         ys = _decade_mantissas(_aligned(_one_size(_y_labels(frame, labels)), vertical=True), vertical=True)
@@ -261,6 +272,8 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
             page, frame, (xs, ys), unread, (_marks(frame, edges, vertical=True), _marks(frame, edges, vertical=False))
         )
         if len(xs) < 2 or len(ys) < 2:  # noqa: PLR2004 -- a line needs two points
+            if xs or ys:
+                unread_frames.append((frame, len(xs), len(ys)))
             continue
         x_ticks = _snap(
             [((lb.box.x0 + lb.box.x1) / 2, lb.value) for lb in xs],
@@ -298,7 +311,27 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
         if not curves:
             _refuse_raster(page, frame)
         found.append(Plot(frame, x_axis, y_axis, curves, tuple(legend), page.paths[0].provenance.at(bbox=frame)))
+    if not found and unread_frames:
+        named = '; '.join(
+            f'{tuple(round(v, 1) for v in frame)} with {nx} x and {ny} y tick labels' for frame, nx, ny in unread_frames
+        )
+        msg = f'page {page.number}: no frame reads as a plot, each needs two tick labels per axis: {named}'
+        raise UnreadFrame(msg)
     return found
+
+
+def _dashes(paths: Sequence[VectorPath]) -> list[_Edge]:
+    """Each drawn minus candidate: a path that is WHOLLY one short flat stroke (or a thin filled rule).
+
+    A short flat segment of a longer path is part of a curve (one continuing past the frame under the PDF clip, or
+    crossing the label row), never a minus: DMEGC and SIFERRIT curves read so negated a tick label.
+    """
+    out = []
+    for path in paths:
+        box = path.provenance.bbox
+        if box is not None and box.width <= DASH_MAX + AXIS_TOL and box.height <= RULE_MAX:
+            out.extend(e for e in _edges([path]) if not e.vertical and e.length <= DASH_MAX)
+    return out
 
 
 def _refuse_unread(

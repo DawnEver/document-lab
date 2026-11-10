@@ -6,7 +6,7 @@ import pytest
 from document_lab.glyphs import UnreadableGlyph
 from document_lab.ir import BBox
 from document_lab.pdf import read_raster
-from document_lab.plot import NoPlotFrame, UnreadableTickLabels, raster_plot
+from document_lab.plot import NoCurveOfColour, NoPlotFrame, UnreadableTickLabels, raster_plot
 from tests.synthetic import BLUE, RED, Axis, PlotSpec, raster_pdf
 
 XS = [float(x) for x in range(0, 101, 5)]
@@ -104,3 +104,28 @@ def test_a_dark_curve_crossing_grid_lines_stays_one_curve(tmp_path):
     (curve,) = plot.curves
     assert curve.x.min() <= 2 and curve.x.max() >= 98  # data units of x: the whole curve
     assert _within_pixels(curve, lambda x: x, 1).all()
+
+
+def test_a_curve_of_a_stated_colour_is_traced_into_data_coordinates_alone(tmp_path):
+    """VITROPERM loss figures: one curve per colour, and the caller names the one it wants."""
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([0, 50, 100]),
+        [(lambda x: x, XS, RED), (lambda x: 30 + 0.004 * x * x, XS, BLUE)],
+        grid=True,
+    )
+    raster = _raster(tmp_path, spec, dpi=200)
+    (curve,) = raster_plot(raster, colour=BLUE).curves
+    assert curve.y == pytest.approx(30 + 0.004 * curve.x**2, abs=1.0)  # data units of y: a pixel is 0.18 here
+    assert curve.x.min() <= 2 and curve.x.max() >= 98  # data units of x: the whole curve
+    (red,) = raster_plot(raster, colour=RED).curves  # the control: the other colour is the other curve
+    assert red.y == pytest.approx(red.x, abs=1.0)  # data units of y
+
+
+def test_a_colour_no_curve_is_drawn_in_raises_by_name(tmp_path):
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)])
+    raster = _raster(tmp_path, spec, dpi=200)
+    with pytest.raises(NoCurveOfColour, match='colour'):
+        raster_plot(raster, colour=(0.0, 0.6, 0.0))
+    with pytest.raises(NoCurveOfColour):
+        raster_plot(raster, colour=(0.0, 0.0, 0.0))  # dark ink: the frame is no curve

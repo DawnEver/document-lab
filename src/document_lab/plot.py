@@ -29,6 +29,7 @@ axes are not read.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import math
 import re
@@ -38,7 +39,7 @@ from typing import TYPE_CHECKING, Final, Literal
 
 import numpy as np
 
-from document_lab.glyphs import Glyph, UnreadableGlyph, rasterise, read_number
+from document_lab.glyphs import Glyph, UnreadableGlyph, rasterise, read_number, read_word
 from document_lab.ir import BBox, Page, Provenance, Raster, TextSpan, VectorPath, union
 from document_lab.numbers import parse_number
 
@@ -50,11 +51,14 @@ __all__ = [
     'Basis',
     'Curve',
     'LegendSample',
+    'NoCurveOfColour',
     'NoPlotFrame',
     'Plot',
     'RasterPlot',
     'Scale',
     'UnreadableTickLabels',
+    'UnrecognisedFrame',
+    'outline_text',
     'plots',
     'raster_plot',
 ]
@@ -129,6 +133,18 @@ class RasterPlot(ValueError):
 
 class NoPlotFrame(ValueError):
     """A raster holds no plot frame: no long horizontal line meets a long vertical one at a bottom-left corner."""
+
+
+class UnrecognisedFrame(ValueError):
+    """A vector frame's tick-label row or column holds an outlined word the glyph reader refuses.
+
+    Calibrating from the labels that did read would silently drop one (older SIFERRIT sheets set labels in glyphs
+    the reader does not know), so the frame is refused by name instead.
+    """
+
+
+class NoCurveOfColour(ValueError):
+    """A raster plot holds no curve of the colour the caller asked :func:`raster_plot` for."""
 
 
 class UnreadableTickLabels(ValueError):
@@ -225,12 +241,16 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
     """Every vector plot on ``page``; ``x_scale``/``y_scale`` force an axis scale instead of inferring it."""
     edges = _edges(page.paths)
     labels = _labels(page.spans, [e for e in edges if not e.vertical and e.length <= DASH_MAX])
-    labels += _outline_labels(page.paths, [e for e in edges if not e.vertical and e.length <= DASH_MAX])
+    outlined = _outline_words(page.paths)
+    labels += _outline_labels(outlined, [e for e in edges if not e.vertical and e.length <= DASH_MAX])
+    unread = [box for value, text, box in outlined if value is None and text is None]
+    words = [*page.spans, *_text_spans(page, outlined)]  # a legend may be outlined
     # A grid line may stop short of the far edge (a legend sits there), so a long rule anchored on an edge counts.
     found = []
     for frame in _frames(edges):
         xs = _decade_mantissas(_aligned(_one_size(_x_labels(frame, labels)), vertical=False), vertical=False)
         ys = _decade_mantissas(_aligned(_one_size(_y_labels(frame, labels)), vertical=True), vertical=True)
+        _refuse_unread(page, frame, xs, ys, unread)
         if len(xs) < 2 or len(ys) < 2:  # noqa: PLR2004 -- a line needs two points
             continue
         x_ticks = _snap(
@@ -246,7 +266,7 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
         x_axis, y_axis = _fit(x_ticks, x_scale), _fit(y_ticks, y_scale)
         legend, paths = [], []
         for path in _joined(_curve_paths(frame, page.paths)):
-            label = _sample_label(path, page.spans)
+            label = _sample_label(path, words)
             if label is None:
                 paths.append(path)
             else:
@@ -270,6 +290,25 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
             _refuse_raster(page, frame)
         found.append(Plot(frame, x_axis, y_axis, curves, tuple(legend), page.paths[0].provenance.at(bbox=frame)))
     return found
+
+
+def _refuse_unread(page: Page, frame: BBox, xs: Sequence[_Label], ys: Sequence[_Label], unread: Sequence[BBox]) -> None:
+    """Raise :class:`UnrecognisedFrame` when an unreadable outlined word sits among the frame's tick labels.
+
+    Among means on the x-label row (between the read labels' top and bottom) or the y-label column (within the read
+    labels' extent across); an unreadable word farther out is a title, not a label.
+    """
+    for box in unread:
+        probe = [_Label(math.nan, box, round(box.height, 1))]
+        cy, cx = (box.y0 + box.y1) / 2, (box.x0 + box.x1) / 2
+        on_row = xs and _x_labels(frame, probe) and min(b.box.y0 for b in xs) <= cy <= max(b.box.y1 for b in xs)
+        on_col = ys and _y_labels(frame, probe) and min(b.box.x0 for b in ys) <= cx <= max(b.box.x1 for b in ys)
+        if on_row or on_col:
+            msg = (
+                f'page {page.number}: the plot framed at {tuple(round(v, 1) for v in frame)} has a tick label at '
+                f'{tuple(round(v, 1) for v in box)} whose glyphs read as no number or word: an unrecognised frame'
+            )
+            raise UnrecognisedFrame(msg)
 
 
 def _edges(paths: Sequence[VectorPath]) -> list[_Edge]:
@@ -335,7 +374,7 @@ def _labels(spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> list[_Label]:
     return out
 
 
-def _outline_labels(paths: Sequence[VectorPath], dashes: Sequence[_Edge]) -> list[_Label]:
+def _outline_labels(outlined: Sequence[tuple[float | None, str | None, BBox]], dashes: Sequence[_Edge]) -> list[_Label]:
     """Numbers set as filled glyph OUTLINES (a sheet exported with its text converted to paths).
 
     A glyph is a small filled shape plus the subpaths whose centres it encloses (a ``0``'s hole); a word is a row of
@@ -344,7 +383,7 @@ def _outline_labels(paths: Sequence[VectorPath], dashes: Sequence[_Edge]) -> lis
     drawn dash before a label (or between ``10`` and its exponent) is its minus. A word the reader cannot read is no
     label.
     """
-    words = [w for w in _outline_words(paths) if w[0] is not None]
+    words = [(value, box) for value, _, box in outlined if value is not None]
     used: set[int] = set()
     out = []
     for i, (value, box) in enumerate(words):
@@ -363,8 +402,25 @@ def _outline_labels(paths: Sequence[VectorPath], dashes: Sequence[_Edge]) -> lis
     return out
 
 
-def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, BBox]]:
-    """Each row of outlined glyphs with the number it reads as (``None`` when it reads as none)."""
+def outline_text(page: Page) -> list[TextSpan]:
+    """Each word ``page`` sets as filled glyph OUTLINES that reads as text (a unit, a grade), as a span.
+
+    A word that spells a number is a tick label (read by :func:`plots`), not text; a word the reader refuses is
+    absent. The span's size is the word's ink height and its font ``outline``.
+    """
+    return _text_spans(page, _outline_words(page.paths))
+
+
+def _text_spans(page: Page, outlined: Sequence[tuple[float | None, str | None, BBox]]) -> list[TextSpan]:
+    return [
+        TextSpan(text, round(box.height, 1), 'outline', page.paths[0].provenance.at(bbox=box))
+        for value, text, box in outlined
+        if value is None and text is not None
+    ]
+
+
+def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, str | None, BBox]]:
+    """Each row of outlined glyphs with the number it reads as, else the text it reads as (each ``None`` if not)."""
     shapes = [
         p
         for p in paths
@@ -383,21 +439,25 @@ def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, BBox
             glyphs.append((box, [shape.points]))
         else:
             host[1].append(shape.points)
-    out: list[tuple[float | None, BBox]] = []
+    out: list[tuple[float | None, str | None, BBox]] = []
     for word in _words([g[0] for g in glyphs]):
         members = [glyphs[i] for i in word]
+        shapes = [Glyph(rasterise(polys, tuple(box)), tuple(box)) for box, polys in members]
+        value: float | None = None
+        text: str | None = None
         try:
-            value = read_number([Glyph(rasterise(polys, tuple(box)), tuple(box)) for box, polys in members])
+            value = read_number(shapes)
         except UnreadableGlyph:
-            value = None
-        out.append((value, union([g[0] for g in members])))
+            with contextlib.suppress(UnreadableGlyph):
+                text = read_word(shapes)
+        out.append((value, text, union([g[0] for g in members])))
     return out
 
 
 def _words(boxes: Sequence[BBox]) -> list[list[int]]:
     """Glyph boxes grouped into words, as indices left to right: one row, gaps under ``WORD_GAP`` of the height.
 
-    A raised smaller glyph (an exponent) starts a word of its own.
+    A raised smaller glyph (an exponent) starts a word of its own: raised above the word's median glyph bottom.
     """
     words: list[list[int]] = []
     for i in sorted(range(len(boxes)), key=lambda k: boxes[k].x0):
@@ -406,7 +466,8 @@ def _words(boxes: Sequence[BBox]) -> list[list[int]]:
         for word in words:
             wb = union([boxes[k] for k in word])
             same_row = wb.y0 <= cy <= wb.y1 or box.y0 <= (wb.y0 + wb.y1) / 2 <= box.y1
-            raised = box.height < RAISED * wb.height and box.y1 < wb.y1 - (1 - RAISED) * wb.height
+            base = float(np.median([boxes[k].y1 for k in word]))  # a descender (``g``) is not the baseline
+            raised = box.height < RAISED * wb.height and box.y1 < base - (1 - RAISED) * wb.height
             if same_row and not raised and -EDGE_TOL <= box.x0 - wb.x1 <= WORD_GAP * max(wb.height, box.height):
                 word.append(i)
                 break
@@ -794,6 +855,7 @@ def raster_plot(
     y_values: Sequence[float] | None = None,
     x_scale: Scale | None = None,
     y_scale: Scale | None = None,
+    colour: tuple[float, float, float] | None = None,
 ) -> Plot:
     """The plot in a RASTER image: its frame, axes calibrated from its tick labels, and its curves traced.
 
@@ -810,6 +872,9 @@ def raster_plot(
     pixel column at each run's centre, or every stroke width along a run longer than two (a steep stretch); a curve
     that folds back over x (a loop) keeps both branches' samples, in column order. Each point carries one pixel's
     extent in data units as its uncertainty.
+
+    ``colour`` (RGB, 0..1) keeps only the curves drawn in it: those of its ``HUE_SECTOR`` when it is coloured, the
+    dark ones when it is not; when none is, :class:`NoCurveOfColour` is raised rather than an empty plot returned.
     """
     box = raster.provenance.bbox
     rgb = raster.pixels.astype(float) / 255
@@ -832,6 +897,12 @@ def raster_plot(
     x_axis = _raster_axis('x', frame, values=x_values, scale=x_scale, **found)
     y_axis = _raster_axis('y', frame, values=y_values, scale=y_scale, **found)
     masks, occluders = _curve_masks(ink, chroma, rgb, frame=frame, box=box, scale=scale)
+    if colour is not None:
+        masks = [m for m in masks if _sector(rgb[m].mean(axis=0)) == _sector(np.asarray(colour, dtype=float))]
+        if not masks:
+            where = tuple(round(v, 1) for v in frame)
+            msg = f'no curve drawn in colour {tuple(colour)} inside the plot framed at {where}'
+            raise NoCurveOfColour(msg)
     traced = (
         _traced(mask, occluders & ~mask, rgb=rgb, here=raster.provenance, scale=scale, axes=(x_axis, y_axis))
         for mask in masks
@@ -1021,6 +1092,13 @@ def _bridged(mask: np.ndarray, grid_rows: np.ndarray, grid_cols: np.ndarray) -> 
             reach = [np.roll(above, s) for s in (-1, 0, 1)], [np.roll(below, s) for s in (-1, 0, 1)]
             view[lo:hi] |= (np.logical_or.reduce(reach[0]) & np.logical_or.reduce(reach[1]))[None, :]
     return out
+
+
+def _sector(rgb: np.ndarray) -> int:
+    """The ``HUE_SECTOR`` a colour falls in (as :func:`_curve_masks` sorts curves), or -1 when it is not coloured."""
+    if float(rgb.max() - rgb.min()) <= CHROMA_MIN:
+        return -1
+    return int(np.floor(((float(_hue(rgb)) + HUE_SECTOR / 2) % 360) / HUE_SECTOR))
 
 
 def _hue(rgb: np.ndarray) -> np.ndarray:

@@ -23,11 +23,22 @@ _CAPTION_RE = re.compile(rf'(?P<label>Figure\s+\d+|Fig\.\s*\d+|Table\s+(?:\d+|{_
 # ── Low-level render helpers ──────────────────────────────────────────────────
 
 
-def _render_one(doc: pymupdf.Document, page_num: int, label: str, img_path: Path, content_below: bool = False) -> None:
+_FULL_PAGE_IMAGE = 0.9  # share of a page one image covers for the page to be that image (a screen capture, a scan)
+
+
+def is_full_page_image(page: pymupdf.Page) -> bool:
+    """Is ``page`` one picture of a page -- a screen capture or a scan -- with nothing drawn beside it?
+
+    Its figures and tables are pixels inside that picture, so there is nothing to crop them from.
+    """
+    area = abs(page.rect)
+    covered = [abs(pymupdf.Rect(info['bbox']) & page.rect) for info in page.get_image_info()]
+    return len(covered) == 1 and covered[0] >= _FULL_PAGE_IMAGE * area and not page.get_drawings()
+
+
+def _render(page: pymupdf.Page, img_path: Path, crop: pymupdf.Rect | None) -> None:
     if img_path.exists():
         return
-    page = doc[page_num]
-    crop = crop_figure(page, label, content_below=content_below)
     mat = pymupdf.Matrix(2.0, 2.0)
     pix = page.get_pixmap(matrix=mat, clip=crop) if crop else page.get_pixmap(matrix=mat)
     img_path.parent.mkdir(parents=True, exist_ok=True)
@@ -268,6 +279,9 @@ def render_figure_pages(
 ) -> tuple[dict[str, str], dict[int, int]]:
     """Render cropped figure images and insert them inline at caption positions.
 
+    A label on a page that is one picture (:func:`is_full_page_image`: a screen capture, a scan) is not cropped: it
+    links the whole page, rendered once as ``page-NN.png`` however many labels the page holds.
+
     Returns (figure_images, page_section_map) where figure_images maps normalised
     figure label → relative image path (for INDEX.md).
     """
@@ -297,9 +311,14 @@ def render_figure_pages(
             unique_entries.append((label, normalized, page_num, owning))
 
     for label, normalized, page_num, owning in unique_entries:
-        img_name = f'page-{page_num + 1:02d}-{normalized.lower().replace(" ", "-")}.png'
+        page = doc[page_num]
+        if is_full_page_image(page):  # nothing to crop from: the page itself, once, shared by every label on it
+            crop, img_name = None, f'page-{page_num + 1:02d}.png'
+        else:
+            crop = crop_figure(page, label, content_below=label.upper().startswith('TABLE'))
+            img_name = f'page-{page_num + 1:02d}-{normalized.lower().replace(" ", "-")}.png'
         img_path = out_dir / 'img' / f'sec{owning:02d}' / img_name
-        _render_one(doc, page_num, label, img_path, content_below=label.upper().startswith('TABLE'))
+        _render(page, img_path, crop)
         figure_images[normalized] = f'img/sec{owning:02d}/{img_name}'
 
     doc.close()

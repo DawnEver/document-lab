@@ -578,3 +578,137 @@ def test_a_lone_short_stroke_before_a_tick_label_is_still_its_minus(tmp_path):
     x0 = _left_of_50(spec)
     with pytest.raises(ValueError, match='monotone'):
         plots(_with_stroke(tmp_path, spec, [(x0 - 3.5, 309.0), (x0 - 1.0, 309.0)]))
+
+
+def _with_multiplier(tmp_path, spec, cy):
+    """``spec`` with a ``10^-6`` set right-aligned under the top y label at ``cy``, as TDK SIFERRIT N48 p3 does."""
+    from tests.synthetic import _power_label  # noqa: PLC0415 -- the synthetic power-label drawing
+
+    doc = pymupdf.open(plot_pdf(tmp_path / 'plot.pdf', spec))
+    _power_label(doc[0], 1e-6, spec.frame.x0 - 4, cy, vector_minus=False, span_minus=True, minus_glyph='_')
+    doc.save(tmp_path / 'multiplied.pdf')
+    return read_pdf(tmp_path / 'multiplied.pdf', tables=False).page(1)
+
+
+def test_a_power_of_ten_stacked_under_the_end_label_scales_the_axis(tmp_path):
+    """SIFERRIT N48 p3: ``250`` over ``10^-6`` read as two ticks, so the axis read [250, 1e-06, 50, 0, -50]."""
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], grid=True)
+    (plot,) = plots(_with_multiplier(tmp_path, spec, spec.frame.y0 + 10))
+    assert sorted(v for _, v in plot.y.ticks) == pytest.approx([0, 50e-6, 100e-6], rel=1e-9, abs=1e-12)
+    (curve,) = plot.curves
+    assert curve.y == pytest.approx(curve.x * 1e-6, abs=1e-8)  # data units of y: the axis is in 10^-6
+
+
+def test_a_power_of_ten_between_two_labels_is_a_tick_not_a_multiplier(tmp_path):
+    """The control: a lone power label set between labels, not stacked at the end, stays a tick and is refused."""
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], grid=True)
+    with pytest.raises(ValueError, match='monotone'):
+        plots(_with_multiplier(tmp_path, spec, to_page(spec, 0, 75)[1]))
+
+
+def _outlined_with(tmp_path, spec, draw):
+    doc = pymupdf.open(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True))
+    draw(doc[0])
+    doc.save(tmp_path / 'drawn.pdf')
+    return read_pdf(tmp_path / 'drawn.pdf', tables=False).page(1)
+
+
+def _log_grid(**kwargs):
+    """A log y axis 1..100 with a minor grid, so a word anywhere in the label column sits on a grid line."""
+    return PlotSpec(
+        Axis([0, 50, 100]), Axis([1, 10, 100], log=True), [(lambda x: 1 + x, XS, RED)], minor_grid=True, **kwargs
+    )
+
+
+def _arrow(page, cx, apex):
+    """An axis-title arrow: a filled head 3.8 x 9.5 points over a hairline shaft, as SIFERRIT N48 p4 draws it."""
+    shape = page.new_shape()
+    shape.draw_polyline([(cx + 0.15, apex), (cx + 1.9, apex + 9.5), (cx - 1.9, apex + 9.5), (cx - 0.15, apex)])
+    shape.finish(fill=(0, 0, 0), color=None, closePath=True)
+    shape.commit()
+    page.draw_line((cx, apex + 8.2), (cx, apex + 28), color=(0, 0, 0), width=0.3)
+
+
+def test_an_outlined_axis_title_arrowhead_in_the_label_column_is_no_tick_label(tmp_path):
+    """SIFERRIT N48 p4: the y title's filled arrowhead read as a glyph of no digit, refusing the frame."""
+    (plot,) = plots(_outlined_with(tmp_path, _log_grid(), lambda page: _arrow(page, 89.0, 135.0)))
+    assert sorted(v for _, v in plot.y.ticks) == [1, 10, 100]
+
+
+def test_an_unreadable_outlined_word_in_the_label_column_still_refuses(tmp_path):
+    """The control: a real glyph the reader cannot read where the arrowhead sat still refuses the frame."""
+    page = read_pdf(
+        plot_pdf(tmp_path / 'plot.pdf', _log_grid(stray=[('Il', 85.0, 143.0, 8.0)]), outlined=True), tables=False
+    ).page(1)
+    with pytest.raises(UnrecognisedFrame, match='unrecognised frame'):
+        plots(page)
+
+
+def _stroked_digits(page, spec, *, where='labels'):
+    """A ``1``-like stroke (a flag and a stem, as stroke-font lettering draws it) at each tick label's place."""
+    f = spec.frame
+    places = [(to_page(spec, v, 0)[0], f.y1 + 10) for v in spec.x.ticks]
+    places += [(f.x0 - 8, to_page(spec, 0, v)[1]) for v in spec.y.ticks]
+    if where == 'away':
+        places = [(x + 150, y - 300) for x, y in places[:1]]
+    for x, y in places:
+        page.draw_polyline([(x - 1.5, y - 2.0), (x, y - 3.5), (x, y + 3.5)], color=(0, 0, 0), width=0.4)
+
+
+def _stroked_lettered(tmp_path, where):
+    blank = ['', '', '']
+    spec = PlotSpec(Axis([0, 50, 100], labels=blank), Axis([0, 50, 100], labels=blank), [(lambda x: x, XS, RED)])
+    doc = pymupdf.open(plot_pdf(tmp_path / 'plot.pdf', spec))
+    _stroked_digits(doc[0], spec, where=where)
+    doc.save(tmp_path / 'stroked.pdf')
+    return read_pdf(tmp_path / 'stroked.pdf', tables=False).page(1)
+
+
+def test_tick_labels_drawn_as_stroked_lettering_refuse_the_frame_by_name(tmp_path):
+    """SIFERRIT N72 p3: labels drawn as stroke-font polylines read as nothing, and three plots read as no plot."""
+    with pytest.raises(UnrecognisedFrame, match=r'stroked lines .*: \(100\.0, 100\.0, 400\.0, 300\.0\)'):
+        plots(_stroked_lettered(tmp_path, 'labels'))
+
+
+def test_a_stroked_mark_away_from_the_label_band_refuses_nothing(tmp_path):
+    """The control: a frame with no labels and no lettering beside it is still no plot, not a refusal."""
+    assert plots(_stroked_lettered(tmp_path, 'away')) == []
+
+
+@pytest.mark.parametrize('gap', [1.8, 3.0])
+def test_a_text_exponent_set_apart_from_its_ten_is_still_the_power(tmp_path, gap):
+    """SIFERRIT N48 p4: ``10`` and a raised ``1`` 1.8 pt apart in text read as three 10s, a non-monotone axis."""
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([1, 10, 100, 1000], log=True, power_labels=True, exponent_gap=gap),
+        [(lambda x: 10 ** (x / 50), XS, RED)],
+    )
+    (plot,) = plots(read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec), tables=False).page(1))
+    assert sorted(v for _, v in plot.y.ticks) == pytest.approx([1, 10, 100, 1000], rel=1e-12, abs=0)
+
+
+def test_a_small_number_a_word_gap_past_a_ten_is_not_its_exponent(tmp_path):
+    """The control: a smaller raised number farther than a word gap from ``10`` is no power; the axis stays 10."""
+    spec = PlotSpec(
+        Axis([0, 50, 100]), Axis([0, 5, 10]), [(lambda x: x / 10, XS, RED)], stray=[('3', 104.0, 97.0, 5.0)]
+    )
+    plot = _one_plot(tmp_path, spec)
+    assert sorted(v for _, v in plot.y.ticks) == [0, 5, 10]
+
+
+def test_a_readable_frame_beside_a_stroke_lettered_one_is_still_returned(tmp_path):
+    """SIFERRIT N91 p6: one stroke-lettered inset must not refuse the page's readable plots; it is skipped."""
+    blank = ['', '', '']
+    lettered = PlotSpec(
+        Axis([0, 50, 100], labels=blank),
+        Axis([0, 50, 100], labels=blank),
+        [(lambda x: x, XS, RED)],
+        frame=pymupdf.Rect(100, 450, 400, 650),
+    )
+    readable = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)])
+    doc = pymupdf.open(plot_pdf(tmp_path / 'plot.pdf', readable))
+    draw_plot(doc[0], lettered)
+    _stroked_digits(doc[0], lettered)
+    doc.save(tmp_path / 'both.pdf')
+    (plot,) = plots(read_pdf(tmp_path / 'both.pdf', tables=False).page(1))
+    assert tuple(plot.frame) == pytest.approx((100, 100, 400, 300), abs=0.5)  # points

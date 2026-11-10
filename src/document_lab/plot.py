@@ -16,11 +16,12 @@ the axis is cut at every tick where the data-per-point spacing (in the scale's u
 a break reads right, and an axis whose spacing is neither linear nor log10 maps linearly between each pair of
 labelled ticks. Ticks whose values are not strictly monotone along the axis are refused (``ValueError``).
 
-Every stroked open polyline inside the frame that is not a tick, a grid line or the frame is a curve, after
-fragments are joined: polylines of one style (stroke, width, dash array) whose ends meet (to ``JOIN_DIGITS``
-decimals) become one, unless more than two ends of that style meet there (ambiguous, left unjoined). A short
-horizontal curve (at most ``SAMPLE_MAX`` long) with a text span starting within ``SAMPLE_GAP`` right of it, at its
-height, is a legend sample: it goes to ``Plot.legend`` with that text, not to ``Plot.curves``.
+Every stroked open polyline inside the frame (a polyline drawn past the frame is clipped to it) that is not a tick,
+a grid line or the frame is a curve, after fragments are joined: polylines of one style (stroke, width, dash
+array) whose ends meet (to ``JOIN_DIGITS`` decimals) become one, unless more than two ends of that style meet
+there (ambiguous, left unjoined). A short horizontal curve (at most ``SAMPLE_MAX`` long) with a text span starting
+within ``SAMPLE_GAP`` right of it, at its height, is a legend sample: it goes to ``Plot.legend`` with that text,
+not to ``Plot.curves``.
 
 In :func:`plots`, a frame whose curves are a RASTER image raises :class:`RasterPlot` (a silent empty result would
 read as "this plot has no curves"): read it with :func:`raster_plot` over ``pdf.read_raster``. Secondary (right/top)
@@ -359,17 +360,31 @@ def _edges(paths: Sequence[VectorPath]) -> list[_Edge]:
 def _frames(edges: Sequence[_Edge]) -> list[BBox]:
     """A frame per bottom-left corner: a long horizontal edge (the x axis) meeting a long vertical one (the y axis).
 
-    A corner where several edges meet (a grid line cut short along the x axis) keeps its largest frame.
+    The two meet at their ends, or cross with each running on past the other by at most ``TICK_MAX`` (axes drawn
+    through the origin, an outward tick at the corner); of the edges crossing there the lowest horizontal and the
+    leftmost vertical are the axes, so a grid line just inside is not one. A corner where several edges meet (a grid
+    line cut short along the x axis) keeps its largest frame.
     """
     long = [e for e in edges if e.length >= MIN_FRAME]
+    flat = [e for e in long if not e.vertical]
+    upright = [e for e in long if e.vertical]
+
+    def meet(h: _Edge, v: _Edge) -> bool:
+        return -EDGE_TOL <= v.at - h.lo <= TICK_MAX and -EDGE_TOL <= v.hi - h.at <= TICK_MAX and v.lo < h.at
+
     corners: dict[tuple[float, float], BBox] = {}
-    for h in (e for e in long if not e.vertical):
-        for v in (e for e in long if e.vertical):
-            if abs(h.lo - v.at) <= EDGE_TOL and abs(h.at - v.hi) <= EDGE_TOL:
-                box = BBox(v.at, v.lo, h.hi, h.at)
-                key = (round(box.x0), round(box.y1))
-                if key not in corners or box.width * box.height > corners[key].width * corners[key].height:
-                    corners[key] = box
+    for h in flat:
+        for v in upright:
+            if not meet(h, v):
+                continue
+            if any(meet(o, v) and o.at > h.at + EDGE_TOL for o in flat):  # a lower x axis crosses this y axis
+                continue
+            if any(meet(h, o) and o.at < v.at - EDGE_TOL for o in upright):  # a y axis further left crosses it
+                continue
+            box = BBox(v.at, v.lo, h.hi, h.at)
+            key = (round(box.x0), round(box.y1))
+            if key not in corners or box.width * box.height > corners[key].width * corners[key].height:
+                corners[key] = box
     return list(corners.values())
 
 
@@ -843,18 +858,83 @@ def _misfit(pos: np.ndarray, target: np.ndarray) -> float:
 
 
 def _curve_paths(frame: BBox, paths: Sequence[VectorPath]) -> list[VectorPath]:
-    """Stroked open paths inside the frame that are not a single tick mark, grid line or frame edge."""
+    """Stroked open paths inside the frame (clipped to it) that are not a single tick mark, grid line or frame edge."""
     out = []
     for path in paths:
         if path.stroke is None or path.closed or len(path.points) < 2:  # noqa: PLR2004
             continue
-        if not all(frame.contains(x, y, tol=EDGE_TOL) for x, y in path.points):
-            continue
-        rules = _edges([path])
-        if len(path.points) == 2 and rules and _is_rule(rules[0], frame):  # noqa: PLR2004
-            continue
-        out.append(path)
+        for piece in _clipped(path, frame):
+            rules = _edges([piece])
+            if len(piece.points) == 2 and rules and _is_rule(rules[0], frame):  # noqa: PLR2004
+                continue
+            out.append(piece)
     return out
+
+
+def _clipped(path: VectorPath, frame: BBox) -> list[VectorPath]:
+    """The runs of ``path`` inside the frame, each cut where it crosses the frame's edge.
+
+    A sheet draws a curve past its frame and clips it there (DMEGC): the part inside is the curve. A path wholly
+    inside (to ``EDGE_TOL``) is returned as it is.
+    """
+    if all(frame.contains(x, y, tol=EDGE_TOL) for x, y in path.points):
+        return [path]
+    box = frame
+    runs: list[list[tuple[float, float]]] = []
+    current: list[tuple[float, float]] = []
+    for a, b in itertools.pairwise(path.points):
+        cut = _clip_segment(a, b, box)
+        if cut is None:
+            if current:
+                runs.append(current)
+            current = []
+            continue
+        start, end = cut
+        if current and current[-1] == start:
+            current.append(end)
+        else:
+            if current:
+                runs.append(current)
+            current = [start, end]
+        if end != b:
+            runs.append(current)
+            current = []
+    if current:
+        runs.append(current)
+    return [
+        VectorPath(tuple(run), path.stroke, path.width, path.dashes, False, path.provenance.at(bbox=_points_box(run)))  # noqa: FBT003
+        for run in runs
+        if len(run) >= 2 and run[0] != run[-1]  # noqa: PLR2004 -- a curve needs two points
+    ]
+
+
+def _clip_segment(
+    a: tuple[float, float], b: tuple[float, float], box: BBox
+) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """The part of segment ``a``-``b`` inside ``box`` (Liang-Barsky), its ends kept exact where they are inside."""
+    (x0, y0), (x1, y1) = a, b
+    dx, dy = x1 - x0, y1 - y0
+    lo, hi = 0.0, 1.0
+    for p, q in ((-dx, x0 - box.x0), (dx, box.x1 - x0), (-dy, y0 - box.y0), (dy, box.y1 - y0)):
+        if p == 0:
+            if q < 0:
+                return None
+            continue
+        t = q / p
+        if p < 0:
+            lo = max(lo, t)
+        else:
+            hi = min(hi, t)
+    if lo > hi:
+        return None
+    start = a if lo == 0 else (x0 + lo * dx, y0 + lo * dy)
+    end = b if hi == 1 else (x0 + hi * dx, y0 + hi * dy)
+    return start, end
+
+
+def _points_box(points: Sequence[tuple[float, float]]) -> BBox:
+    xs, ys = [p[0] for p in points], [p[1] for p in points]
+    return BBox(min(xs), min(ys), max(xs), max(ys))
 
 
 def _joined(paths: Sequence[VectorPath]) -> list[VectorPath]:
@@ -946,7 +1026,9 @@ def raster_plot(
     """The plot in a RASTER image: its frame, axes calibrated from its tick labels, and its curves traced.
 
     The frame is found as in :func:`plots`, from the image's long dark (not coloured) horizontal and vertical pixel
-    runs: the largest with two or more label glyph rows below it and left of it (a drop shadow frames none). A
+    runs: of those with two or more aligned label glyph rows below it and left of it (a drop shadow frames none), the
+    one whose fewer-labelled axis READS the most labels, then has the most, then the largest (a border box around the
+    figure, with a caption's numbers below it, is not the plot's frame). A
     tick label is a row of ink glyphs below the frame (x) or left of it (y), read by :mod:`document_lab.glyphs`; one
     the reader refuses raises :class:`UnreadableTickLabels` -- unless the caller states the axis' labelled values
     (``x_values`` left to right, ``y_values`` bottom to top), which are then paired with the label positions found
@@ -969,16 +1051,21 @@ def raster_plot(
     chroma = rgb.max(axis=2) - rgb.min(axis=2)
     ink = (1 - rgb.mean(axis=2) > INK_LEVEL) | (chroma > CHROMA_MIN)
     edges = _pixel_edges(ink & (chroma <= CHROMA_MIN), box, scale)  # a frame is drawn dark, not in colour
-    for frame in sorted(_frames(edges), key=lambda f: -f.width * f.height):
+    candidates = []
+    for frame in _frames(edges):
         labels, refusals = _raster_labels(ink, 1 - rgb.mean(axis=2), frame, box, scale)
-        if len(_x_labels(frame, labels)) >= 2 and len(_y_labels(frame, labels)) >= 2:  # noqa: PLR2004 -- a line
-            break
-    else:
+        rows = [_aligned(_x_labels(frame, labels), vertical=False), _aligned(_y_labels(frame, labels), vertical=True)]
+        if min(len(r) for r in rows) >= 2:  # noqa: PLR2004 -- a line needs two points
+            read = min(sum(not math.isnan(lb.value) for lb in r) for r in rows)
+            rank = (read, min(len(r) for r in rows), frame.width * frame.height)
+            candidates.append((rank, frame, labels, refusals))
+    if not candidates:
         msg = (
             f'no plot frame in the raster at {tuple(round(v, 1) for v in box)}: no long lines meet at a corner '
             'with two or more labels below it and left of it'
         )
         raise NoPlotFrame(msg)
+    _, frame, labels, refusals = max(candidates, key=lambda c: c[0])
     found = {'labels': labels, 'refusals': refusals, 'edges': edges}
     x_axis = _raster_axis('x', frame, values=x_values, scale=x_scale, **found)
     y_axis = _raster_axis('y', frame, values=y_values, scale=y_scale, **found)

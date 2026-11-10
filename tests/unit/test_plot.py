@@ -8,7 +8,7 @@ import pytest
 
 from document_lab.numbers import bound
 from document_lab.pdf import read_pdf
-from document_lab.plot import RasterPlot, UnrecognisedFrame, outline_text, plots
+from document_lab.plot import RasterPlot, UnreadFrame, UnrecognisedFrame, outline_text, plots
 from tests.synthetic import BLUE, RED, Axis, PlotSpec, draw_plot, plot_pdf, to_page
 
 XS = [float(x) for x in range(0, 101, 10)]
@@ -528,3 +528,53 @@ def test_axes_drawn_through_the_corner_still_frame_the_plot(tmp_path, grid):
 
 def _one_plot_list(tmp_path, spec):
     return plots(read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec), tables=False).page(1))
+
+
+def test_a_page_whose_every_labelled_frame_fails_to_read_raises_naming_the_page_and_frame(tmp_path):
+    """SIFERRIT N72 p3: a frame with one readable x label read as no plot and raised nothing."""
+    spec = PlotSpec(Axis([0, 50, 100], labels=['', '50', '']), Axis([0, 50, 100]), [(lambda x: x, XS, RED)])
+    doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec), tables=False)
+    with pytest.raises(UnreadFrame, match=r'page 1: .*\(100\.0, 100\.0, 400\.0, 300\.0\)'):
+        plots(doc.page(1))
+
+
+def test_a_readable_frame_beside_an_unreadable_one_is_still_returned(tmp_path):
+    """The control: the refusal is for a page that reads NO plot, not for a stray box beside one that reads."""
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)])
+    doc = pymupdf.open(plot_pdf(tmp_path / 'plot.pdf', spec))
+    doc[0].draw_rect(pymupdf.Rect(450, 400, 550, 500), color=(0, 0, 0), width=0.8)
+    doc[0].insert_text((440, 503), '7', fontname='helv', fontsize=8)  # one label: the box reads as no plot
+    doc.save(tmp_path / 'two.pdf')
+    (plot,) = plots(read_pdf(tmp_path / 'two.pdf', tables=False).page(1))
+    assert tuple(plot.frame) == pytest.approx((100, 100, 400, 300), abs=0.5)  # points
+
+
+def _with_stroke(tmp_path, spec, points):
+    doc = pymupdf.open(plot_pdf(tmp_path / 'plot.pdf', spec))
+    doc[0].draw_polyline(points, color=BLUE, width=1.0)
+    doc.save(tmp_path / 'stroked.pdf')
+    return read_pdf(tmp_path / 'stroked.pdf', tables=False).page(1)
+
+
+def _left_of_50(spec):
+    return to_page(spec, 50, 0)[0] - pymupdf.get_text_length('50', fontname='helv', fontsize=8) / 2
+
+
+def test_a_curve_stroke_running_flat_into_a_tick_label_is_not_its_minus(tmp_path):
+    """SIFERRIT N48 p3, DMEGC dmr96a/dmr52w: a curve continuing past the frame crossed the label row.
+
+    Its short flat segments ending just left of ``50`` were read as a minus, so the axis read 0, -50, 100.
+    """
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)])
+    x0 = _left_of_50(spec)
+    stroke = [(x0 - 60, 250.0), (x0 - 30, 309.0), *((x0 - 30 + 2 * k, 309.0) for k in range(15))]
+    plot = plots(_with_stroke(tmp_path, spec, stroke))[0]
+    assert sorted(v for _, v in plot.x.ticks) == [0, 50, 100]
+
+
+def test_a_lone_short_stroke_before_a_tick_label_is_still_its_minus(tmp_path):
+    """The control: a minus drawn as a path of its own still negates the label the curve stroke must not."""
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)])
+    x0 = _left_of_50(spec)
+    with pytest.raises(ValueError, match='monotone'):
+        plots(_with_stroke(tmp_path, spec, [(x0 - 3.5, 309.0), (x0 - 1.0, 309.0)]))

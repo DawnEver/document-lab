@@ -79,8 +79,10 @@ RULE_MAX: Final = 1.5
 DASH_MAX: Final = 5.0
 #: The widest gap (points) between a drawn minus sign and its digits.
 DASH_GAP: Final = 2.5
-#: A span holding only one of these is a minus sign set apart from its digits.
-MINUS_GLYPHS: Final = frozenset({'-', chr(0x2212), chr(0x2013), chr(0x2010)})
+#: How far (decades) a bare mantissa digit may sit from the power labels' line to be read as a multiple of a decade.
+MANTISSA_TOL: Final = 0.15
+#: A span holding only one of these is a minus sign set apart from its digits (``_``: TDK SIFERRIT sheets).
+MINUS_GLYPHS: Final = frozenset({'-', '_', chr(0x2212), chr(0x2013), chr(0x2010)})
 #: The widest gap (points) between two digit spans of one number set glyph by glyph.
 GLYPH_GAP: Final = 0.3
 #: A span of digits only (a glyph run's piece).
@@ -201,6 +203,8 @@ class _Label:
     value: float
     box: BBox
     size: float
+    #: Set as ``10`` plus a raised exponent, not as digits.
+    power: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,12 +229,20 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
     # A grid line may stop short of the far edge (a legend sits there), so a long rule anchored on an edge counts.
     found = []
     for frame in _frames(edges):
-        xs = _aligned(_one_size(_x_labels(frame, labels)), vertical=False)
-        ys = _aligned(_one_size(_y_labels(frame, labels)), vertical=True)
+        xs = _decade_mantissas(_aligned(_one_size(_x_labels(frame, labels)), vertical=False), vertical=False)
+        ys = _decade_mantissas(_aligned(_one_size(_y_labels(frame, labels)), vertical=True), vertical=True)
         if len(xs) < 2 or len(ys) < 2:  # noqa: PLR2004 -- a line needs two points
             continue
-        x_ticks = _snap([((lb.box.x0 + lb.box.x1) / 2, lb.value) for lb in xs], _marks(frame, edges, vertical=True))
-        y_ticks = _snap([((lb.box.y0 + lb.box.y1) / 2, lb.value) for lb in ys], _marks(frame, edges, vertical=False))
+        x_ticks = _snap(
+            [((lb.box.x0 + lb.box.x1) / 2, lb.value) for lb in xs],
+            _marks(frame, edges, vertical=True),
+            max(lb.box.width for lb in xs) / 2,
+        )
+        y_ticks = _snap(
+            [((lb.box.y0 + lb.box.y1) / 2, lb.value) for lb in ys],
+            _marks(frame, edges, vertical=False),
+            max(lb.box.height for lb in ys) / 2,
+        )
         x_axis, y_axis = _fit(x_ticks, x_scale), _fit(y_ticks, y_scale)
         legend, paths = [], []
         for path in _joined(_curve_paths(frame, page.paths)):
@@ -311,7 +323,7 @@ def _labels(spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> list[_Label]:
             if found is not None:
                 j, power = found
                 used.add(j)
-                out.append(_Label(10.0**power, union([box, spans[j].provenance.bbox]), span.size))
+                out.append(_Label(10.0**power, union([box, spans[j].provenance.bbox]), span.size, power=True))
                 continue
         value = parse_number(span.text)
         if value is None:
@@ -343,7 +355,7 @@ def _outline_labels(paths: Sequence[VectorPath], dashes: Sequence[_Edge]) -> lis
             if power is not None:
                 j, exponent = power
                 used.add(j)
-                out.append(_Label(10.0**exponent, union([box, words[j][1]]), round(box.height, 1)))
+                out.append(_Label(10.0**exponent, union([box, words[j][1]]), round(box.height, 1), power=True))
                 continue
         minus = _minus_before(box, (), dashes) if value > 0 else None
         signed = (value, box) if minus is None else (-value, union([box, minus]))
@@ -406,14 +418,18 @@ def _words(boxes: Sequence[BBox]) -> list[list[int]]:
 def _outline_exponent(
     base: BBox, words: Sequence[tuple[float | None, BBox]], dashes: Sequence[_Edge]
 ) -> tuple[int, int] | None:
-    """The raised smaller integer word just right of an outlined ``10``, negative when a drawn dash is between."""
+    """The raised smaller integer word just right of an outlined ``10``, negative when a drawn dash is between.
+
+    Outline boxes are INK boxes, without the side bearing a text box carries: ``10`` and an exponent set a point
+    apart are 2-3 points apart in ink (TDK SIFERRIT N97 p5), so the gap allowed is a word gap of the base's height.
+    """
     for j, (power, box) in enumerate(words):
         if power is None or power != int(power) or box.height >= RAISED * base.height:
             continue
         if not (box.y1 < base.y1 - (1 - RAISED) * base.height and box.y1 > base.y0):
             continue
         gap = box.x0 - base.x1
-        if -EDGE_TOL <= gap <= EDGE_TOL:
+        if -EDGE_TOL <= gap <= max(EDGE_TOL, WORD_GAP * base.height):
             return j, int(power)
         dashed = any(
             base.x1 - EDGE_TOL <= d.lo and d.hi <= box.x0 + EDGE_TOL and base.y0 <= d.at <= box.y1 for d in dashes
@@ -509,6 +525,37 @@ def _exponent_of(i: int, spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> 
     return None
 
 
+def _decade_mantissas(labels: list[_Label], *, vertical: bool) -> list[_Label]:
+    """A bare digit 2..9 among power-of-ten labels read as that multiple of the decade its POSITION puts it in.
+
+    TDK SIFERRIT sheets label a log axis ``10^0 5 10^1 5 10^2``: the ``5`` is 5 x 10^n, and a decade's own label may
+    be missing (N97 p4 prints no 10^3). The power labels fix log10(value) as a line in position; a digit ``m`` takes
+    the ``m x 10^k`` nearest that line, and keeps its value when none is within ``MANTISSA_TOL`` decade. Applied only
+    when the labels as read are not monotone along the axis and at least two are SET as powers (``10`` plus an
+    exponent); every label on an axis without power labels keeps its value, and such an axis is refused as before.
+    """
+
+    def at(lb: _Label) -> float:
+        return (lb.box.y0 + lb.box.y1) / 2 if vertical else (lb.box.x0 + lb.box.x1) / 2
+
+    ordered = sorted(labels, key=at)
+    steps = np.diff([lb.value for lb in ordered])
+    powers = [lb for lb in ordered if lb.power]
+    if len(powers) < 2 or np.all(steps > 0) or np.all(steps < 0):  # noqa: PLR2004 -- a line needs two
+        return labels
+    slope, intercept = np.polyfit([at(lb) for lb in powers], [math.log10(lb.value) for lb in powers], 1)
+    out = []
+    for lb in ordered:
+        if not lb.power and lb.value == int(lb.value) and 2 <= lb.value <= 9:  # noqa: PLR2004 -- a mantissa
+            line = slope * at(lb) + intercept
+            k = round(line - math.log10(lb.value))
+            if abs(k + math.log10(lb.value) - line) <= MANTISSA_TOL:
+                out.append(_Label(lb.value * 10.0**k, lb.box, lb.size))
+                continue
+        out.append(lb)
+    return out
+
+
 def _x_labels(frame: BBox, labels: list[_Label]) -> list[_Label]:
     return [
         lb
@@ -551,7 +598,10 @@ def _aligned(labels: list[_Label], *, vertical: bool) -> list[_Label]:
 
 
 def _marks(frame: BBox, edges: Sequence[_Edge], *, vertical: bool) -> list[float]:
-    """Positions of tick marks (short, on a frame edge) and grid lines (spanning the frame) across one axis."""
+    """Positions of tick marks (short, on a frame edge) and grid lines (spanning the frame) across one axis.
+
+    A grid line spans THIS frame: a line as long as the frame but beside it is another plot's (N97 p3 stacks two).
+    """
     lo_edge, hi_edge, span = (frame.y0, frame.y1, frame.height) if vertical else (frame.x0, frame.x1, frame.width)
     first, last = (frame.x0, frame.x1) if vertical else (frame.y0, frame.y1)
     marks = []
@@ -559,21 +609,26 @@ def _marks(frame: BBox, edges: Sequence[_Edge], *, vertical: bool) -> list[float
         if e.vertical != vertical or not first - EDGE_TOL <= e.at <= last + EDGE_TOL:
             continue
         on_edge = any(abs(b - e.lo) <= EDGE_TOL or abs(b - e.hi) <= EDGE_TOL for b in (lo_edge, hi_edge))
-        if (on_edge and e.length <= TICK_MAX) or e.length >= GRID_SPAN * span:
+        inside = min(e.hi, hi_edge) - max(e.lo, lo_edge)
+        if (on_edge and e.length <= TICK_MAX) or inside >= GRID_SPAN * span:
             marks.append(e.at)
     return marks
 
 
-def _snap(ticks: list[tuple[float, float]], marks: list[float]) -> tuple[tuple[float, float], ...]:
+def _snap(
+    ticks: list[tuple[float, float]], marks: list[float], half_extent: float = math.inf
+) -> tuple[tuple[float, float], ...]:
     """Labels moved onto their marks by ONE shared offset, the one that lands the most labels on a mark.
 
     A label sits a constant distance from its tick (same font, same alignment), so the offset is a property of
     the axis, not of each label; snapping each to its nearest mark instead lets a dense minor grid capture it.
-    A label with no mark at its shifted position keeps its own position.
+    The offset is at most ``half_extent``, half the labels' own extent along the axis: a label overlaps the tick
+    it names, and a larger shift lands it on a minor line instead (N49 p5). A label with no mark at its shifted
+    position keeps its own position.
     """
     positions = sorted(p for p, _ in ticks)
     spacing = min((b - a for a, b in itertools.pairwise(positions) if b > a), default=LABEL_REACH)
-    reach = 0.4 * spacing
+    reach = min(0.4 * spacing, half_extent)
     shifts = [m - p for p in positions for m in marks if abs(m - p) <= reach]
     if not shifts:
         return tuple(sorted(ticks))

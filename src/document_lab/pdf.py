@@ -7,14 +7,15 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+import numpy as np
 import pymupdf
 
-from document_lab.ir import BBox, Document, Figure, Page, Provenance, Table, TextSpan, VectorPath
+from document_lab.ir import BBox, Document, Figure, Page, Provenance, Raster, Table, TextSpan, VectorPath
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-__all__ = ['read_pdf']
+__all__ = ['read_pdf', 'read_raster']
 
 #: PyMuPDF's span flag bit for a bold font.
 BOLD_FLAG: Final = 16
@@ -22,6 +23,8 @@ BOLD_FLAG: Final = 16
 BEZIER_SAMPLES: Final = 8
 #: How far below an image (points) a caption may start.
 CAPTION_GAP: Final = 30.0
+#: The resolution (dpi) a region holding no image is rendered at.
+VECTOR_DPI: Final = 300.0
 _CAPTION_RE: Final = re.compile(r'^\s*(?:fig\.?|figure)\s*\d+', re.IGNORECASE)
 
 
@@ -34,6 +37,31 @@ def read_pdf(path: Path | str, *, tables: bool = True) -> Document:
     with pymupdf.open(stream=data, filetype='pdf') as pdf:
         pages = tuple(_page(page, Provenance(sha, uri, page=page.number + 1), tables=tables) for page in pdf)
     return Document(sha256=sha, uri=uri, pages=pages)
+
+
+def read_raster(path: Path | str, page: int, bbox: BBox, *, dpi: float | None = None) -> Raster:
+    """The region ``bbox`` of 1-based ``page`` as pixels, everything drawn there composited.
+
+    ``dpi`` defaults to the finest native resolution among the images the region overlaps, so a pixel is a source
+    pixel and none is invented; a region holding no image renders at ``VECTOR_DPI``.
+    """
+    path = Path(path)
+    data = path.read_bytes()
+    clip = pymupdf.Rect(*bbox)
+    with pymupdf.open(stream=data, filetype='pdf') as pdf:
+        source = pdf[page - 1]
+        if dpi is None:
+            native = [
+                72 * info['width'] / pymupdf.Rect(info['bbox']).width
+                for info in source.get_image_info()
+                if pymupdf.Rect(info['bbox']).intersects(clip) and pymupdf.Rect(info['bbox']).width > 0
+            ]
+            dpi = max(native, default=VECTOR_DPI)
+        zoom = pymupdf.Matrix(dpi / 72, dpi / 72)
+        pix = source.get_pixmap(matrix=zoom, clip=clip, colorspace=pymupdf.csRGB, alpha=False)
+        pixels = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3).copy()
+    here = Provenance(hashlib.sha256(data).hexdigest(), path.resolve().as_uri(), page=page, bbox=bbox)
+    return Raster(pixels, here)
 
 
 def _page(page: pymupdf.Page, here: Provenance, *, tables: bool) -> Page:

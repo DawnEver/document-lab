@@ -3,6 +3,7 @@ from pathlib import Path
 
 from document_lab.paper.output import build_index, write_paper_output, write_section_files
 
+EN_DASH = chr(0x2013)  # the dash a standard's caption prints: "Figure 1 - Title" with an en dash
 LONG_BODY = 'Long body text that passes all thresholds. ' * 20
 
 
@@ -96,6 +97,43 @@ class TestBuildIndex:
             content = (out_dir / 'INDEX.md').read_text(encoding='utf-8')
             assert 'img/sec01/page-04-figure-3.png' in content
 
+    def _index(self, body: str, figure_images: dict[str, str] | None = None) -> str:
+        sections = [('## Shapes', body)]
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            md_dir = out_dir / 'md'
+            write_section_files(sections, md_dir)
+            build_index(out_dir, md_dir, sections, figure_images or {})
+            return (out_dir / 'INDEX.md').read_text(encoding='utf-8')
+
+    def test_a_scanned_figure_is_the_converter_image_above_its_caption(self):
+        # A scanned page has no text layer to crop by: the image the converter placed above the caption is the figure.
+        body = (
+            'Figure 1 shows the core.\n\n![](../img/sec01/_page_3_Picture_4.jpeg)\n\n'
+            f'Figure 1 {EN_DASH} Location of main core parts\n\nText.\n'
+        )
+        content = self._index(body)
+        row = '| Figure 1 | img/sec01/_page_3_Picture_4.jpeg | md/01-shapes.md | Location of main core parts |'
+        assert row in content
+
+    def test_an_image_above_an_earlier_caption_is_not_the_next_figure(self):
+        body = (
+            f'![](../img/sec01/a.jpeg)\n\nFigure 1 {EN_DASH} First\n\nFigure 2 shows nothing drawn.\n\n'
+            'Figure 2 - Second, with no image of its own\n'
+        )
+        content = self._index(body)
+        assert '| Figure 1 | img/sec01/a.jpeg | md/01-shapes.md | First |' in content
+        assert '| Figure 2 | — | md/01-shapes.md | Second, with no image of its own |' in content
+
+    def test_a_table_caption_is_indexed_with_its_title(self):
+        content = self._index(f'Table 3 {EN_DASH} Dimensions of RM-cores\n\n| a | b |\n|---|---|\n| 1 | 2 |\n')
+        assert '| Table 3 | — | md/01-shapes.md | Dimensions of RM-cores |' in content
+
+    def test_a_cropped_render_wins_over_the_converter_image(self):
+        body = '![](../img/sec01/a.jpeg)\n\nFigure 1: First\n'
+        content = self._index(body, {'Figure 1': 'img/sec01/page-02-figure-1.png'})
+        assert '| Figure 1 | img/sec01/page-02-figure-1.png | md/01-shapes.md | First |' in content
+
 
 class TestWritePaperOutput:
     def test_writes_paper_md(self):
@@ -115,6 +153,19 @@ class TestWritePaperOutput:
             assert 'My Paper' in content
             assert '## Abstract' in content
             assert '## Sections' in content
+
+    def test_a_front_matter_paper_md_cannot_hold_is_a_section(self):
+        # A handbook's first pages (contents, material tables) precede its first heading: paper.md keeps only an
+        # abstract-sized head of them, so the rest is a section of its own -- never dropped.
+        front = 'Specific heat 750 J/(kg K). ' * 100
+        sections = [('', front), ('## Introduction', LONG_BODY)]
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            n_sec, _n_fig, _n_tbl = write_paper_output(sections, out_dir, f'{front}\n\n## Introduction\n{LONG_BODY}')
+
+            assert n_sec == 2
+            written = ''.join(f.read_text(encoding='utf-8') for f in sorted((out_dir / 'md').iterdir()))
+            assert front.strip() in written
 
     def test_title_override(self):
         sections = [('## Intro', LONG_BODY)]

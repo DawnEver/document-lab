@@ -666,7 +666,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "ruff", marker = "extra == 'dev'" },
 ]
-provides-extras = ["gpu", "ai", "capture", "dev"]
+provides-extras = ["gpu", "ai", "dev"]
 
 [[package]]
 name = "execnet"
@@ -1083,8 +1083,8 @@ wheels = [
 
 [[package]]
 name = "lab-commons"
-version = "0.3.1.dev1400+gd869c6ca3"
-source = { git = "https://github.com/DawnEver/lab-commons.git#d869c6ca34ecceeda43eb08c73c2ba4365e7e3c8" }
+version = "0.3.1.dev1411+g5ff3b85b2"
+source = { git = "https://github.com/DawnEver/lab-commons.git#5ff3b85b2dca6ab8d0b7f7e5e184880ca9d392ae" }
 
 [package.optional-dependencies]
 io = [

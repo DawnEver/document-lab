@@ -111,6 +111,12 @@ GLYPH_MAX: Final = 12.0
 RAISED: Final = 0.85
 #: The widest ink blob (points) a raster label may be: glyphs that touch at a coarse pixel are one blob.
 BLOB_MAX: Final = 3 * GLYPH_MAX
+#: The widest gap between a number and the ``min.``/``max.`` after it, as a fraction of the word's height.
+BOUND_GAP: Final = 1.5
+#: A glyph at most this fraction of its neighbour's height is a mark (a dot, a prime), not a letter or digit.
+MARK_HEIGHT_PT: Final = 0.45
+#: The widest gap between a dot and the glyph below it (an ``i``), as a fraction of that glyph's height.
+DOT_GAP: Final = 0.5
 #: The widest gap between two glyphs of one outlined label, as a fraction of the label's height.
 WORD_GAP: Final = 0.6
 #: A pixel this dark (0 white .. 1 black, the mean of R, G and B) is ink: a hairline grid at 100 dpi averages 0.2.
@@ -423,18 +429,34 @@ def _outline_labels(outlined: Sequence[tuple[float | None, str | None, BBox]], d
 def outline_text(page: Page) -> list[TextSpan]:
     """Each word ``page`` sets as filled glyph OUTLINES that reads as text (a unit, a grade), as a span.
 
-    A word that spells a number is a tick label (read by :func:`plots`), not text; a word the reader refuses is
-    absent. The span's size is the word's ink height and its font ``outline``.
+    A word that spells a number is a tick label (read by :func:`plots`), not text -- unless a ``min.`` or ``max.``
+    word follows it, when the two are one span (``12.5 min.``, read by :func:`document_lab.numbers.bound`); a word
+    the reader refuses is absent. The span's size is the word's ink height and its font ``outline``.
     """
     return _text_spans(page, _outline_words(page.paths))
 
 
 def _text_spans(page: Page, outlined: Sequence[tuple[float | None, str | None, BBox]]) -> list[TextSpan]:
-    return [
-        TextSpan(text, round(box.height, 1), 'outline', page.paths[0].provenance.at(bbox=box))
-        for value, text, box in outlined
-        if value is None and text is not None
-    ]
+    """The outlined words that read as text; a number set just left of a ``min.``/``max.`` word joins it (a bound)."""
+    out = []
+    for value, text, box in outlined:
+        if value is not None or text is None:
+            continue
+        if text.rstrip('.').lower() in {'min', 'max'}:
+            number = next(
+                (
+                    (v, b)
+                    for v, _, b in outlined
+                    if v is not None
+                    and b.y0 <= (box.y0 + box.y1) / 2 <= b.y1
+                    and -EDGE_TOL <= box.x0 - b.x1 <= BOUND_GAP * box.height
+                ),
+                None,
+            )
+            if number is not None:
+                text, box = f'{number[0]:g} {text}', union([number[1], box])  # noqa: PLW2901 -- the joined word
+        out.append(TextSpan(text, round(box.height, 1), 'outline', page.paths[0].provenance.at(bbox=box)))
+    return out
 
 
 def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, str | None, BBox]]:
@@ -461,6 +483,7 @@ def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, str 
             glyphs.append((box, [shape.points]))
         else:
             host[1].append(shape.points)
+    glyphs = _dotted(glyphs)
     out: list[tuple[float | None, str | None, BBox]] = []
     for word in _words([g[0] for g in glyphs]):
         members = [glyphs[i] for i in word]
@@ -478,10 +501,46 @@ def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, str 
     return out
 
 
+def _dotted(
+    glyphs: list[tuple[BBox, list[tuple[tuple[float, float], ...]]]],
+) -> list[tuple[BBox, list[tuple[tuple[float, float], ...]]]]:
+    """Each small mark just above a taller glyph whose extent across holds its centre, joined to it (an ``i``'s dot).
+
+    Just above is a gap of at most ``DOT_GAP`` of the glyph's height; the joined glyph is read as one shape.
+    """
+    marks = {
+        i
+        for i, (box, _) in enumerate(glyphs)
+        if any(
+            box.width <= other.width + EDGE_TOL
+            and box.height < MARK_HEIGHT_PT * other.height
+            and other.x0 <= (box.x0 + box.x1) / 2 <= other.x1
+            and 0 <= other.y0 - box.y1 <= DOT_GAP * other.height
+            for j, (other, _) in enumerate(glyphs)
+            if j != i
+        )
+    }
+    out = [(box, list(polys)) for i, (box, polys) in enumerate(glyphs) if i not in marks]
+    for i in marks:
+        box, polys = glyphs[i]
+        cx = (box.x0 + box.x1) / 2
+        k = min(
+            (k for k, (other, _) in enumerate(out) if other.x0 <= cx <= other.x1 and other.y0 >= box.y1),
+            key=lambda k: out[k][0].y0 - box.y1,
+            default=None,
+        )
+        if k is None:  # its host was itself a mark (a colon's upper dot over the lower): keep it
+            out.append((box, list(polys)))
+            continue
+        out[k] = (union([out[k][0], box]), [*out[k][1], *polys])
+    return out
+
+
 def _words(boxes: Sequence[BBox]) -> list[list[int]]:
     """Glyph boxes grouped into words, as indices left to right: one row, gaps under ``WORD_GAP`` of the height.
 
-    A raised smaller glyph (an exponent) starts a word of its own: raised above the word's median glyph bottom.
+    A raised smaller glyph (an exponent) starts a word of its own: raised above the word's median glyph bottom. A
+    raised MARK (taller than wide, at most ``MARK_HEIGHT_PT`` of the word's height: a prime in ``mu'``) does not.
     """
     words: list[list[int]] = []
     for i in sorted(range(len(boxes)), key=lambda k: boxes[k].x0):
@@ -492,7 +551,10 @@ def _words(boxes: Sequence[BBox]) -> list[list[int]]:
             same_row = wb.y0 <= cy <= wb.y1 or box.y0 <= (wb.y0 + wb.y1) / 2 <= box.y1
             base = float(np.median([boxes[k].y1 for k in word]))  # a descender (``g``) is not the baseline
             raised = box.height < RAISED * wb.height and box.y1 < base - (1 - RAISED) * wb.height
-            if same_row and not raised and -EDGE_TOL <= box.x0 - wb.x1 <= WORD_GAP * max(wb.height, box.height):
+            prime = box.height > box.width and box.height <= MARK_HEIGHT_PT * wb.height and wb.y0 < box.y1 < wb.y1
+            if (prime or (same_row and not raised)) and -EDGE_TOL <= box.x0 - wb.x1 <= WORD_GAP * max(
+                wb.height, box.height
+            ):
                 word.append(i)
                 break
         else:

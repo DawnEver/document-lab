@@ -14,7 +14,9 @@ A word that is TEXT (a unit such as ``mT``, a grade such as ``N96``) is read by 
 where shape alone cannot tell an ``o`` from an ``O``: each glyph is also compared by where its ink sits against the
 word's baseline (the median glyph bottom), in ems taken from the word's tallest top assumed to be ``ASCENT`` -- a
 word with no capital, ascender or digit is mis-scaled and is then refused, never guessed. The same ``ACCEPT`` and
-``MARGIN`` refuse a near tie (``l``, ``I`` and ``1`` are one bar in Helvetica, so a word holding one raises).
+``MARGIN`` refuse a near tie (``l``, ``I`` and ``1`` are one bar in Helvetica, so a word holding one raises). A
+small raised mark taller than wide is a prime (``mu'``, ``mu''`` read as ``µ'``, ``µ''``); a word of one letter is
+read by shape alone (:func:`_word_chars`).
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ __all__ = ['ALPHABET', 'Glyph', 'UnreadableGlyph', 'has_letter', 'rasterise', 'r
 #: The font the reference digits are rendered in (PyMuPDF's built-in Helvetica).
 REFERENCE_FONT: Final = 'helv'
 #: The characters :func:`read_word` reads.
-ALPHABET: Final = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+ALPHABET: Final = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzµ'
 #: The height above the baseline (ems) of a ``REFERENCE_FONT`` capital, ascender or digit (0.73 measured).
 ASCENT: Final = 0.73
 #: Weight of a glyph's top and bottom (ems from the baseline) in a word reading's distance.
@@ -42,6 +44,10 @@ PLACE_WEIGHT: Final = 8.0
 #: Two characters whose references (nearest phases, with place) are this close are one shape to the reader: at 32
 #: rows ``I``/``l`` are 1.65 apart, anti-aliasing noise, and the nearest distinct pair ``O``/``Q`` 1.91 (2026-11-10).
 TWIN: Final = 1.8
+#: A minus' centre sits at least this far (ems) above the baseline; a point (as wide as tall) sits on it.
+MINUS_FLOOR: Final = 0.12
+#: A mark taller than wide whose bottom sits at least this far (ems) above the baseline is a prime (``mu'``).
+PRIME_FLOOR: Final = 0.3
 #: Rows and columns of the ink-fraction grid a glyph is compared on.
 GRID: Final = (12, 8)
 #: Weight of the width-to-height ratio difference in the distance (a ``1`` is narrow, a ``0`` is not).
@@ -129,31 +135,70 @@ def has_letter(glyphs: Sequence[Glyph]) -> bool:
 
 
 def _word_chars(glyphs: Sequence[Glyph]) -> list[str | UnreadableGlyph]:
-    """Per glyph left to right, the character it reads as in its word, else the reader's refusal."""
+    """Per glyph left to right, the character it reads as in its word, else the reader's refusal.
+
+    The baseline is the median bottom of the word's letters (its marks aside). The word's top is the ascent (a
+    capital, ascender or digit) or the x-height (``max.``, ``mm``): the word is read both ways and the way with fewer
+    refusals wins; when both read every letter but spell different text (``ox`` or ``OX``) each letter is refused. A
+    word of ONE letter has no baseline to place it by -- a lone ``u`` scaled as if its top were the ascent is a ``U``
+    -- so that letter is read by shape alone, and refused when the reference font draws another character of that
+    shape (``o`` and ``O``).
+    """
     ordered = sorted(glyphs, key=lambda g: g.box[0])
     tall = max(g.box[3] - g.box[1] for g in ordered)
-    baseline = float(np.median([g.box[3] for g in ordered]))
-    em = (baseline - min(g.box[1] for g in ordered)) / ASCENT
+    letters = [g for g in ordered if g.box[3] - g.box[1] > MARK_HEIGHT * tall]
+    baseline = float(np.median([g.box[3] for g in letters]))
+    top = min(g.box[1] for g in ordered)
+    readings = []
+    for height in (ASCENT, _x_height()) if len(letters) > 1 else (ASCENT,):
+        em = (baseline - top) / height
+        readings.append(
+            _marked([_letter(g, baseline, em, placed=len(letters) > 1) for g in letters], ordered, baseline, em)
+        )
+    best = min(readings, key=lambda r: sum(isinstance(c, UnreadableGlyph) for c in r))
+    clean = [r for r in readings if not any(isinstance(c, UnreadableGlyph) for c in r)]
+    if len(clean) > 1 and clean[0] != clean[1]:
+        msg = f'the word reads as {"".join(clean[0])!r} at the ascent and {"".join(clean[1])!r} at the x-height'
+        return [UnreadableGlyph(msg) for _ in ordered]
+    return best
+
+
+def _letter(glyph: Glyph, baseline: float, em: float, *, placed: bool) -> str | UnreadableGlyph:
+    _, y0, _, y1 = glyph.box
+    try:
+        return _read_char(glyph.ink, ((baseline - y0) / em, (baseline - y1) / em) if placed else None)
+    except UnreadableGlyph as refused:
+        return refused
+
+
+def _marked(
+    read: list[str | UnreadableGlyph], ordered: Sequence[Glyph], baseline: float, em: float
+) -> list[str | UnreadableGlyph]:
+    """The word's characters in order: its letters as ``read``, each mark a minus, a point or a prime."""
+    tall = max(g.box[3] - g.box[1] for g in ordered)
+    letters = iter(read)
     out: list[str | UnreadableGlyph] = []
     for glyph in ordered:
         x0, y0, x1, y1 = glyph.box
         if y1 - y0 > MARK_HEIGHT * tall:
-            try:
-                out.append(_read_char(glyph.ink, ((baseline - y0) / em, (baseline - y1) / em)))
-            except UnreadableGlyph as refused:
-                out.append(refused)
-        elif x1 - x0 > y1 - y0 and baseline - ASCENT * em < (y0 + y1) / 2 < baseline:
+            out.append(next(letters))
+        elif x1 - x0 > y1 - y0 and baseline - ASCENT * em < (y0 + y1) / 2 < baseline - MINUS_FLOOR * em:
             out.append('-')
         elif y1 >= baseline - 0.1 * em:
             out.append('.')
+        elif y1 - y0 > x1 - x0 and y1 < baseline - PRIME_FLOOR * em:
+            out.append("'")
         else:
-            msg = f'a mark at {tuple(round(v, 1) for v in glyph.box)} is neither a minus nor a point'
+            msg = f'a mark at {tuple(round(v, 1) for v in glyph.box)} is neither a minus, a point nor a prime'
             out.append(UnreadableGlyph(msg))
     return out
 
 
-def _read_char(ink: np.ndarray, place: tuple[float, float]) -> str:
-    """The ``ALPHABET`` character ``ink`` shows with its (top, bottom) ems from the baseline at ``place``."""
+def _read_char(ink: np.ndarray, place: tuple[float, float] | None) -> str:
+    """The ``ALPHABET`` character ``ink`` shows with its (top, bottom) ems from the baseline at ``place``.
+
+    With no ``place`` the character is read by shape alone, and a twin is then judged by shape alone too.
+    """
     ink = _crop(ink)
     if ink.shape[0] < MIN_ROWS:
         msg = f'a glyph {ink.shape[0]} px high is below the {MIN_ROWS} px a character needs to be told apart'
@@ -162,7 +207,7 @@ def _read_char(ink: np.ndarray, place: tuple[float, float]) -> str:
     ranked = sorted(
         (
             min(float(np.linalg.norm(features - f) + ASPECT_WEIGHT * abs(aspect - a)) for f, a in variants)
-            + PLACE_WEIGHT * (abs(place[0] - top) + abs(place[1] - bottom)),
+            + (0.0 if place is None else PLACE_WEIGHT * (abs(place[0] - top) + abs(place[1] - bottom))),
             char,
         )
         for char, (variants, (top, bottom)) in _letter_references(ink.shape[0]).items()
@@ -171,7 +216,7 @@ def _read_char(ink: np.ndarray, place: tuple[float, float]) -> str:
     if best > ACCEPT or second - best < MARGIN:
         msg = f'a glyph reads as {char!r} at {best:.2f} and {runner!r} at {second:.2f}: no clear character'
         raise UnreadableGlyph(msg)
-    twins = _twins(ink.shape[0])[char]
+    twins = _twins(ink.shape[0], placed=place is not None)[char]
     if twins:  # the reference itself cannot be told apart: matching it clearly says nothing
         msg = f'a glyph reads as {char!r}, which the reference font draws within {TWIN} of {"".join(twins)!r}'
         raise UnreadableGlyph(msg)
@@ -179,8 +224,8 @@ def _read_char(ink: np.ndarray, place: tuple[float, float]) -> str:
 
 
 @functools.cache
-def _twins(rows: int) -> dict[str, tuple[str, ...]]:
-    """Per ``ALPHABET`` character, the others whose reference (shape and place) lies within ``TWIN`` of it."""
+def _twins(rows: int, *, placed: bool = True) -> dict[str, tuple[str, ...]]:
+    """Per ``ALPHABET`` character, the others whose reference (shape, and place when ``placed``) is within ``TWIN``."""
     refs = _letter_references(rows)
 
     def distance(a: str, b: str) -> float:
@@ -190,7 +235,7 @@ def _twins(rows: int) -> dict[str, tuple[str, ...]]:
             for fa, aa in refs[a][0]
             for fb, ab in refs[b][0]
         )
-        return shape + PLACE_WEIGHT * (abs(ta - tb) + abs(ba - bb))
+        return shape + (PLACE_WEIGHT * (abs(ta - tb) + abs(ba - bb)) if placed else 0.0)
 
     return {a: tuple(b for b in ALPHABET if b != a and distance(a, b) <= TWIN) for a in ALPHABET}
 
@@ -275,6 +320,12 @@ def _place(char: str) -> tuple[float, float]:
     rows = np.flatnonzero((_render(char, size, (0.0, 0.0)) > INK).any(axis=1))
     flat = np.flatnonzero((_render('H', size, (0.0, 0.0)) > INK).any(axis=1))[-1] + 1  # a flat bottom is the baseline
     return (flat - rows[0]) / size, (flat - rows[-1] - 1) / size
+
+
+@functools.cache
+def _x_height() -> float:
+    """The height above the baseline (ems) of a ``REFERENCE_FONT`` lowercase ``x``."""
+    return _place('x')[0]
 
 
 @functools.cache

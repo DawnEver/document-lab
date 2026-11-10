@@ -1,6 +1,6 @@
 import pytest
 
-from document_lab.numbers import first_number, parse_number
+from document_lab.numbers import bound, first_number, parse_number
 
 MINUS = chr(0x2212)
 THIN = chr(0x2009)
@@ -45,3 +45,21 @@ def test_the_first_number_in_a_cell(text, value):
 
 def test_no_number_is_none():
     assert first_number('ungapped') is None
+
+
+@pytest.mark.parametrize(
+    ('text', 'expected'),
+    [
+        ('12.5 min.', ('min', 12.5)),
+        ('12.5min', ('min', 12.5)),
+        ('max. 3', ('max', 3.0)),
+        ('MAX 1,200', ('max', 1200.0)),
+    ],
+)
+def test_a_number_qualified_min_or_max_is_a_bound(text, expected):
+    assert bound(text) == expected
+
+
+@pytest.mark.parametrize('text', ['12.5', 'min.', '12.5 mm', 'minimum 3'])
+def test_text_that_states_no_bound_is_none(text):
+    assert bound(text) is None

@@ -56,6 +56,7 @@ __all__ = [
     'RasterPlot',
     'Scale',
     'UnreadableTickLabels',
+    'UnrecognisedFrame',
     'outline_text',
     'plots',
     'raster_plot',
@@ -131,6 +132,14 @@ class RasterPlot(ValueError):
 
 class NoPlotFrame(ValueError):
     """A raster holds no plot frame: no long horizontal line meets a long vertical one at a bottom-left corner."""
+
+
+class UnrecognisedFrame(ValueError):
+    """A vector frame's tick-label row or column holds an outlined word the glyph reader refuses.
+
+    Calibrating from the labels that did read would silently drop one (older SIFERRIT sheets set labels in glyphs
+    the reader does not know), so the frame is refused by name instead.
+    """
 
 
 class UnreadableTickLabels(ValueError):
@@ -227,13 +236,16 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
     """Every vector plot on ``page``; ``x_scale``/``y_scale`` force an axis scale instead of inferring it."""
     edges = _edges(page.paths)
     labels = _labels(page.spans, [e for e in edges if not e.vertical and e.length <= DASH_MAX])
-    labels += _outline_labels(page.paths, [e for e in edges if not e.vertical and e.length <= DASH_MAX])
-    words = [*page.spans, *outline_text(page)] if page.paths else list(page.spans)  # a legend may be outlined
+    outlined = _outline_words(page.paths)
+    labels += _outline_labels(outlined, [e for e in edges if not e.vertical and e.length <= DASH_MAX])
+    unread = [box for value, text, box in outlined if value is None and text is None]
+    words = [*page.spans, *_text_spans(page, outlined)]  # a legend may be outlined
     # A grid line may stop short of the far edge (a legend sits there), so a long rule anchored on an edge counts.
     found = []
     for frame in _frames(edges):
         xs = _decade_mantissas(_aligned(_one_size(_x_labels(frame, labels)), vertical=False), vertical=False)
         ys = _decade_mantissas(_aligned(_one_size(_y_labels(frame, labels)), vertical=True), vertical=True)
+        _refuse_unread(page, frame, xs, ys, unread)
         if len(xs) < 2 or len(ys) < 2:  # noqa: PLR2004 -- a line needs two points
             continue
         x_ticks = _snap(
@@ -273,6 +285,25 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
             _refuse_raster(page, frame)
         found.append(Plot(frame, x_axis, y_axis, curves, tuple(legend), page.paths[0].provenance.at(bbox=frame)))
     return found
+
+
+def _refuse_unread(page: Page, frame: BBox, xs: Sequence[_Label], ys: Sequence[_Label], unread: Sequence[BBox]) -> None:
+    """Raise :class:`UnrecognisedFrame` when an unreadable outlined word sits among the frame's tick labels.
+
+    Among means on the x-label row (between the read labels' top and bottom) or the y-label column (within the read
+    labels' extent across); an unreadable word farther out is a title, not a label.
+    """
+    for box in unread:
+        probe = [_Label(math.nan, box, round(box.height, 1))]
+        cy, cx = (box.y0 + box.y1) / 2, (box.x0 + box.x1) / 2
+        on_row = xs and _x_labels(frame, probe) and min(b.box.y0 for b in xs) <= cy <= max(b.box.y1 for b in xs)
+        on_col = ys and _y_labels(frame, probe) and min(b.box.x0 for b in ys) <= cx <= max(b.box.x1 for b in ys)
+        if on_row or on_col:
+            msg = (
+                f'page {page.number}: the plot framed at {tuple(round(v, 1) for v in frame)} has a tick label at '
+                f'{tuple(round(v, 1) for v in box)} whose glyphs read as no number or word: an unrecognised frame'
+            )
+            raise UnrecognisedFrame(msg)
 
 
 def _edges(paths: Sequence[VectorPath]) -> list[_Edge]:
@@ -338,7 +369,7 @@ def _labels(spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> list[_Label]:
     return out
 
 
-def _outline_labels(paths: Sequence[VectorPath], dashes: Sequence[_Edge]) -> list[_Label]:
+def _outline_labels(outlined: Sequence[tuple[float | None, str | None, BBox]], dashes: Sequence[_Edge]) -> list[_Label]:
     """Numbers set as filled glyph OUTLINES (a sheet exported with its text converted to paths).
 
     A glyph is a small filled shape plus the subpaths whose centres it encloses (a ``0``'s hole); a word is a row of
@@ -347,7 +378,7 @@ def _outline_labels(paths: Sequence[VectorPath], dashes: Sequence[_Edge]) -> lis
     drawn dash before a label (or between ``10`` and its exponent) is its minus. A word the reader cannot read is no
     label.
     """
-    words = [(value, box) for value, _, box in _outline_words(paths) if value is not None]
+    words = [(value, box) for value, _, box in outlined if value is not None]
     used: set[int] = set()
     out = []
     for i, (value, box) in enumerate(words):
@@ -372,9 +403,13 @@ def outline_text(page: Page) -> list[TextSpan]:
     A word that spells a number is a tick label (read by :func:`plots`), not text; a word the reader refuses is
     absent. The span's size is the word's ink height and its font ``outline``.
     """
+    return _text_spans(page, _outline_words(page.paths))
+
+
+def _text_spans(page: Page, outlined: Sequence[tuple[float | None, str | None, BBox]]) -> list[TextSpan]:
     return [
         TextSpan(text, round(box.height, 1), 'outline', page.paths[0].provenance.at(bbox=box))
-        for value, text, box in _outline_words(page.paths)
+        for value, text, box in outlined
         if value is None and text is not None
     ]
 

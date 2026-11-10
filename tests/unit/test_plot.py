@@ -6,6 +6,7 @@ import numpy as np
 import pymupdf
 import pytest
 
+from document_lab.numbers import bound
 from document_lab.pdf import read_pdf
 from document_lab.plot import RasterPlot, UnrecognisedFrame, outline_text, plots
 from tests.synthetic import BLUE, RED, Axis, PlotSpec, draw_plot, plot_pdf, to_page
@@ -473,3 +474,31 @@ def test_a_recognised_outlined_frame_still_reads_beside_an_outlined_axis_title(t
     page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False).page(1)
     (plot,) = plots(page)  # an unreadable word below the label row is a title, not a label
     assert sorted(v for _, v in plot.x.ticks) == [0, 50, 100]
+
+
+def test_outlined_lowercase_words_dotted_letters_and_primes_read_as_text(tmp_path):
+    """TDK legends and drawings: ``max.``, ``min.`` (an ``i``'s dot is its own fill) and ``µ'``/``µ''`` were absent."""
+    mu = chr(0xB5)
+    words = ['max.', 'min.', mu + "'", mu + "''", 'mT']
+    stray = [(w, 450.0, 120.0 + 20 * k, 8.0) for k, w in enumerate(words)]
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=stray)
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False).page(1)
+    assert sorted(s.text for s in outline_text(page)) == sorted(words)
+
+
+def test_an_outlined_word_is_read_at_its_own_scale_and_a_lone_letter_by_shape_alone(tmp_path):
+    """``ox`` tops at the x-height and ``OX`` at the ascent; a lone ``x`` has no baseline to tell ``x`` from ``X``."""
+    stray = [('ox', 450.0, 120.0, 8.0), ('OX', 450.0, 140.0, 8.0), ('x', 450.0, 160.0, 8.0), ('B', 450.0, 180.0, 8.0)]
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=stray)
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False).page(1)
+    assert sorted(s.text for s in outline_text(page)) == ['B', 'OX', 'ox']
+
+
+def test_an_outlined_number_before_min_or_max_is_one_bound_span(tmp_path):
+    """TDK E-core drawings: a window span set ``12.5 min.`` is a lower bound, not a bare number beside a word."""
+    stray = [('12.5', 420.0, 400.0, 8.0), ('min.', 440.0, 400.0, 8.0), ('3', 420.0, 430.0, 8.0)]
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=stray)
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False).page(1)
+    (span,) = outline_text(page)  # the lone 3 stays a number
+    assert span.text == '12.5 min.'
+    assert bound(span.text) == ('min', 12.5)

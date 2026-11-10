@@ -45,7 +45,7 @@ from document_lab.ir import BBox, Page, Provenance, Raster, TextSpan, VectorPath
 from document_lab.numbers import parse_number
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
 __all__ = [
     'Axis',
@@ -1032,7 +1032,8 @@ def raster_plot(
     tick label is a row of ink glyphs below the frame (x) or left of it (y), read by :mod:`document_lab.glyphs`; one
     the reader refuses raises :class:`UnreadableTickLabels` -- unless the caller states the axis' labelled values
     (``x_values`` left to right, ``y_values`` bottom to top), which are then paired with the label positions found
-    (their counts must agree). Positions snap to tick marks and grid lines as for vector plots.
+    and checked against those that read (:func:`_stated`). Positions snap to tick marks and grid lines as for vector
+    plots.
 
     Curves are the frame's ink less its grid lines (rows or columns inked across ``GRID_INK`` of it). Coloured ink is
     one curve per ``HUE_SECTOR`` (so two crossing curves of two colours stay two); dark ink is one curve per
@@ -1194,22 +1195,37 @@ def _raster_axis(
     near = _y_labels(frame, labels) if vertical else _x_labels(frame, labels)
     row = sorted(_aligned(near, vertical=vertical), key=lambda lb: (lb.box.y0 + lb.box.y1) if vertical else lb.box.x0)
     centre = (lambda b: (b.y0 + b.y1) / 2) if vertical else (lambda b: (b.x0 + b.x1) / 2)
+    marks = _marks(frame, edges, vertical=not vertical)
     if values is not None:
-        ordered = row[::-1] if vertical else row  # values run bottom to top, positions top to bottom
-        if len(ordered) != len(values):
-            msg = f'{name} axis: {len(ordered)} labels found, {len(values)} values stated'
+        return _fit(_stated(name, row, values, marks, centre), scale)
+    ticks = [(centre(lb.box), lb.value) for lb in row if not math.isnan(lb.value)]
+    if len(ticks) < 2:  # noqa: PLR2004 -- a line needs two points
+        refused = next((refusals[labels.index(lb)] for lb in row if math.isnan(lb.value)), None)
+        msg = (
+            f'{name} axis: {len(ticks)} of {len(row)} labels read; state them '
+            f'({name}_values=) or read the plot at a finer resolution'
+        )
+        raise UnreadableTickLabels(msg) from refused
+    return _fit(_snap(ticks, marks), scale)
+
+
+def _stated(
+    name: str, row: Sequence[_Label], values: Sequence[float], marks: Sequence[float], centre: Callable[[BBox], float]
+) -> tuple[tuple[float, float], ...]:
+    """The caller's ``values`` (left to right, bottom to top) paired with the axis' labels, snapped to ``marks``.
+
+    There must be as many labels as values, and every label that DID read must read as its stated value: a stated
+    value is checked against what the page shows, never trusted blind. Else :class:`UnreadableTickLabels` is raised.
+    """
+    ordered = list(row[::-1] if name == 'y' else row)  # values run bottom to top, positions top to bottom
+    if len(ordered) != len(values):
+        msg = f'{name} axis: {len(ordered)} labels found, {len(values)} values stated'
+        raise UnreadableTickLabels(msg)
+    for lb, v in zip(ordered, values, strict=True):
+        if not math.isnan(lb.value) and not math.isclose(lb.value, v, rel_tol=1e-9, abs_tol=0.0):
+            msg = f'{name} axis: the label at {centre(lb.box):.1f} reads {lb.value:g}, the stated value is {v:g}'
             raise UnreadableTickLabels(msg)
-        ticks = [(centre(lb.box), float(v)) for lb, v in zip(ordered, values, strict=True)]
-    else:
-        ticks = [(centre(lb.box), lb.value) for lb in row if not math.isnan(lb.value)]
-        if len(ticks) < 2:  # noqa: PLR2004 -- a line needs two points
-            refused = next((refusals[labels.index(lb)] for lb in row if math.isnan(lb.value)), None)
-            msg = (
-                f'{name} axis: {len(ticks)} of {len(row)} labels read; state them '
-                f'({name}_values=) or read the plot at a finer resolution'
-            )
-            raise UnreadableTickLabels(msg) from refused
-    return _fit(_snap(ticks, _marks(frame, edges, vertical=not vertical)), scale)
+    return _snap([(centre(lb.box), float(v)) for lb, v in zip(ordered, values, strict=True)], marks)
 
 
 def _curve_masks(

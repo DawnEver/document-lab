@@ -644,15 +644,23 @@ def test_an_unreadable_outlined_word_in_the_label_column_still_refuses(tmp_path)
         plots(page)
 
 
+#: A stroked glyph of no stroke-font character, a label high (7 points): what a lettered label the reader lacks is.
+SPIRAL = [(0, 0), (1, 0), (1, 1), (-1, 1), (-1, -1.5), (2, -1.5), (2, 3.5), (-2, 3.5), (-2, -3.5), (2, -3.5)]
+
+
+def _spiral(page, x, y):
+    page.draw_polyline([(x + dx, y + dy) for dx, dy in SPIRAL], color=(0, 0, 0), width=0.4)
+
+
 def _stroked_digits(page, spec, *, where='labels'):
-    """A ``1``-like stroke (a flag and a stem, as stroke-font lettering draws it) at each tick label's place."""
+    """A stroked glyph of no stroke-font character (:data:`SPIRAL`) at each tick label's place."""
     f = spec.frame
     places = [(to_page(spec, v, 0)[0], f.y1 + 10) for v in spec.x.ticks]
     places += [(f.x0 - 8, to_page(spec, 0, v)[1]) for v in spec.y.ticks]
     if where == 'away':
         places = [(x + 150, y - 300) for x, y in places[:1]]
     for x, y in places:
-        page.draw_polyline([(x - 1.5, y - 2.0), (x, y - 3.5), (x, y + 3.5)], color=(0, 0, 0), width=0.4)
+        _spiral(page, x, y)
 
 
 def _stroked_lettered(tmp_path, where):
@@ -665,7 +673,7 @@ def _stroked_lettered(tmp_path, where):
 
 
 def test_tick_labels_drawn_as_stroked_lettering_refuse_the_frame_by_name(tmp_path):
-    """SIFERRIT N72 p3: labels drawn as stroke-font polylines read as nothing, and three plots read as no plot."""
+    """Stroke-font labels of characters the font lacks read as nothing: the frame is refused by name, not empty."""
     with pytest.raises(UnrecognisedFrame, match=r'stroked lines .*: \(100\.0, 100\.0, 400\.0, 300\.0\)'):
         plots(_stroked_lettered(tmp_path, 'labels'))
 
@@ -712,3 +720,127 @@ def test_a_readable_frame_beside_a_stroke_lettered_one_is_still_returned(tmp_pat
     doc.save(tmp_path / 'both.pdf')
     (plot,) = plots(read_pdf(tmp_path / 'both.pdf', tables=False).page(1))
     assert tuple(plot.frame) == pytest.approx((100, 100, 400, 300), abs=0.5)  # points
+
+
+def _stroke_plot(x_labels=None, **kwargs):
+    return PlotSpec(
+        Axis([-60, 0, 100, 200], labels=x_labels),
+        Axis([1, 10, 100, 1000], log=True, power_labels=True),
+        [(lambda x: 10 ** ((x + 60) / 100), XS_WIDE, RED)],
+        stroke_font=True,
+        **kwargs,
+    )
+
+
+XS_WIDE = [float(x) for x in range(-60, 201, 20)]
+
+
+def _stroke_page(tmp_path, spec, draw=None):
+    doc = pymupdf.open(plot_pdf(tmp_path / 'plot.pdf', spec))
+    if draw is not None:
+        draw(doc[0])
+    doc.save(tmp_path / 'lettered.pdf')
+    return read_pdf(tmp_path / 'lettered.pdf', tables=False).page(1)
+
+
+def test_tick_labels_in_the_stroke_font_calibrate_the_axes(tmp_path):
+    """SIFERRIT N27/N30/N41/N72 letter every label as stroked polylines: a minus, digits and raised exponents read."""
+    (plot,) = plots(_stroke_page(tmp_path, _stroke_plot()))
+    assert sorted(v for _, v in plot.x.ticks) == [-60, 0, 100, 200]
+    assert sorted(v for _, v in plot.y.ticks) == pytest.approx([1, 10, 100, 1000], rel=1e-12, abs=0)
+    (curve,) = plot.curves
+    assert curve.y == pytest.approx(10 ** ((curve.x + 60) / 100), rel=0.01)  # data units of y
+
+
+def test_an_unreadable_stroked_tick_label_among_read_ones_refuses_the_frame(tmp_path):
+    """The control: a label-sized stroked glyph of no character on a tick, among read labels, refuses the frame."""
+    spec = _stroke_plot(x_labels=['-60', '0', '', '200'])
+    x, _ = to_page(spec, 100, 1)
+    with pytest.raises(UnrecognisedFrame, match='read as no number or word'):
+        plots(_stroke_page(tmp_path, spec, lambda page: _spiral(page, x, spec.frame.y1 + 10)))
+
+
+def test_a_small_unread_stroked_mark_on_the_label_row_refuses_nothing(tmp_path):
+    """SIFERRIT N88 p6, N96 p3/p5: the stroked ring of a degree sign on a tick of the label row refused the page."""
+    spec = PlotSpec(Axis([0, 50, 100], labels=['0', '', '100']), Axis([0, 50, 100]), [(lambda x: x, XS, RED)])
+    x, _ = to_page(spec, 50, 0)
+    ring = [(x + 1.1 * math.cos(k * math.pi / 8), 307.0 + 1.1 * math.sin(k * math.pi / 8)) for k in range(17)]
+    (plot,) = plots(_stroke_page(tmp_path, spec, lambda page: page.draw_polyline(ring, color=(0, 0, 0), width=0.4)))
+    assert sorted(v for _, v in plot.x.ticks) == [0, 100]
+
+
+def _hatched_wedge(page, cx, top):
+    """An arrowhead pointing up, its outline and a zigzag filling it stroked in hairlines (SIFERRIT N22 p3)."""
+    base = top + 8.4
+    page.draw_polyline([(cx, top), (cx + 1.9, base), (cx - 1.9, base), (cx, top)], color=(0, 0, 0), width=0.4)
+    zigzag = []
+    for k in range(13):
+        x = cx - 1.8 + 0.3 * k
+        edge = top + 8.4 * abs(x - cx) / 1.9
+        zigzag += [(x, base), (x, edge)] if k % 2 else [(x, edge), (x, base)]
+    page.draw_polyline(zigzag, color=(0, 0, 0), width=0.4)
+
+
+def _left_of_power(spec, value):
+    """Where the stroke-font ``10`` of the power label ``value`` starts, and that label's height on the page."""
+    from tests.synthetic import STROKE_HEIGHT, stroke_width  # noqa: PLC0415 -- the stroke-font metrics
+
+    exp = str(round(math.log10(value)))
+    left = spec.frame.x0 - 4 - stroke_width('10') - 1.5 - stroke_width(exp, STROKE_HEIGHT * 0.8)
+    return left, to_page(spec, 0, value)[1]
+
+
+def test_a_hatched_arrowhead_beside_a_stroked_label_is_no_glyph_of_it(tmp_path):
+    """SIFERRIT N22 p3: the y title's hatched arrowhead joined the ``300`` beside it into one word read as nothing."""
+    spec = _stroke_plot()
+    left, y = _left_of_power(spec, 100)
+    (plot,) = plots(_stroke_page(tmp_path, spec, lambda page: _hatched_wedge(page, left - 1.2 - 1.9, y - 4.2)))
+    assert sorted(v for _, v in plot.y.ticks) == pytest.approx([1, 10, 100, 1000], rel=1e-12, abs=0)
+
+
+def test_a_stroked_glyph_of_no_character_beside_a_stroked_label_still_refuses(tmp_path):
+    """The control: where the arrowhead sat, a glyph that is no wedge and reads as nothing keeps the word unread."""
+    spec = _stroke_plot()
+    left, y = _left_of_power(spec, 100)
+    with pytest.raises(UnrecognisedFrame, match='read as no number or word'):
+        plots(_stroke_page(tmp_path, spec, lambda page: _spiral(page, left - 1.2 - 2.0, y)))
+
+
+def test_a_stroked_letter_on_the_label_row_is_no_tick_label(tmp_path):
+    """SIFERRIT N22 p3: the ``C`` of ``°C`` sits on the label row between 100 and 160; a unit is no tick label.
+
+    The reading that made N22's ``C`` a ``0`` is refused in ``tests/unit/test_glyphs.py`` (a letter nearer than any
+    digit); here the page path is held to it.
+    """
+    from tests.synthetic import stroke_text  # noqa: PLC0415 -- the stroke-font drawing
+
+    spec = _stroke_plot()
+    x, _ = to_page(spec, 150, 1)
+    (plot,) = plots(_stroke_page(tmp_path, spec, lambda page: stroke_text(page, 'C', x, spec.frame.y1 + 13.5)))
+    assert sorted(v for _, v in plot.x.ticks) == [-60, 0, 100, 200]
+
+
+def test_a_stroked_zero_on_the_label_row_is_a_label(tmp_path):
+    """The control: a ``0`` where the ``C`` sat is a tick label, and the axis it breaks is refused as not monotone."""
+    from tests.synthetic import stroke_text  # noqa: PLC0415 -- the stroke-font drawing
+
+    spec = _stroke_plot()
+    x, _ = to_page(spec, 150, 1)
+    with pytest.raises(ValueError, match='monotone'):
+        plots(_stroke_page(tmp_path, spec, lambda page: stroke_text(page, '0', x, spec.frame.y1 + 13.5)))
+
+
+def test_stroke_font_lettering_inside_a_frame_is_no_curve(tmp_path):
+    """SIFERRIT N27 p5: ``300 mT`` lettered inside the frame came back as 69 curves, one per hairline fragment."""
+    from tests.synthetic import stroke_text  # noqa: PLC0415 -- the stroke-font drawing
+
+    spec = _stroke_plot()
+    (plot,) = plots(_stroke_page(tmp_path, spec, lambda page: stroke_text(page, '300mT', 300.0, 280.0)))
+    assert [c.stroke for c in plot.curves] == [RED]
+
+
+def test_an_unread_stroke_inside_a_frame_is_still_a_curve(tmp_path):
+    """The control: only lettering that READS is withheld; a stroked glyph of no character stays a curve."""
+    spec = _stroke_plot()
+    (plot,) = plots(_stroke_page(tmp_path, spec, lambda page: _spiral(page, 300.0, 280.0)))
+    assert sorted(len(c.x) for c in plot.curves) == sorted([len(XS_WIDE), len(SPIRAL)])

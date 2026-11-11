@@ -114,7 +114,7 @@ merges_only_since = "bd7950d9a35321edef37c71f40c85a22fd009e00"  # INTEGRATION-IS
 # repo admin (integrator ruling 2026-11-10). `python -m dev_lab.dev.forge protect plan|check|apply`.
 [tool.dev_lab.protection]
 [tool.dev_lab.protection.forges."github.com"]
-breakglass = "role:admin"
+breakglass = ["app:5704921", "role:admin"]  # the ops App (motronics-ops) merges break-glass; admin stays
 
 # GitHub Actions: the family's one PR lifecycle (dev_lab/dev/ci_base.toml) as is; rendered to
 # .github/workflows/ci.yml by `python -m dev_lab.dev.ciworkflows render`, never hand-edited.

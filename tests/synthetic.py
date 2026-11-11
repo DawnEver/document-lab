@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pymupdf
 
+from document_lab.strokefont import TEMPLATES
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from pathlib import Path
@@ -75,6 +77,8 @@ class PlotSpec:
     fragments: int = 1  # each curve drawn as this many polylines meeting end to end, every other one reversed
     #: Legend entries inside the frame's top right: (label, colour, PDF dash string or None), a sample line each.
     legend: Sequence[tuple[str, tuple[float, float, float], str | None]] = ()
+    #: Tick labels drawn in the stroke font (:func:`stroke_text`): polylines only, no text, as TDK SIFERRIT N72 does.
+    stroke_font: bool = False
 
 
 def to_page(spec: PlotSpec, x: float, y: float) -> tuple[float, float]:
@@ -140,6 +144,79 @@ def _glyphs(page: pymupdf.Page, text: str, cx: float, cy: float) -> None:
         x += w
 
 
+#: Stroke-font digit height (points) and the gap between its glyphs, as the SIFERRIT sheets set them.
+STROKE_HEIGHT = 7.0
+STROKE_GAP = 1.2
+#: Width of the hairline every stroke-font glyph is drawn with (points).
+STROKE_WIDTH = 0.4
+
+
+def _stroke_lines(char: str) -> tuple[list[list[tuple[float, float]]], tuple[float, float]]:
+    """``char``'s polylines (unit height, y down from its top) and its (top, bottom) place in digit heights."""
+    place, _, drawn = TEMPLATES[char]
+    lines = [[tuple(float(v) / 100 for v in p.split(',')) for p in line.split()] for line in drawn.split(';')]
+    return lines, place
+
+
+def stroke_width(text: str, height: float = STROKE_HEIGHT) -> float:
+    """The width :func:`stroke_text` draws ``text`` in."""
+    widths = [height * 0.5 if c == '-' else height * 0.12 if c == '.' else _glyph_width(c, height) for c in text]
+    return sum(widths) + STROKE_GAP * (len(text) - 1)
+
+
+def _glyph_width(char: str, height: float) -> float:
+    lines, (top, bottom) = _stroke_lines(char)
+    return max(x for line in lines for x, _ in line) * height * (top - bottom)
+
+
+def stroke_text(
+    page: pymupdf.Page,
+    text: str,
+    x0: float,
+    baseline: float,
+    height: float = STROKE_HEIGHT,
+    *,
+    pieces: int = 2,
+    width: float = STROKE_WIDTH,
+) -> float:
+    """``text`` in the stroke font from ``x0`` on ``baseline``: each glyph's polylines stroked as ``pieces`` hairlines.
+
+    A minus is a thin closed rectangle at mid height and a point a small closed square on the baseline, as the
+    SIFERRIT sheets draw them. Returns the x the text ends at.
+    """
+    x = x0
+    for char in text:
+        if char in '-.':
+            w, h = (height * 0.5, height * 0.045) if char == '-' else (height * 0.12, height * 0.12)
+            y = baseline - height / 2 if char == '-' else baseline - h
+            page.draw_polyline(
+                [(x, y), (x + w, y), (x + w, y + h), (x, y + h)], color=(0, 0, 0), width=width, closePath=True
+            )
+            x += w + STROKE_GAP
+            continue
+        lines, (top, bottom) = _stroke_lines(char)
+        size = height * (top - bottom)
+        y0 = baseline - height * top
+        for line in lines:
+            points = [(x + px * size, y0 + py * size) for px, py in line]
+            step = max(1, math.ceil((len(points) - 1) / pieces))
+            for start in range(0, max(1, len(points) - 1), step):
+                piece = points[start : start + step + 1]
+                if len(piece) > 1:
+                    page.draw_polyline(piece, color=(0, 0, 0), width=width)
+        x += _glyph_width(char, height) + STROKE_GAP
+    return x - STROKE_GAP
+
+
+def _stroke_power(page: pymupdf.Page, value: float, right: float, cy: float) -> None:
+    """``10`` and a raised stroke-font exponent right-aligned on ``right``, as SIFERRIT N72 sets a log axis."""
+    exp = str(round(math.log10(value)))
+    small = STROKE_HEIGHT * 0.8
+    x0 = right - stroke_width('10') - 1.5 - stroke_width(exp, small)
+    end = stroke_text(page, '10', x0, cy + STROKE_HEIGHT / 2)
+    stroke_text(page, exp, end + 1.5, cy + STROKE_HEIGHT / 2 - 0.4 * STROKE_HEIGHT, small)
+
+
 def _minor(ticks: Sequence[float]) -> list[float]:
     return [k * 10**e for e in range(round(math.log10(ticks[0])), round(math.log10(ticks[-1]))) for k in range(2, 10)]
 
@@ -180,6 +257,9 @@ def _minus_span(page: pymupdf.Page, text: str, cx: float, cy: float, glyph: str 
 def _x_label(page: pymupdf.Page, spec: PlotSpec, text: str, px: float) -> None:
     """A label centred on its tick; a drawn minus is part of the centred whole, as typeset labels are."""
     y = spec.frame.y1 + 10
+    if spec.stroke_font:
+        stroke_text(page, text, px - stroke_width(text) / 2, y + STROKE_HEIGHT / 2)
+        return
     if spec.x.glyph_spans:
         _glyphs(page, text, px, y)
         return
@@ -206,6 +286,13 @@ def _y_axis(page: pymupdf.Page, spec: PlotSpec) -> None:
         if spec.grid:
             page.draw_line((f.x0, py), (f.x0 + spec.grid_reach * f.width, py), color=(spec.grid_grey,) * 3, width=0.3)
         py += spec.y.label_drop
+        text = spec.y.labels[i] if spec.y.labels else _label(v)
+        if spec.stroke_font and spec.y.power_labels:
+            _stroke_power(page, v, f.x0 - 4, py)
+            continue
+        if spec.stroke_font:
+            stroke_text(page, text, f.x0 - 4 - stroke_width(text), py + STROKE_HEIGHT / 2)
+            continue
         if spec.y.power_labels:
             _power_label(
                 page,
@@ -218,7 +305,6 @@ def _y_axis(page: pymupdf.Page, spec: PlotSpec) -> None:
                 exponent_gap=spec.y.exponent_gap,
             )
             continue
-        text = spec.y.labels[i] if spec.y.labels else _label(v)
         width = pymupdf.get_text_length(text, fontname='helv', fontsize=FONT_SIZE)
         if spec.y.span_minus and text.startswith('-'):
             _minus_span(page, text, f.x0 - 4 - width / 2, py, spec.y.minus_glyph)

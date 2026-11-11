@@ -4,7 +4,8 @@ import numpy as np
 import pymupdf
 import pytest
 
-from document_lab.glyphs import Glyph, UnreadableGlyph, read_glyph, read_number
+from document_lab.glyphs import STROKE, Font, Glyph, UnreadableGlyph, read_glyph, read_number, read_word, stroke
+from document_lab.strokefont import TEMPLATES
 
 
 def _ink(text: str, *, size: float = 24, font: str = 'helv', dpi: int = 72) -> np.ndarray:
@@ -59,3 +60,80 @@ def test_digits_of_another_font_are_refused_or_read_right_never_misread(font):
             assert read_glyph(_ink(digit, size=12, dpi=200, font=font)) == digit
         except UnreadableGlyph:
             continue
+
+
+def _lines(char: str) -> list[list[tuple[float, float]]]:
+    return [
+        [tuple(float(v) / 100 for v in p.split(',')) for p in line.split()] for line in TEMPLATES[char][2].split(';')
+    ]
+
+
+def _stroked(char: str, pieces: int = 3, width: float | None = None) -> np.ndarray:
+    """A stroke-font character's ink, its polylines broken into ``pieces`` hairlines, as the SIFERRIT sheets draw it."""
+    broken = []
+    for line in _lines(char):
+        step = max(1, -(-(len(line) - 1) // pieces))
+        broken += [line[k : k + step + 1] for k in range(0, max(1, len(line) - 1), step)]
+    return stroke(broken, TEMPLATES[char][1] if width is None else width)
+
+
+@pytest.mark.parametrize('char', sorted(TEMPLATES))
+def test_each_stroke_font_character_reads_as_itself(char):
+    """TDK SIFERRIT N27/N30/N41/N72 draw every label in this font: each character, broken into hairlines, reads back."""
+    ink = _stroked(char)
+    assert read_word([Glyph(ink, (0, 0, 4, 7))], STROKE) == char
+    if char.isdigit():
+        assert read_glyph(ink, STROKE) == char
+
+
+class _Variant(Font):
+    """The stroke font with its letters changed by ``letters``: a font a test plants a defect in."""
+
+    def __init__(self, letters):
+        self.name = 'variant'
+        self._letters = letters
+
+    def digits(self, rows):
+        return STROKE.digits(rows)
+
+    def letters(self, rows):
+        return self._letters(STROKE.letters(rows))
+
+    def ascent(self):
+        return STROKE.ascent()
+
+    def x_height(self):
+        return STROKE.x_height()
+
+
+def test_a_stroked_letter_nearer_than_any_digit_is_no_digit():
+    """SIFERRIT N22 p3: the ``C`` of ``°C`` on the label row read as ``0``, the nearest digit and clear of the next.
+
+    A heavier ``C`` is such a glyph: among digits alone it reads as ``0`` (the planted precondition), but the
+    letter ``C`` is nearer than any digit, so it is no digit.
+    """
+    bold_c = _stroked('C', width=0.085)  # of its height: the template's hairline is 0.057
+    digits_only = _Variant(lambda refs: {c: r for c, r in refs.items() if c.isdigit()})
+    assert read_glyph(bold_c, digits_only) == '0'
+    with pytest.raises(UnreadableGlyph, match="the letter 'C'"):
+        read_glyph(bold_c, STROKE)
+
+
+def test_a_stroked_glyph_of_no_character_is_refused():
+    """The control: a spiral is no character of the stroke font, so it is refused rather than read as its nearest."""
+    spiral = [(0, 0), (1, 0), (1, 1), (-1, 1), (-1, -1.5), (2, -1.5), (2, 2.5), (-2, 2.5), (-2, -3.5), (2, -3.5)]
+    with pytest.raises(UnreadableGlyph):
+        read_word([Glyph(stroke([spiral], 0.4), (0, 0, 4, 7))], STROKE)
+
+
+def test_a_character_the_font_draws_as_another_is_refused_as_a_twin():
+    """A clear match says nothing when the font draws another character within ``TWIN`` of it: an ``O`` 0.9 off."""
+
+    def with_o(refs):
+        variants, place = refs['0']
+        return {**refs, 'O': ([(f, a + 0.45) for f, a in variants], place)}  # aspect weight 2: 0.9 apart
+
+    zero = [Glyph(_stroked('0'), (0, 0, 4, 7))]
+    with pytest.raises(UnreadableGlyph, match='within'):
+        read_word(zero, _Variant(with_o))
+    assert read_word(zero, STROKE) == '0'  # the control: without the twin, a 0

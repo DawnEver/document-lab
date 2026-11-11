@@ -8,8 +8,8 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 | `ir` | frozen IR: `Provenance`, `TextSpan`, `VectorPath`, `Table`/`Cell`, `Figure`, `Raster`, `Page`, `Document` |
 | `pdf` | `read_pdf(path)`: spans, vector paths, ruled tables with per-cell boxes, image figures and captions (PyMuPDF); `read_raster(path, page, bbox)`: a region's pixels at its images' native resolution |
 | `html` | `read_html(path)`: every `<table>` as a `Table` (standard-library parser) |
-| `plot` | `plots(page)`: curves digitised from VECTOR plots (axes linear, log10, or piecewise between labelled ticks; labels as text or glyph outlines; fragments joined; legend samples apart); a raster plot raises `RasterPlot`. `raster_plot(raster)`: one plot traced from pixels, each point with its pixel uncertainty; unreadable labels raise `UnreadableTickLabels` unless stated (`x_values=`, `y_values=`) |
-| `glyphs` | digits read from glyph shapes (outlines or pixels) against Helvetica; a near tie or a glyph under 14 px raises `UnreadableGlyph` |
+| `plot` | `plots(page)`: curves digitised from VECTOR plots (axes linear, log10, or piecewise between labelled ticks; labels as text, glyph outlines or stroke-font polylines; fragments joined; legend samples apart); a raster plot raises `RasterPlot`. `raster_plot(raster)`: one plot traced from pixels, each point with its pixel uncertainty; unreadable labels raise `UnreadableTickLabels` unless stated (`x_values=`, `y_values=`) |
+| `glyphs` | digits and words read from glyph shapes (outlines, pixels or stroked polylines) against a `Font`: `HELVETICA`, or `STROKE` (the SIFERRIT stroke font, templates in `strokefont`); a near tie, a twin, a letter nearer than any digit or a glyph under 14 px raises `UnreadableGlyph` |
 | `numbers` | the one number grammar: `parse_number` (whole text) and `first_number` (a cell's leading value) |
 | `extract` | typed values against the caller's `Schema` from key-value (`from_rows`) or column (`from_columns`) tables |
 | `ai` | `ask(responder, schema, page_or_table)`: the same values read by a model through ai-lab (`[ai]` extra) |

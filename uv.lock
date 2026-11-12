@@ -3,10 +3,10 @@ revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'darwin'",
-    "python_full_version >= '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "(python_full_version >= '3.14' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.14' and sys_platform != 'darwin' and sys_platform != 'linux')",
     "python_full_version < '3.14' and sys_platform == 'darwin'",
+    "python_full_version >= '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "(python_full_version >= '3.14' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.14' and sys_platform != 'darwin' and sys_platform != 'linux')",
     "(python_full_version < '3.14' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version < '3.14' and sys_platform != 'darwin' and sys_platform != 'linux')",
 ]
 
@@ -18,8 +18,8 @@ overrides = [
 
 [[package]]
 name = "ai-lab"
-version = "0.0.1.dev353+gc3f21251f"
-source = { git = "https://github.com/DawnEver/ai-lab.git#c3f21251fc1c1abb077d06154837510bdeb9dde1" }
+version = "0.0.1.dev362+ga1912f2f2"
+source = { git = "https://github.com/DawnEver/ai-lab.git#a1912f2f284d6917278c88c2806c828cad54cb8c" }
 dependencies = [
     { name = "lab-commons", extra = ["paths"] },
 ]
@@ -591,8 +591,8 @@ nvtx = [
 
 [[package]]
 name = "dev-lab"
-version = "0.0.1.dev2954+g6983fe15e"
-source = { git = "https://github.com/DawnEver/dev-lab.git#6983fe15e712fceff4d36f1986de49fed1b5ffca" }
+version = "0.0.1.dev2988+ge990ef16f"
+source = { git = "https://github.com/DawnEver/dev-lab.git#e990ef16fb12181a2db406f7fbd77688e71798fd" }
 dependencies = [
     { name = "cryptography" },
     { name = "lab-commons", extra = ["io", "paths", "structured", "units"] },
@@ -1083,8 +1083,8 @@ wheels = [
 
 [[package]]
 name = "lab-commons"
-version = "0.3.1.dev1447+g438951e3b"
-source = { git = "https://github.com/DawnEver/lab-commons.git#438951e3b46a5131c993b45a49bad044c651cfa9" }
+version = "0.3.1.dev1456+g3b167f2bf"
+source = { git = "https://github.com/DawnEver/lab-commons.git#3b167f2bf13ed72dc2e142899aa28017ec54f617" }
 
 [package.optional-dependencies]
 io = [

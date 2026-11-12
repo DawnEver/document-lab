@@ -3,10 +3,10 @@ revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'darwin'",
-    "python_full_version >= '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "(python_full_version >= '3.14' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.14' and sys_platform != 'darwin' and sys_platform != 'linux')",
     "python_full_version < '3.14' and sys_platform == 'darwin'",
+    "python_full_version >= '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "python_full_version < '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "(python_full_version >= '3.14' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.14' and sys_platform != 'darwin' and sys_platform != 'linux')",
     "(python_full_version < '3.14' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version < '3.14' and sys_platform != 'darwin' and sys_platform != 'linux')",
 ]
 
@@ -591,8 +591,8 @@ nvtx = [
 
 [[package]]
 name = "dev-lab"
-version = "0.0.1.dev2985+g137824646"
-source = { git = "https://github.com/DawnEver/dev-lab.git#1378246469078af6e0700d72658a27ccf31ef488" }
+version = "0.0.1.dev2988+ge990ef16f"
+source = { git = "https://github.com/DawnEver/dev-lab.git#e990ef16fb12181a2db406f7fbd77688e71798fd" }
 dependencies = [
     { name = "cryptography" },
     { name = "lab-commons", extra = ["io", "paths", "structured", "units"] },

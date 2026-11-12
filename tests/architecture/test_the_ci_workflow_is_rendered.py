@@ -12,7 +12,14 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_the_repo_runs_the_family_pr_lifecycle() -> None:
     # dev-lab #92: a GitHub repo renders its forge's whole base set.
-    assert set(workflows(ROOT)) == {'ci.yml', 'continue.yml', 'merge-tick.yml', 'review-again.yml'}
+    # review-prepare.yml gained 2026-11-10: a judge repo renders the bundle prepare its judge reads;
+    # review-again.yml left 2026-11-11 with dev-lab #443 (the judge is advisory; Actions alone gate).
+    assert set(workflows(ROOT)) == {
+        'ci.yml',
+        'continue.yml',
+        'merge-tick.yml',
+        'review-prepare.yml',
+    }
 
 
 def test_every_workflow_matches_its_toml() -> None:

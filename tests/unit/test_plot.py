@@ -7,7 +7,7 @@ import pymupdf
 import pytest
 
 from document_lab.pdf import read_pdf
-from document_lab.plot import RasterPlot, plots
+from document_lab.plot import RasterPlot, UnrecognisedFrame, outline_text, plots
 from tests.synthetic import BLUE, RED, Axis, PlotSpec, draw_plot, plot_pdf, to_page
 
 XS = [float(x) for x in range(0, 101, 10)]
@@ -429,3 +429,47 @@ def test_outlined_powers_of_ten_and_a_drawn_minus_read_as_their_values(tmp_path)
     assert sorted(v for _, v in plot.y.ticks) == pytest.approx([0.01, 0.1, 1, 10, 100], rel=1e-12, abs=0)
     (curve,) = plot.curves
     assert np.log10(curve.y) == pytest.approx([-1, 0, 2], abs=0.01)  # decades
+
+
+def test_outlined_units_and_grades_read_as_text(tmp_path):
+    """TDK SIFERRIT N96/N88: units, grades and legends are outlines; the letter-blind reader dropped every one."""
+    words = ['mT', 'degC', 'N96', 'N88', 'kHz', 'oO0']
+    stray = [(w, 450.0, 120.0 + 20 * k, 8.0) for k, w in enumerate(words)]
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=stray)
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False).page(1)
+    assert not page.spans  # the planted premise: nothing here is text
+    text = outline_text(page)
+    assert sorted(s.text for s in text) == sorted(words)  # tick labels are numbers, not text
+    for span in text:
+        assert span.provenance.bbox.x0 == pytest.approx(450.0, abs=1.5)  # points: the word's own ink
+
+
+def test_an_outlined_legend_names_its_sample_line(tmp_path):
+    legend = [('N96', RED, None), ('100mT', BLUE, None)]
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], legend=legend)
+    (plot,) = plots(read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False).page(1))
+    assert sorted(s.label for s in plot.legend) == ['100mT', 'N96']
+
+
+def test_a_letter_the_reference_font_draws_as_another_is_refused_not_guessed(tmp_path):
+    """``l`` and ``I`` are one bar in Helvetica: a word holding either is absent, never read as its twin."""
+    stray = [('Il', 450.0, 120.0, 8.0), ('l', 450.0, 140.0, 8.0), ('mT', 450.0, 160.0, 8.0)]
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=stray)
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False).page(1)
+    assert [s.text for s in outline_text(page)] == ['mT']  # the control beside them still reads
+
+
+@pytest.mark.parametrize('label', ['l00', '5l'])
+def test_an_unreadable_outlined_tick_label_refuses_the_frame_by_name(tmp_path, label):
+    """Older SIFERRIT sheets: a label the glyph reader cannot read was dropped and the axis fit from the rest."""
+    spec = PlotSpec(Axis([0, 50, 100], labels=['0', '50', label]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)])
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False).page(1)
+    with pytest.raises(UnrecognisedFrame, match='unrecognised frame'):
+        plots(page)
+
+
+def test_a_recognised_outlined_frame_still_reads_beside_an_outlined_axis_title(tmp_path):
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=[('Il', 240.0, 325.0, 8.0)])
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False).page(1)
+    (plot,) = plots(page)  # an unreadable word below the label row is a title, not a label
+    assert sorted(v for _, v in plot.x.ticks) == [0, 50, 100]

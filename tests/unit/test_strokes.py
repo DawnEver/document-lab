@@ -6,7 +6,7 @@ import pytest
 
 from document_lab.ir import BBox
 from document_lab.pdf import read_raster
-from document_lab.strokes import attach_dots, bands, centre_line, coverage, dots, fragments, link, opening, pattern
+from document_lab.strokes import Fragment, bands, centre_line, coverage, dots, fragments, link, opening, split_by_dots
 
 STROKE = 1.5  # pt, the curves
 HAIR = 0.3  # pt, the grid
@@ -128,15 +128,44 @@ def test_the_dash_opening_loses_nearly_every_dot_and_a_smaller_one_keeps_them(tm
     assert len(kept) >= 20
 
 
-@pytest.mark.parametrize('apart', [8.0, 3.0])  # pt; 3 pt is two strokes, the N72 70/100 degC spacing
+@pytest.mark.parametrize('apart', [8.0, 3.0, -3.0])  # pt; 3 is two strokes, the N72 70/100 degC spacing
 def test_a_dash_dot_curve_is_told_from_a_dashed_one_by_its_dots(tmp_path, apart):
-    _, raster = _pair(tmp_path, apart)
-    frags = fragments(raster, opening_pt=1.3, min_pt=2.5)  # the dashes alone
-    chains = sorted((ch for ch in link(frags, off_pt=1.0) if len(ch) > 5), key=lambda ch: frags[ch[0]].y.mean())
-    assert len(chains) == 2
-    found = attach_dots(frags, chains, dots(fragments(raster, opening_pt=0.6, min_pt=0.5)), off_pt=1.0)
-    names = [pattern(frags, ch, len(d)) for ch, d in zip(chains, found, strict=True)]
-    assert names == ['dashed', 'dash-dot']
-    assert len(found[0]) == 0
-    # Planted control: with no dots read, both are only dashed -- the dots are what names the curve.
-    assert [pattern(frags, ch, 0) for ch in chains] == ['dashed', 'dashed']
+    fns, raster = _pair(tmp_path, apart)  # fns[0] dashed, fns[1] dash-dot
+    dashes = fragments(raster, opening_pt=1.3, min_pt=2.5)
+    found = [f for f in dots(fragments(raster, opening_pt=0.6, min_pt=0.8)) if 65 < f.x.mean() < 335]
+    on, off = split_by_dots(dashes, found)
+    assert on
+    assert off
+    assert all(_owner(dashes[i], fns) == 1 for i in on)
+    assert all(_owner(dashes[i], fns) == 0 for i in off if _owner(dashes[i], fns) is not None)
+    # Planted control: the same split traced by the DASHED curve's line puts its dashes on, so the dots are what
+    # names the curve, not the order of the two curves on the page.
+    stand_in = [Fragment(np.array([x]), np.array([fns[0](x)]), STROKE) for x in (70.0, 200.0, 330.0)]
+    swapped, _ = split_by_dots(dashes, stand_in)
+    assert swapped
+    assert all(_owner(dashes[i], fns) == 0 for i in swapped)
+
+
+def test_a_split_needs_two_dots():
+    with pytest.raises(ValueError, match='two or more'):
+        split_by_dots([], [Fragment(np.array([1.0]), np.array([1.0]), STROKE)])
+
+
+def test_a_dot_has_no_direction_so_a_dash_dot_curve_links_through_its_dots(tmp_path):
+    """Read with the dot opening, a sloped dash-dot curve is dash, dot, dash ... at short gaps: one chain."""
+    fn = _line(220, -0.5)
+    frags = fragments(_pdf(tmp_path, [(fn, 60, 300, DASH_DOT)]), opening_pt=0.6, min_pt=0.8)  # a dot is ~1.1 pt
+    inside = [f for f in frags if 65 < f.x.mean() < 295]
+    assert len(dots(inside)) >= 15
+    chains = link(inside, gap_pt=3.5, off_pt=1.0)
+    assert len(chains) == 1
+
+
+def test_an_end_is_placed_on_the_stroke_line_not_on_its_cap_corner(tmp_path):
+    """A steep dashed curve with long gaps links at a tight miss: each end's y is the fitted line's, not the corner a
+    column cut through the cap samples (that corner sits up to half a stroke off the line)."""
+    fn = _line(250, -0.65)
+    frags = fragments(_pdf(tmp_path, [(fn, 60, 300, '[5.3 7] 0')]), opening_pt=0.9, min_pt=1.0)
+    inside = [f for f in frags if 65 < f.x.mean() < 295]
+    assert len(inside) >= 15
+    assert len(link(inside, gap_pt=8.5, off_pt=0.5)) == 1

@@ -5,19 +5,18 @@ side ``opening_pt`` (wider than any hairline, narrower than the strokes) keeps t
 then comes out as separate fragments, which this module joins:
 
 - ``link``: each fragment's right end goes to the fragment whose left end lies on its own extrapolated direction
-  (mutual best, by miss). That joins a curve across its gaps and refuses a jump onto a curve crossing it.
+  (nearest first, each end once). That joins a curve across its gaps and refuses a jump onto a curve crossing it.
 - ``bands``: where curves run too close for links alone, the solid curves (one chain each) define bands, and every
   other fragment joins the band of its nearest solid curve on the stated side.
-- ``attach_dots``: a dash-dot curve's dots are smaller than the opening that reads the dashes; read the band again
-  with a smaller opening, and a dot sits in the gap of the dash-dot chain only, which names the pattern
-  (``pattern``) and so tells two close dashed curves apart.
+- ``split_by_dots``: a dash-dot curve's dots are smaller than the opening that reads the dashes; read again with a
+  smaller opening, the dots (``dots``) trace the dash-dot curve alone, which tells it from a dashed curve two
+  strokes away. ``link`` joins a dash-dot curve through its dots: a dot has no direction of its own.
 
 Coordinates are page pt (x right, y down), so every distance here is in pt.
 """
 
 from __future__ import annotations
 
-import itertools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -31,23 +30,26 @@ if TYPE_CHECKING:
     from document_lab.ir import Raster
 
 Side = Literal['above', 'below', 'nearest']
-Pattern = Literal['solid', 'dashed', 'dash-dot']
 
 INK_LEVEL = 128  # a pixel darker than this (0..255 grey) is ink
 GAP_PT = 9.0  # longest dash gap a link bridges
 OFF_PT = 1.6  # largest miss of the extrapolated end (about one stroke)
 END_PT = 2.5  # the end segment a fragment's direction is fit on
 DOT_PT = 2.2  # a fragment no longer than this is a dot
-SOLID_COVERAGE = 0.9  # inked fraction of its span above which a chain is solid
 
 
 @dataclass(frozen=True)
 class Fragment:
-    """One connected piece of thick ink: its centre-line samples in page pt, and its stroke width."""
+    """One connected piece of thick ink: its centre-line samples in page pt, and its stroke width.
+
+    ``axis``: ``(x, y, slope)`` of its ink's principal axis through the ink centroid, when read from pixels. A short
+    dash's ends lie on it: its centre-line samples bend towards the caps, its pixels do not.
+    """
 
     x: np.ndarray
     y: np.ndarray
     stroke: float
+    axis: tuple[float, float, float] | None = None
 
     @property
     def length(self) -> float:
@@ -106,22 +108,62 @@ def fragments(
                     xs.append(x0 + (c0 + j + 0.5) * sx)
                     ys.append(y0 + (r0 + centre) * sy)
                     widths.append((hi - lo) * sy)
-        out.append(Fragment(np.array(xs), np.array(ys), float(np.median(widths))))
+        px, py = x0 + (cc + 0.5) * sx, y0 + (rr + 0.5) * sy
+        out.append(Fragment(np.array(xs), np.array(ys), float(np.median(widths)), _principal_axis(px, py)))
     return out
 
 
-def _ends(f: Fragment, end_pt: float) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
-    """``(x, y, slope)`` at the left and the right end, the slope fit on the last ``end_pt`` of x."""
+def _principal_axis(px: np.ndarray, py: np.ndarray) -> tuple[float, float, float]:
+    """``(x, y, slope)``: the ink centroid and the slope of the cloud's major axis.
+
+    A vertical axis reads as a large finite slope.
+    """
+    cx, cy = float(px.mean()), float(py.mean())
+    cov = np.cov(np.vstack([px - cx, py - cy])) if len(px) > 1 else np.eye(2)
+    vals, vecs = np.linalg.eigh(cov)
+    dx, dy = vecs[:, int(np.argmax(vals))]
+    return cx, cy, float(dy / dx) if abs(dx) > 1e-9 else 1e9  # noqa: PLR2004
+
+
+End = tuple[float, float, float | None]
+
+
+def _ends(f: Fragment, end_pt: float) -> tuple[End, End]:
+    """``(x, y, slope)`` at the left and the right end.
+
+    A dot (no longer than ``DOT_PT``) has no direction: its slope is ``None`` and both its ends sit at its centre
+    height. A fragment too short to hold ``end_pt`` of line beyond a cap at each end has its ends on its ink's
+    principal axis. A longer one fits a line on the ``end_pt`` of x just inside each cap (one stroke from the end) and
+    takes the end on that line: a column through a sloped stroke's cap samples a corner, not the line.
+    """
     o = np.argsort(f.x, kind='stable')
     x, y = f.x[o], f.y[o]
+    lo, hi = float(x[0]), float(x[-1])
+    if f.length <= DOT_PT:
+        centre = float(np.mean(y))
+        return (lo, centre, None), (hi, centre, None)
+    cap = f.stroke
+    if hi - lo < 2 * (cap + end_pt) and f.axis is not None:
+        cx, cy, slope = f.axis
+        return (lo, cy + slope * (lo - cx), slope), (hi, cy + slope * (hi - cx), slope)
 
-    def slope(sel: np.ndarray) -> float:
-        return 0.0 if np.ptp(x[sel]) < 0.3 else float(np.polyfit(x[sel], y[sel], 1)[0])  # noqa: PLR2004 -- pt
+    def end(sel: np.ndarray, at: float) -> End:
+        if np.count_nonzero(sel) < 2 or np.ptp(x[sel]) < 0.3:  # noqa: PLR2004 -- pt: no slope in x to fit
+            near = np.abs(x - at) <= cap + end_pt
+            return at, float(np.mean(y[near])), 0.0
+        slope, intercept = np.polyfit(x[sel], y[sel], 1)
+        return at, float(intercept + slope * at), float(slope)
 
-    lo, hi = x[0], x[-1]
-    left = (float(lo), float(np.mean(y[x <= lo + 0.3])), slope(x <= lo + end_pt))
-    right = (float(hi), float(np.mean(y[x >= hi - 0.3])), slope(x >= hi - end_pt))
+    left = end((x >= lo + cap) & (x <= lo + cap + end_pt), lo)
+    right = end((x <= hi - cap) & (x >= hi - cap - end_pt), hi)
     return left, right
+
+
+def _direction(right: float | None, left: float | None) -> float:
+    """The slope a gap is crossed on: both ends' mean when they agree, else the right end's; a dot defers."""
+    if right is None or left is None:
+        return next((v for v in (right, left) if v is not None), 0.0)
+    return 0.5 * (right + left) if abs(right - left) < 1.0 else right
 
 
 def link(
@@ -130,7 +172,7 @@ def link(
     """Chains of fragment indices, each left to right.
 
     A link runs from a right end to a left end within ``gap_pt``, the left end missing the right end's extrapolated
-    direction by at most ``off_pt``; links are taken mutual-best by miss (plus a small gap term).
+    direction by at most ``off_pt``. Within that cone the nearest end (by distance) is taken first, each end once.
     """
     ends = [_ends(f, end_pt) for f in frags]
     candidates = []
@@ -139,10 +181,10 @@ def link(
             dx = lx - rx
             if i == j or not -0.5 < dx <= gap_pt:  # noqa: PLR2004 -- pt of overlap a butt joint may show
                 continue
-            s = 0.5 * (rs + ls) if abs(rs - ls) < 1.0 else rs
+            s = _direction(rs, ls)
             miss = abs(ly - (ry + s * dx))
             if miss <= off_pt:
-                candidates.append((miss + 0.05 * max(dx, 0.0), i, j))
+                candidates.append((float(np.hypot(max(dx, 0.0), miss)), i, j))
     after: dict[int, int] = {}
     before: dict[int, int] = {}
     for _, i, j in sorted(candidates):
@@ -219,43 +261,39 @@ def bands(
     return members, orphans
 
 
-def attach_dots(
-    frags: Sequence[Fragment], chains: Sequence[Sequence[int]], dots: Sequence[Fragment], *, off_pt: float = OFF_PT
-) -> list[list[int]]:
-    """Per chain, the indices of ``dots`` lying in one of its gaps and on its line (within ``off_pt``).
+def split_by_dots(
+    frags: Sequence[Fragment], dots: Sequence[Fragment], *, off_pt: float = 1.0, reach_pt: float = 15.0
+) -> tuple[list[int], list[int]]:
+    """``frags`` split into those on the dash-dot curve the ``dots`` trace, and the rest.
 
-    The line across a gap is the straight segment from one fragment's right end to the next's left end; a dot
-    claimed by two chains goes to the nearer, a dot no chain claims to none.
+    The dots of one dash-dot curve, read with an opening small enough to keep them, trace that curve: the polyline
+    through their centres (x increasing). A fragment whose samples lie on it -- median miss within ``off_pt`` over the
+    samples within ``reach_pt`` of the dots' x span -- is the dash-dot curve's; every other fragment is not. A curve
+    two strokes away is told apart where the dash lengths cannot be (both are dashes). Needs two dots or more.
     """
-    gaps = []
-    for k, ch in enumerate(chains):
-        for a, b in itertools.pairwise(ch):
-            (_, right), (left, _) = _ends(frags[a], END_PT), _ends(frags[b], END_PT)
-            gaps.append((k, right[0], right[1], left[0], left[1]))
-    out: list[list[int]] = [[] for _ in chains]
-    for d, dot in enumerate(dots):
-        cx, cy = float(dot.x.mean()), float(dot.y.mean())
-        best, best_miss = None, off_pt
-        for k, xa, ya, xb, yb in gaps:
-            if not xa - 0.5 <= cx <= xb + 0.5 or xb <= xa:
-                continue
-            miss = abs(cy - (ya + (yb - ya) * (cx - xa) / (xb - xa)))
-            if miss <= best_miss:
-                best, best_miss = k, miss
-        if best is not None:
-            out[best].append(d)
-    return out
+    if len(dots) < 2:  # noqa: PLR2004 -- a line needs two points
+        msg = f'{len(dots)} dot(s): a dash-dot curve is traced by two or more'
+        raise ValueError(msg)
+    centres = sorted((float(d.x.mean()), float(d.y.mean())) for d in dots)
+    dx, dy = np.array([c[0] for c in centres]), np.array([c[1] for c in centres])
+    on, off = [], []
+    for i, f in enumerate(frags):
+        near = (f.x >= dx[0] - reach_pt) & (f.x <= dx[-1] + reach_pt)
+        if not near.any():
+            off.append(i)
+            continue
+        miss = float(np.median(np.abs(f.y[near] - _polyline(f.x[near], dx, dy))))
+        (on if miss <= off_pt else off).append(i)
+    return on, off
 
 
-def pattern(frags: Sequence[Fragment], chain: Sequence[int], n_dots: int, *, min_dots: int = 2) -> Pattern:
-    """The chain's line style from its ink and the dots in its gaps.
-
-    ``solid`` when the chain inks its span, ``dash-dot`` when at least ``min_dots`` dots sit in its gaps, else
-    ``dashed``.
-    """
-    if coverage(frags, chain) > SOLID_COVERAGE:
-        return 'solid'
-    return 'dash-dot' if n_dots >= min_dots else 'dashed'
+def _polyline(x: np.ndarray, px: np.ndarray, py: np.ndarray) -> np.ndarray:
+    """The polyline through ``(px, py)`` at ``x``, its end segments extended straight (never held flat)."""
+    y = np.interp(x, px, py)
+    lo, hi = x < px[0], x > px[-1]
+    y[lo] = py[0] + (py[1] - py[0]) / max(px[1] - px[0], 1e-9) * (x[lo] - px[0])
+    y[hi] = py[-1] + (py[-1] - py[-2]) / max(px[-1] - px[-2], 1e-9) * (x[hi] - px[-1])
+    return y
 
 
 def dots(frags: Sequence[Fragment], *, max_pt: float = DOT_PT) -> list[Fragment]:

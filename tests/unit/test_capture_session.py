@@ -3,7 +3,8 @@ its caps, and waits for a frame that is still changing to settle."""
 
 import numpy as np
 
-from document_lab.capture.session import Limits, Pace, Rows, capture, follow
+from document_lab.capture.session import Limits, Pace, Rows, Settling, capture, follow
+from document_lab.capture.stitch import Match
 from tests.unit.test_capture_stitch import tall
 
 
@@ -240,3 +241,71 @@ def test_a_view_that_cannot_be_recovered_is_told_lost_and_ends_the_capture():
     assert done.stopped.startswith('unstitchable: ')
     assert len(lost) == 1
     assert np.array_equal(rows.image(), image[: done.height])
+
+
+class SlowRender(Viewport):
+    """A reader that renders ``render`` seconds after each scroll: until then the view shows the new position with
+    everything below its top third still blank -- the same unfinished frame on every grab."""
+
+    def __init__(self, image, height, step, render):
+        super().__init__(image, height, step)
+        self.render, self.clock, self.since = render, 0.0, -render  # rendered before the first scroll
+
+    def sleep(self, seconds):
+        self.clock += seconds
+
+    def scroll(self, notches=1):
+        super().scroll(notches)
+        self.since = self.clock
+
+    def grab(self):
+        frame = super().grab()
+        if self.clock - self.since < self.render:
+            frame[self.height // 3 :] = 255
+        return frame
+
+
+def slow_capture(view, settling):
+    rows = Rows()
+    done = capture(view.grab, view.scroll, rows, pace=Pace(stride=0), settling=settling, sleep=view.sleep)
+    return done, rows.image()
+
+
+def test_a_slow_renderer_grows_the_settle_gap_until_it_is_seen_rendered():
+    image = tall(3000)
+    done, rows = slow_capture(SlowRender(image, 300, 150, render=0.5), Settling(interval=0.12, max_interval=1.0))
+    assert done.complete
+    assert np.array_equal(rows, image)
+
+
+def test_a_fixed_settle_gap_shorter_than_the_render_bounces_and_gives_up():
+    image = tall(3000)  # the control: the same reader with the gap held at --settle
+    done, _ = slow_capture(SlowRender(image, 300, 150, render=0.5), Settling(interval=0.12, max_interval=0.12))
+    assert done.stopped.startswith('unstitchable: ')
+
+
+def test_a_scroll_the_os_refuses_stops_the_capture_with_what_it_has():
+    image = tall(1500)
+    view = Viewport(image, 300, 150)
+    scrolled = []
+
+    def scroll(notches):
+        if len(scrolled) == 2:
+            msg = 'SendInput was blocked (error 5)'
+            raise OSError(msg)
+        scrolled.append(notches)
+        view.scroll(notches)
+
+    rows = Rows()
+    done = capture(view.grab, scroll, rows, pace=Pace(stride=0), sleep=lambda _: None)
+    assert done.stopped == 'blocked: SendInput was blocked (error 5)'
+    assert np.array_equal(rows.image(), image[: 300 + 2 * 150])
+
+
+def test_a_frame_that_shares_nothing_reports_how_far_off_its_best_match_was():
+    image = tall(1500)
+    view = Viewport(image, 300, 300)  # a whole view a scroll: nothing shared
+    done = capture(view.grab, view.scroll, Rows(), pace=Pace(stride=0), sleep=lambda _: None)
+    assert done.stopped.startswith('unstitchable: ')
+    assert done.error is not None
+    assert done.error > 3 * Match().tolerance  # random rows: far above the tolerance

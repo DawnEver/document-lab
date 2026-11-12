@@ -12,13 +12,14 @@ from typing import TYPE_CHECKING, Final
 
 from lab_commons.log import emit
 
-from document_lab.capture.session import Pace
+from document_lab.capture.session import Pace, Settling
 from document_lab.capture.stitch import Match
 
 if TYPE_CHECKING:
     import numpy as np
 
     from document_lab.capture.desktop import Hud, Region, Window
+    from document_lab.capture.pages import Rhythm
     from document_lab.capture.session import Capture, Lost
     from document_lab.capture.stitch import Stitcher
 
@@ -28,6 +29,10 @@ __all__ = ['add_parser', 'run']
 def _rect(text: str) -> tuple[int, int, int, int]:
     left, top, width, height = (int(v) for v in text.split(','))
     return left, top, width, height
+
+
+def _page_height(text: str) -> int | str:
+    return 'auto' if text == 'auto' else int(text)
 
 
 def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -63,7 +68,17 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     )
     scroll.add_argument('--delay', type=float, default=1.0, help='--auto: seconds to wait before the first frame')
     scroll.add_argument(
-        '--settle', type=float, default=0.12, help='--auto: seconds between grabs while the view settles'
+        '--settle',
+        type=float,
+        default=Settling.interval,
+        help='--auto: the least seconds between the two equal grabs that make a view settled; doubled, up to '
+        '--settle-max, each time a view taken for settled was still rendering',
+    )
+    scroll.add_argument(
+        '--settle-max',
+        type=float,
+        default=Settling.max_interval,
+        help='--auto: the most seconds --settle grows to for a slow renderer',
     )
     scroll.add_argument(
         '--every', type=float, default=0.0, help='seconds between grabs while you scroll (0: as fast as it can match)'
@@ -104,7 +119,12 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help='share of cells that may disagree at the true scroll (a scrollbar thumb, a caret); 0: none',
     )
     pdf = capture.add_argument_group('pdf')
-    pdf.add_argument('--page-height', type=int, help='pixels per page (default: A4-shaped; 0: one page, held whole)')
+    pdf.add_argument(
+        '--page-height',
+        type=_page_height,
+        help="pixels per page (default: A4-shaped; 0: one page, held whole; 'auto': cut on the reader's page "
+        'separators, A4-shaped if it finds none)',
+    )
     pdf.add_argument('--dpi', type=float, default=96)
     pdf.add_argument(
         '--ocr',
@@ -183,13 +203,26 @@ _SHORT: Final = {
 }
 
 
-def _report(result: Capture) -> int:
+_APART: Final = 3  # times the tolerance a best match may miss by before the frames are taken to share nothing
+
+
+def _report(result: Capture, tolerance: float = Match.tolerance) -> int:
     """Say how the capture ended; the exit status (1: it stopped short of the end on its own)."""
     sys.stderr.write('\n')
+    if result.stopped.startswith('blocked: '):
+        emit(f'stopped after {result.frames} frames, short of the end: {result.stopped.removeprefix("blocked: ")}')
+        emit('what was stitched is written. Windows dropped the scroll: a UAC prompt, a program running as')
+        emit('administrator in front, or the lock screen / screen saver. Clear it, then capture the rest.')
+        return 1
     if result.stopped.startswith('unstitchable: '):
         reason = result.stopped.removeprefix('unstitchable: ')
         emit(f'stopped after {result.frames} frames, short of the end: {reason}')
-        emit('what was stitched is written; try a larger --tolerance, or scroll yourself (leave out --auto)')
+        if result.error is not None and result.error > _APART * max(tolerance, 1.0):
+            emit('what was stitched is written; the frames before and after the scroll share nothing at all: the')
+            emit('reader is probably in single-page / page-flip mode. Switch it to continuous scrolling and capture')
+            emit('again (a larger --tolerance will not help)')
+        else:
+            emit('what was stitched is written; try a larger --tolerance, or scroll yourself (leave out --auto)')
         return 1
     if result.stuck:
         emit('the first scroll moved nothing, so only one screen was captured: what is under the middle of the area')
@@ -198,6 +231,16 @@ def _report(result: Capture) -> int:
     if result.stopped in _SHORT:
         emit(f'{_SHORT[result.stopped]} after {result.frames} frames')
     return 0
+
+
+def _report_pages(page_height: int | str | None, rhythm: Rhythm | None) -> None:
+    """Say where ``--page-height auto`` cut the pages."""
+    if page_height != 'auto':
+        return
+    if rhythm is None:
+        emit('no page separators found in the image: pages cut A4-shaped')
+    else:
+        emit(f'pages cut on the reader separators, {rhythm.pitch:.1f} px apart')
 
 
 def _started(target: Window | Region) -> tuple[Window | Region, Region, Hud, bool] | None:
@@ -219,6 +262,19 @@ def _started(target: Window | Region) -> tuple[Window | Region, Region, Hud, boo
         target = desktop.select(target)
 
 
+def _prepare(args: argparse.Namespace) -> str | None:
+    """Name and check the output; why the capture's windows cannot open here, None when they can.
+
+    An unnamed output is named for the time; one that exists is refused (:func:`_refuse_existing`).
+    """
+    if args.out is None:
+        args.out = Path(f'capture-{datetime.now().astimezone():%Y%m%d-%H%M%S}.pdf')
+    _refuse_existing(args)
+    from document_lab.capture import desktop  # noqa: PLC0415
+
+    return desktop.tk_problem()  # the selection and the panel are tkinter windows
+
+
 def _refuse_existing(args: argparse.Namespace) -> None:
     """Refuse an output that exists, unless ``--overwrite``: it may be the very document on screen."""
     for path in (args.out, args.png):
@@ -231,15 +287,15 @@ def run(args: argparse.Namespace) -> int:
     """Run ``document-lab capture`` with the parsed ``args``; the exit status."""
     from document_lab.capture import desktop  # noqa: PLC0415
     from document_lab.capture.export import PdfWriter, PngWriter  # noqa: PLC0415
-    from document_lab.capture.session import Limits, Settling, capture, follow  # noqa: PLC0415
+    from document_lab.capture.session import Limits, capture, follow  # noqa: PLC0415
 
     if args.list:
         for window in desktop.windows():
             emit(f'{window.hwnd:#010x}  {window.client().width}x{window.client().height}  {window.title}')
         return 0
-    if args.out is None:
-        args.out = Path(f'capture-{datetime.now().astimezone():%Y%m%d-%H%M%S}.pdf')
-    _refuse_existing(args)
+    if problem := _prepare(args):
+        emit(problem)
+        return 1
     target = _target(args)
     started = _started(target)
     if started is None:
@@ -286,14 +342,15 @@ def run(args: argparse.Namespace) -> int:
                 sink,
                 limits=limits,
                 match=match,
-                settling=Settling(interval=args.settle, end_wait=args.end_wait),
+                settling=Settling(interval=args.settle, end_wait=args.end_wait, max_interval=args.settle_max),
                 pace=Pace(args.notches, args.stride),
                 drop_overlays=args.drop_overlays,
                 aborted=shown.stopped,
                 progress=shown.progress,
                 lost=shown.lost,
             )
-    status = _report(result)
+    status = _report(result, args.tolerance)
+    _report_pages(args.page_height, pdf.rhythm)
     emit(f'{args.out.resolve()}: {width}x{result.height} px on {pdf.pages} page(s)')
     if args.png:
         emit(f'{args.png.resolve()}: the same, as one image')

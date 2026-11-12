@@ -198,3 +198,77 @@ def test_an_existing_output_is_refused_before_anything_unless_overwrite(tmp_path
     assert (tmp_path / 'c.png').read_bytes() == b'the document on screen'
     assert run(tmp_path, '--no-scroll', '--png', str(tmp_path / 'c.png'), '--overwrite') == 0
     assert (tmp_path / 'c.png').read_bytes() != b'the document on screen'
+
+
+def test_a_scroll_windows_refuses_ends_the_capture_with_what_it_has_and_why(tmp_path, fake, monkeypatch, capsys):
+    scrolled = []
+
+    def refused(self, notches=1):
+        if len(scrolled) == 3:
+            msg = 'SendInput was blocked (error 5): is a higher-integrity window in front?'
+            raise OSError(msg)  # what desktop._send raises
+        scrolled.append(notches)
+        self.view.scroll(notches)
+
+    monkeypatch.setattr(fake, 'scroll', refused)
+    assert auto(tmp_path, '--page-height', '0') == 1  # no traceback: an exit status
+    out = capsys.readouterr().out
+    assert 'SendInput was blocked' in out
+    assert 'UAC' in out
+    assert 'lock screen' in out
+    assert '1 page(s)' in out
+    image, _ = pdf_pixels(tmp_path / 'c.pdf')
+    assert np.array_equal(image, fake.IMAGE[: 300 + 3 * fake.STEP])  # every frame placed before it is written
+
+
+def test_frames_that_share_nothing_say_page_flip_mode_not_a_larger_tolerance(tmp_path, fake, monkeypatch, capsys):
+    monkeypatch.setattr(fake, 'STEP', 300)  # a whole view a scroll: a reader turning pages
+    assert auto(tmp_path, '--page-height', '0') == 1
+    out = capsys.readouterr().out
+    assert 'page-flip' in out
+    assert 'continuous' in out
+    assert 'larger --tolerance will not help' in out
+
+
+def test_frames_that_nearly_match_still_suggest_a_larger_tolerance(tmp_path, fake, monkeypatch, capsys):
+    rng = np.random.default_rng(1)
+    grab = FakeSource.grab
+
+    def noisy(self):  # re-rendered each grab: the true offset errs about 10 grey levels, above 8 but near it
+        frame = grab(self).astype(np.int16) + rng.integers(-17, 18, (300, WIDTH, 3))
+        return np.clip(frame, 0, 255).astype(np.uint8)
+
+    monkeypatch.setattr(fake, 'grab', noisy)
+    assert auto(tmp_path, '--page-height', '0') == 1
+    out = capsys.readouterr().out
+    assert 'try a larger --tolerance' in out
+    assert 'page-flip' not in out
+
+
+def test_page_height_auto_is_accepted_and_reported(tmp_path, fake, capsys):
+    assert auto(tmp_path, '--page-height', 'auto') == 0
+    assert 'no page separators found' in capsys.readouterr().out  # noise has none: A4-shaped, and it says so
+
+
+def test_python_3_13_0_in_a_venv_without_tcl_is_told_before_tkinter_starts(tmp_path):
+    venv, base = tmp_path / 'venv', tmp_path / 'base'
+    venv.mkdir()
+    problem = desktop.tk_problem((3, 13, 0), str(venv), str(base), {})
+    assert problem is not None
+    assert '3.13.1' in problem
+    assert str(base / 'tcl') in problem
+    assert desktop.tk_problem((3, 13, 1), str(venv), str(base), {}) is None  # the controls: fixed in 3.13.1,
+    assert desktop.tk_problem((3, 13, 0), str(base), str(base), {}) is None  # not in a venv,
+    assert desktop.tk_problem((3, 13, 0), str(venv), str(base), {'TCL_LIBRARY': 'x'}) is None  # Tcl named,
+    (venv / 'tcl').mkdir()
+    assert desktop.tk_problem((3, 13, 0), str(venv), str(base), {}) is None  # or the tcl folder copied in
+
+
+def test_a_tkinter_that_cannot_start_ends_the_run_with_the_remedy(tmp_path, fake, monkeypatch, capsys):
+    monkeypatch.setattr(desktop, 'tk_problem', lambda: 'Use Python 3.13.1 or later')
+    shown = []
+    monkeypatch.setattr(FakeHud, 'ready', lambda self: shown.append(1) or 'start')
+    assert run(tmp_path) == 1
+    assert 'Use Python 3.13.1' in capsys.readouterr().out
+    assert not shown
+    assert not list(tmp_path.iterdir())

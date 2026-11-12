@@ -4,7 +4,9 @@
   Full-width lines cut the page into bands; each band reads its left column, then its right.
 - Headings: the largest text on page 1 is the title (``#``); a line that is a Roman-numbered upper-case heading
   (``II. METHOD``), a standalone ``REFERENCES``/``ACKNOWLEDGMENT``/``APPENDIX``/``CONCLUSION``, or an all-bold
-  short line numbered ``2`` / ``2.1`` is a section (``##``, ``###`` per depth).
+  short line numbered ``2`` / ``2.1`` is a section (``##``, ``###`` per depth). A line without a letter (a page
+  number) or a contents entry (a leader then a page number) never is, nor is any line of a table-of-contents page
+  (:data:`TOC_LINES` such entries): it names the sections, it does not open them.
 - Paragraphs: lines of one column closer than :data:`PARAGRAPH_GAP` line heights join with a space (a hyphen at a
   line end joins the word); a larger gap, a heading or a column change starts a new paragraph.
 """
@@ -41,6 +43,10 @@ GUTTER: Final = 5.0
 _ROMAN: Final = re.compile(r'^(?:X{0,3})(?:IX|IV|V?I{0,3})\.\s+[A-Z][A-Z0-9 ,:;&/()\-]{3,}$')
 _STANDALONE: Final = re.compile(r'^(?:ACKNOWLEDG(?:E)?MENTS?|REFERENCES|APPENDIX|CONCLUSIONS?)$')
 _NUMBERED: Final = re.compile(r'^(\d+(?:\.\d+)*)\.?\s+[A-Z]')
+#: A table-of-contents entry: words, a leader (dots, ellipses, middle dots, rules), a page number at the end.
+_TOC_ENTRY: Final = re.compile(r'^(?=.*[A-Za-z]).*?(?:(?:\.\s?){4,}|\u2026{2,}|\u00b7{3,}|_{4,})\s*[\dixvIXV]{1,5}$')
+#: Lines of a page that are contents entries for the page to be a table of contents.
+TOC_LINES: Final = 3
 
 
 @dataclass
@@ -166,6 +172,8 @@ def _ordered(lines: list[_Line]) -> list[_Line]:
 
 def _heading(line: _Line, body: float, title_size: float | None) -> str | None:
     text = line.text
+    if not any(c.isalpha() for c in text) or _TOC_ENTRY.match(text):
+        return None
     if title_size is not None and line.size >= TITLE_SCALE * body:
         return f'# {text}'
     if _ROMAN.match(text) or _STANDALONE.match(text):
@@ -187,8 +195,10 @@ def _page_blocks(page: Page, body: float, title_size: float | None) -> list[str]
             blocks.append(' '.join(paragraph))
             paragraph.clear()
 
-    for line in _ordered(_lines(page)):
-        heading = _heading(line, body, title_size)
+    lines = _ordered(_lines(page))
+    contents = sum(bool(_TOC_ENTRY.match(line.text)) for line in lines) >= TOC_LINES
+    for line in lines:
+        heading = None if contents else _heading(line, body, title_size)
         if heading and heading.startswith('# '):
             title.append(line.text)  # a title wraps over several lines
             previous = line

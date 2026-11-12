@@ -13,7 +13,7 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 | `numbers` | the one number grammar: `parse_number` (whole text) and `first_number` (a cell's leading value) |
 | `extract` | typed values against the caller's `Schema` from key-value (`from_rows`) or column (`from_columns`) tables |
 | `ai` | `ask(responder, schema, page_or_table)`: the same values read by a model through ai-lab (`[ai]` extra) |
-| `paper` | `document-lab paper <pdf> <out>`: a paper as per-section markdown (written from the IR, or marker-pdf on a GPU) plus cropped figures/tables/equations |
+| `paper` | `document-lab paper <pdf> <out>`: a paper as per-section markdown (written from the IR, or marker-pdf on a GPU) plus cropped figures/tables/equations; a table-of-contents page opens no sections, and a page that is one picture (a screen-captured or scanned PDF) is linked whole, once, never cropped into copies |
 | `capture` | `document-lab capture <out.pdf>`: any window or screen region, scrolled to its end and stitched losslessly, to a PDF -- the stage before `read_pdf` (Windows, `[capture]` extra) |
 
 ```python
@@ -47,7 +47,12 @@ document-lab capture out.pdf --auto                # it scrolls for you, to the 
 document-lab capture out.pdf --no-scroll           # one frame
 document-lab capture out.pdf --window "Notepad" --ocr chi_sim+eng
 document-lab capture --list                        # the capturable windows and their handles
+document-lab capture out.pdf --page-height auto    # pages cut on the reader's own page separators
 ```
+
+Requires Windows and a tkinter that starts: Python 3.13.0 in a venv cannot (cpython #125235, `Can't find a usable
+init.tcl`); use Python >= 3.13.1, or copy the base install's `tcl` folder into `.venv\tcl`. The capture checks this
+before it opens any window and prints that remedy.
 
 Targets: none dims every monitor, live, the last area confirmed already marked (kept in
 `%LOCALAPPDATA%\document-lab\capture-area.json`; not if it is off the screen now) -- the window under the pointer
@@ -71,7 +76,13 @@ assumed, and the notches grow to `--stride` of the view (default 0.5; 0 keeps `-
 that loads more time to grow -- and says so, exit 1, if its first scroll moved nothing. Neither has a length cap unless
 `--max-frames`/`--max-height`; the height so far shows while it runs. A frame `--auto` cannot place -- caught
 mid-render, or a step past the overlap -- is looked at again, then found by scrolling back, the steps halved; only
-one it cannot recover ends it (kept by `--keep-lost`). An output that exists is refused before anything unless
+one it cannot recover ends it (kept by `--keep-lost`). A view is settled when two grabs `--settle` seconds apart
+(default 0.12) are equal; a frame taken for settled that a second look then places was still rendering, so the gap
+doubles for every later step, up to `--settle-max` (default 1.0) -- a slow renderer (Acrobat in reading mode) gets
+the wait it needs instead of bouncing between its first pages; raise `--settle` to start there. A reader in
+single-page / page-flip mode shares nothing between frames: the capture stops and says to switch it to continuous
+scrolling (no `--tolerance` helps). A scroll Windows refuses (a UAC prompt, an elevated window in front, the lock
+screen) ends it the same way: what was stitched is written, the reason printed, exit 1. An output that exists is refused before anything unless
 `--overwrite`: it may be the very document on screen. A window is read
 through `PrintWindow`, so another window over it does not show; the wheel, which does land on whatever covers it,
 refuses then (bring it forward, or `--method message` -- which some applications act on only some of the time, so it
@@ -85,7 +96,9 @@ be at most `--tolerance` (default 8) and clearly below every offset that is not 
 mean squared difference of every row at every offset, by FFT. An offset that is not unique (a repeating view), or none, stops the capture there: what was stitched is written, the reason is printed and the exit status is 1.
 `--drop-overlays` (off by default) also removes the overlays from where they would recur: each spot of the page is
 taken from the frame that showed it least covered. `--ignore-top/--ignore-bottom` exclude chrome that changes as it
-scrolls. PDF: `--page-height` (pixels; default A4-shaped, `0` one page), `--dpi`, `--ocr [LANGS]` (Tesseract, default
+scrolls. PDF: `--page-height` (pixels; default A4-shaped, `0` one page; `auto` finds the reader's page separators --
+rows that recur, equally spaced, from the first page to the end, not a viewer border repeating at the scroll step --
+and starts each page on one, A4-shaped if there are none, and says which; `capture.pages.page_rhythm`), `--dpi`, `--ocr [LANGS]` (Tesseract, default
 `eng`), `--png`; page size and OCR are checked before the capture starts.
 
 Any length: frames only move down, so every stitched row above the current view is final and is written at once --

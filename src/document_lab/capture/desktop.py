@@ -288,6 +288,27 @@ _PANEL: Final = '#202020'
 _SHOWN_MS: Final = 150  # how long the overlay takes to be shown and active, before a remembered mark
 
 
+def tk_problem(
+    version: tuple[int, ...] | None = None,
+    prefix: str = sys.prefix,
+    base_prefix: str = sys.base_prefix,
+    environ: dict[str, str] | None = None,
+) -> str | None:
+    """Why tkinter cannot start here, with the remedy; None when it can.
+
+    Python 3.13.0 in a venv looks for Tcl under the venv rather than the base install (cpython #125235, fixed in
+    3.13.1): ``Can't find a usable init.tcl`` -- unless the venv holds a ``tcl`` folder or ``TCL_LIBRARY`` names one.
+    """
+    version = tuple(sys.version_info[:3]) if version is None else version
+    environ = dict(os.environ) if environ is None else environ
+    if version != (3, 13, 0) or prefix == base_prefix or 'TCL_LIBRARY' in environ or (Path(prefix) / 'tcl').is_dir():
+        return None
+    return (
+        'Python 3.13.0 in a virtual environment cannot start tkinter (cpython #125235: it looks for Tcl in the venv). '
+        f'Use Python 3.13.1 or later, or copy {Path(base_prefix) / "tcl"} to {Path(prefix) / "tcl"}.'
+    )
+
+
 def _photo(image: np.ndarray) -> bytes:
     """``image`` (RGB uint8) as the PPM bytes a Tk photo reads."""
     height, width, _ = image.shape

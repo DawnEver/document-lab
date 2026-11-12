@@ -43,7 +43,16 @@ class Unstitchable(ValueError):
 
 
 class NoOverlap(Unstitchable):
-    """No offset leaves enough shared rows: the scroll moved (almost) a whole view, or the view changed."""
+    """No offset leaves enough shared rows: the scroll moved (almost) a whole view, or the view changed.
+
+    ``error``: the mean grey error of the best offset found, when there was one -- far above the tolerance, the two
+    frames share nothing at all (a reader turning whole pages).
+    """
+
+    def __init__(self, message: str, error: float | None = None) -> None:
+        """``message`` and the best offset's ``error``."""
+        super().__init__(message)
+        self.error = error
 
 
 class AmbiguousOverlap(Unstitchable):
@@ -237,7 +246,7 @@ def _place(a: np.ndarray, b: np.ndarray, match: Match) -> float:
             msg = 'the shared rows hold nothing that moved, so any offset fits: scroll by less, or past the blank'
             raise AmbiguousOverlap(msg)
         msg = f'no offset leaves {least} shared rows alike (best errs {found[best][0]:.1f} grey levels): scroll by less'
-        raise NoOverlap(msg)
+        raise NoOverlap(msg, found[best][0])
     error = found[best][0]
     bar = max(_UNIQUE * error, error + _FLOOR)
     low = {d for d, (e, _) in found.items() if e < bar}
@@ -303,7 +312,7 @@ def locate(tall: np.ndarray, frame: np.ndarray, match: Match = Match()) -> int: 
     error = found[best][0]
     if error > match.tolerance:
         msg = f'the view is not in what was captured (best errs {error:.1f} grey levels)'
-        raise NoOverlap(msg)
+        raise NoOverlap(msg, error)
     bar = max(_UNIQUE * error, error + _FLOOR)
     low = {p for p, (e, _) in found.items() if e < bar}
 

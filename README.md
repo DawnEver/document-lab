@@ -9,6 +9,7 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 | `pdf` | `read_pdf(path)`: spans, vector paths, ruled tables with per-cell boxes, image figures and captions (PyMuPDF); `read_raster(path, page, bbox)`: a region's pixels at its images' native resolution |
 | `html` | `read_html(path)`: every `<table>` as a `Table` (standard-library parser) |
 | `plot` | `plots(page)`: curves digitised from VECTOR plots (axes linear, log10, or piecewise between labelled ticks; labels as text or glyph outlines; fragments joined; legend samples apart); a raster plot raises `RasterPlot`. `raster_plot(raster)`: one plot traced from pixels, each point with its pixel uncertainty; unreadable labels raise `UnreadableTickLabels` unless stated (`x_values=`, `y_values=`) |
+| `strokes` | thick strokes in a `Raster`: `fragments` (a morphological opening drops hairlines), `link` (dashes joined end to start along their own direction; crossing curves stay apart), `bands` (fragments to the nearest solid curve), `dots` + `split_by_dots` (a smaller opening keeps dash-dot dots; they trace the dash-dot curve, telling it from a dashed one two strokes away) |
 | `glyphs` | digits read from glyph shapes (outlines or pixels) against Helvetica; a near tie or a glyph under 14 px raises `UnreadableGlyph` |
 | `numbers` | the one number grammar: `parse_number` (whole text) and `first_number` (a cell's leading value) |
 | `extract` | typed values against the caller's `Schema` from key-value (`from_rows`) or column (`from_columns`) tables |

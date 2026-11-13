@@ -356,7 +356,7 @@ def _started(
 
     The desktop is free and nothing is grabbed until then; Adjust reopens the selection on the area. A start that
     ``refuse`` gives a reason for is not one: the reason is shown, and the panel waits again. One it answers with an
-    area starts there instead (the page moved sideways: the area follows it).
+    area starts there instead (moved sideways to line up with the earlier capture).
     """
     from document_lab.capture import desktop  # noqa: PLC0415
 
@@ -436,8 +436,9 @@ def _seam_match(args: argparse.Namespace) -> Match:
 def _resumable(args: argparse.Namespace) -> Callable[[Window | Region, Region], str | Region | None]:
     """Why a start cannot go on from the end of ``--resume``, or where the area must move to go on.
 
-    A reason: the area's width differs, or the view shows nothing of the earlier end. An area: the page moved sideways
-    since, and the area moves to where it now sits, so the two line up pixel for pixel.
+    A reason: the area's width differs, or the view shows nothing of the earlier end. An area: this one sits sideways
+    on the page from where the earlier capture's did (marked a little differently, or the page moved), and it moves
+    to match, so the two line up pixel for pixel.
     """
     if args.resume is None:
         return _no_reason
@@ -469,7 +470,10 @@ def _resumable(args: argparse.Namespace) -> Callable[[Window | Region, Region], 
             return f'The view fits {name} in more than one place ({unsure}): scroll to something unique, then Start.'
         if dx:
             side = 'right' if dx > 0 else 'left'
-            emit(f'the page sits {abs(dx)} px {side} of where {name} has it: the area follows it')
+            emit(
+                f'{name} was captured from {abs(dx)} px further {side} on the page than this area: the area moves '
+                f'{abs(dx)} px {side} to line up with it'
+            )
             return desktop.Region(area.left + dx, area.top, area.width, area.height)
         return None
 

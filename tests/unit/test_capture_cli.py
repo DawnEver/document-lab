@@ -414,7 +414,10 @@ def test_resume_where_the_page_moved_sideways_moves_the_area_with_it_and_lines_u
     monkeypatch.setattr(fake, 'IMAGE', text_page(2000))
     earlier = to_pdf(sideways(fake.IMAGE[:500], 5), tmp_path / 'earlier.pdf')  # the page sat 5 px further right then
     assert auto(tmp_path, '--resume', str(earlier), '--page-height', '0') == 0
-    assert 'sits 5 px left' in capsys.readouterr().out
+    assert (
+        'captured from 5 px further left on the page than this area: the area moves 5 px left'
+        in capsys.readouterr().out
+    )
     assert np.array_equal(pdf_pixels(tmp_path / 'c.pdf')[0], sideways(fake.IMAGE, 5))
 
 

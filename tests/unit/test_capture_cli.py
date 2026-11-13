@@ -324,7 +324,7 @@ def test_resume_where_the_view_shows_nothing_of_the_earlier_end_waits_and_says_s
 def test_resume_with_an_area_of_another_width_says_the_width_to_set(tmp_path, fake, monkeypatch):
     earlier = to_pdf(fake.IMAGE[:500, :32], tmp_path / 'earlier.pdf')
     monkeypatch.setattr(FakeHud, 'answers', ['start', 'cancel'])
-    assert run(tmp_path, '--resume', str(earlier)) == 1
+    assert run(tmp_path, '--resume', str(earlier), '--width-tolerance', '16') == 1
     assert any(isinstance(shown, tuple) and '32 px' in shown[1] for shown in FakeHud.shown)
 
 
@@ -447,3 +447,11 @@ def test_a_view_auto_scroll_lost_waits_red_until_finish_rather_than_quitting(tmp
     assert auto(tmp_path, '--page-height', '0') == 0  # Finish ended it, not the loss
     assert len(reds) >= 3  # told, and told again while it waited
     assert np.array_equal(pdf_pixels(tmp_path / 'c.pdf')[0], fake.IMAGE[:300])
+
+
+def test_resume_with_an_area_a_few_pixels_narrower_makes_it_as_wide_and_goes_on(tmp_path, fake, capsys):
+    earlier = to_pdf(fake.IMAGE[:500], tmp_path / 'earlier.pdf')
+    argv = ['capture', str(tmp_path / 'c.pdf'), '--resume', str(earlier), '--rect', f'0,0,{WIDTH - 9},300']
+    assert main([*argv, '--auto', '--delay', '0', '--settle', '0', '--end-wait', '0', '--page-height', '0']) == 0
+    assert f'it is made {WIDTH} px wide' in capsys.readouterr().out
+    assert np.array_equal(pdf_pixels(tmp_path / 'c.pdf')[0], fake.IMAGE)

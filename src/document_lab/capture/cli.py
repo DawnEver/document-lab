@@ -155,6 +155,13 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         'document reopened renders the same text a little differently)',
     )
     match.add_argument(
+        '--width-tolerance',
+        type=int,
+        default=64,
+        help='--resume: pixels the area may differ in width from the earlier capture; within them its right edge '
+        'moves to match (default 64; 0: refuse any difference)',
+    )
+    match.add_argument(
         '--outliers',
         type=float,
         default=0.05,
@@ -453,8 +460,12 @@ def _resumable(args: argparse.Namespace) -> Callable[[Window | Region, Region], 
         name = args.resume.name
         with pymupdf.open(args.resume) as doc:
             wide = width(doc)
-        if area.width != wide:
+        given = area
+        if abs(area.width - wide) > args.width_tolerance:
             return f'The area is {area.width} px wide and {name} {wide} px: Adjust it to {wide} px, then Start.'
+        if area.width != wide:  # near enough: the same area marked a few pixels off; its right edge moves
+            emit(f'the area is {area.width} px wide and {name} {wide} px: it is made {wide} px wide')
+            target = area = desktop.Region(area.left, area.top, wide, area.height)
         frame = desktop.Source(target, args.notches, args.method).grab()
         try:
             _, dx = drift(tail_rows(args.resume, 3 * len(frame)), frame, _seam_match(args))
@@ -474,8 +485,8 @@ def _resumable(args: argparse.Namespace) -> Callable[[Window | Region, Region], 
                 f'{name} was captured from {abs(dx)} px further {side} on the page than this area: the area moves '
                 f'{abs(dx)} px {side} to line up with it'
             )
-            return desktop.Region(area.left + dx, area.top, area.width, area.height)
-        return None
+            area = desktop.Region(area.left + dx, area.top, area.width, area.height)
+        return area if area != given else None
 
     return refuse
 

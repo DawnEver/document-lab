@@ -52,3 +52,31 @@ def test_a_word_broken_across_columns_rejoins(md):
 
 def test_body_text_starting_with_a_hash_is_not_a_heading(md):
     assert '\\#1 legend text' in md
+
+
+def test_a_table_of_contents_page_opens_no_sections(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    _write(page, 150, 60, 'A Standard', size=22)
+    contents = doc.new_page(width=612, height=792)
+    _write(contents, LEFT, 100, 'Contents', size=22)
+    entries = ['1 Scope', '2 Normative references', 'II. TERMS AND DEFINITIONS', 'REFERENCES']
+    for i, entry in enumerate(entries):
+        _write(contents, LEFT, 140 + 20 * i, f'{entry} ' + '.' * 30 + f' {i + 5}', font='tibo')
+    body = doc.new_page(width=612, height=792)
+    _write(body, LEFT, 100, '1 Scope', font='tibo')
+    _write(body, LEFT, 120, 'This standard applies to rotating machines.')
+    _write(body, LEFT, 760, '2', font='tibo')  # a page number in bold: no letters, no heading
+    doc.save(tmp_path / 'toc.pdf')
+    headings = [ln for ln in to_markdown(read_pdf(tmp_path / 'toc.pdf', tables=False)).splitlines() if ln[:1] == '#']
+    assert headings == ['# A Standard', '## 1 Scope']
+
+
+def test_one_contents_line_is_not_a_heading_but_a_page_of_them_is_a_contents_page(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    _write(page, LEFT, 100, 'II. METHOD ........ 4')
+    _write(page, LEFT, 120, 'III. RESULTS')  # the control: a real heading on a page with one entry stays one
+    doc.save(tmp_path / 'one.pdf')
+    headings = [ln for ln in to_markdown(read_pdf(tmp_path / 'one.pdf', tables=False)).splitlines() if ln[:1] == '#']
+    assert headings == ['## III. RESULTS']

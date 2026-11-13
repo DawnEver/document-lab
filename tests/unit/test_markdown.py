@@ -93,3 +93,23 @@ def test_each_page_stands_alone_and_a_page_without_text_is_empty(tmp_path):
     assert 'ends here' not in pages[0]
     assert pages[2].startswith('ends here.')
     assert 'next page and ends here.' in to_markdown(read_pdf(tmp_path / 'p.pdf', tables=False))
+
+
+def test_a_clause_number_set_apart_from_its_title_heads_the_clause_even_not_bold(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    for y, number, title in ((80, '4', 'Effects on performance'), (120, '4.1', 'General')):
+        _write(page, 57, y, number, size=11)
+        _write(page, 100, y, title, size=11)  # four font sizes apart, as a standard sets a clause title
+    _write(page, 57, 150, 'The effects of unbalanced voltages are as described in 4.2 to 4.6.', size=10)
+    _write(page, 57, 165, '-', size=10)
+    _write(page, 75, 165, 'IEC Electropedia: available online', size=10)
+    _write(page, 57, 180, '1', size=10)
+    _write(page, 100, 180, 'The motor shall be rated for the duty declared by the purchaser.', size=10)
+    doc.save(tmp_path / 's.pdf')
+    md = to_markdown(read_pdf(tmp_path / 's.pdf', tables=False))
+    assert '## 4 Effects on performance' in md
+    assert '### 4.1 General' in md
+    assert '1 The motor shall be rated' in md  # a numbered sentence stays text
+    assert '# 1 The motor' not in md
+    assert '- IEC Electropedia: available online' in md  # a bullet keeps its text

@@ -4,7 +4,9 @@
   Full-width lines cut the page into bands; each band reads its left column, then its right.
 - Headings: the largest text on page 1 is the title (``#``); a line that is a Roman-numbered upper-case heading
   (``II. METHOD``), a standalone ``REFERENCES``/``ACKNOWLEDGMENT``/``APPENDIX``/``CONCLUSION``, or an all-bold
-  short line numbered ``2`` / ``2.1`` is a section (``##``, ``###`` per depth). A line without a letter (a page
+  line numbered ``2`` / ``2.1`` is a section (``##``, ``###`` per depth). A document with no bold text at all (OCR'd:
+  it carries no weight) cannot be judged by weight, so there a short numbered line that is no sentence heads its
+  clause, and a bare clause number or bullet takes the text set apart beside it. A line without a letter (a page
   number) or a contents entry (a leader then a page number) never is, nor is any line of a table-of-contents page
   (:data:`TOC_LINES` such entries): it names the sections, it does not open them.
 - Paragraphs: lines of one column closer than :data:`PARAGRAPH_GAP` line heights join with a space (a hyphen at a
@@ -38,11 +40,18 @@ ESCAPE: Final = chr(92)
 WORD_GAP: Final = 0.15
 #: A span further right of a line than this many font sizes starts another line (a column gutter).
 LINE_GAP: Final = 1.0
+#: Unweighted: a bare clause number (``4.1``) or bullet takes the text beside it within this many font sizes.
+CLAUSE_GAP: Final = 8.0
+#: Unweighted: a numbered line of at most this many words, not ending a sentence, heads its clause.
+HEADING_WORDS: Final = 8
 #: Points a column line may cross the page middle.
 GUTTER: Final = 5.0
 _ROMAN: Final = re.compile(r'^(?:X{0,3})(?:IX|IV|V?I{0,3})\.\s+[A-Z][A-Z0-9 ,:;&/()\-]{3,}$')
 _STANDALONE: Final = re.compile(r'^(?:ACKNOWLEDG(?:E)?MENTS?|REFERENCES|APPENDIX|CONCLUSIONS?)$')
 _NUMBERED: Final = re.compile(r'^(\d+(?:\.\d+)*)\.?\s+[A-Z]')
+_CLAUSE: Final = re.compile(
+    r'^(?:\d+(?:\.\d+)*\.?|[-\N{EN DASH}\N{EM DASH}\N{BULLET}])$'
+)  # a clause number, or a bullet
 #: A table-of-contents entry: words, a leader (dots, ellipses, middle dots, rules), a page number at the end.
 _TOC_ENTRY: Final = re.compile(r'^(?=.*[A-Za-z]).*?(?:(?:\.\s?){4,}|\u2026{2,}|\u00b7{3,}|_{4,})\s*[\dixvIXV]{1,5}$')
 #: Lines of a page that are contents entries for the page to be a table of contents.
@@ -99,9 +108,10 @@ def page_markdowns(doc: Document) -> list[str]:
 
 
 def _blocks(doc: Document) -> list[list[str]]:
+    weighted = any(span.bold for span in doc.spans())
     body = _body_size(doc)
     title_size = max((s.size for s in doc.pages[0].spans), default=0.0) if doc.pages else 0.0
-    return [_page_blocks(page, body, title_size) for page in doc.pages]
+    return [_page_blocks(page, body, title_size, weighted=weighted) for page in doc.pages]
 
 
 def _rejoin(blocks: list[str]) -> list[str]:
@@ -135,7 +145,7 @@ def _body_size(doc: Document) -> float:
     return sizes.most_common(1)[0][0] if sizes else 0.0
 
 
-def _lines(page: Page) -> list[_Line]:
+def _lines(page: Page, *, weighted: bool) -> list[_Line]:
     mid = page.width / 2
     lines: list[_Line] = []
     # A line: spans on one baseline, each starting within LINE_GAP font sizes of the line's right end (a column
@@ -145,7 +155,8 @@ def _lines(page: Page) -> list[_Line]:
         centre = (box.y0 + box.y1) / 2
         for line in lines:
             right = max(s.provenance.bbox.x1 for s in line.spans)
-            near = -GUTTER <= box.x0 - right <= LINE_GAP * max(span.size, line.size)
+            reach = CLAUSE_GAP if not weighted and _CLAUSE.match(line.text) else LINE_GAP
+            near = -GUTTER <= box.x0 - right <= reach * max(span.size, line.size)
             if near and abs((line.y0 + line.y1) / 2 - centre) <= 0.4 * max(span.size, line.size):
                 line.spans.append(span)
                 break
@@ -179,7 +190,7 @@ def _ordered(lines: list[_Line]) -> list[_Line]:
     return out
 
 
-def _heading(line: _Line, body: float, title_size: float | None) -> str | None:
+def _heading(line: _Line, body: float, title_size: float | None, *, weighted: bool) -> str | None:
     text = line.text
     if not any(c.isalpha() for c in text) or _TOC_ENTRY.match(text):
         return None
@@ -188,12 +199,13 @@ def _heading(line: _Line, body: float, title_size: float | None) -> str | None:
     if _ROMAN.match(text) or _STANDALONE.match(text):
         return f'## {text}'
     numbered = _NUMBERED.match(text)
-    if numbered and line.bold and len(text) <= 80:
+    short = len(text.split()) <= HEADING_WORDS and not text.endswith(('.', ',', ';', ':'))
+    if numbered and len(text) <= 80 and (line.bold if weighted else short):
         return f'{"#" * (numbered.group(1).count(".") + 2)} {text}'
     return None
 
 
-def _page_blocks(page: Page, body: float, title_size: float | None) -> list[str]:
+def _page_blocks(page: Page, body: float, title_size: float | None, *, weighted: bool) -> list[str]:
     blocks: list[str] = []
     paragraph: list[str] = []
     previous: _Line | None = None
@@ -204,10 +216,10 @@ def _page_blocks(page: Page, body: float, title_size: float | None) -> list[str]
             blocks.append(' '.join(paragraph))
             paragraph.clear()
 
-    lines = _ordered(_lines(page))
+    lines = _ordered(_lines(page, weighted=weighted))
     contents = sum(bool(_TOC_ENTRY.match(line.text)) for line in lines) >= TOC_LINES
     for line in lines:
-        heading = None if contents else _heading(line, body, title_size)
+        heading = None if contents else _heading(line, body, title_size, weighted=weighted)
         if heading and heading.startswith('# '):
             title.append(line.text)  # a title wraps over several lines
             previous = line

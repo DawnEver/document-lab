@@ -4,8 +4,8 @@ A paper reads as sections (`document_lab.paper`); a standard is cited by clause 
 in place, so each page is kept whole. ``page-NNN.md`` is the page's text in markdown (`document_lab.markdown`, read
 from the PDF's text layer -- a page of a capture needs `document_lab.ocr` first) under a link to ``page-NNN.png``,
 the page as it is seen: a page that is one image gives that image's own pixels, any other page is rendered at
-:data:`RENDER_DPI`. ``INDEX.md`` lists the pages with their first heading. A page without text is written all the
-same, its markdown empty, and named in :attr:`Paged.textless` -- never silently dropped.
+:data:`RENDER_DPI`. ``INDEX.md`` lists the pages with the clause headings each opens. A page without text is written
+all the same, its markdown empty, and named in :attr:`Paged.textless` -- never silently dropped.
 """
 
 from __future__ import annotations
@@ -43,8 +43,9 @@ def _picture(page: pymupdf.Page) -> pymupdf.Pixmap:
     return page.get_pixmap(dpi=RENDER_DPI)
 
 
-def _heading(markdown: str) -> str:
-    return next((line.lstrip('#').strip() for line in markdown.splitlines() if line.startswith('#')), '')
+def _clauses(markdown: str) -> str:
+    """The clause headings a page opens (``##`` and deeper), ``; ``-joined: what the index names it by."""
+    return '; '.join(line.lstrip('#').strip() for line in markdown.splitlines() if line.startswith('##'))
 
 
 def write_pages(pdf: Path, out: Path) -> Paged:
@@ -61,7 +62,7 @@ def write_pages(pdf: Path, out: Path) -> Paged:
             (out / f'{name}.md').write_text(f'[{pdf.name}, page {number}]({name}.png)\n\n{text}', encoding='utf-8')
             if not text.strip():
                 textless.append(number)
-            heading = _heading(text)
-            index.append(f'- [page {number}]({name}.md)' + (f' -- {heading}' if heading else ''))
+            clauses = _clauses(text)
+            index.append(f'- [page {number}]({name}.md)' + (f' -- {clauses}' if clauses else ''))
     (out / 'INDEX.md').write_text('\n'.join(index) + '\n', encoding='utf-8')
     return Paged(out, len(texts), tuple(textless))

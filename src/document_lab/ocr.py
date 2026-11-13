@@ -8,7 +8,9 @@ touched. A page that already has text, or holds no image, is left as it is, so a
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
+from typing import Final
 
 import pymupdf
 
@@ -41,11 +43,16 @@ def _image(page: pymupdf.Page) -> pymupdf.Pixmap | None:
     return pix
 
 
+_DRAWN: Final = re.compile(rb'/[A-Za-z0-9]+\s+Do(?![A-Za-z])')  # an XObject drawn: in Tesseract's page, only its image
+
+
 def _lay(page: pymupdf.Page, pix: pymupdf.Pixmap, languages: str) -> None:
+    """Tesseract's page for ``pix`` with its image taken out -- not drawn, not held -- shown over ``page``."""
     with pymupdf.open('pdf', pix.pdfocr_tobytes(language=languages)) as words:
         recognised = words[0]
-        for xref, *_ in recognised.get_images():
-            recognised.delete_image(xref)  # the words alone: the page keeps its own image
+        for xref in recognised.get_contents():
+            words.update_stream(xref, _DRAWN.sub(b'', words.xref_stream(xref)))
+        words.xref_set_key(recognised.xref, 'Resources/XObject', '<<>>')
         page.show_pdf_page(page.rect, words, 0)
 
 

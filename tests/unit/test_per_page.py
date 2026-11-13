@@ -25,7 +25,9 @@ def test_each_page_gets_its_markdown_and_image_and_the_index_names_them(tmp_path
     assert page1.startswith('[std.pdf, page 1](page-001.png)')
     assert 'declared by the purchaser' in page1
     assert 'Annex A' not in page1  # a page stands alone
-    assert '- [page 3](page-003.md)' in (tmp_path / 'out' / 'INDEX.md').read_text(encoding='utf-8')
+    index = (tmp_path / 'out' / 'INDEX.md').read_text(encoding='utf-8')
+    assert '- [page 3](page-003.md)\n' in index
+    assert '- [page 1](page-001.md) -- 4 Duty' in index
 
 
 def test_a_page_that_is_one_image_keeps_its_own_pixels(tmp_path):

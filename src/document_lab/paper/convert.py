@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Final, Literal
 
-from document_lab.paper.markdown import to_markdown
+from document_lab.markdown import to_markdown
 from document_lab.pdf import read_pdf
 
 __all__ = [

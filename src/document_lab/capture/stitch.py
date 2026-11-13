@@ -212,7 +212,7 @@ def _unmoved(cells: np.ndarray, least: int) -> float:
     return 0.0
 
 
-def offset(a: np.ndarray, b: np.ndarray, match: Match = Match()) -> int:  # noqa: B008 -- frozen
+def offset(a: np.ndarray, b: np.ndarray, match: Match = Match()) -> int:
     """Rows the view scrolled from frame ``a`` to frame ``b`` (0: it did not move), to the nearest row.
 
     :func:`_place` says how many to the fraction of a row.
@@ -295,7 +295,7 @@ def _squared_in(tall: np.ndarray, view: np.ndarray, least: int) -> np.ndarray:
     return (tall2[positions + shared] - tall2[positions] + view2[shared] - 2 * cross) / (shared * tall.shape[1])
 
 
-def locate(tall: np.ndarray, frame: np.ndarray, match: Match = Match()) -> int:  # noqa: B008 -- frozen
+def locate(tall: np.ndarray, frame: np.ndarray, match: Match = Match()) -> int:
     """The row of ``tall`` -- the image so far -- at which ``frame`` starts.
 
     Where a view that lost the last frame is found again: ``frame`` shares at least the least overlap with ``tall``.
@@ -357,7 +357,7 @@ def _ink(image: np.ndarray) -> np.ndarray:
     return np.abs(grey - paper).sum(axis=0)
 
 
-def drift(tall: np.ndarray, frame: np.ndarray, match: Match = Match(), reach: int | None = None) -> tuple[int, int]:  # noqa: B008
+def drift(tall: np.ndarray, frame: np.ndarray, match: Match = Match(), reach: int | None = None) -> tuple[int, int]:
     """Where ``frame`` starts in ``tall`` and how many columns its content sits further right: ``(row, dx)``.
 
     A page that moved sideways between two captures -- a reader reopened, its side bar or zoom margin changed --
@@ -428,7 +428,7 @@ class Stitcher:
     def __init__(
         self,
         first: np.ndarray,
-        match: Match = Match(),  # noqa: B008 -- frozen
+        match: Match = Match(),
         *,
         drop_overlays: bool = False,
         history: int = 0,
@@ -547,7 +547,7 @@ class Stitcher:
         return self._canvas[: self._end].copy()
 
 
-def stitch(frames: Sequence[np.ndarray], match: Match = Match(), *, drop_overlays: bool = False) -> np.ndarray:  # noqa: B008
+def stitch(frames: Sequence[np.ndarray], match: Match = Match(), *, drop_overlays: bool = False) -> np.ndarray:
     """The tall image ``frames`` show in order; repeated frames add nothing."""
     if not frames:
         msg = 'no frames to stitch'

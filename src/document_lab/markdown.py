@@ -1,4 +1,4 @@
-"""A paper's markdown written from document_lab's own IR: reading order, headings and paragraphs from the spans.
+"""A document's markdown written from document_lab's own IR: reading order, headings and paragraphs from the spans.
 
 - Reading order: a page's lines are FULL width (crossing the page middle) or in the LEFT or RIGHT column.
   Full-width lines cut the page into bands; each band reads its left column, then its right.
@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Final
 if TYPE_CHECKING:
     from document_lab.ir import Document, Page, TextSpan
 
-__all__ = ['to_markdown']
+__all__ = ['page_markdowns', 'to_markdown']
 
 #: A gap between lines larger than this many line heights starts a paragraph.
 PARAGRAPH_GAP: Final = 0.6
@@ -86,13 +86,22 @@ class _Line:
 
 
 def to_markdown(doc: Document) -> str:
-    """The document as markdown, page after page."""
+    """The document as markdown, page after page: a paragraph a page break cut is joined again."""
+    return '\n\n'.join(_rejoin([block for page in _blocks(doc) for block in page])) + '\n'
+
+
+def page_markdowns(doc: Document) -> list[str]:
+    """Each page's own markdown, in order (empty for a page without text).
+
+    Body size and title are judged over the whole document; nothing is joined across a page break: a page stands alone.
+    """
+    return ['\n\n'.join(_rejoin(page)) + '\n' if page else '' for page in _blocks(doc)]
+
+
+def _blocks(doc: Document) -> list[list[str]]:
     body = _body_size(doc)
     title_size = max((s.size for s in doc.pages[0].spans), default=0.0) if doc.pages else 0.0
-    blocks: list[str] = []
-    for page in doc.pages:
-        blocks.extend(_page_blocks(page, body, title_size))
-    return '\n\n'.join(_rejoin(blocks)) + '\n'
+    return [_page_blocks(page, body, title_size) for page in doc.pages]
 
 
 def _rejoin(blocks: list[str]) -> list[str]:

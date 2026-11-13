@@ -407,6 +407,10 @@ def _prepare(args: argparse.Namespace) -> str | None:
     from document_lab.capture import desktop  # noqa: PLC0415
     from document_lab.capture.export import check_name  # noqa: PLC0415
 
+    if args.ocr:
+        from document_lab.ocr import check  # noqa: PLC0415
+
+        check(args.ocr)  # before the capture: a missing Tesseract is said now, not after it
     for path in (args.out, args.png):
         if path is not None:
             check_name(path)
@@ -536,7 +540,7 @@ def run(args: argparse.Namespace) -> int:
     # The writers check page size and OCR before the capture starts, and keep what was written whatever stops it.
     with (
         contextlib.closing(hud),
-        PdfWriter(written, width, page_height=args.page_height, dpi=args.dpi, ocr=args.ocr) as pdf,
+        PdfWriter(written, width, page_height=args.page_height, dpi=args.dpi) as pdf,
         PngWriter(args.png, width) if args.png else contextlib.nullcontext() as png,
     ):
 
@@ -594,6 +598,10 @@ def _finished(args: argparse.Namespace, result: Capture, pdf: PdfWriter, written
         emit(f'{args.out.resolve()}: {pdf.width}x{result.height} px on {pdf.pages} page(s)')
         if args.png:
             emit(f'{args.png.resolve()}: the same, as one image')
+    if args.ocr and args.out.exists():
+        from document_lab.ocr import text_layer  # noqa: PLC0415
+
+        emit(f'{args.out.name}: text layer on {text_layer(args.out, args.out, args.ocr)} page(s)')
     if args.open and args.out.exists():
         desktop.open_file(args.out)
     return status

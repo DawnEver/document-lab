@@ -3,7 +3,7 @@
 import pymupdf
 import pytest
 
-from document_lab.paper.markdown import to_markdown
+from document_lab.markdown import page_markdowns, to_markdown
 from document_lab.pdf import read_pdf
 
 LEFT, RIGHT, WIDTH = 50, 320, 240
@@ -80,3 +80,16 @@ def test_one_contents_line_is_not_a_heading_but_a_page_of_them_is_a_contents_pag
     doc.save(tmp_path / 'one.pdf')
     headings = [ln for ln in to_markdown(read_pdf(tmp_path / 'one.pdf', tables=False)).splitlines() if ln[:1] == '#']
     assert headings == ['## III. RESULTS']
+
+
+def test_each_page_stands_alone_and_a_page_without_text_is_empty(tmp_path):
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), 'the paragraph runs on to the next page and', fontsize=10)
+    doc.new_page()
+    doc.new_page().insert_text((72, 72), 'ends here.', fontsize=10)
+    doc.save(tmp_path / 'p.pdf')
+    pages = page_markdowns(read_pdf(tmp_path / 'p.pdf', tables=False))
+    assert pages[1] == ''
+    assert 'ends here' not in pages[0]
+    assert pages[2].startswith('ends here.')
+    assert 'next page and ends here.' in to_markdown(read_pdf(tmp_path / 'p.pdf', tables=False))

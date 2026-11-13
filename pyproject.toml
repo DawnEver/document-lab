@@ -82,9 +82,9 @@ ignore = ["COM812", "D203", "D213", "D400", "D401", "N818", "PLR0913", "Q000", "
 
 [tool.ruff.lint.per-file-ignores]
 # A test asserts, reads private seams of what it tests, and names fixtures rather than documenting them.
-# The paper port's layout heuristics (absorbed from paper_pdf_ingest): their thresholds are measured page-geometry
+# The layout heuristics (the paper port absorbed from paper_pdf_ingest, and its IR markdown writer): their thresholds are measured page-geometry
 # constants read inline, their branching IS the heuristic, and its re.sub callbacks run synchronously in the loop.
-"src/document_lab/paper/**" = ["PLR2004", "C901", "PLR0911", "PLR0912", "PLR0915", "PLR0917", "FBT001", "FBT002", "B023"]
+"src/document_lab/{paper/**,markdown.py}" = ["PLR2004", "C901", "PLR0911", "PLR0912", "PLR0915", "PLR0917", "FBT001", "FBT002", "B023"]
 "tests/**" = ["S101", "SLF001", "D", "ANN", "ARG", "FBT003", "PLR2004", "PT018", "INP001"]
 
 [tool.dev_lab.branchset]

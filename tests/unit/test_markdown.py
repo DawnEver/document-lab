@@ -113,3 +113,19 @@ def test_a_clause_number_set_apart_from_its_title_heads_the_clause_even_not_bold
     assert '1 The motor shall be rated' in md  # a numbered sentence stays text
     assert '# 1 The motor' not in md
     assert '- IEC Electropedia: available online' in md  # a bullet keeps its text
+
+
+def test_ocr_noise_heads_nothing_in_an_unweighted_document(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    _write(page, 57, 80, '5.8 Machines with more than one rating ..............ccccececeece', size=11)
+    _write(page, 57, 110, '1 H', size=11)
+    _write(page, 57, 140, '1 OO OO', size=11)
+    _write(page, 300, 200, 'NN I ERE Ee', size=30)  # a figure's big lettering, read as text
+    _write(page, 57, 240, '4.2 Duty types', size=11)
+    _write(page, 57, 270, 'The duty shall be declared by the purchaser of the machine.', size=10)
+    doc.save(tmp_path / 's.pdf')
+    md = to_markdown(read_pdf(tmp_path / 's.pdf', tables=False))
+    assert '### 4.2 Duty types' in md
+    heads = [line for line in md.splitlines() if line.startswith('#')]
+    assert heads == ['### 4.2 Duty types']

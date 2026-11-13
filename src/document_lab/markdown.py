@@ -6,7 +6,9 @@
   (``II. METHOD``), a standalone ``REFERENCES``/``ACKNOWLEDGMENT``/``APPENDIX``/``CONCLUSION``, or an all-bold
   line numbered ``2`` / ``2.1`` is a section (``##``, ``###`` per depth). A document with no bold text at all (OCR'd:
   it carries no weight) cannot be judged by weight, so there a short numbered line that is no sentence heads its
-  clause, and a bare clause number or bullet takes the text set apart beside it. A line without a letter (a page
+  clause, and a bare clause number or bullet takes the text set apart beside it; there a heading must read as words
+  (:func:`_wordy`, not all capitals when numbered) -- a figure's labels, OCR'd, are not. A run of four dots (a
+  contents leader, however garbled) heads nothing. A line without a letter (a page
   number) or a contents entry (a leader then a page number) never is, nor is any line of a table-of-contents page
   (:data:`TOC_LINES` such entries): it names the sections, it does not open them.
 - Paragraphs: lines of one column closer than :data:`PARAGRAPH_GAP` line heights join with a space (a hyphen at a
@@ -44,6 +46,9 @@ LINE_GAP: Final = 1.0
 CLAUSE_GAP: Final = 8.0
 #: Unweighted: a numbered line of at most this many words, not ending a sentence, heads its clause.
 HEADING_WORDS: Final = 8
+#: Unweighted: a heading has a word of at least this many letters, and letters (and spaces) this share of it.
+WORD_LETTERS: Final = 4
+LETTER_SHARE: Final = 0.6
 #: Points a column line may cross the page middle.
 GUTTER: Final = 5.0
 _ROMAN: Final = re.compile(r'^(?:X{0,3})(?:IX|IV|V?I{0,3})\.\s+[A-Z][A-Z0-9 ,:;&/()\-]{3,}$')
@@ -190,17 +195,25 @@ def _ordered(lines: list[_Line]) -> list[_Line]:
     return out
 
 
+def _wordy(text: str) -> bool:
+    """Does ``text`` read as words, not OCR noise: a word of :data:`WORD_LETTERS` letters, letters most of it?"""
+    letters = sum(c.isalpha() or c.isspace() for c in text)
+    return letters >= LETTER_SHARE * len(text) and any(len(w) >= WORD_LETTERS and w.isalpha() for w in text.split())
+
+
 def _heading(line: _Line, body: float, title_size: float | None, *, weighted: bool) -> str | None:
     text = line.text
-    if not any(c.isalpha() for c in text) or _TOC_ENTRY.match(text):
+    if not any(c.isalpha() for c in text) or _TOC_ENTRY.match(text) or '....' in text:
         return None
+    if not weighted and not _wordy(text):
+        return None  # OCR noise: a figure's labels, a garbled leader
     if title_size is not None and line.size >= TITLE_SCALE * body:
         return f'# {text}'
     if _ROMAN.match(text) or _STANDALONE.match(text):
         return f'## {text}'
     numbered = _NUMBERED.match(text)
-    short = len(text.split()) <= HEADING_WORDS and not text.endswith(('.', ',', ';', ':'))
-    if numbered and len(text) <= 80 and (line.bold if weighted else short):
+    clause = len(text.split()) <= HEADING_WORDS and not text.endswith(('.', ',', ';', ':')) and not text.isupper()
+    if numbered and len(text) <= 80 and (line.bold if weighted else clause):
         return f'{"#" * (numbered.group(1).count(".") + 2)} {text}'
     return None
 

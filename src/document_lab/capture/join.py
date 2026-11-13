@@ -3,8 +3,9 @@
 A capture stopped part way -- Finish, a lost view, a crash -- is continued by capturing again from anywhere
 overlapping its end, then joining the two. Only the seam is redrawn: the first's last pages, down to where the second
 begins; every other page of both is copied as it is (its pixels, its OCR layer). The second's head is found in the
-first's tail by `document_lab.capture.stitch.locate`, so two that share nothing, or fit more than one place, are
-refused -- never butted together -- and two of different widths are refused before anything is read.
+first's tail by `document_lab.capture.stitch.locate`, at :data:`JOIN_TOLERANCE` -- looser than within one capture: a
+document reopened renders the same text a little differently. Two that share nothing, or fit more than one place,
+are refused -- never butted together -- and two of different widths before anything is read.
 """
 
 from __future__ import annotations
@@ -16,13 +17,14 @@ import numpy as np
 import pymupdf
 
 from document_lab.capture.export import check_page
-from document_lab.capture.stitch import Match, locate
+from document_lab.capture.stitch import Match, NoOverlap, locate
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-__all__ = ['HEAD_ROWS', 'Joined', 'join', 'tail_rows', 'width']
+__all__ = ['HEAD_ROWS', 'JOIN_TOLERANCE', 'Joined', 'join', 'tail_rows', 'width']
 
+JOIN_TOLERANCE: Final = 20.0  # grey levels: the same text rendered again after reopening differs ~15 (measured)
 HEAD_ROWS: Final = 1000  # rows of the second capture's start looked for in the first: enough to be told apart
 _REACH: Final = 3  # the first's tail searched: this many times the head, so the second may start well before its end
 
@@ -81,6 +83,23 @@ def _head(doc: pymupdf.Document, rows: int) -> np.ndarray:
     return np.concatenate(parts)[:rows]
 
 
+def _found(doc: pymupdf.Document, frame: np.ndarray, match: Match) -> tuple[int, np.ndarray, int]:
+    """Where ``frame`` starts in the end of ``doc``: the tail pages searched, their rows, and the row in them.
+
+    The search starts :data:`_REACH` frames back and doubles until it holds the whole document, so a second capture
+    begun far before the first ended is found too; what is still not found, or fits more than one place, is refused.
+    """
+    least = _REACH * len(frame)
+    while True:
+        count, tail = _tail(doc, least)
+        try:
+            return count, tail, locate(tail, frame, match)
+        except NoOverlap:
+            if count == doc.page_count:
+                raise
+            least *= 2
+
+
 def _seam(out: pymupdf.Document, rows: np.ndarray, page_height: int, dpi: float) -> None:
     """``rows`` onto new pages of ``out``, ``page_height`` rows each, the last shorter."""
     for top in range(0, len(rows), page_height):
@@ -90,7 +109,14 @@ def _seam(out: pymupdf.Document, rows: np.ndarray, page_height: int, dpi: float)
         out.new_page(width=rect.width, height=rect.height).insert_image(rect, pixmap=pix)
 
 
-def join(first: Path, second: Path, out: Path, match: Match = Match(), *, head: int = HEAD_ROWS) -> Joined:  # noqa: B008
+def join(
+    first: Path,
+    second: Path,
+    out: Path,
+    match: Match = Match(tolerance=JOIN_TOLERANCE),  # noqa: B008 -- frozen
+    *,
+    head: int = HEAD_ROWS,
+) -> Joined:
     """``first`` then ``second`` from where its first ``head`` rows are found in ``first``'s end, written to ``out``.
 
     ``out`` may be ``first`` itself: it is written beside as ``<out>.part`` and moved into place only when whole.
@@ -100,8 +126,7 @@ def join(first: Path, second: Path, out: Path, match: Match = Match(), *, head: 
             msg = f'the captures are {width(a)} and {width(b)} px wide: only captures of one area join'
             raise ValueError(msg)
         frame = _head(b, head)
-        count, tail = _tail(a, _REACH * len(frame))
-        top = locate(tail, frame, match)
+        count, tail, top = _found(a, frame, match)
         whole = sum(_heights(b))
         joined = pymupdf.open()
         if top + whole <= len(tail):  # the second shows nothing the first does not

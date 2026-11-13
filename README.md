@@ -115,7 +115,9 @@ the view to anywhere overlapping where it ended and Start; a start whose area is
 nothing of that end, is refused on the panel with what to do, and it waits again. What is captured is joined to it
 (into `part.pdf`, or the output named). `capture-merge a.pdf b.pdf [...] -o out.pdf` joins finished captures the same
 way (`capture.join.join`): each one's first rows are found in the end of the one before and the rows both show kept
-once; only the seam is redrawn, every other page copied as it is (its OCR layer too). Captures that share nothing,
+once, matched at `--join-tolerance` (`capture-merge --tolerance`; default 20, as the document reopened renders the same
+text ~15 grey levels apart); the search reaches back as far as the earlier capture goes; only the seam is redrawn,
+every other page copied as it is (its OCR layer too). Captures that share nothing,
 fit more than one place, or differ in width are refused, never butted together.
 
 Any length: frames only move down, so every stitched row above the current view is final and is written at once --

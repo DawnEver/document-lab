@@ -74,3 +74,12 @@ def test_the_tail_of_a_capture_is_its_last_pages_rows(tmp_path):
     image = tall(1000)
     a = to_pdf(image, tmp_path / 'a.pdf', page_height=150)
     assert np.array_equal(tail_rows(a, 200), image[-250:])  # whole pages: the last 100 and one of 150
+
+
+def test_a_second_capture_starting_far_before_the_first_ends_is_still_found(tmp_path):
+    image = tall(9000)
+    a = to_pdf(image[:8000], tmp_path / 'a.pdf', page_height=300)
+    b = to_pdf(image[1500:], tmp_path / 'b.pdf', page_height=300)  # starts 6500 rows before a ends
+    joined = join(a, b, tmp_path / 'c.pdf', head=500)  # far past the first look, 3 heads back
+    assert np.array_equal(pdf_pixels(joined.path)[0], image)
+    assert joined.shared == 6500

@@ -407,3 +407,25 @@ def test_the_panels_pause_holds_the_capture_and_resume_picks_it_up(tmp_path, fak
     assert run(tmp_path, '--page-height', '0') == 0
     assert len(polls) > 6
     assert np.array_equal(pdf_pixels(tmp_path / 'c.pdf')[0], fake.IMAGE[:900])
+
+
+def rerendered(image, spread):
+    noise = np.random.default_rng(3).integers(-spread, spread + 1, image.shape)
+    return np.clip(image.astype(int) + noise, 0, 255).astype(np.uint8)
+
+
+def test_resume_takes_the_same_text_rendered_anew_by_default(tmp_path, fake):
+    earlier = to_pdf(rerendered(fake.IMAGE[:500], 25), tmp_path / 'earlier.pdf')  # mean error ~12.7, above 8
+    assert auto(tmp_path, '--resume', str(earlier)) == 0
+    joined, _ = pdf_pixels(tmp_path / 'c.pdf')
+    assert len(joined) == len(fake.IMAGE)
+
+
+def test_resume_beyond_the_join_tolerance_says_the_one_to_use(tmp_path, fake, monkeypatch):
+    earlier = to_pdf(rerendered(fake.IMAGE[:500], 50), tmp_path / 'earlier.pdf')  # mean error ~25
+    monkeypatch.setattr(FakeHud, 'answers', ['start', 'cancel'])
+    assert run(tmp_path, '--resume', str(earlier)) == 1
+    said = [shown[1] for shown in FakeHud.shown if isinstance(shown, tuple) and shown[0] is False]
+    assert said
+    wider = said[0].split('--join-tolerance ')[2].split(';')[0]
+    assert auto(tmp_path, '--resume', str(earlier), '--join-tolerance', wider) == 0

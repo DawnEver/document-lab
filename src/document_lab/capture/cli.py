@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Final
 
 from lab_commons.log import emit
 
+from document_lab.capture.join import JOIN_TOLERANCE
 from document_lab.capture.session import Pace, Settling
 from document_lab.capture.stitch import Match
 
@@ -141,6 +142,13 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help=f'mean grey levels the shared rows may differ by (default {Match.tolerance:g}; 0: exact)',
     )
     match.add_argument(
+        '--join-tolerance',
+        type=float,
+        default=JOIN_TOLERANCE,
+        help=f'--resume: as --tolerance, where this capture meets the earlier one (default {JOIN_TOLERANCE:g}: the '
+        'document reopened renders the same text a little differently)',
+    )
+    match.add_argument(
         '--outliers',
         type=float,
         default=0.05,
@@ -180,7 +188,13 @@ def add_merge_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser
     merge.add_argument('pdfs', type=Path, nargs='+', metavar='PDF', help='two or more captures, top to bottom')
     merge.add_argument('-o', '--out', type=Path, required=True, help='the joined PDF to write')
     merge.add_argument('--min-overlap', type=int, help='fewest rows two captures must share (default: 1/6 of 1000)')
-    merge.add_argument('--tolerance', type=float, default=Match.tolerance, help='as for capture')
+    merge.add_argument(
+        '--tolerance',
+        type=float,
+        default=JOIN_TOLERANCE,
+        help=f'mean grey levels the shared rows may differ by (default {JOIN_TOLERANCE:g}: two captures are two '
+        'renderings of the same text)',
+    )
     merge.add_argument('--outliers', type=float, default=Match.outliers, help='as for capture')
     merge.add_argument('--overwrite', action='store_true', help='replace an existing output')
     return merge
@@ -389,8 +403,21 @@ def _refuse_existing(args: argparse.Namespace) -> None:
             raise FileExistsError(msg)
 
 
+_RERENDER: Final = 3  # times the tolerance a resumed view may miss by and still be the same text rendered anew
+
+
+def _wider(error: float) -> int:
+    """A tolerance with room above ``error``: the next multiple of 5 past one and a half times it."""
+    return 5 * -(-round(1.5 * error) // 5)
+
+
 def _match(args: argparse.Namespace) -> Match:
     return Match(args.ignore_top, args.ignore_bottom, args.min_overlap, args.tolerance, args.outliers)
+
+
+def _seam_match(args: argparse.Namespace) -> Match:
+    """How this capture meets the earlier one (``--resume``): as within it, at ``--join-tolerance``."""
+    return Match(args.ignore_top, args.ignore_bottom, args.min_overlap, args.join_tolerance, args.outliers)
 
 
 def _resumable(args: argparse.Namespace) -> Callable[[Window | Region, Region], str | None]:
@@ -403,7 +430,7 @@ def _resumable(args: argparse.Namespace) -> Callable[[Window | Region, Region], 
 
         from document_lab.capture import desktop  # noqa: PLC0415
         from document_lab.capture.join import tail_rows, width  # noqa: PLC0415
-        from document_lab.capture.stitch import Unstitchable, locate  # noqa: PLC0415
+        from document_lab.capture.stitch import NoOverlap, Unstitchable, locate  # noqa: PLC0415
 
         name = args.resume.name
         with pymupdf.open(args.resume) as doc:
@@ -412,9 +439,17 @@ def _resumable(args: argparse.Namespace) -> Callable[[Window | Region, Region], 
             return f'The area is {area.width} px wide and {name} {wide} px: Adjust it to {wide} px, then Start.'
         frame = desktop.Source(target, args.notches, args.method).grab()
         try:
-            locate(tail_rows(args.resume, 3 * len(frame)), frame, _match(args))
-        except Unstitchable:
+            locate(tail_rows(args.resume, 3 * len(frame)), frame, _seam_match(args))
+        except NoOverlap as missed:
+            if missed.error is not None and missed.error <= _RERENDER * max(args.join_tolerance, 1.0):
+                return (
+                    f'The nearest place in {name} differs by {missed.error:.1f} grey levels (--join-tolerance '
+                    f'{args.join_tolerance:g}). If it is the same text, Cancel and run again with --join-tolerance '
+                    f'{_wider(missed.error)}; else scroll to where it ends.'
+                )
             return f'The view shows nothing of where {name} ends: scroll back to it, then Start.'
+        except Unstitchable as unsure:
+            return f'The view fits {name} in more than one place ({unsure}): scroll to something unique, then Start.'
         return None
 
     return refuse
@@ -429,7 +464,7 @@ def _joined(args: argparse.Namespace, written: Path) -> int:
         emit('nothing was captured: the output is as it was')
         return 1
     try:
-        joined = join(args.resume, written, args.out, _match(args))
+        joined = join(args.resume, written, args.out, _seam_match(args))
     except Unstitchable as refused:
         emit(f'what was captured did not join {args.resume.name} ({refused}); it is kept as {written}')
         return 1

@@ -591,8 +591,8 @@ nvtx = [
 
 [[package]]
 name = "dev-lab"
-version = "0.0.1.dev3018+g4223aec79"
-source = { git = "https://github.com/DawnEver/dev-lab.git#4223aec797bed8af9ea14f0e66d549c18c5fa1e2" }
+version = "0.0.1.dev3171+g1798693ec"
+source = { git = "https://github.com/DawnEver/dev-lab.git#1798693ec0b6c1be62c78f427a5f3ea86d313144" }
 dependencies = [
     { name = "cryptography" },
     { name = "lab-commons", extra = ["io", "paths", "structured", "units"] },
@@ -1083,8 +1083,8 @@ wheels = [
 
 [[package]]
 name = "lab-commons"
-version = "0.3.1.dev1456+g3b167f2bf"
-source = { git = "https://github.com/DawnEver/lab-commons.git#3b167f2bf13ed72dc2e142899aa28017ec54f617" }
+version = "0.3.1.dev1470+gde715ae41"
+source = { git = "https://github.com/DawnEver/lab-commons.git#de715ae4191c5aa0a7522198aae7153a6b91d850" }
 
 [package.optional-dependencies]
 io = [

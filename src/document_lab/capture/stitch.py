@@ -30,7 +30,19 @@ import numpy as np
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-__all__ = ['BINS', 'AmbiguousOverlap', 'Match', 'NoOverlap', 'Stitcher', 'Unstitchable', 'locate', 'offset', 'stitch']
+__all__ = [
+    'BINS',
+    'AmbiguousOverlap',
+    'Match',
+    'NoOverlap',
+    'Stitcher',
+    'Unstitchable',
+    'drift',
+    'locate',
+    'offset',
+    'shifted',
+    'stitch',
+]
 
 BINS: Final = 64
 _EDGE: Final = 1 << 16  # a rank: class * _EDGE + the row's distance from the view's middle
@@ -324,6 +336,60 @@ def locate(tall: np.ndarray, frame: np.ndarray, match: Match = Match()) -> int: 
         msg = 'the view fits more than one place in what was captured'
         raise AmbiguousOverlap(msg)
     return best - match.top
+
+
+_SIDEWAYS: Final = 8  # sideways shifts tried, best first by the columns' ink: a moved page is among the first
+
+
+def shifted(image: np.ndarray, dx: int) -> np.ndarray:
+    """``image`` with its content ``dx`` columns further left (right when negative); the edge column fills in."""
+    if dx > 0:
+        return np.concatenate([image[:, dx:], np.repeat(image[:, -1:], dx, axis=1)], axis=1)
+    if dx < 0:
+        return np.concatenate([np.repeat(image[:, :1], -dx, axis=1), image[:, :dx]], axis=1)
+    return image
+
+
+def _ink(image: np.ndarray) -> np.ndarray:
+    """Each column's ink: how far it is from the image's commonest grey, summed down the rows."""
+    grey = image.mean(axis=2)
+    paper = np.median(grey)
+    return np.abs(grey - paper).sum(axis=0)
+
+
+def drift(tall: np.ndarray, frame: np.ndarray, match: Match = Match(), reach: int | None = None) -> tuple[int, int]:  # noqa: B008
+    """Where ``frame`` starts in ``tall`` and how many columns its content sits further right: ``(row, dx)``.
+
+    A page that moved sideways between two captures -- a reader reopened, its side bar or zoom margin changed --
+    shows the same rows ``dx`` columns over. The shifts within ``reach`` (default a quarter of the width) are ranked by
+    how well the columns' ink lines up -- the margins of text tell -- and each in turn is checked as strictly as
+    :func:`locate` checks a view: the first that places ``frame`` uniquely is the answer, 0 tried first. None
+    placing it is refused, never guessed.
+    """
+    width = frame.shape[1]
+    reach = width // 4 if reach is None else reach
+    ta, fa = _ink(tall), _ink(frame)
+    ta, fa = ta / max(ta.sum(), 1.0), fa / max(fa.sum(), 1.0)
+
+    def misfit(dx: int) -> float:
+        lo, hi = max(0, dx), min(width, width + dx)
+        return float(np.abs(fa[lo:hi] - ta[lo - dx : hi - dx]).sum())
+
+    ranked = sorted(range(-reach, reach + 1), key=misfit)[:_SIDEWAYS]
+    refusals: list[Unstitchable] = []
+    for dx in [0, *(d for d in ranked if d)]:
+        try:
+            return locate(tall, shifted(frame, dx), match), dx
+        except Unstitchable as error:
+            refusals.append(error)
+    raise min(refusals, key=_closeness)
+
+
+def _closeness(refused: Unstitchable) -> float:
+    """How near a refusal came: an ambiguous fit before any miss, then the miss that erred least."""
+    if isinstance(refused, NoOverlap) and refused.error is not None:
+        return refused.error
+    return -1.0 if isinstance(refused, AmbiguousOverlap) else float('inf')
 
 
 def _proven(a: np.ndarray, b: np.ndarray, moved: int, known: np.ndarray) -> np.ndarray:

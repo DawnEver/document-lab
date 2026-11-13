@@ -345,17 +345,18 @@ def _report_pages(page_height: int | str | None, rhythm: Rhythm | None) -> None:
         emit(f'pages cut on the reader separators, {rhythm.pitch:.1f} px apart')
 
 
-def _no_reason(_target: Window | Region, _area: Region) -> str | None:
+def _no_reason(_target: Window | Region, _area: Region) -> str | Region | None:
     return None
 
 
 def _started(
-    target: Window | Region, refuse: Callable[[Window | Region, Region], str | None] = _no_reason
+    target: Window | Region, refuse: Callable[[Window | Region, Region], str | Region | None] = _no_reason
 ) -> tuple[Window | Region, Region, Hud, bool] | None:
     """The area set, its HUD and whether to scroll for the user (Auto scroll) once a start is clicked; None on Cancel.
 
     The desktop is free and nothing is grabbed until then; Adjust reopens the selection on the area. A start that
-    ``refuse`` gives a reason for is not one: the reason is shown, and the panel waits again.
+    ``refuse`` gives a reason for is not one: the reason is shown, and the panel waits again. One it answers with an
+    area starts there instead (the page moved sideways: the area follows it).
     """
     from document_lab.capture import desktop  # noqa: PLC0415
 
@@ -363,10 +364,16 @@ def _started(
         area = target.client() if isinstance(target, desktop.Window) else target
         hud = desktop.Hud(area)
         answer = hud.ready()
-        while answer in {'start', 'auto'} and (reason := refuse(target, area)):
-            hud.status(reason, ok=False)
-            answer = hud.ready()
-        if answer in {'start', 'auto'}:
+        while answer in {'start', 'auto'}:
+            verdict = refuse(target, area)
+            if isinstance(verdict, str):
+                hud.status(verdict, ok=False)
+                answer = hud.ready()
+                continue
+            if verdict is not None:
+                hud.close()
+                target = area = verdict
+                hud = desktop.Hud(area)
             hud.begin(answer)
             return target, area, hud, answer == 'auto'
         hud.close()
@@ -426,17 +433,21 @@ def _seam_match(args: argparse.Namespace) -> Match:
     return Match(args.ignore_top, args.ignore_bottom, args.min_overlap, args.join_tolerance, args.outliers)
 
 
-def _resumable(args: argparse.Namespace) -> Callable[[Window | Region, Region], str | None]:
-    """Why a start cannot go on from the end of ``--resume``: the area's width, or a view showing nothing of it."""
+def _resumable(args: argparse.Namespace) -> Callable[[Window | Region, Region], str | Region | None]:
+    """Why a start cannot go on from the end of ``--resume``, or where the area must move to go on.
+
+    A reason: the area's width differs, or the view shows nothing of the earlier end. An area: the page moved sideways
+    since, and the area moves to where it now sits, so the two line up pixel for pixel.
+    """
     if args.resume is None:
         return _no_reason
 
-    def refuse(target: Window | Region, area: Region) -> str | None:
+    def refuse(target: Window | Region, area: Region) -> str | Region | None:
         import pymupdf  # noqa: PLC0415
 
         from document_lab.capture import desktop  # noqa: PLC0415
         from document_lab.capture.join import tail_rows, width  # noqa: PLC0415
-        from document_lab.capture.stitch import NoOverlap, Unstitchable, locate  # noqa: PLC0415
+        from document_lab.capture.stitch import NoOverlap, Unstitchable, drift  # noqa: PLC0415
 
         name = args.resume.name
         with pymupdf.open(args.resume) as doc:
@@ -445,7 +456,7 @@ def _resumable(args: argparse.Namespace) -> Callable[[Window | Region, Region], 
             return f'The area is {area.width} px wide and {name} {wide} px: Adjust it to {wide} px, then Start.'
         frame = desktop.Source(target, args.notches, args.method).grab()
         try:
-            locate(tail_rows(args.resume, 3 * len(frame)), frame, _seam_match(args))
+            _, dx = drift(tail_rows(args.resume, 3 * len(frame)), frame, _seam_match(args))
         except NoOverlap as missed:
             if missed.error is not None and missed.error <= _RERENDER * max(args.join_tolerance, 1.0):
                 return (
@@ -456,6 +467,10 @@ def _resumable(args: argparse.Namespace) -> Callable[[Window | Region, Region], 
             return f'The view shows nothing of where {name} ends: scroll back to it, then Start.'
         except Unstitchable as unsure:
             return f'The view fits {name} in more than one place ({unsure}): scroll to something unique, then Start.'
+        if dx:
+            side = 'right' if dx > 0 else 'left'
+            emit(f'the page sits {abs(dx)} px {side} of where {name} has it: the area follows it')
+            return desktop.Region(area.left + dx, area.top, area.width, area.height)
         return None
 
     return refuse

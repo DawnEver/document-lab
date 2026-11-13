@@ -9,7 +9,7 @@ from document_lab.capture.export import to_pdf
 from document_lab.capture.join import join, tail_rows
 from document_lab.capture.stitch import Match, NoOverlap
 from tests.unit.test_capture_cli import pdf_pixels
-from tests.unit.test_capture_stitch import tall
+from tests.unit.test_capture_stitch import sideways, tall, text_page
 
 
 def two(tmp_path, image, first_end, second_start, page_height=150):
@@ -95,3 +95,25 @@ def test_a_head_that_fits_more_than_one_place_grows_until_it_fits_one(tmp_path):
     b = to_pdf(image[1500:], tmp_path / 'b.pdf', page_height=200)  # opens on the recurring block
     joined = join(a, b, tmp_path / 'c.pdf', head=120)
     assert np.array_equal(pdf_pixels(joined.path)[0], image)
+
+
+def test_a_second_capture_of_the_page_moved_sideways_is_moved_back_in_line(tmp_path):
+    image = text_page(1600)
+    a = to_pdf(image[:900], tmp_path / 'a.pdf', page_height=200)
+    b = to_pdf(sideways(image[700:], 6), tmp_path / 'b.pdf', page_height=200)  # reopened: the page 6 px further right
+    joined = join(a, b, tmp_path / 'c.pdf')
+    assert joined.shift == 6
+    rows, _ = pdf_pixels(joined.path)
+    assert np.array_equal(rows[:900], image[:900])
+    assert np.array_equal(rows[900:, :-6], image[900:, :-6])  # in line; only the right edge filled in
+
+
+def test_the_seam_is_cut_mid_overlap_so_a_border_caught_at_either_edge_is_left_out(tmp_path):
+    image = text_page(1600)
+    first, second = image[:900].copy(), image[600:].copy()
+    first[-3:] = 90  # the window's bottom border, caught in the first capture's last view
+    second[:3] = 90  # and its top border, in the second's first
+    a = to_pdf(first, tmp_path / 'a.pdf', page_height=200)
+    b = to_pdf(second, tmp_path / 'b.pdf', page_height=200)
+    rows, _ = pdf_pixels(join(a, b, tmp_path / 'c.pdf', Match(outliers=0.05)).path)
+    assert np.array_equal(rows, image)

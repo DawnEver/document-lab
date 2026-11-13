@@ -7,7 +7,7 @@ import time
 import numpy as np
 import pytest
 
-from document_lab.capture.stitch import AmbiguousOverlap, Match, NoOverlap, Stitcher, offset, stitch
+from document_lab.capture.stitch import AmbiguousOverlap, Match, NoOverlap, Stitcher, drift, offset, stitch
 
 WIDTH = 64
 
@@ -294,3 +294,31 @@ def test_a_fractional_scroll_is_placed_within_a_row_never_refused(step):
     image = page(3000, 600, seed=15)
     for top in np.arange(0, 3000 - 500 - step - 1, 3 * step):
         assert abs(offset(rendered(image, top, 500), rendered(image, top + step, 500)) - step) <= 1
+
+
+def sideways(image: np.ndarray, dx: int) -> np.ndarray:
+    """``image`` with its content ``dx`` columns further right (left when negative), the edge column filling in."""
+    if dx > 0:
+        return np.concatenate([np.repeat(image[:, :1], dx, axis=1), image[:, :-dx]], axis=1)
+    if dx < 0:
+        return np.concatenate([image[:, -dx:], np.repeat(image[:, -1:], -dx, axis=1)], axis=1)
+    return image
+
+
+def text_page(height: int, margin: int = 12, seed: int = 0) -> np.ndarray:
+    """A text-like page: white, with dark noise between ``margin`` columns on either side."""
+    out = np.full((height, WIDTH, 3), 255, dtype=np.uint8)
+    out[:, margin : WIDTH - margin] = np.random.default_rng(seed).integers(0, 256, (height, WIDTH - 2 * margin, 3))
+    return out
+
+
+@pytest.mark.parametrize('dx', [0, 5, -7])
+def test_a_view_moved_sideways_is_found_with_how_far(dx):
+    image = text_page(900)
+    top, found = drift(image, sideways(image[400:700], dx))
+    assert (top, found) == (400, dx)
+
+
+def test_a_view_of_nothing_captured_is_refused_whatever_the_shift():
+    with pytest.raises(NoOverlap):
+        drift(text_page(900), text_page(300, seed=4))

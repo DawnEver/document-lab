@@ -11,7 +11,7 @@ from document_lab.__main__ import main
 from document_lab.capture import desktop
 from document_lab.capture.export import to_pdf
 from tests.unit.test_capture_session import Hand, Viewport
-from tests.unit.test_capture_stitch import tall
+from tests.unit.test_capture_stitch import sideways, tall, text_page
 
 WIDTH = 64  # the fake view's width: tests.unit.test_capture_stitch.tall's
 
@@ -24,9 +24,10 @@ class FakeSource:
 
     def __init__(self, target, notches, method):
         self.view = Viewport(self.IMAGE, target.height, self.STEP)
+        self.dx = -target.left  # an area further left shows the page further right
 
     def grab(self):
-        return self.view.grab()
+        return sideways(self.view.grab(), self.dx)
 
     def scroll(self, notches=1):
         self.view.scroll(notches)
@@ -409,20 +410,21 @@ def test_the_panels_pause_holds_the_capture_and_resume_picks_it_up(tmp_path, fak
     assert np.array_equal(pdf_pixels(tmp_path / 'c.pdf')[0], fake.IMAGE[:900])
 
 
+def test_resume_where_the_page_moved_sideways_moves_the_area_with_it_and_lines_up(tmp_path, fake, monkeypatch, capsys):
+    monkeypatch.setattr(fake, 'IMAGE', text_page(2000))
+    earlier = to_pdf(sideways(fake.IMAGE[:500], 5), tmp_path / 'earlier.pdf')  # the page sat 5 px further right then
+    assert auto(tmp_path, '--resume', str(earlier), '--page-height', '0') == 0
+    assert 'sits 5 px left' in capsys.readouterr().out
+    assert np.array_equal(pdf_pixels(tmp_path / 'c.pdf')[0], sideways(fake.IMAGE, 5))
+
+
 def rerendered(image, spread):
     noise = np.random.default_rng(3).integers(-spread, spread + 1, image.shape)
     return np.clip(image.astype(int) + noise, 0, 255).astype(np.uint8)
 
 
-def test_resume_takes_the_same_text_rendered_anew_by_default(tmp_path, fake):
-    earlier = to_pdf(rerendered(fake.IMAGE[:500], 25), tmp_path / 'earlier.pdf')  # mean error ~12.7, above 8
-    assert auto(tmp_path, '--resume', str(earlier)) == 0
-    joined, _ = pdf_pixels(tmp_path / 'c.pdf')
-    assert len(joined) == len(fake.IMAGE)
-
-
 def test_resume_beyond_the_join_tolerance_says_the_one_to_use(tmp_path, fake, monkeypatch):
-    earlier = to_pdf(rerendered(fake.IMAGE[:500], 50), tmp_path / 'earlier.pdf')  # mean error ~25
+    earlier = to_pdf(rerendered(fake.IMAGE[:500], 30), tmp_path / 'earlier.pdf')  # mean error ~15, above 8
     monkeypatch.setattr(FakeHud, 'answers', ['start', 'cancel'])
     assert run(tmp_path, '--resume', str(earlier)) == 1
     said = [shown[1] for shown in FakeHud.shown if isinstance(shown, tuple) and shown[0] is False]

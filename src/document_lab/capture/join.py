@@ -1,11 +1,13 @@
 """Two captures of one document as one: the second goes on where it overlaps the first's end, the shared rows once.
 
 A capture stopped part way -- Finish, a lost view, a crash -- is continued by capturing again from anywhere
-overlapping its end, then joining the two. Only the seam is redrawn: the first's last pages, down to where the second
-begins; every other page of both is copied as it is (its pixels, its OCR layer). The second's head is found in the
-first's tail by `document_lab.capture.stitch.locate`, at :data:`JOIN_TOLERANCE` -- looser than within one capture: a
-document reopened renders the same text a little differently. Two that share nothing, or fit more than one place,
-are refused -- never butted together -- and two of different widths before anything is read.
+overlapping its end, then joining the two. Only the seam is redrawn -- the first's last pages and the second's first,
+cut in the middle of the rows both show, so neither's edge (a window border caught at the top or bottom of a view)
+shows -- every other page of both is copied as it is (its pixels, its OCR layer). The second's head is found in the
+first's tail by `document_lab.capture.stitch.drift`: a page that moved sideways between the two (a reader reopened,
+its side bar changed) is found with how far, and the second's pages are redrawn moved back in line. Two that share
+nothing, or fit more than one place, are refused -- never butted together -- and two of different widths before
+anything is read.
 """
 
 from __future__ import annotations
@@ -17,25 +19,29 @@ import numpy as np
 import pymupdf
 
 from document_lab.capture.export import check_page
-from document_lab.capture.stitch import AmbiguousOverlap, Match, NoOverlap, locate
+from document_lab.capture.stitch import AmbiguousOverlap, Match, NoOverlap, drift, shifted
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 __all__ = ['HEAD_ROWS', 'JOIN_TOLERANCE', 'Joined', 'join', 'tail_rows', 'width']
 
-JOIN_TOLERANCE: Final = 20.0  # grey levels: the same text rendered again after reopening differs ~15 (measured)
+JOIN_TOLERANCE: Final = Match.tolerance  # once aligned sideways, a reopened page matches as closely (0.06, measured)
 HEAD_ROWS: Final = 1000  # rows of the second capture's start looked for in the first: enough to be told apart
 _REACH: Final = 3  # the first's tail searched: this many times the head, so the second may start well before its end
 
 
 @dataclass(frozen=True)
 class Joined:
-    """The joined capture at ``path``: ``shared`` rows both showed, kept once; ``redrawn`` first pages redrawn."""
+    """The joined capture at ``path``: ``shared`` rows both showed, kept once; ``redrawn`` first pages redrawn.
+
+    ``shift``: columns the second's content sat further right than the first's, taken out (0: none).
+    """
 
     path: Path
     shared: int
     redrawn: int
+    shift: int = 0
 
 
 def _image(page: pymupdf.Page) -> pymupdf.Pixmap:
@@ -83,8 +89,8 @@ def _head(doc: pymupdf.Document, rows: int) -> np.ndarray:
     return np.concatenate(parts)[:rows]
 
 
-def _found(doc: pymupdf.Document, frame: np.ndarray, match: Match) -> tuple[int, np.ndarray, int]:
-    """Where ``frame`` starts in the end of ``doc``: the tail pages searched, their rows, and the row in them.
+def _found(doc: pymupdf.Document, frame: np.ndarray, match: Match) -> tuple[int, np.ndarray, int, int]:
+    """Where ``frame`` starts in the end of ``doc``: the tail pages searched, their rows, the row, the sideways shift.
 
     The search starts :data:`_REACH` frames back and doubles until it holds the whole document, so a second capture
     begun far before the first ended is found too; what is still not found, or fits more than one place, is refused.
@@ -93,14 +99,14 @@ def _found(doc: pymupdf.Document, frame: np.ndarray, match: Match) -> tuple[int,
     while True:
         count, tail = _tail(doc, least)
         try:
-            return count, tail, locate(tail, frame, match)
+            return count, tail, *drift(tail, frame, match)
         except NoOverlap:
             if count == doc.page_count:
                 raise
             least *= 2
 
 
-def _placed(a: pymupdf.Document, b: pymupdf.Document, head: int, match: Match) -> tuple[int, np.ndarray, int]:
+def _placed(a: pymupdf.Document, b: pymupdf.Document, head: int, match: Match) -> tuple[int, np.ndarray, int, int]:
     """Where ``b`` starts in the end of ``a`` (as :func:`_found`), its head doubled while it fits more than one place.
 
     A short head of a standard -- a recurring page header, white space -- fits many places; a longer one fits one.
@@ -124,6 +130,26 @@ def _seam(out: pymupdf.Document, rows: np.ndarray, page_height: int, dpi: float)
         out.new_page(width=rect.width, height=rect.height).insert_image(rect, pixmap=pix)
 
 
+def _second(joined: pymupdf.Document, b: pymupdf.Document, cut: int, dx: int, dpi: float) -> None:
+    """``b`` from its row ``cut`` onto ``joined``.
+
+    The page holding the cut is redrawn from there and the rest copied -- or, ``dx`` not 0, every page is redrawn,
+    moved ``dx`` columns back in line with the first capture.
+    """
+    start = 0
+    for number, page in enumerate(b):
+        height = page.get_images()[0][3]
+        if start + height <= cut:
+            start += height
+            continue
+        if dx or start < cut:
+            rows = _rows(page)[max(cut - start, 0) :]
+            _seam(joined, shifted(rows, dx), height, dpi)
+        else:
+            joined.insert_pdf(b, from_page=number, to_page=number)
+        start += height
+
+
 def join(
     first: Path,
     second: Path,
@@ -140,7 +166,7 @@ def join(
         if width(a) != width(b):
             msg = f'the captures are {width(a)} and {width(b)} px wide: only captures of one area join'
             raise ValueError(msg)
-        count, tail, top = _placed(a, b, head, match)
+        count, tail, top, dx = _placed(a, b, head, match)
         whole = sum(_heights(b))
         joined = pymupdf.open()
         if top + whole <= len(tail):  # the second shows nothing the first does not
@@ -154,11 +180,12 @@ def join(
             dpi = _image(seam).width * 72 / seam.rect.width
             page_height = _heights(a)[0]
             check_page(width(a), page_height, dpi)
-            _seam(joined, tail[:top], page_height, dpi)
-            joined.insert_pdf(b)
             shared = len(tail) - top
+            cut = shared // 2  # mid-overlap: each capture's edge rows (a window border caught) left out
+            _seam(joined, tail[: top + cut], page_height, dpi)
+            _second(joined, b, cut, dx, dpi)
         part = out.with_name(out.name + '.part')
         joined.save(part, deflate=True)
         joined.close()
     part.replace(out)
-    return Joined(out, shared, count)
+    return Joined(out, shared, count, dx)

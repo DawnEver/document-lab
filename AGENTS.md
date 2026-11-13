@@ -9,7 +9,7 @@ consumers. Modules and usage: `README.md`.
 
 - Dependency arrow: `paper`, `ai` -> `extract`; `paper` -> `pdf`; `extract` -> `plot`, `pdf`, `html` -> `numbers`, `ir`;
   `plot` -> `glyphs`; `strokes` -> `plot`, `ir`; `capture` is apart (`cli` -> `session` -> `stitch`; `cli` -> `desktop`,
-  `export`), imported only by `__main__`. The base imports
+  `export`, `join` -> `export`, `stitch`), imported only by `__main__`. The base imports
   without `ai_lab` (`tests/unit/test_ai.py` proves it in a subprocess).
 - A test that needs expected values builds a SYNTHETIC PDF (`tests/synthetic.py`); vendor PDFs are never
   committed. The three real papers are checked STRUCTURALLY against what each PDF says

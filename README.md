@@ -15,7 +15,7 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 | `extract` | typed values against the caller's `Schema` from key-value (`from_rows`) or column (`from_columns`) tables |
 | `ai` | `ask(responder, schema, page_or_table)`: the same values read by a model through ai-lab (`[ai]` extra) |
 | `paper` | `document-lab paper <pdf> <out>`: a paper as per-section markdown (written from the IR, or marker-pdf on a GPU) plus cropped figures/tables/equations; a table-of-contents page opens no sections, and a page that is one picture (a screen-captured or scanned PDF) is linked whole, once, never cropped into copies |
-| `capture` | `document-lab capture <out.pdf>`: any window or screen region, scrolled to its end and stitched losslessly, to a PDF -- the stage before `read_pdf` (Windows, `[capture]` extra) |
+| `capture` | `document-lab capture <out.pdf>`: any window or screen region, scrolled to its end and stitched losslessly, to a PDF -- the stage before `read_pdf` (Windows, `[capture]` extra); `--resume` and `capture-merge` join captures where they overlap |
 
 ```python
 from document_lab.pdf import read_pdf
@@ -49,6 +49,9 @@ document-lab capture out.pdf --no-scroll           # one frame
 document-lab capture out.pdf --window "Notepad" --ocr chi_sim+eng
 document-lab capture --list                        # the capturable windows and their handles
 document-lab capture out.pdf --page-height auto    # pages cut on the reader's own page separators
+document-lab capture --resume part.pdf             # go on from where part.pdf ended, into part.pdf
+document-lab capture-merge a.pdf b.pdf -o ab.pdf   # join captures where each overlaps the one before
+document-lab capture out.pdf --open                # open the PDF once written
 ```
 
 Requires Windows and a tkinter that starts: Python 3.13.0 in a venv cannot (cpython #125235, `Can't find a usable
@@ -58,12 +61,13 @@ before it opens any window and prints that remedy.
 Targets: none dims every monitor, live, the last area confirmed already marked (kept in
 `%LOCALAPPDATA%\document-lab\capture-area.json`; not if it is off the screen now) -- the window under the pointer
 is outlined; a click marks it, a drag marks a
-rectangle (shown clear, the rest dim) -- a new drag, inside it or out, marks again; its edges, corners and top handle
+rectangle (shown clear, the rest dim, its W x H above its corner) -- a new drag, inside it or out, marks again; its edges, corners and top handle
 drag to adjust it, arrows nudge it (Shift: 10 px, Ctrl: resize); Enter or Confirm sets it, Esc cancels -- or
 `--window TITLE` (must match one), `--hwnd`, `--rect L,T,W,H`. Once set, nothing covers the desktop: open or arrange
 other windows freely while the area waits, framed in blue, until the panel beside it starts the capture:
 **Start (I scroll)** follows your own scrolling, **Auto scroll** scrolls for you to the end (as `--auto`); either way
-Finish ends it.
+Finish ends it, and **Pause** holds it: nothing is grabbed or scrolled -- scroll anywhere, use any window -- until
+Resume, which picks up wherever the view overlaps what was captured (red, with the way back, until it does).
 Adjust reopens the selection with the area still marked, to drag or redo it (Esc there keeps it as it was); Cancel
 quits, nothing written.
 
@@ -73,7 +77,10 @@ flick too far, or back up -- is looked for in the last three views captured and 
 only a view outside all of them is skipped, the frame turning red with which way to go back. The Finish button on
 the panel ends it (not a key, which is too easily hit). Frames placed to a fraction of a row add up without drift. `--auto` scrolls for you
 (`--method wheel|message|keys`) until the view stops moving, each step about half the view: a notch is measured, not
-assumed, and the notches grow to `--stride` of the view (default 0.5; 0 keeps `--notches`, the first step, every step) -- `--end-wait` (default 0.8 s) gives a feed
+assumed, and the notches grow to `--stride` of the view (default 0.5; 0 keeps `--notches`, the first step, every step);
+every `--streak` steps placed in a row (default 3) the step grows a quarter, up to `--stride-max` (default 0.75), and
+the settle gap halves back toward `--settle` -- a step that loses the view drops back to `--stride` (`--stride-max`
+at `--stride`: a fixed pace) -- `--end-wait` (default 0.8 s) gives a feed
 that loads more time to grow -- and says so, exit 1, if its first scroll moved nothing. Neither has a length cap unless
 `--max-frames`/`--max-height`; the height so far shows while it runs. A frame `--auto` cannot place -- caught
 mid-render, or a step past the overlap -- is looked at again, then found by scrolling back, the steps halved; only
@@ -84,7 +91,8 @@ the wait it needs instead of bouncing between its first pages; raise `--settle` 
 single-page / page-flip mode shares nothing between frames: the capture stops and says to switch it to continuous
 scrolling (no `--tolerance` helps). A scroll Windows refuses (a UAC prompt, an elevated window in front, the lock
 screen) ends it the same way: what was stitched is written, the reason printed, exit 1. An output that exists is refused before anything unless
-`--overwrite`: it may be the very document on screen. A window is read
+`--overwrite`: it may be the very document on screen; so is a name Windows cannot hold (`a:b.pdf` would be written as
+a hidden stream of a file `a`), with one it can. A window is read
 through `PrintWindow`, so another window over it does not show; the wheel, which does land on whatever covers it,
 refuses then (bring it forward, or `--method message` -- which some applications act on only some of the time, so it
 may stop early); `keys` refuses a window it cannot bring forward.
@@ -101,6 +109,14 @@ scrolls. PDF: `--page-height` (pixels; default A4-shaped, `0` one page; `auto` f
 rows that recur, equally spaced, from the first page to the end, not a viewer border repeating at the scroll step --
 and starts each page on one, A4-shaped if there are none, and says which; `capture.pages.page_rhythm`), `--dpi`, `--ocr [LANGS]` (Tesseract, default
 `eng`), `--png`; page size and OCR are checked before the capture starts.
+
+Resuming: a capture that stopped part way -- Finish, a lost view, a crash -- goes on with `--resume part.pdf`: bring
+the view to anywhere overlapping where it ended and Start; a start whose area is not as wide, or whose view shows
+nothing of that end, is refused on the panel with what to do, and it waits again. What is captured is joined to it
+(into `part.pdf`, or the output named). `capture-merge a.pdf b.pdf [...] -o out.pdf` joins finished captures the same
+way (`capture.join.join`): each one's first rows are found in the end of the one before and the rows both show kept
+once; only the seam is redrawn, every other page copied as it is (its OCR layer too). Captures that share nothing,
+fit more than one place, or differ in width are refused, never butted together.
 
 Any length: frames only move down, so every stitched row above the current view is final and is written at once --
 PDF pages as they fill (saved incrementally), the PNG compressed as it grows -- and a capture holds about one view in

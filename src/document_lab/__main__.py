@@ -1,4 +1,4 @@
-"""The one ``document-lab`` command line: ``paper <pdf> <out>`` and ``capture [out.pdf]``."""
+"""The one ``document-lab`` command line: ``paper <pdf> <out>``, ``capture [out.pdf]`` and ``capture-merge``."""
 
 from __future__ import annotations
 
@@ -21,9 +21,12 @@ def main(argv: list[str] | None = None) -> int:
     paper.add_argument('out', type=Path, help='the directory to write the paper layout into')
     paper.add_argument('--tool', choices=('marker', 'pymupdf'), help='force a converter (default: best available)')
     capture_cli.add_parser(sub)
+    capture_cli.add_merge_parser(sub)
     args = parser.parse_args(argv)
     if args.command == 'capture':
         return capture_cli.run(args)
+    if args.command == 'capture-merge':
+        return capture_cli.run_merge(args)
 
     from document_lab.paper.ingest import ingest  # noqa: PLC0415 -- a subcommand loads only what it runs
 

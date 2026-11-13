@@ -16,6 +16,8 @@ from document_lab.capture.session import Pace, Settling
 from document_lab.capture.stitch import Match
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import numpy as np
 
     from document_lab.capture.desktop import Hud, Region, Window
@@ -23,7 +25,7 @@ if TYPE_CHECKING:
     from document_lab.capture.session import Capture, Lost
     from document_lab.capture.stitch import Stitcher
 
-__all__ = ['add_parser', 'run']
+__all__ = ['add_merge_parser', 'add_parser', 'run', 'run_merge']
 
 
 def _rect(text: str) -> tuple[int, int, int, int]:
@@ -44,7 +46,19 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         'Confirm; the desktop stays usable until Start on the panel beside the area begins. '
         'Finish on the panel beside the area ends it and keeps what was captured.',
     )
-    capture.add_argument('out', type=Path, nargs='?', help='the PDF to write (default: capture-<date>-<time>.pdf here)')
+    capture.add_argument(
+        'out',
+        type=Path,
+        nargs='?',
+        help='the PDF to write (default: the --resume PDF, else capture-<date>-<time>.pdf here)',
+    )
+    capture.add_argument(
+        '--resume',
+        type=Path,
+        metavar='PDF',
+        help='go on from the end of this earlier capture: bring the view to anywhere overlapping where it ended, '
+        'then Start; the two are joined where they overlap (as capture-merge does)',
+    )
     target = capture.add_mutually_exclusive_group()  # none: mark it on the screen (a click or a drag), then confirm
     target.add_argument('--window', metavar='TITLE', help='the one window whose title contains TITLE')
     target.add_argument('--hwnd', type=lambda v: int(v, 0), help='the window with this handle (see --list)')
@@ -138,6 +152,56 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         '--overwrite', action='store_true', help='replace an existing PDF or PNG (default: refuse, before anything)'
     )
     return capture
+
+
+def add_merge_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
+    """Add the ``capture-merge`` subcommand to ``sub`` and return its parser."""
+    merge = sub.add_parser(
+        'capture-merge',
+        help='captures of one document, in order, joined where each overlaps the one before',
+        description='Each capture goes on from where its start is found in the end of the one before; the rows both '
+        'show are kept once. Captures that share nothing, or of different widths, are refused.',
+    )
+    merge.add_argument('pdfs', type=Path, nargs='+', metavar='PDF', help='two or more captures, top to bottom')
+    merge.add_argument('-o', '--out', type=Path, required=True, help='the joined PDF to write')
+    merge.add_argument('--min-overlap', type=int, help='fewest rows two captures must share (default: 1/6 of 1000)')
+    merge.add_argument('--tolerance', type=float, default=Match.tolerance, help='as for capture')
+    merge.add_argument('--outliers', type=float, default=Match.outliers, help='as for capture')
+    merge.add_argument('--overwrite', action='store_true', help='replace an existing output')
+    return merge
+
+
+def run_merge(args: argparse.Namespace) -> int:
+    """Run ``document-lab capture-merge``; the exit status (1: two captures would not join, nothing written)."""
+    import shutil  # noqa: PLC0415
+
+    from document_lab.capture.export import check_name  # noqa: PLC0415
+    from document_lab.capture.join import join  # noqa: PLC0415
+    from document_lab.capture.stitch import Unstitchable  # noqa: PLC0415
+
+    if len(args.pdfs) < 2:  # noqa: PLR2004
+        emit('capture-merge needs two captures or more')
+        return 1
+    check_name(args.out)
+    if args.out.exists() and not args.overwrite:
+        msg = f'{args.out} exists: name another output, or add --overwrite to replace it'
+        raise FileExistsError(msg)
+    match = Match(min_overlap=args.min_overlap, tolerance=args.tolerance, outliers=args.outliers)
+    work = args.out.with_name(args.out.name + '.merge.pdf')
+    shutil.copyfile(args.pdfs[0], work)
+    try:
+        for pdf in args.pdfs[1:]:
+            try:
+                joined = join(work, pdf, work, match)
+            except Unstitchable as refused:
+                emit(f'{pdf} does not join the captures before it: {refused}')
+                return 1
+            emit(f'{pdf.name}: {joined.shared} px shared')
+        work.replace(args.out)
+    finally:
+        work.unlink(missing_ok=True)
+    emit(f'{args.out.resolve()}: {len(args.pdfs)} captures joined')
+    return 0
 
 
 def _target(args: argparse.Namespace) -> Window | Region:
@@ -243,10 +307,17 @@ def _report_pages(page_height: int | str | None, rhythm: Rhythm | None) -> None:
         emit(f'pages cut on the reader separators, {rhythm.pitch:.1f} px apart')
 
 
-def _started(target: Window | Region) -> tuple[Window | Region, Region, Hud, bool] | None:
+def _no_reason(_target: Window | Region, _area: Region) -> str | None:
+    return None
+
+
+def _started(
+    target: Window | Region, refuse: Callable[[Window | Region, Region], str | None] = _no_reason
+) -> tuple[Window | Region, Region, Hud, bool] | None:
     """The area set, its HUD and whether to scroll for the user (Auto scroll) once a start is clicked; None on Cancel.
 
-    The desktop is free and nothing is grabbed until then; Adjust reopens the selection on the area.
+    The desktop is free and nothing is grabbed until then; Adjust reopens the selection on the area. A start that
+    ``refuse`` gives a reason for is not one: the reason is shown, and the panel waits again.
     """
     from document_lab.capture import desktop  # noqa: PLC0415
 
@@ -254,7 +325,11 @@ def _started(target: Window | Region) -> tuple[Window | Region, Region, Hud, boo
         area = target.client() if isinstance(target, desktop.Window) else target
         hud = desktop.Hud(area)
         answer = hud.ready()
+        while answer in {'start', 'auto'} and (reason := refuse(target, area)):
+            hud.status(reason, ok=False)
+            answer = hud.ready()
         if answer in {'start', 'auto'}:
+            hud.begin(answer)
             return target, area, hud, answer == 'auto'
         hud.close()
         if answer == 'cancel':
@@ -268,8 +343,15 @@ def _prepare(args: argparse.Namespace) -> str | None:
     An unnamed output is named for the time; a name Windows cannot hold (`export.check_name`)
     and one that exists (:func:`_refuse_existing`) are refused.
     """
+    if args.resume is not None:
+        if args.png is not None:
+            msg = '--png would hold only what this capture adds: leave it out with --resume'
+            raise ValueError(msg)
+        if not args.resume.is_file():
+            msg = f'{args.resume}: no such capture to resume'
+            raise FileNotFoundError(msg)
     if args.out is None:
-        args.out = Path(f'capture-{datetime.now().astimezone():%Y%m%d-%H%M%S}.pdf')
+        args.out = args.resume or Path(f'capture-{datetime.now().astimezone():%Y%m%d-%H%M%S}.pdf')
     from document_lab.capture import desktop  # noqa: PLC0415
     from document_lab.capture.export import check_name  # noqa: PLC0415
 
@@ -284,9 +366,58 @@ def _prepare(args: argparse.Namespace) -> str | None:
 def _refuse_existing(args: argparse.Namespace) -> None:
     """Refuse an output that exists, unless ``--overwrite``: it may be the very document on screen."""
     for path in (args.out, args.png):
-        if path is not None and path.exists() and not args.overwrite:
+        if path is not None and path.exists() and not args.overwrite and path != args.resume:
             msg = f'{path} exists: name another output, or add --overwrite to replace it'
             raise FileExistsError(msg)
+
+
+def _match(args: argparse.Namespace) -> Match:
+    return Match(args.ignore_top, args.ignore_bottom, args.min_overlap, args.tolerance, args.outliers)
+
+
+def _resumable(args: argparse.Namespace) -> Callable[[Window | Region, Region], str | None]:
+    """Why a start cannot go on from the end of ``--resume``: the area's width, or a view showing nothing of it."""
+    if args.resume is None:
+        return _no_reason
+
+    def refuse(target: Window | Region, area: Region) -> str | None:
+        import pymupdf  # noqa: PLC0415
+
+        from document_lab.capture import desktop  # noqa: PLC0415
+        from document_lab.capture.join import tail_rows, width  # noqa: PLC0415
+        from document_lab.capture.stitch import Unstitchable, locate  # noqa: PLC0415
+
+        name = args.resume.name
+        with pymupdf.open(args.resume) as doc:
+            wide = width(doc)
+        if area.width != wide:
+            return f'The area is {area.width} px wide and {name} {wide} px: Adjust it to {wide} px, then Start.'
+        frame = desktop.Source(target, args.notches, args.method).grab()
+        try:
+            locate(tail_rows(args.resume, 3 * len(frame)), frame, _match(args))
+        except Unstitchable:
+            return f'The view shows nothing of where {name} ends: scroll back to it, then Start.'
+        return None
+
+    return refuse
+
+
+def _joined(args: argparse.Namespace, written: Path) -> int:
+    """Join what was captured to ``--resume`` into the output; 1 when they did not join (both kept, and said)."""
+    from document_lab.capture.join import join  # noqa: PLC0415
+    from document_lab.capture.stitch import Unstitchable  # noqa: PLC0415
+
+    if not written.exists():
+        emit('nothing was captured: the output is as it was')
+        return 1
+    try:
+        joined = join(args.resume, written, args.out, _match(args))
+    except Unstitchable as refused:
+        emit(f'what was captured did not join {args.resume.name} ({refused}); it is kept as {written}')
+        return 1
+    written.unlink()
+    emit(f'{args.out.resolve()}: {args.resume.name} continued, {joined.shared} px shared')
+    return 0
 
 
 def run(args: argparse.Namespace) -> int:
@@ -303,7 +434,7 @@ def run(args: argparse.Namespace) -> int:
         emit(problem)
         return 1
     target = _target(args)
-    started = _started(target)
+    started = _started(target, _resumable(args))
     if started is None:
         emit('cancelled')
         return 1
@@ -311,11 +442,12 @@ def run(args: argparse.Namespace) -> int:
     source = desktop.Source(target, args.notches, args.method)
     width = area.width
     shown = _Shown(hud, args.keep_lost)
+    written = args.out if args.resume is None else args.out.with_name(args.out.name + '.new.pdf')
 
     # The writers check page size and OCR before the capture starts, and keep what was written whatever stops it.
     with (
         contextlib.closing(hud),
-        PdfWriter(args.out, width, page_height=args.page_height, dpi=args.dpi, ocr=args.ocr) as pdf,
+        PdfWriter(written, width, page_height=args.page_height, dpi=args.dpi, ocr=args.ocr) as pdf,
         PngWriter(args.png, width) if args.png else contextlib.nullcontext() as png,
     ):
 
@@ -326,7 +458,7 @@ def run(args: argparse.Namespace) -> int:
             hud.add(rows)
 
         limits = Limits(args.max_frames, args.max_height)
-        match = Match(args.ignore_top, args.ignore_bottom, args.min_overlap, args.tolerance, args.outliers)
+        match = _match(args)
         if not (args.auto or auto or args.no_scroll):
             emit('now scroll the area down at your own pace; click Finish on the panel when you are done')
             result = follow(
@@ -357,6 +489,8 @@ def run(args: argparse.Namespace) -> int:
             )
     status = _report(result, args.tolerance)
     _report_pages(args.page_height, pdf.rhythm)
+    if args.resume is not None:
+        return _joined(args, written) or status
     emit(f'{args.out.resolve()}: {width}x{result.height} px on {pdf.pages} page(s)')
     if args.png:
         emit(f'{args.png.resolve()}: the same, as one image')

@@ -9,6 +9,7 @@ import pytest
 
 from document_lab.__main__ import main
 from document_lab.capture import desktop
+from document_lab.capture.export import to_pdf
 from tests.unit.test_capture_session import Hand, Viewport
 from tests.unit.test_capture_stitch import tall
 
@@ -54,6 +55,9 @@ class FakeHud:
     def ready(self):
         FakeHud.shown.append('ready')
         return FakeHud.answers.pop(0) if FakeHud.answers else 'start'
+
+    def begin(self, answer):
+        return None
 
     @property
     def finished(self):
@@ -283,3 +287,75 @@ def test_a_name_windows_cannot_hold_is_refused_before_anything(tmp_path, fake, m
         run(tmp_path, '--no-scroll', '--png', str(tmp_path / 'ab:c.png'))
     assert not asked
     assert list(tmp_path.iterdir()) == []
+
+
+def test_resume_goes_on_from_the_end_of_an_earlier_capture_into_the_same_file(tmp_path, fake):
+    earlier = to_pdf(fake.IMAGE[:500], tmp_path / 'earlier.pdf', page_height=200)
+    argv = ['capture', '--resume', str(earlier), '--rect', f'0,0,{WIDTH},300', '--auto', '--delay', '0']
+    assert main([*argv, '--settle', '0', '--end-wait', '0', '--page-height', '0']) == 0
+    image, _ = pdf_pixels(earlier)  # no output named: the earlier capture itself, continued
+    assert np.array_equal(image, fake.IMAGE)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['earlier.pdf']
+
+
+def test_resume_into_another_file_leaves_the_earlier_one(tmp_path, fake):
+    earlier = to_pdf(fake.IMAGE[:500], tmp_path / 'earlier.pdf', page_height=200)
+    before = earlier.read_bytes()
+    assert auto(tmp_path, '--resume', str(earlier)) == 0
+    assert np.array_equal(pdf_pixels(tmp_path / 'c.pdf')[0], fake.IMAGE)
+    assert earlier.read_bytes() == before
+
+
+def test_resume_where_the_view_shows_nothing_of_the_earlier_end_waits_and_says_so(tmp_path, fake, monkeypatch):
+    earlier = to_pdf(tall(500, seed=9), tmp_path / 'earlier.pdf')
+    before = earlier.read_bytes()
+    monkeypatch.setattr(FakeHud, 'answers', ['start', 'cancel'])
+    assert run(tmp_path, '--resume', str(earlier)) == 1
+    refusals = [shown[1] for shown in FakeHud.shown if isinstance(shown, tuple) and shown[0] is False]
+    assert refusals
+    assert 'earlier.pdf' in refusals[0]
+    assert FakeHud.shown.count('ready') == 2  # it waited for Start again
+    assert earlier.read_bytes() == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['earlier.pdf']
+
+
+def test_resume_with_an_area_of_another_width_says_the_width_to_set(tmp_path, fake, monkeypatch):
+    earlier = to_pdf(fake.IMAGE[:500, :32], tmp_path / 'earlier.pdf')
+    monkeypatch.setattr(FakeHud, 'answers', ['start', 'cancel'])
+    assert run(tmp_path, '--resume', str(earlier)) == 1
+    assert any(isinstance(shown, tuple) and '32 px' in shown[1] for shown in FakeHud.shown)
+
+
+def test_resume_and_png_are_refused_together(tmp_path, fake):
+    earlier = to_pdf(fake.IMAGE[:500], tmp_path / 'earlier.pdf')
+    with pytest.raises(ValueError, match='--png'):
+        run(tmp_path, '--resume', str(earlier), '--png', str(tmp_path / 'c.png'))
+
+
+def test_capture_merge_joins_two_captures_where_they_overlap(tmp_path, capsys):
+    image = tall(1500)
+    a = to_pdf(image[:900], tmp_path / 'a.pdf', page_height=200)
+    b = to_pdf(image[600:], tmp_path / 'b.pdf', page_height=200)
+    out = tmp_path / 'ab.pdf'
+    assert main(['capture-merge', str(a), str(b), '-o', str(out)]) == 0
+    assert np.array_equal(pdf_pixels(out)[0], image)
+    assert '300 px shared' in capsys.readouterr().out
+    with pytest.raises(FileExistsError, match='--overwrite'):
+        main(['capture-merge', str(a), str(b), '-o', str(out)])
+    assert main(['capture-merge', str(a), str(b), '-o', str(out), '--overwrite']) == 0
+
+
+def test_capture_merge_folds_more_than_two_in_order(tmp_path):
+    image = tall(1500)
+    parts = [to_pdf(image[s:e], tmp_path / f'{s}.pdf') for s, e in ((0, 600), (400, 1100), (900, 1500))]
+    assert main(['capture-merge', *map(str, parts), '-o', str(tmp_path / 'all.pdf')]) == 0
+    assert np.array_equal(pdf_pixels(tmp_path / 'all.pdf')[0], image)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['0.pdf', '400.pdf', '900.pdf', 'all.pdf']
+
+
+def test_capture_merge_of_captures_that_share_nothing_exits_1_and_writes_nothing(tmp_path, capsys):
+    a = to_pdf(tall(600), tmp_path / 'a.pdf')
+    b = to_pdf(tall(600, seed=5), tmp_path / 'b.pdf')
+    assert main(['capture-merge', str(a), str(b), '-o', str(tmp_path / 'ab.pdf')]) == 1
+    assert 'b.pdf' in capsys.readouterr().out
+    assert not (tmp_path / 'ab.pdf').exists()

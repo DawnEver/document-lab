@@ -821,19 +821,22 @@ class Hud:
     def ready(self) -> Answer:
         """Wait, the desktop free, for the panel's answer: Start (you scroll), Auto scroll, Adjust or Cancel.
 
-        Either start turns the first button into Finish, which ends an auto scroll early too.
+        It may be asked again -- a start the caller refused, its reason shown with :meth:`status` -- until
+        :meth:`begin`.
         """
         self.root.mainloop()  # left by any button: Tk sleeps meanwhile, nothing polls
-        if self.answer in {'start', 'auto'}:
-            self.auto.pack_forget()
-            self.others.pack_forget()
-            self.button.configure(text='Finish and save', command=self.finish)
-            say = {
-                'start': 'Capturing. Scroll down at your own pace; click Finish when you are done.',
-                'auto': 'Scrolling for you to the end; click Finish to stop early.',
-            }
-            self.status(say[self.answer], ok=True)
         return self.answer
+
+    def begin(self, answer: Answer) -> None:
+        """The capture starts, as ``answer`` (``start`` or ``auto``) asked: the first button becomes Finish."""
+        self.auto.pack_forget()
+        self.others.pack_forget()
+        self.button.configure(text='Finish and save', command=self.finish)
+        say = {
+            'start': 'Capturing. Scroll down at your own pace; click Finish when you are done.',
+            'auto': 'Scrolling for you to the end; click Finish to stop early.',
+        }
+        self.status(say[answer], ok=True)
 
     def _answer(self, answer: Answer) -> None:
         self.answer = answer

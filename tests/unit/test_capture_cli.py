@@ -359,3 +359,15 @@ def test_capture_merge_of_captures_that_share_nothing_exits_1_and_writes_nothing
     assert main(['capture-merge', str(a), str(b), '-o', str(tmp_path / 'ab.pdf')]) == 1
     assert 'b.pdf' in capsys.readouterr().out
     assert not (tmp_path / 'ab.pdf').exists()
+
+
+def test_a_fixed_stride_is_the_stride_max_at_the_stride(tmp_path, fake, monkeypatch):
+    counts = {}
+    for name, more in (('grown', ()), ('fixed', ('--stride-max', '0.5'))):
+        monkeypatch.setattr(fake, 'STEP', 20)
+        scrolls = []
+        monkeypatch.setattr(fake, 'scroll', lambda self, n=1, s=scrolls: s.append(n) or self.view.scroll(n))
+        assert auto(tmp_path, '--page-height', '0', '--overwrite', *more) == 0
+        assert np.array_equal(pdf_pixels(tmp_path / 'c.pdf')[0], fake.IMAGE)
+        counts[name] = len(scrolls)
+    assert counts['grown'] < counts['fixed']

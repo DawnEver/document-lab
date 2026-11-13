@@ -62,20 +62,32 @@ class Pace:
     A notch scrolls however far the application makes it -- a few rows at one zoom, a screenful at another -- so it is
     measured, not assumed: each step's rows per notch set the next step's notches, at most doubling, so a step never
     outruns what consecutive frames must share. ``stride`` 0 keeps ``first`` notches every step.
+
+    It adapts, as a congestion window does: every ``streak`` steps placed in a row, the share aimed for grows by
+    :data:`_GROW`, up to ``most`` of the view; a step that loses the view drops it back to ``stride`` (and halves the
+    notches, as before). ``most`` at or below ``stride`` holds it at ``stride``. ``most`` stays under the 5/6 of the
+    view two frames may scroll and still share the sixth that places them.
     """
 
     first: int = 1
     stride: float = 0.5
+    most: float = 0.75
+    streak: int = 3
 
-    def next(self, notches: int, moved: int, rows: int, ceiling: int | None = None) -> int:
+    def next(self, notches: int, moved: int, rows: int, ceiling: int | None = None, reach: float | None = None) -> int:
         """The notches for the step after one of ``notches`` that moved ``moved`` of a ``rows``-row view.
 
-        Never past ``ceiling``: half a step that once lost the view.
+        Aimed at ``reach`` of the view (default ``stride``); never past ``ceiling``: half a step that once lost it.
         """
+        reach = self.stride if reach is None else reach
         if not (self.stride and moved):
             return notches
-        grown = max(1, min(2 * notches, round(self.stride * rows * notches / moved)))
+        grown = max(1, min(2 * notches, round(reach * rows * notches / moved)))
         return grown if ceiling is None else min(grown, ceiling)
+
+    def grown(self, reach: float) -> float:
+        """The share aimed for after ``streak`` steps placed in a row at ``reach``."""
+        return max(reach, min(self.most, reach * _GROW))
 
 
 @dataclass(frozen=True)
@@ -209,6 +221,7 @@ def _cap(limits: Limits, frames: int, height: int, aborted: Callable[[], bool]) 
     return 'aborted' if aborted() else None
 
 
+_GROW: Final = 1.25  # the share a step aims for grows by this after a streak of steps placed
 _LEAST_GAP: Final = 0.05  # seconds a settle gap grows from when --settle is 0
 
 
@@ -266,7 +279,8 @@ def capture(
     first = grab()
     stitcher = Stitcher(first, match, drop_overlays=drop_overlays, history=_HISTORY * len(first))
     notches, ceiling, lapses = pace.first, None, 0  # lapses: recoveries in a row, no step placed between
-    gap = settling.interval  # grows when a frame taken for settled was still rendering
+    reach, placed = pace.stride, 0  # the share of the view a step aims for; steps placed in a row since it last grew
+    gap = settling.interval  # grows when a frame taken for settled was still rendering; shrinks back on a streak
     frames, stopped, error = 1, 'one frame' if scroll is None else 'end', None
     step = None if scroll is None else _refusing(scroll)
     try:
@@ -279,7 +293,12 @@ def capture(
             try:
                 if not (moved := _moved(stitcher, grab, settling, sleep, gap)):
                     break
-                notches, lapses = pace.next(notches, moved, len(first), ceiling), 0
+                placed += 1
+                if pace.streak and placed >= pace.streak:  # a streak placed: aim further, wait less, lift the cap
+                    reach, placed = pace.grown(reach), 0
+                    gap = max(settling.interval, gap / 2)
+                    ceiling = None if ceiling is None else 2 * ceiling
+                notches, lapses = pace.next(notches, moved, len(first), ceiling, reach), 0
             except Unstitchable as failure:
                 seen = _recover(stitcher, grab, step, notches=notches, settling=settling, sleep=sleep, gap=gap)
                 lapses += 1
@@ -290,6 +309,7 @@ def capture(
                     lost(Lost(_where(last, seen, match), last, seen, str(failure)))
                     raise
                 ceiling = notches = max(1, notches // 2)
+                reach, placed = pace.stride, 0
             frames += 1
             sink(stitcher.drain())
             progress(stitcher)

@@ -80,6 +80,19 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help='--auto: the share of the view each step scrolls, its notches measured and grown to it (0: --notches '
         'every step; nearer 1 is faster, and riskier where a notch varies)',
     )
+    scroll.add_argument(
+        '--stride-max',
+        type=float,
+        default=Pace.most,
+        help='--auto: the share of the view a step grows to while steps keep placing; dropped back to --stride when '
+        'one loses the view (at or below --stride: a fixed --stride)',
+    )
+    scroll.add_argument(
+        '--streak',
+        type=int,
+        default=Pace.streak,
+        help='--auto: steps placed in a row before the step grows and the settle gap shrinks (0: never)',
+    )
     scroll.add_argument('--delay', type=float, default=1.0, help='--auto: seconds to wait before the first frame')
     scroll.add_argument(
         '--settle',
@@ -481,7 +494,7 @@ def run(args: argparse.Namespace) -> int:
                 limits=limits,
                 match=match,
                 settling=Settling(interval=args.settle, end_wait=args.end_wait, max_interval=args.settle_max),
-                pace=Pace(args.notches, args.stride),
+                pace=Pace(args.notches, args.stride, args.stride_max, args.streak),
                 drop_overlays=args.drop_overlays,
                 aborted=shown.stopped,
                 progress=shown.progress,

@@ -309,3 +309,52 @@ def test_a_frame_that_shares_nothing_reports_how_far_off_its_best_match_was():
     assert done.stopped.startswith('unstitchable: ')
     assert done.error is not None
     assert done.error > 3 * Match().tolerance  # random rows: far above the tolerance
+
+
+def test_steps_that_keep_placing_grow_past_half_the_view_up_to_the_most():
+    image = tall(9000)
+    fast, half = Viewport(image, 300, 30), Viewport(image, 300, 30)
+    assert np.array_equal(run(fast), image)
+    assert np.array_equal(run(half, pace=Pace(most=Pace.stride)), image)  # --stride-max = --stride: fixed at half
+    assert fast.scrolls < half.scrolls * 0.8
+    assert Pace().most * 300 >= 30 * 7  # it may reach 7 notches (210 rows) of a 300-row view, never past 225
+
+
+def test_a_step_that_lost_the_view_drops_back_to_the_stride_and_grows_again():
+    image = tall(6000)
+    view = Glitchy(image, 300, 30, bad=12, jump=60)  # 60 rows more: lost by a grown step, never by a half-view one
+    held = Glitchy(image, 300, 30, bad=12, jump=60)
+    lost = []
+    assert np.array_equal(run(view, lost=lost.append), image)
+    assert np.array_equal(run(held, pace=Pace(most=Pace.stride)), image)
+    assert view.ups and not held.ups and not lost
+    assert view.scrolls < held.scrolls  # still faster, the loss and its recovery counted
+
+
+class Settles(SlowRender):
+    """A reader slow to render only for its first ``slow`` scrolls, then at once."""
+
+    def __init__(self, image, height, step, render, slow):
+        super().__init__(image, height, step, render)
+        self.slow, self.gaps = slow, []
+
+    def sleep(self, seconds):
+        self.gaps.append(seconds)
+        super().sleep(seconds)
+
+    def scroll(self, notches=1):
+        super().scroll(notches)
+        if self.scrolls > self.slow:
+            self.render = 0.0
+
+
+def test_a_settle_gap_grown_for_a_slow_stretch_shrinks_back_once_it_renders_at_once():
+    image = tall(6000)
+    view = Settles(image, 300, 150, render=0.5, slow=3)
+    done, rows = slow_capture(view, Settling(interval=0.12, max_interval=1.0))
+    assert done.complete
+    assert np.array_equal(rows, image)
+    assert max(view.gaps) > 0.12  # it grew for the slow stretch
+    settles = [g for g in view.gaps[-12:] if g < Settling.end_wait]
+    assert settles
+    assert min(settles) == 0.12  # and is back at --settle by the end

@@ -122,7 +122,7 @@ def test_the_whole_view_streams_into_the_pdf_and_the_png(tmp_path, fake):
 
 def test_a_capture_that_cannot_be_stitched_keeps_what_it_has_and_exits_1(tmp_path, fake, monkeypatch):
     monkeypatch.setattr(fake, 'STEP', 290)  # past what a 300-row view can overlap
-    assert auto(tmp_path, '--page-height', '100') == 1
+    assert auto(tmp_path, '--stop-when-lost', '--page-height', '100') == 1
     image, _ = pdf_pixels(tmp_path / 'c.pdf')
     assert np.array_equal(image, fake.IMAGE[:300])
 
@@ -216,7 +216,7 @@ def test_a_scroll_windows_refuses_ends_the_capture_with_what_it_has_and_why(tmp_
         self.view.scroll(notches)
 
     monkeypatch.setattr(fake, 'scroll', refused)
-    assert auto(tmp_path, '--page-height', '0') == 1  # no traceback: an exit status
+    assert auto(tmp_path, '--stop-when-lost', '--page-height', '0') == 1  # no traceback: an exit status
     out = capsys.readouterr().out
     assert 'SendInput was blocked' in out
     assert 'UAC' in out
@@ -228,7 +228,7 @@ def test_a_scroll_windows_refuses_ends_the_capture_with_what_it_has_and_why(tmp_
 
 def test_frames_that_share_nothing_say_page_flip_mode_not_a_larger_tolerance(tmp_path, fake, monkeypatch, capsys):
     monkeypatch.setattr(fake, 'STEP', 300)  # a whole view a scroll: a reader turning pages
-    assert auto(tmp_path, '--page-height', '0') == 1
+    assert auto(tmp_path, '--stop-when-lost', '--page-height', '0') == 1
     out = capsys.readouterr().out
     assert 'page-flip' in out
     assert 'continuous' in out
@@ -244,7 +244,7 @@ def test_frames_that_nearly_match_still_suggest_a_larger_tolerance(tmp_path, fak
         return np.clip(frame, 0, 255).astype(np.uint8)
 
     monkeypatch.setattr(fake, 'grab', noisy)
-    assert auto(tmp_path, '--page-height', '0') == 1
+    assert auto(tmp_path, '--stop-when-lost', '--page-height', '0') == 1
     out = capsys.readouterr().out
     assert 'try a larger --tolerance' in out
     assert 'page-flip' not in out
@@ -429,3 +429,16 @@ def test_resume_beyond_the_join_tolerance_says_the_one_to_use(tmp_path, fake, mo
     assert said
     wider = said[0].split('--join-tolerance ')[2].split(';')[0]
     assert auto(tmp_path, '--resume', str(earlier), '--join-tolerance', wider) == 0
+
+
+def test_a_view_auto_scroll_lost_waits_red_until_finish_rather_than_quitting(tmp_path, fake, monkeypatch):
+    monkeypatch.setattr(fake, 'STEP', 290)  # past what a 300-row view can overlap: lost at the first step
+    reds = []
+    monkeypatch.setattr(FakeHud, 'done', staticmethod(lambda: len(reds) >= 3))
+    status = FakeHud.status
+    monkeypatch.setattr(
+        FakeHud, 'status', lambda self, text, ok: (ok is False and reds.append(text)) or status(self, text, ok=ok)
+    )
+    assert auto(tmp_path, '--page-height', '0') == 0  # Finish ended it, not the loss
+    assert len(reds) >= 3  # told, and told again while it waited
+    assert np.array_equal(pdf_pixels(tmp_path / 'c.pdf')[0], fake.IMAGE[:300])

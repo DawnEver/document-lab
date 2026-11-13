@@ -83,3 +83,15 @@ def test_a_second_capture_starting_far_before_the_first_ends_is_still_found(tmp_
     joined = join(a, b, tmp_path / 'c.pdf', head=500)  # far past the first look, 3 heads back
     assert np.array_equal(pdf_pixels(joined.path)[0], image)
     assert joined.shared == 6500
+
+
+def test_a_head_that_fits_more_than_one_place_grows_until_it_fits_one(tmp_path):
+    rng = np.random.default_rng(1)
+    unit = rng.integers(0, 256, (120, 64, 3), dtype=np.uint8)  # a block that recurs, as a page header does
+    image = tall(2400)
+    for top in (300, 900, 1500):
+        image[top : top + 120] = unit
+    a = to_pdf(image[:1700], tmp_path / 'a.pdf', page_height=200)
+    b = to_pdf(image[1500:], tmp_path / 'b.pdf', page_height=200)  # opens on the recurring block
+    joined = join(a, b, tmp_path / 'c.pdf', head=120)
+    assert np.array_equal(pdf_pixels(joined.path)[0], image)

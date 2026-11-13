@@ -404,3 +404,22 @@ def test_an_auto_scroll_paused_neither_scrolls_nor_grabs_and_goes_on_after():
     assert got.complete
     assert not any(acted)
     assert np.array_equal(rows.image(), image)
+
+
+def test_a_view_lost_beyond_recovery_waits_for_the_user_to_bring_it_back_then_goes_on():
+    image = tall(2000)
+    view = Glitchy(image, 300, 150, bad=3, jump=1200)  # far past anything recovery's steps back can reach
+    told = []
+
+    def lost(where):
+        told.append(where.back)
+        if len(told) == 2:  # the user, told twice, scrolls back to the last placed view
+            view.top = 300
+
+    rows = Rows()
+    done = capture(
+        view.grab, view.scroll, rows, pace=Pace(stride=0), lost=lost, wait_when_lost=True, sleep=lambda _: None
+    )
+    assert done.complete
+    assert told[0] == 'up'
+    assert np.array_equal(rows.image(), image)

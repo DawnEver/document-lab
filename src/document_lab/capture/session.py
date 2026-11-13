@@ -226,8 +226,10 @@ class _Pacing:
         self.ceiling = self.notches = max(1, self.notches // 2)
         self.reach, self.placed = self.pace.stride, 0
 
-    def rendering(self) -> None:
-        """A frame taken for settled was still rendering: wait longer from now on."""
+    def looked_again(self, *, placed: bool) -> None:
+        """A frame that did not place was looked at again; ``placed`` then, it was still rendering: wait longer."""
+        if not placed:
+            return
         interval = self.settling.interval
         self.gap = min(max(2 * self.gap, _LEAST_GAP), max(self.settling.max_interval, interval))
 
@@ -335,6 +337,7 @@ def capture(
     drop_overlays: bool = False,
     aborted: Callable[[], bool] = _never,
     paused: Callable[[], bool] = _never,
+    wait_when_lost: bool = False,
     progress: Callable[[Stitcher], None] = _ignore,
     lost: Callable[[Lost], None] = _report,
     sleep: Callable[[float], None] = time.sleep,
@@ -343,7 +346,9 @@ def capture(
 
     ``scroll(n)`` scrolls ``n`` notches, down as many as ``pace`` says, up when ``n`` is negative. A frame that cannot
     be placed -- caught mid-render, or a step that outran the overlap -- is recovered (:func:`_recover`), the steps
-    capped at half the one that lost it; only one that cannot be recovered ends the capture, told to ``lost`` first.
+    capped at half the one that lost it; one that cannot be recovered is told to ``lost`` and ends the capture -- or,
+    ``wait_when_lost``, waits (told to ``lost`` with the way back) until the user brings the view back over what was
+    captured, and goes on scrolling from there; only ``aborted`` ends it then.
     ``progress`` sees the stitcher after every frame it placed. A ``scroll`` that raises ``OSError`` (Windows refused
     the input) stops it as ``blocked: <reason>``, what was stitched kept. While ``paused`` it neither scrolls nor
     grabs; after, it goes on from wherever the view overlaps what was captured (:func:`_rejoin`).
@@ -373,12 +378,14 @@ def capture(
                     stitcher, grab, step, notches=pacing.notches, settling=settling, sleep=sleep, gap=pacing.gap
                 )
                 lapses += 1
-                if seen is True:  # looking again placed it: it was still rendering
-                    pacing.rendering()
+                pacing.looked_again(placed=seen is True)
                 if not isinstance(seen, bool) or lapses > _RECOVERIES:  # lost, or back where it was, no smaller step
                     seen = stitcher.last if isinstance(seen, bool) else seen
                     lost(Lost(_where(last, seen, match), last, seen, str(failure)))
-                    raise
+                    if not wait_when_lost:
+                        raise
+                    _rejoin(stitcher, grab, settling=settling, sleep=sleep, gap=pacing.gap, aborted=aborted, lost=lost)
+                    lapses = 0
                 pacing.lost_step()
             frames += 1
             sink(stitcher.drain())

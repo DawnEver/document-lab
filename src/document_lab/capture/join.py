@@ -17,7 +17,7 @@ import numpy as np
 import pymupdf
 
 from document_lab.capture.export import check_page
-from document_lab.capture.stitch import Match, NoOverlap, locate
+from document_lab.capture.stitch import AmbiguousOverlap, Match, NoOverlap, locate
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -100,6 +100,21 @@ def _found(doc: pymupdf.Document, frame: np.ndarray, match: Match) -> tuple[int,
             least *= 2
 
 
+def _placed(a: pymupdf.Document, b: pymupdf.Document, head: int, match: Match) -> tuple[int, np.ndarray, int]:
+    """Where ``b`` starts in the end of ``a`` (as :func:`_found`), its head doubled while it fits more than one place.
+
+    A short head of a standard -- a recurring page header, white space -- fits many places; a longer one fits one.
+    """
+    whole = sum(_heights(b))
+    while True:
+        try:
+            return _found(a, _head(b, head), match)
+        except AmbiguousOverlap:
+            if head >= whole:
+                raise
+            head *= 2
+
+
 def _seam(out: pymupdf.Document, rows: np.ndarray, page_height: int, dpi: float) -> None:
     """``rows`` onto new pages of ``out``, ``page_height`` rows each, the last shorter."""
     for top in range(0, len(rows), page_height):
@@ -125,8 +140,7 @@ def join(
         if width(a) != width(b):
             msg = f'the captures are {width(a)} and {width(b)} px wide: only captures of one area join'
             raise ValueError(msg)
-        frame = _head(b, head)
-        count, tail, top = _found(a, frame, match)
+        count, tail, top = _placed(a, b, head, match)
         whole = sum(_heights(b))
         joined = pymupdf.open()
         if top + whole <= len(tail):  # the second shows nothing the first does not

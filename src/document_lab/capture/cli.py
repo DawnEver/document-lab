@@ -95,6 +95,12 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         default=Pace.streak,
         help='--auto: steps placed in a row before the step grows and the settle gap shrinks (0: never)',
     )
+    scroll.add_argument(
+        '--stop-when-lost',
+        action='store_true',
+        help='--auto: end the capture when a view is lost beyond recovery (default: turn red, wait for you to scroll '
+        'back over what was captured, then scroll on; only Finish ends it)',
+    )
     scroll.add_argument('--delay', type=float, default=1.0, help='--auto: seconds to wait before the first frame')
     scroll.add_argument(
         '--settle',
@@ -539,6 +545,7 @@ def run(args: argparse.Namespace) -> int:
                 drop_overlays=args.drop_overlays,
                 aborted=shown.stopped,
                 paused=shown.paused,
+                wait_when_lost=not args.stop_when_lost,
                 progress=shown.progress,
                 lost=shown.lost,
             )

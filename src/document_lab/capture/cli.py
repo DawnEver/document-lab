@@ -265,12 +265,18 @@ def _started(target: Window | Region) -> tuple[Window | Region, Region, Hud, boo
 def _prepare(args: argparse.Namespace) -> str | None:
     """Name and check the output; why the capture's windows cannot open here, None when they can.
 
-    An unnamed output is named for the time; one that exists is refused (:func:`_refuse_existing`).
+    An unnamed output is named for the time; a name Windows cannot hold (`export.check_name`)
+    and one that exists (:func:`_refuse_existing`) are refused.
     """
     if args.out is None:
         args.out = Path(f'capture-{datetime.now().astimezone():%Y%m%d-%H%M%S}.pdf')
-    _refuse_existing(args)
     from document_lab.capture import desktop  # noqa: PLC0415
+    from document_lab.capture.export import check_name  # noqa: PLC0415
+
+    for path in (args.out, args.png):
+        if path is not None:
+            check_name(path)
+    _refuse_existing(args)
 
     return desktop.tk_problem()  # the selection and the panel are tkinter windows
 

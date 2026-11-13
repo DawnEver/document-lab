@@ -10,6 +10,7 @@ from document_lab.capture.export import (
     PdfWriter,
     PngWriter,
     a4_page_height,
+    check_name,
     check_ocr,
     save_png,
     to_pdf,
@@ -204,3 +205,17 @@ def test_a_border_line_at_the_scroll_step_is_not_taken_for_the_page():
     rhythm = page_rhythm(plain)
     assert rhythm is not None
     assert (rhythm.pitch, rhythm.offset) == (pytest.approx(1000, abs=0.01), 1)
+
+
+@pytest.mark.parametrize(
+    'name', ['BS-EN-60034-1:2010.pdf', 'a<b.pdf', 'a|b.pdf', 'a?.pdf', 'a*.pdf', 'a".pdf', 'CON.pdf', 'x.pdf.']
+)
+def test_a_name_windows_cannot_hold_is_refused_with_one_it_can(tmp_path, name):
+    with pytest.raises(ValueError, match='cannot name a file') as refused:
+        check_name(tmp_path / name)
+    suggested = str(refused.value).rsplit(': try ', 1)[1]
+    check_name(tmp_path / suggested)
+
+
+def test_a_drive_and_folders_are_not_the_name(tmp_path):
+    check_name(tmp_path / 'sub' / 'BS-EN-60034-1_2010.pdf')

@@ -32,6 +32,7 @@ __all__ = [
     'PdfWriter',
     'PngWriter',
     'a4_page_height',
+    'check_name',
     'check_ocr',
     'check_page',
     'save_png',
@@ -58,6 +59,27 @@ def _pixmap(image: np.ndarray) -> pymupdf.Pixmap:
 
 def _part(path: Path) -> Path:
     return path.with_name(path.name + '.part')
+
+
+_UNNAMEABLE: Final = '<>:"/\\|?*'  # characters Windows refuses in a file name; ':' opens an NTFS data stream
+_RESERVED: Final = frozenset(
+    ['CON', 'PRN', 'AUX', 'NUL', *(f'COM{n}' for n in range(1, 10)), *(f'LPT{n}' for n in range(1, 10))]
+)
+
+
+def check_name(path: Path) -> None:
+    """Refuse a file name Windows cannot hold -- before a capture is spent on it -- naming one it can.
+
+    ``a:b.pdf`` is the worst case: Windows writes it as the hidden stream ``b.pdf`` of a file ``a``, and the move into
+    place then fails. Refused on every system, so a name is portable wherever the capture is read.
+    """
+    name = path.name
+    fixed = ''.join('_' if c in _UNNAMEABLE or ord(c) < 32 else c for c in name).rstrip(' .') or '_'  # noqa: PLR2004
+    if fixed.split('.')[0].upper() in _RESERVED:
+        fixed = f'_{fixed}'
+    if fixed != name:
+        msg = f'Windows cannot name a file {name!r}: try {fixed}'
+        raise ValueError(msg)
 
 
 def check_ocr(languages: str) -> None:

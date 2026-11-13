@@ -272,3 +272,14 @@ def test_a_tkinter_that_cannot_start_ends_the_run_with_the_remedy(tmp_path, fake
     assert 'Use Python 3.13.1' in capsys.readouterr().out
     assert not shown
     assert not list(tmp_path.iterdir())
+
+
+def test_a_name_windows_cannot_hold_is_refused_before_anything(tmp_path, fake, monkeypatch):
+    asked = []
+    monkeypatch.setattr(FakeHud, 'ready', lambda self: asked.append(1) or 'start')
+    with pytest.raises(ValueError, match=r'try BS-EN-60034-1_2010\.pdf'):
+        main(['capture', str(tmp_path / 'BS-EN-60034-1:2010.pdf'), '--rect', f'0,0,{WIDTH},300', '--no-scroll'])
+    with pytest.raises(ValueError, match=r'try ab_c\.png'):
+        run(tmp_path, '--no-scroll', '--png', str(tmp_path / 'ab:c.png'))
+    assert not asked
+    assert list(tmp_path.iterdir()) == []

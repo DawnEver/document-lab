@@ -1,7 +1,8 @@
 # document-lab
 
 Documents (PDF first, HTML tables second) to typed data that carries its provenance; the absorbed paper
-ingester (`document-lab paper`). Generic and domain-free: no consumer's vocabulary here -- schemas live in
+ingester (`document-lab paper`); and the screen capture that makes such a PDF (`document-lab capture`: any window
+or region, scrolled to its end and stitched into one long PDF -- the long screenshot). Generic and domain-free: no consumer's vocabulary here -- schemas live in
 consumers. Modules and usage: `README.md`.
 
 ## Rules here

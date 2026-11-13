@@ -37,6 +37,7 @@ class FakeHud:
 
     shown: ClassVar[list] = []
     rows = 0
+    paused = False
     done = staticmethod(lambda: False)  # what the Finish button says, per test
     answers: ClassVar[list] = []  # what the panel answers before the capture, in turn; then Start (I scroll)
 
@@ -371,3 +372,38 @@ def test_a_fixed_stride_is_the_stride_max_at_the_stride(tmp_path, fake, monkeypa
         assert np.array_equal(pdf_pixels(tmp_path / 'c.pdf')[0], fake.IMAGE)
         counts[name] = len(scrolls)
     assert counts['grown'] < counts['fixed']
+
+
+def test_open_shows_the_pdf_once_written_and_only_then(tmp_path, fake, monkeypatch):
+    opened = []
+    monkeypatch.setattr(desktop, 'open_file', opened.append)
+    assert auto(tmp_path, '--open') == 0
+    assert opened == [tmp_path / 'c.pdf']
+    assert (tmp_path / 'c.pdf').exists()
+    opened.clear()
+    assert auto(tmp_path, '--overwrite') == 0
+    assert not opened
+
+
+def test_open_after_resume_shows_the_joined_pdf(tmp_path, fake, monkeypatch):
+    opened = []
+    monkeypatch.setattr(desktop, 'open_file', opened.append)
+    earlier = to_pdf(fake.IMAGE[:500], tmp_path / 'earlier.pdf')
+    assert auto(tmp_path, '--resume', str(earlier), '--open') == 0
+    assert opened == [tmp_path / 'c.pdf']
+
+
+def test_the_panels_pause_holds_the_capture_and_resume_picks_it_up(tmp_path, fake, monkeypatch):
+    hand = Hand(fake.IMAGE, 300, [150, 150, 150, 150])
+    polls = []
+
+    def paused(self):
+        polls.append(1)
+        return 2 < len(polls) <= 6
+
+    monkeypatch.setattr(fake, 'grab', lambda self: hand.grab())
+    monkeypatch.setattr(FakeHud, 'done', staticmethod(hand.esc))
+    monkeypatch.setattr(FakeHud, 'paused', property(paused))
+    assert run(tmp_path, '--page-height', '0') == 0
+    assert len(polls) > 6
+    assert np.array_equal(pdf_pixels(tmp_path / 'c.pdf')[0], fake.IMAGE[:900])

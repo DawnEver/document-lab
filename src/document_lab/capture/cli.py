@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     import numpy as np
 
     from document_lab.capture.desktop import Hud, Region, Window
+    from document_lab.capture.export import PdfWriter
     from document_lab.capture.pages import Rhythm
     from document_lab.capture.session import Capture, Lost
     from document_lab.capture.stitch import Stitcher
@@ -161,6 +162,7 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="add a searchable text layer in Tesseract's LANGS (default eng; e.g. chi_sim+eng)",
     )
     pdf.add_argument('--png', type=Path, help='also write the stitched image here')
+    pdf.add_argument('--open', action='store_true', help='open the PDF once it is written')
     pdf.add_argument(
         '--overwrite', action='store_true', help='replace an existing PDF or PNG (default: refuse, before anything)'
     )
@@ -250,6 +252,9 @@ class _Shown:
     def stopped(self) -> bool:
         self.hud.pump()  # once per grab: the panel stays drawn, and its Finish button is heard, in this one thread
         return self.hud.finished
+
+    def paused(self) -> bool:
+        return self.hud.paused  # the panel is pumped by stopped(), asked in the same loop
 
     def progress(self, stitcher: Stitcher) -> None:
         text = f'Capturing: {stitcher.height} px. Keep scrolling; click Finish when you are done.'
@@ -478,6 +483,7 @@ def run(args: argparse.Namespace) -> int:
                 source.grab,
                 sink,
                 aborted=shown.stopped,
+                paused=shown.paused,
                 interval=args.every,
                 limits=limits,
                 match=match,
@@ -497,14 +503,25 @@ def run(args: argparse.Namespace) -> int:
                 pace=Pace(args.notches, args.stride, args.stride_max, args.streak),
                 drop_overlays=args.drop_overlays,
                 aborted=shown.stopped,
+                paused=shown.paused,
                 progress=shown.progress,
                 lost=shown.lost,
             )
+    return _finished(args, result, pdf, written)
+
+
+def _finished(args: argparse.Namespace, result: Capture, pdf: PdfWriter, written: Path) -> int:
+    """Say how it ended and what was written -- joined to ``--resume`` -- and open it if asked; the exit status."""
+    from document_lab.capture import desktop  # noqa: PLC0415
+
     status = _report(result, args.tolerance)
     _report_pages(args.page_height, pdf.rhythm)
     if args.resume is not None:
-        return _joined(args, written) or status
-    emit(f'{args.out.resolve()}: {width}x{result.height} px on {pdf.pages} page(s)')
-    if args.png:
-        emit(f'{args.png.resolve()}: the same, as one image')
+        status = _joined(args, written) or status
+    else:
+        emit(f'{args.out.resolve()}: {pdf.width}x{result.height} px on {pdf.pages} page(s)')
+        if args.png:
+            emit(f'{args.png.resolve()}: the same, as one image')
+    if args.open and args.out.exists():
+        desktop.open_file(args.out)
     return status

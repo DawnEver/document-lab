@@ -358,3 +358,49 @@ def test_a_settle_gap_grown_for_a_slow_stretch_shrinks_back_once_it_renders_at_o
     settles = [g for g in view.gaps[-12:] if g < Settling.end_wait]
     assert settles
     assert min(settles) == 0.12  # and is back at --settle by the end
+
+
+class Switch:
+    """A Pause button: pressed for the ``held`` polls after the first ``after``, counted in polls."""
+
+    def __init__(self, after: int, held: int):
+        self.after, self.held, self.polls = after, held, 0
+
+    def __call__(self) -> bool:
+        self.polls += 1
+        return self.after < self.polls <= self.after + self.held
+
+
+def test_following_paused_grabs_nothing_and_picks_up_where_the_view_overlaps():
+    image = tall(1500)
+    hand, rows, lost = Hand(image, 300, [150, 150, 150, 150]), Rows(), []
+    pause = Switch(after=2, held=5)
+    grabs = []
+
+    def grab():
+        grabs.append(pause.after < pause.polls <= pause.after + pause.held)
+        return hand.grab()
+
+    got = follow(grab, rows, aborted=hand.esc, paused=pause, lost=lost.append, sleep=lambda _: None)
+    assert got.stopped == 'aborted'
+    assert not any(grabs)  # nothing grabbed while paused: the user may scroll anywhere, use any window
+    assert not lost
+    assert pause.polls > pause.after + pause.held
+    assert np.array_equal(rows.image(), image[:900])
+
+
+def test_an_auto_scroll_paused_neither_scrolls_nor_grabs_and_goes_on_after():
+    image = tall(1500)
+    view = Viewport(image, 300, 150)
+    pause = Switch(after=2, held=4)
+    acted = []
+    rows = Rows()
+
+    def scroll(n=1):
+        acted.append(pause.after < pause.polls <= pause.after + pause.held)
+        view.scroll(n)
+
+    got = capture(view.grab, scroll, rows, paused=pause, pace=Pace(stride=0), sleep=lambda _: None)
+    assert got.complete
+    assert not any(acted)
+    assert np.array_equal(rows.image(), image)

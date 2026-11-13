@@ -315,6 +315,18 @@ def _photo(image: np.ndarray) -> bytes:
     return f'P6 {width} {height} 255\n'.encode() + np.ascontiguousarray(image).tobytes()
 
 
+_LABEL_GAP: Final = 26  # px above the mark its size label takes; nearer the screen's top, it goes inside
+
+
+def size_label(box: Region, screen: Region) -> tuple[str, int, int]:
+    """The mark's size as shown beside it -- ``'W x H'`` -- and the screen point of the label's top-left corner.
+
+    Above the mark's top-left corner, as screenshot tools show it; inside, when the mark is at the screen's top.
+    """
+    top = box.top - _LABEL_GAP if box.top - _LABEL_GAP >= screen.top else box.top + 4
+    return f'{box.width} x {box.height}', box.left, top
+
+
 def _edited(held: str, box: Region, dx: int, dy: int) -> Region:
     """``box`` with the part ``held`` (an edge, a corner, or ``move``) dragged by ``dx, dy``; never under 8 pixels."""
     left, top, right, bottom = box.left, box.top, box.left + box.width, box.top + box.height
@@ -377,6 +389,10 @@ class _Overlay:
         hint.update_idletasks()
         primary = _dll('user32').GetSystemMetrics(0)
         hint.geometry(f'+{(primary - hint.winfo_reqwidth()) // 2}+12')
+        self.size = self._window(tk)  # the mark's W x H beside it: its own opaque window, so it is not dimmed
+        self.size_text = tk.Label(self.size, fg='white', bg=_PANEL, font=('Segoe UI', 10, 'bold'), padx=6, pady=2)
+        self.size_text.pack()
+        self.size.withdraw()
         self.panel = self._window(tk)
         self.confirm_button = tk.Button(
             self.panel,
@@ -462,6 +478,11 @@ class _Overlay:
         self.glass.geometry(f'{max(box.width, 1)}x{max(box.height, 1)}+{box.left}+{box.top}')
         self.glass.deiconify()
         self.glass.lift()
+        text, x, y = size_label(box, self.screen)
+        self.size_text.configure(text=text)
+        self.size.geometry(f'+{x}+{y}')
+        self.size.deiconify()
+        self.size.lift()
 
     def grip(self, x: int, y: int) -> str | None:
         """Which part of the mark the screen point ``x, y`` takes hold of: an edge, a corner, ``move``, or None.
@@ -757,6 +778,7 @@ class Hud:
         width = _MINI[0] + 16
         self.panel = self._window(tk, 0, 0, None, colour='#202020')
         self.finished = False  # set by the Finish button: a deliberate click ends the capture, a stray key does not
+        self.paused = False  # toggled by Pause / Resume: nothing is grabbed or scrolled while it is set
         self.answer: Answer | None = None  # what the panel answered before the capture
         starts = tk.Frame(self.panel, bg='#202020')  # first, at the top: always in view, whatever the text wraps to
         starts.pack(fill='x', padx=8, pady=(8, 4))
@@ -772,6 +794,7 @@ class Hud:
             **style,
         )
         self.button.pack(side='left', fill='x', expand=True)
+        self.pause = tk.Button(starts, text='Pause', command=self.toggle_pause, bg=WAIT, **style)  # packed on begin
         self.auto = tk.Button(starts, text='Auto scroll', command=lambda: self._answer('auto'), bg=OK, **style)
         self.auto.pack(side='left', fill='x', expand=True, padx=(6, 0))
         self.adjust = tk.Button(self.others, text='Adjust', command=lambda: self._answer('adjust'), bg=WAIT, **style)
@@ -832,6 +855,7 @@ class Hud:
         self.auto.pack_forget()
         self.others.pack_forget()
         self.button.configure(text='Finish and save', command=self.finish)
+        self.pause.pack(side='left', fill='x', expand=True, padx=(6, 0))
         say = {
             'start': 'Capturing. Scroll down at your own pace; click Finish when you are done.',
             'auto': 'Scrolling for you to the end; click Finish to stop early.',
@@ -853,6 +877,19 @@ class Hud:
         self.photo.configure(data=_photo(shown), format='ppm')
         self.canvas.coords(self.canvas.find_all()[0], 0, _MINI[1] - len(shown))
 
+    def toggle_pause(self) -> None:
+        """The Pause / Resume button: while paused the desktop is the user's -- scroll anywhere, use any window."""
+        self.paused = not self.paused
+        self.pause.configure(text='Resume' if self.paused else 'Pause')
+        if self.paused:
+            self.status(
+                'Paused: nothing is captured. Scroll or use other windows freely; Resume picks up wherever the view '
+                'overlaps what is captured.',
+                ok=None,
+            )
+        else:
+            self.status('Capturing again.', ok=True)
+
     def finish(self) -> None:
         """The Finish button: the capture ends after the frame in hand."""
         self.finished = True
@@ -864,6 +901,12 @@ class Hud:
     def close(self) -> None:
         """Take the frame and the panel away."""
         self.root.destroy()
+
+
+def open_file(path: Path) -> None:
+    """Open ``path`` in the application Windows associates with it (a PDF in its reader)."""
+    _require_windows()
+    os.startfile(path)  # noqa: S606 -- a file this capture wrote, opened as the user asked (--open)
 
 
 def escape_pressed() -> bool:

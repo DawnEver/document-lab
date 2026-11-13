@@ -2,7 +2,7 @@
 
 import pytest
 
-from document_lab.capture.desktop import Region, _edited, recall, remember
+from document_lab.capture.desktop import Region, _edited, recall, remember, size_label
 
 BOX = Region(100, 200, 300, 150)
 
@@ -46,3 +46,10 @@ def test_a_memory_this_code_did_not_write_is_ignored(tmp_path, monkeypatch):
     for junk in ('{', '{"left": 1}', '[1, 2]'):
         (tmp_path / 'document-lab' / 'capture-area.json').write_text(junk, encoding='utf-8')
         assert recall(SCREEN) is None
+
+
+def test_the_size_shows_above_the_marks_corner_or_inside_it_at_the_screens_top():
+    screen = Region(0, 0, 1920, 1080)
+    assert size_label(BOX, screen) == ('300 x 150', 100, 174)
+    assert size_label(Region(100, 10, 300, 150), screen) == ('300 x 150', 100, 14)
+    assert size_label(Region(-1900, -1070, 40, 30), Region(-1920, -1080, 3840, 2160))[2] == -1066

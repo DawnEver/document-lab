@@ -200,6 +200,75 @@ class _Blocked(Exception):
     """The source refused a scroll (the OS dropped the input): the capture ends there, like any other stop."""
 
 
+class _Pacing:
+    """An automatic capture's pace as it goes, grown and shrunk by what happens.
+
+    The ``notches`` of the next step, the share of the view it aims for (``reach``), the cap a lost step set
+    (``ceiling``) and the settle ``gap``.
+    """
+
+    def __init__(self, pace: Pace, settling: Settling) -> None:
+        self.pace, self.settling = pace, settling
+        self.notches, self.ceiling, self.reach, self.placed = pace.first, None, pace.stride, 0
+        self.gap = settling.interval
+
+    def placed_step(self, moved: int, rows: int) -> None:
+        """A step of ``notches`` placed, ``moved`` rows of a ``rows``-row view: after a streak, faster."""
+        self.placed += 1
+        if self.pace.streak and self.placed >= self.pace.streak:  # aim further, wait less, lift the cap
+            self.reach, self.placed = self.pace.grown(self.reach), 0
+            self.gap = max(self.settling.interval, self.gap / 2)
+            self.ceiling = None if self.ceiling is None else 2 * self.ceiling
+        self.notches = self.pace.next(self.notches, moved, rows, self.ceiling, self.reach)
+
+    def lost_step(self) -> None:
+        """A step lost the view: half its notches from now on, aimed at ``stride`` again."""
+        self.ceiling = self.notches = max(1, self.notches // 2)
+        self.reach, self.placed = self.pace.stride, 0
+
+    def rendering(self) -> None:
+        """A frame taken for settled was still rendering: wait longer from now on."""
+        interval = self.settling.interval
+        self.gap = min(max(2 * self.gap, _LEAST_GAP), max(self.settling.max_interval, interval))
+
+
+def _hold(paused: Callable[[], bool], aborted: Callable[[], bool], sleep: Callable[[float], None]) -> bool:
+    """Wait out a pause; was there one?"""
+    if not paused():
+        return False
+    while paused() and not aborted():
+        sleep(_POLL)
+    return True
+
+
+def _rejoin(
+    stitcher: Stitcher,
+    grab: Callable[[], np.ndarray],
+    *,
+    settling: Settling,
+    sleep: Callable[[float], None],
+    gap: float,
+    aborted: Callable[[], bool],
+    lost: Callable[[Lost], None],
+) -> None:
+    """After a pause, place the view wherever it overlaps what was captured; until it does, say which way back."""
+    match = stitcher.match
+    while not aborted():
+        frame = _settled(grab, settling, sleep, gap)
+        if np.array_equal(frame, stitcher.last):
+            return
+        try:
+            stitcher.add(frame)
+        except Unstitchable as error:
+            try:
+                stitcher.relocate(frame)
+            except Unstitchable:
+                lost(Lost(_where(stitcher.last, frame, match), stitcher.last, frame, str(error)))
+                sleep(_POLL)
+                continue
+        return
+
+
 def _refusing(scroll: Callable[[int], None]) -> Callable[[int], None]:
     """``scroll``, its ``OSError`` (the input refused) raised as :class:`_Blocked`."""
 
@@ -221,6 +290,7 @@ def _cap(limits: Limits, frames: int, height: int, aborted: Callable[[], bool]) 
     return 'aborted' if aborted() else None
 
 
+_POLL: Final = 0.1  # seconds between looks at the Pause button while paused
 _GROW: Final = 1.25  # the share a step aims for grows by this after a streak of steps placed
 _LEAST_GAP: Final = 0.05  # seconds a settle gap grows from when --settle is 0
 
@@ -264,6 +334,7 @@ def capture(
     pace: Pace = Pace(),  # noqa: B008 -- frozen
     drop_overlays: bool = False,
     aborted: Callable[[], bool] = _never,
+    paused: Callable[[], bool] = _never,
     progress: Callable[[Stitcher], None] = _ignore,
     lost: Callable[[Lost], None] = _report,
     sleep: Callable[[float], None] = time.sleep,
@@ -274,13 +345,12 @@ def capture(
     be placed -- caught mid-render, or a step that outran the overlap -- is recovered (:func:`_recover`), the steps
     capped at half the one that lost it; only one that cannot be recovered ends the capture, told to ``lost`` first.
     ``progress`` sees the stitcher after every frame it placed. A ``scroll`` that raises ``OSError`` (Windows refused
-    the input) stops it as ``blocked: <reason>``, what was stitched kept.
+    the input) stops it as ``blocked: <reason>``, what was stitched kept. While ``paused`` it neither scrolls nor
+    grabs; after, it goes on from wherever the view overlaps what was captured (:func:`_rejoin`).
     """
     first = grab()
     stitcher = Stitcher(first, match, drop_overlays=drop_overlays, history=_HISTORY * len(first))
-    notches, ceiling, lapses = pace.first, None, 0  # lapses: recoveries in a row, no step placed between
-    reach, placed = pace.stride, 0  # the share of the view a step aims for; steps placed in a row since it last grew
-    gap = settling.interval  # grows when a frame taken for settled was still rendering; shrinks back on a streak
+    pacing, lapses = _Pacing(pace, settling), 0  # lapses: recoveries in a row, no step placed between
     frames, stopped, error = 1, 'one frame' if scroll is None else 'end', None
     step = None if scroll is None else _refusing(scroll)
     try:
@@ -288,28 +358,28 @@ def capture(
             if capped := _cap(limits, frames, stitcher.height, aborted):
                 stopped = capped
                 break
-            step(notches)
+            if _hold(paused, aborted, sleep):
+                _rejoin(stitcher, grab, settling=settling, sleep=sleep, gap=pacing.gap, aborted=aborted, lost=lost)
+                continue
+            step(pacing.notches)
             last = stitcher.last
             try:
-                if not (moved := _moved(stitcher, grab, settling, sleep, gap)):
+                if not (moved := _moved(stitcher, grab, settling, sleep, pacing.gap)):
                     break
-                placed += 1
-                if pace.streak and placed >= pace.streak:  # a streak placed: aim further, wait less, lift the cap
-                    reach, placed = pace.grown(reach), 0
-                    gap = max(settling.interval, gap / 2)
-                    ceiling = None if ceiling is None else 2 * ceiling
-                notches, lapses = pace.next(notches, moved, len(first), ceiling, reach), 0
+                pacing.placed_step(moved, len(first))
+                lapses = 0
             except Unstitchable as failure:
-                seen = _recover(stitcher, grab, step, notches=notches, settling=settling, sleep=sleep, gap=gap)
+                seen = _recover(
+                    stitcher, grab, step, notches=pacing.notches, settling=settling, sleep=sleep, gap=pacing.gap
+                )
                 lapses += 1
-                if seen is True:  # looking again placed it: it was still rendering, so wait longer from now on
-                    gap = min(max(2 * gap, _LEAST_GAP), max(settling.max_interval, settling.interval))
+                if seen is True:  # looking again placed it: it was still rendering
+                    pacing.rendering()
                 if not isinstance(seen, bool) or lapses > _RECOVERIES:  # lost, or back where it was, no smaller step
                     seen = stitcher.last if isinstance(seen, bool) else seen
                     lost(Lost(_where(last, seen, match), last, seen, str(failure)))
                     raise
-                ceiling = notches = max(1, notches // 2)
-                reach, placed = pace.stride, 0
+                pacing.lost_step()
             frames += 1
             sink(stitcher.drain())
             progress(stitcher)
@@ -333,6 +403,7 @@ def follow(
     limits: Limits = Limits(),  # noqa: B008 -- frozen
     match: Match = Match(),  # noqa: B008 -- frozen
     drop_overlays: bool = False,
+    paused: Callable[[], bool] = _never,
     progress: Callable[[Stitcher], None] = _ignore,
     lost: Callable[[Lost], None] = _report,
     sleep: Callable[[float], None] = time.sleep,
@@ -343,13 +414,17 @@ def follow(
     that cannot be placed below the last is looked for in the last :data:`_HISTORY` views captured: found, the capture
     goes on from there; not found -- scrolled too far at once, or far back -- it is skipped and told to ``lost`` with
     the way back (:class:`Lost`), until the view overlaps anything held again.
-    ``aborted`` is asked once per grab, so a caller can keep its own window responsive there.
+    ``aborted`` is asked once per grab, so a caller can keep its own window responsive there. While ``paused``
+    nothing is grabbed -- scroll anywhere, use other windows -- and after, it picks up as from a flick.
     """
     first = grab()
     stitcher = Stitcher(first, match, drop_overlays=drop_overlays, history=_HISTORY * len(first))
     frames, stopped = 1, 'aborted'
     try:
         while not aborted():
+            if paused():
+                sleep(_POLL)
+                continue
             if limits.max_frames is not None and frames >= limits.max_frames:
                 stopped = 'max_frames'
                 break

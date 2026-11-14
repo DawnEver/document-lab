@@ -31,7 +31,7 @@ def _parser() -> argparse.ArgumentParser:
         help='a PDF as page-NNN.md and page-NNN.png per page, its regions cut out, and INDEX.md (a directory or a .zip)',
     )
     pages.add_argument('pdf', type=Path)
-    pages.add_argument('out', type=Path, help='the directory to write the pages into, or a .zip archive of them')
+    pages.add_argument('out', type=Path, help='the directory to write the pages into, or a .zip archive')
     paper = sub.add_parser('paper', help='a paper PDF to per-section markdown and cropped figures')
     paper.add_argument('pdf', type=Path)
     paper.add_argument('out', type=Path, help='the directory to write the paper layout into')

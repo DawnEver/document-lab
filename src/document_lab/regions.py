@@ -6,8 +6,8 @@ nearest prose above. A table's caption is above it: the table runs down from the
 heading or caption. An equation number standing alone at the right (``(3)``, ``(A.1)``) is an equation: its region
 takes in every line beside it that is not prose -- a formula OCR'd reads as noise -- up to the prose around it.
 Prose is a line that reads as words (`document_lab.layout.wordy`), set near the body size, across half the text
-width. A mention in prose (``Table 7, item 1d``) or a contents entry (a leader) is no caption. Each region spans
-the text width; its label is the caption's or the number's, as read.
+width or :data:`PROSE_WORDS` words long. A mention in prose (``Table 7, item 1d``) or a contents entry (a leader) is
+no caption. Each region spans the text width; its label is the caption's or the number's, as read.
 
 A table without a caption (a standard's normative-reference annex, a list set in columns) is told by its rows:
 :data:`TABLE_ROWS` or more bands of :data:`ROW_CELLS` or more cells side by side, set near the body size, no prose
@@ -43,6 +43,8 @@ NUMBER_RIGHT: Final = 0.6
 #: Prose is set within this factor of the body size, across at least this share of the text width.
 PROSE_SIZE: Final = 1.4
 PROSE_WIDTH: Final = 0.5
+#: A line of at least this many words is prose at any width (a column of a two-column page); no table cell's is.
+PROSE_WORDS: Final = 12
 #: A region stops this many body sizes short of the prose that bounds it.
 PAD: Final = 0.3
 #: An equation takes a line not prose within this many body sizes of it, above or below.
@@ -53,6 +55,11 @@ TABLE_ROWS: Final = 2
 ROW_CELLS: Final = 3
 ROW_SIZE: Final = 1.5
 ROW_GAP: Final = 3.0
+#: A table's row has a short cell -- at most this many words -- among its cells; columns of prose do not.
+SHORT_CELL: Final = 3
+#: A cell reads at least this many letters or digits (or is a dash); fewer is a speck OCR read.
+CELL_CHARS: Final = 2
+_DASHES: Final = frozenset('-\N{HYPHEN}\N{EN DASH}\N{EM DASH}\N{MINUS SIGN}')
 _HEADING: Final = re.compile(r'^\d+(?:\.\d+)*\.?\s+[A-Z]')
 
 Kind = Literal['figure', 'table', 'equation']
@@ -84,7 +91,7 @@ class _Page:
             layout.wordy(line.text)
             and line.size <= PROSE_SIZE * self.body
             and '....' not in line.text
-            and line.x1 - line.x0 >= PROSE_WIDTH * (self.right - self.left)
+            and (line.x1 - line.x0 >= PROSE_WIDTH * (self.right - self.left) or len(line.text.split()) >= PROSE_WORDS)
         )
 
     def box(self, top: float, bottom: float) -> BBox:
@@ -142,14 +149,26 @@ def _bands(page: _Page) -> list[list[layout.Line]]:
     return bands
 
 
+def _noise(text: str) -> bool:
+    """A speck OCR read as a cell: under :data:`CELL_CHARS` letters or digits, and not a dash (an empty entry)."""
+    stripped = text.strip()
+    return sum(c.isalnum() for c in stripped) < CELL_CHARS and stripped not in _DASHES
+
+
 def _row(page: _Page, band: list[layout.Line]) -> bool:
     """Is ``band`` a table's row: cells side by side, none of them prose nor a contents entry?
 
-    :data:`ROW_CELLS` of them are set near the body size and none larger; a lone ``-`` may read smaller.
+    :data:`ROW_CELLS` of them are set near the body size and none larger (a lone ``-`` may read smaller); one is short,
+    at most :data:`SHORT_CELL` words -- a code, a year, a dash -- which columns of prose, however OCR splits them,
+    are not.
     """
     near = [ln for ln in band if page.body / ROW_SIZE <= ln.size <= ROW_SIZE * page.body]
-    return len(near) >= ROW_CELLS and all(
-        ln.size <= ROW_SIZE * page.body and not page.prose(ln) and '....' not in ln.text for ln in band
+    short = any(len(ln.text.split()) <= SHORT_CELL for ln in band)  # a code, a year, a '-': columns of prose have none
+    return (
+        len(near) >= ROW_CELLS
+        and short
+        and not any(_noise(ln.text) for ln in band)
+        and all(ln.size <= ROW_SIZE * page.body and not page.prose(ln) and '....' not in ln.text for ln in band)
     )
 
 

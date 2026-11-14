@@ -138,3 +138,45 @@ def test_an_untitled_table_ends_at_the_formula_after_it(tmp_path):
     found = regions(*_page(tmp_path, draw))
     assert [(r.kind, r.label) for r in found] == [('table', 'Untitled table 1')]
     assert found[0].bbox.y1 < 225
+
+
+def test_two_columns_of_prose_split_into_three_pieces_are_no_table(tmp_path):
+    def draw(page):  # a back-matter page: two columns of small prose, OCR'd into three pieces a line
+        for y in range(100, 260, 14):
+            _row(
+                page,
+                y,
+                (
+                    (50, 'All the content in BSI publications'),
+                    (190, 'including British Standards is the'),
+                    (320, 'documentation is current for further information'),
+                ),
+                size=8,
+            )
+
+    assert regions(*_page(tmp_path, draw)) == []
+
+
+def test_rows_with_specks_read_as_cells_are_no_table(tmp_path):
+    def draw(page):  # columns of prose with OCR specks beside them: a speck is no cell
+        for y in (100, 120, 140):
+            _row(page, y, ((50, 'All documentation'), (200, 'is current in BSI'), (380, 'oo'), (420, '.'), (460, 'i')))
+
+    assert regions(*_page(tmp_path, draw)) == []
+
+
+def test_a_long_line_in_a_narrow_column_is_prose_not_a_cell(tmp_path):
+    def draw(page):  # a two-column back page: a long line of words beside short pieces
+        for y in (100, 120, 140):
+            _row(
+                page,
+                y,
+                (
+                    (50, 'you may not transfer share or disseminate any portion of the standard to'),
+                    (330, 'Our British'),
+                    (450, 'to benefit'),
+                ),
+                size=6,
+            )
+
+    assert regions(*_page(tmp_path, draw)) == []

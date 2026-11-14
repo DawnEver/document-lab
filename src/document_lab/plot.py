@@ -146,6 +146,8 @@ CORNER_MERGE: Final = 0.15
 DOT_GAP: Final = 0.5
 #: The widest gap between two glyphs of one outlined label, as a fraction of the label's height.
 WORD_GAP: Final = 0.6
+#: A column of at least this many glyphs stacked tight is a turned title (:func:`_columns`), never a label.
+TURNED_GLYPHS: Final = 3
 #: A pixel this dark (0 white .. 1 black, the mean of R, G and B) is ink: a hairline grid at 100 dpi averages 0.2.
 INK_LEVEL: Final = 0.15
 #: A pixel whose R, G, B spread at least this much is coloured ink, however light.
@@ -750,11 +752,21 @@ def _reads(glyph: Glyph) -> bool:
 def _read_words(glyphs: Sequence[Glyph], font: Font) -> list[tuple[float | None, str | None, BBox]]:
     """Each row of ``glyphs`` with the number it reads as in ``font``, else the text (each ``None`` if not).
 
+    A column of glyphs set turned a quarter (:func:`_columns`: a y-axis title reading upward) is read turned upright,
+    as text; one that does not read is a title all the same, never a tick label, and is left out.
     A row that reads as neither but holds a glyph that reads clearly as a letter is a word (a unit such as ``kW/m3``
     whose ``/`` the reader lacks), never a tick label: it is left out, so it can neither refuse a frame nor be text.
     """
     out: list[tuple[float | None, str | None, BBox]] = []
-    for word in _words([BBox(*g.box) for g in glyphs]):
+    boxes = [BBox(*g.box) for g in glyphs]
+    upright = set()
+    for column in _columns(glyphs, font):
+        upright.update(column)
+        turned = [_turned(glyphs[i]) for i in column]
+        with contextlib.suppress(UnreadableGlyph):
+            out.append((None, read_word(turned, font), union([boxes[i] for i in column])))
+    rest = [i for i in range(len(glyphs)) if i not in upright]
+    for word in ([rest[k] for k in word] for word in _words([boxes[i] for i in rest])):
         shapes = [glyphs[i] for i in word]
         value: float | None = None
         text: str | None = None
@@ -767,6 +779,44 @@ def _read_words(glyphs: Sequence[Glyph], font: Font) -> list[tuple[float | None,
             continue
         out.append((value, text, union([BBox(*g.box) for g in shapes])))
     return out
+
+
+def _columns(glyphs: Sequence[Glyph], font: Font) -> list[list[int]]:
+    """Glyphs set turned a quarter, as columns of indices bottom to top: a y-axis title reading upward.
+
+    A column is :data:`TURNED_GLYPHS` or more glyphs stacked with their middles across inside the column's extent
+    across, each at most ``WORD_GAP`` of the narrowest one's extent across above the last -- as a row's glyphs sit
+    along it -- and not every one reading upright as a digit (tick labels down an axis are digits; a turned word's
+    letters, or its letters run together at a coarse pixel, are not).
+    """
+    boxes = [BBox(*g.box) for g in glyphs]
+    columns: list[list[int]] = []
+    for i in sorted(range(len(boxes)), key=lambda k: -boxes[k].y1):
+        box = boxes[i]
+        cx = (box.x0 + box.x1) / 2
+        for column in columns:
+            cb = union([boxes[k] for k in column])
+            narrow = min(box.width, *(boxes[k].width for k in column))
+            if cb.x0 <= cx <= cb.x1 and -EDGE_TOL <= cb.y0 - box.y1 <= WORD_GAP * narrow:
+                column.append(i)
+                break
+        else:
+            columns.append([i])
+    return [c for c in columns if len(c) >= TURNED_GLYPHS and not all(_digit(glyphs[k], font) for k in c)]
+
+
+def _digit(glyph: Glyph, font: Font) -> bool:
+    try:
+        read_number([glyph], font)
+    except UnreadableGlyph:
+        return False
+    return True
+
+
+def _turned(glyph: Glyph) -> Glyph:
+    """``glyph`` of an upward-reading column turned upright: its ink a quarter clockwise, its box so too."""
+    x0, y0, x1, y1 = glyph.box
+    return Glyph(np.rot90(glyph.ink, k=-1), (-y1, x0, -y0, x1))
 
 
 def _arrowhead(points: Sequence[tuple[float, float]], box: BBox) -> bool:
@@ -1435,7 +1485,10 @@ def _components(mask: np.ndarray) -> np.ndarray:
 def _raster_labels(
     ink: np.ndarray, dark: np.ndarray, frame: BBox, box: BBox, scale: tuple[float, float]
 ) -> tuple[list[_Label], dict[int, UnreadableGlyph]]:
-    """Each row of ink glyphs outside the frame as a label: its value, or NaN with the reader's refusal by index."""
+    """Each row of ink glyphs outside the frame as a label: its value, or NaN with the reader's refusal by index.
+
+    Glyphs set turned a quarter (:func:`_columns`) are an axis title, not labels.
+    """
     sx, sy = scale
     xs = box.x0 + (np.arange(ink.shape[1]) + 0.5) * sx
     ys = box.y0 + (np.arange(ink.shape[0]) + 0.5) * sy
@@ -1457,8 +1510,13 @@ def _raster_labels(
         cut = (slice(rr.min(), rr.max() + 1), slice(cc.min(), cc.max() + 1))
         glyphs.append(Glyph(np.where(labels[cut] == k, dark[cut], 0.0), tuple(glyph_box)))
     out, refusals = [], {}
-    for word in _words([BBox(*g.box) for g in glyphs]):
-        members = [glyphs[i] for i in word]
+    boxes = [BBox(*g.box) for g in glyphs]
+    title = {
+        i for column in _columns(glyphs, HELVETICA) for i in column
+    }  # a turned y title in the label column is no label
+    rest = [i for i in range(len(glyphs)) if i not in title]
+    for word in _words([boxes[i] for i in rest]):
+        members = [glyphs[rest[k]] for k in word]
         wb = union([BBox(*g.box) for g in members])
         try:
             value = read_number(members)

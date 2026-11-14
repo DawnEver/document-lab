@@ -129,3 +129,19 @@ def test_ocr_noise_heads_nothing_in_an_unweighted_document(tmp_path):
     assert '### 4.2 Duty types' in md
     heads = [line for line in md.splitlines() if line.startswith('#')]
     assert heads == ['### 4.2 Duty types']
+
+
+def test_a_table_row_led_by_a_year_heads_nothing(tmp_path):
+    """BS EN 60034-18-1 Annex ZA: '2011 Evaluation and qualification of electrical' (a year, then a title) was a
+    clause heading; a clause number has one or two digits before its first point, a year four.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    _write(page, 57, 80, '4.2 Duty types', size=11)
+    _write(page, 57, 110, '2011 Evaluation and qualification of electrical', size=11)
+    _write(page, 57, 140, '2014 Electrical insulation systems - Thermal', size=11)
+    _write(page, 57, 170, '12 Tests', size=11)
+    _write(page, 57, 200, 'The duty shall be declared by the purchaser of the machine.', size=10)
+    doc.save(tmp_path / 's.pdf')
+    heads = [line for line in to_markdown(read_pdf(tmp_path / 's.pdf', tables=False)).splitlines() if line[:1] == '#']
+    assert heads == ['### 4.2 Duty types', '## 12 Tests']

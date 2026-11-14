@@ -75,7 +75,7 @@ def _cut(pix: pymupdf.Pixmap, scale: float, region: Region) -> pymupdf.Pixmap:
 
 
 def _file(name: str, region: Region) -> str:
-    label = region.label.removeprefix('Figure').removeprefix('Table').strip('() ')
+    label = re.sub('(?i)(?:figure|table)', '', region.label).strip('() ')  # the kind is named once, in the name
     return f'{name}-{region.kind}-{re.sub(r"[^A-Za-z0-9]+", "-", label).strip("-").lower()}.png'
 
 

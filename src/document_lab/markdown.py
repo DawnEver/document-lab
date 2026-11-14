@@ -40,7 +40,8 @@ ESCAPE: Final = chr(92)
 HEADING_WORDS: Final = 8
 _ROMAN: Final = re.compile(r'^(?:X{0,3})(?:IX|IV|V?I{0,3})\.\s+[A-Z][A-Z0-9 ,:;&/()\-]{3,}$')
 _STANDALONE: Final = re.compile(r'^(?:ACKNOWLEDG(?:E)?MENTS?|REFERENCES|APPENDIX|CONCLUSIONS?)$')
-_NUMBERED: Final = re.compile(r'^(\d+(?:\.\d+)*)\.?\s+[A-Z]')
+#: A clause number: one or two digits, then ``.N`` parts -- a year (``2011 Evaluation ...``, a table row) is none.
+_NUMBERED: Final = re.compile(r'^(\d{1,2}(?:\.\d+)*)\.?\s+[A-Z]')
 #: A table-of-contents entry: words, a leader (dots, ellipses, middle dots, rules), a page number at the end.
 _TOC_ENTRY: Final = re.compile(r'^(?=.*[A-Za-z]).*?(?:(?:\.\s?){4,}|\u2026{2,}|\u00b7{3,}|_{4,})\s*[\dixvIXV]{1,5}$')
 #: Lines of a page that are contents entries for the page to be a table of contents.

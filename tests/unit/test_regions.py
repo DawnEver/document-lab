@@ -82,3 +82,59 @@ def test_a_mention_in_prose_or_a_contents_entry_is_no_caption(tmp_path):
         _text(page, 160, PROSE)
 
     assert regions(*_page(tmp_path, draw)) == []
+
+
+def _row(page, y, cells, size=10):
+    for x, text in cells:
+        _text(page, y, text, x=x, size=size)
+
+
+def test_a_table_without_a_caption_is_found_by_its_columns(tmp_path):
+    def draw(page):
+        _text(page, 100, PROSE)
+        _row(
+            page,
+            160,
+            ((50, 'IEC 60034-18-41'), (160, '2014'), (200, 'Rotating electrical machines'), (420, 'EN 60034-18-41')),
+        )
+        _row(page, 175, ((200, 'Partial discharge free systems'),))  # a cell's second line
+        _row(page, 200, ((50, 'IEC 60085'), (160, '-'), (200, 'Electrical insulation'), (420, 'EN 60085')))
+        _row(page, 225, ((50, 'IEC 62539'), (160, '-'), (200, 'Guide for the analysis'), (420, '-')))
+        _text(page, 300, PROSE)
+
+    found = regions(*_page(tmp_path, draw))
+    assert [(r.kind, r.label) for r in found] == [('table', 'Untitled table 1')]
+    box = found[0].bbox
+    assert 100 < box.y0 < 152 and 225 <= box.y1 < 292
+
+
+def test_two_columns_of_prose_are_no_table(tmp_path):
+    def draw(page):
+        for y in range(100, 400, 15):
+            _row(page, y, ((50, 'the rated output of the machine is'), (320, 'expressed in watts at the shaft end')))
+
+    assert regions(*_page(tmp_path, draw)) == []
+
+
+def test_a_captioned_table_is_not_found_twice(tmp_path):
+    def draw(page):
+        _text(page, 100, PROSE)
+        _text(page, 140, 'Table 2 - Duty types', x=200)
+        for y in (170, 190, 210):
+            _row(page, y, ((60, 'S1'), (200, 'continuous'), (400, '1 h')))
+        _text(page, 280, PROSE)
+
+    assert [(r.kind, r.label) for r in regions(*_page(tmp_path, draw))] == [('table', 'Table 2')]
+
+
+def test_an_untitled_table_ends_at_the_formula_after_it(tmp_path):
+    def draw(page):
+        _text(page, 100, PROSE)
+        for y in (150, 170, 190):
+            _row(page, y, ((60, 'Zero-sequence'), (220, '7.1'), (330, 'Single-phase voltage')))
+        _text(page, 240, 'U,=qW,+a, +220]', x=230, size=18)  # a formula, OCR'd
+        _text(page, 265, '1/. +0U,', x=260, size=14)
+
+    found = regions(*_page(tmp_path, draw))
+    assert [(r.kind, r.label) for r in found] == [('table', 'Untitled table 1')]
+    assert found[0].bbox.y1 < 225

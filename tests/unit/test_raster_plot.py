@@ -186,3 +186,17 @@ def test_a_rotated_y_title_in_the_label_column_is_no_raster_tick_label(tmp_path,
     plot, bare = plots
     assert sorted(v for _, v in plot.y.ticks) == [0, 25, 50, 75, 100]
     assert plot.y.ticks == bare.y.ticks  # the title removed gives the same ticks
+
+
+def test_a_curve_drawn_over_the_x_axis_from_the_origin_still_frames_the_plot(tmp_path):
+    """A curve that starts along the x axis (a B-H or loss curve from zero) covers the axis' dark pixels with its
+    colour: the axis read from dark ink alone broke there -- no frame, or one cut short where the curve leaves it.
+    """
+    xs = [float(x) for x in range(0, 101, 5)]
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: max(0.0, 2 * (x - 50)), xs, RED)])
+    plot = raster_plot(_raster(tmp_path, spec, dpi=300))
+    assert sorted(v for _, v in plot.x.ticks) == [0, 50, 100]
+    assert sorted(v for _, v in plot.y.ticks) == [0, 50, 100]
+    assert (plot.frame.x0, plot.frame.x1, plot.frame.y1) == pytest.approx(
+        (100, 400, 300), abs=1
+    )  # not cut at the curve

@@ -158,6 +158,8 @@ HUE_SECTOR: Final = 30.0
 CURVE_SPAN: Final = 0.05
 #: A pixel row or column inked across this share of the frame interior is a grid line, not a curve.
 GRID_INK: Final = 0.9
+#: A raster edge at least this share dark along its line is a frame or tick line; a curve's colour fills the rest.
+DARK_SHARE: Final = 0.25
 #: The share of the frame an image must cover for a curve-less plot to count as a raster plot.
 RASTER_COVER: Final = 0.25
 
@@ -1366,7 +1368,7 @@ def raster_plot(
     scale = (box.width / cols, box.height / rows)  # points per pixel
     chroma = rgb.max(axis=2) - rgb.min(axis=2)
     ink = (1 - rgb.mean(axis=2) > INK_LEVEL) | (chroma > CHROMA_MIN)
-    edges = _pixel_edges(ink & (chroma <= CHROMA_MIN), box, scale)  # a frame is drawn dark, not in colour
+    edges = _dark_edges(ink, ink & (chroma <= CHROMA_MIN), box, scale)
     candidates = []
     for frame in _frames(edges):
         labels, refusals = _raster_labels(ink, 1 - rgb.mean(axis=2), frame, box, scale)
@@ -1398,6 +1400,27 @@ def raster_plot(
     )
     curves = tuple(c for c in traced if c.x.size)  # ink whose every run is half hidden yields no clean sample
     return Plot(frame, x_axis, y_axis, curves, (), raster.provenance.at(bbox=frame))
+
+
+def _dark_edges(ink: np.ndarray, dark: np.ndarray, box: BBox, scale: tuple[float, float]) -> list[_Edge]:
+    """The runs of ``ink`` (:func:`_pixel_edges`) at least :data:`DARK_SHARE` dark along their line.
+
+    A frame and its ticks are drawn dark; a curve drawn over the x axis from the origin covers the axis' pixels with
+    its colour, so the axis read from dark ink alone stopped short of the corner. Read from all ink, the axis runs
+    on under the curve; a curve alone (no dark under it) is still no edge.
+    """
+    sx, sy = scale
+    out = []
+    for e in _pixel_edges(ink, box, scale):
+        if e.vertical:
+            col = min(int((e.at - box.x0) / sx), dark.shape[1] - 1)
+            line = dark[int((e.lo - box.y0) / sy) : max(int((e.hi - box.y0) / sy), int((e.lo - box.y0) / sy) + 1), col]
+        else:
+            row = min(int((e.at - box.y0) / sy), dark.shape[0] - 1)
+            line = dark[row, int((e.lo - box.x0) / sx) : max(int((e.hi - box.x0) / sx), int((e.lo - box.x0) / sx) + 1)]
+        if line.size and line.mean() >= DARK_SHARE:
+            out.append(e)
+    return out
 
 
 def _pixel_edges(ink: np.ndarray, box: BBox, scale: tuple[float, float]) -> list[_Edge]:

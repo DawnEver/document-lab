@@ -3,15 +3,16 @@
 Recognised: a sign (hyphen or the typographic minus), thousands commas in groups of three, thin-space digit
 groups, a decimal point, ``e`` exponents, ``x 10^n`` multipliers (``x``, ``*`` or the multiplication sign)
 and a bare ``10ⁿ`` power. A decimal COMMA is not read as one: ``1,5`` is ambiguous with a thousands
-separator, so its first number is ``1``.
+separator, so its first number is ``1``. A number qualified ``min.`` or ``max.`` (``12.5 min.``, ``max. 3``) is a
+BOUND, read by :func:`bound`.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Final
+from typing import Final, Literal
 
-__all__ = ['first_number', 'parse_number']
+__all__ = ['bound', 'first_number', 'parse_number']
 
 _SUPERSCRIPT: Final = str.maketrans('⁰¹²³⁴⁵⁶⁷⁸⁹⁻⁺', '0123456789-+')
 _MINUS: Final = chr(0x2212)
@@ -20,6 +21,7 @@ _THIN: Final = chr(0x2009)
 _MANTISSA: Final = r'[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d*)?(?:[eE][+-]?\d+)?|[+-]?\.\d+(?:[eE][+-]?\d+)?'
 _TIMES_TEN: Final = rf'\s*[x{chr(0xD7)}*]\s*10\s*\^?\s*([+-]?\d+)'
 _NUMBER: Final = re.compile(rf'(?<![\w.])({_MANTISSA})(?:{_TIMES_TEN})?')
+_BOUND: Final = re.compile(rf'(?i)^(?:({_MANTISSA})\s*(min|max)\.?|(min|max)\.?\s*({_MANTISSA}))$')
 _POWER: Final = re.compile(r'^10\^?([+-]?\d+)$')
 
 
@@ -46,3 +48,12 @@ def first_number(text: str) -> float | None:
     """The first number in ``text`` (a cell: ``≈2100``, ``7100±25%``, ``4.5e2 s``), else ``None``."""
     match = _NUMBER.search(_normal(text))
     return _value(match) if match else None
+
+
+def bound(text: str) -> tuple[Literal['min', 'max'], float] | None:
+    """The bound ``text`` states (``12.5 min.`` is ``('min', 12.5)``, ``max. 3`` is ``('max', 3.0)``), else ``None``."""
+    match = _BOUND.fullmatch(_normal(text))
+    if match is None:
+        return None
+    number, word = (match.group(1), match.group(2)) if match.group(1) else (match.group(4), match.group(3))
+    return ('min' if word.lower() == 'min' else 'max'), float(number.replace(',', ''))

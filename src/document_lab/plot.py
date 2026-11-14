@@ -4,7 +4,8 @@
 Every :class:`Curve` says which (``basis``); a raster curve carries one pixel's extent in data units per point.
 
 A plot here is an axis-aligned rectangular frame with numeric tick labels below it (x) and left of it (y). A label
-is text, or glyph outlines / pixels read by shape (:mod:`document_lab.glyphs`, which refuses rather than guesses). Each
+is text, or glyph outlines / stroke-font polylines / pixels read by shape (:mod:`document_lab.glyphs`, which refuses
+rather than guesses); stroke-font lettering that reads is never a curve. Each
 label's position is snapped to the tick mark or grid line it labels when one is drawn, else its box centre is
 used. A tick label is a number in the axis' common font size, aligned with the others on one row (x) or column
 (y), whose box overlaps the frame's extent along the axis; a stray number off that row or past the frame is not.
@@ -16,19 +17,23 @@ the axis is cut at every tick where the data-per-point spacing (in the scale's u
 a break reads right, and an axis whose spacing is neither linear nor log10 maps linearly between each pair of
 labelled ticks. Ticks whose values are not strictly monotone along the axis are refused (``ValueError``).
 
-Every stroked open polyline inside the frame that is not a tick, a grid line or the frame is a curve, after
-fragments are joined: polylines of one style (stroke, width, dash array) whose ends meet (to ``JOIN_DIGITS``
-decimals) become one, unless more than two ends of that style meet there (ambiguous, left unjoined). A short
-horizontal curve (at most ``SAMPLE_MAX`` long) with a text span starting within ``SAMPLE_GAP`` right of it, at its
-height, is a legend sample: it goes to ``Plot.legend`` with that text, not to ``Plot.curves``.
+Every stroked open polyline inside the frame (a polyline drawn past the frame is clipped to it) that is not a tick,
+a grid line or the frame is a curve, after fragments are joined: polylines of one style (stroke, width, dash
+array) whose ends meet (to ``JOIN_DIGITS`` decimals) become one, unless more than two ends of that style meet
+there (ambiguous, left unjoined). A short horizontal curve (at most ``SAMPLE_MAX`` long) with a text span starting
+within ``SAMPLE_GAP`` right of it, at its height, is a legend sample: it goes to ``Plot.legend`` with that text,
+not to ``Plot.curves``.
 
 In :func:`plots`, a frame whose curves are a RASTER image raises :class:`RasterPlot` (a silent empty result would
-read as "this plot has no curves"): read it with :func:`raster_plot` over ``pdf.read_raster``. Secondary (right/top)
+read as "this plot has no curves"): read it with :func:`raster_plot` over ``pdf.read_raster``. A page on which
+frames carry tick labels but none reads as a plot raises :class:`UnreadFrame` naming each. A drawn minus is a path
+that is wholly one short flat stroke: a flat stretch of a curve beside a label is not one. Secondary (right/top)
 axes are not read.
 """
 
 from __future__ import annotations
 
+import bisect
 import contextlib
 import itertools
 import math
@@ -39,12 +44,23 @@ from typing import TYPE_CHECKING, Final, Literal
 
 import numpy as np
 
-from document_lab.glyphs import Glyph, UnreadableGlyph, rasterise, read_number, read_word
+from document_lab.glyphs import (
+    HELVETICA,
+    STROKE,
+    Font,
+    Glyph,
+    UnreadableGlyph,
+    has_letter,
+    rasterise,
+    read_number,
+    read_word,
+    stroke,
+)
 from document_lab.ir import BBox, Page, Provenance, Raster, TextSpan, VectorPath, union
 from document_lab.numbers import parse_number
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
 __all__ = [
     'Axis',
@@ -56,6 +72,7 @@ __all__ = [
     'Plot',
     'RasterPlot',
     'Scale',
+    'UnreadFrame',
     'UnreadableTickLabels',
     'UnrecognisedFrame',
     'outline_text',
@@ -111,6 +128,22 @@ GLYPH_MAX: Final = 12.0
 RAISED: Final = 0.85
 #: The widest ink blob (points) a raster label may be: glyphs that touch at a coarse pixel are one blob.
 BLOB_MAX: Final = 3 * GLYPH_MAX
+#: The widest gap between a number and the ``min.``/``max.`` after it, as a fraction of the word's height.
+BOUND_GAP: Final = 1.5
+#: A glyph at most this fraction of its neighbour's height is a mark (a dot, a prime), not a letter or digit.
+MARK_HEIGHT_PT: Final = 0.45
+#: A fill thinner than this (points) is a sliver (an arrowhead's cut apex), never a glyph: a minus is 0.5 thick at 8.
+SLIVER: Final = 0.1
+#: Stroke-font fragments whose boxes come this close (points) are one glyph: glyphs of a label sit 1 pt or more apart.
+STROKE_TOUCH: Final = 0.3
+#: A solid wedge (an arrowhead) narrows to at most this fraction of its widest run at its tip...
+WEDGE_TIP: Final = 0.35
+#: ...and widens to at least this fraction at its base (:func:`_solid_triangle`).
+WEDGE_BASE: Final = 0.8
+#: Corners of a fill closer than this fraction of its larger side are one corner (:func:`_arrowhead`).
+CORNER_MERGE: Final = 0.15
+#: The widest gap between a dot and the glyph below it (an ``i``), as a fraction of that glyph's height.
+DOT_GAP: Final = 0.5
 #: The widest gap between two glyphs of one outlined label, as a fraction of the label's height.
 WORD_GAP: Final = 0.6
 #: A pixel this dark (0 white .. 1 black, the mean of R, G and B) is ink: a hairline grid at 100 dpi averages 0.2.
@@ -133,6 +166,13 @@ class RasterPlot(ValueError):
 
 class NoPlotFrame(ValueError):
     """A raster holds no plot frame: no long horizontal line meets a long vertical one at a bottom-left corner."""
+
+
+class UnreadFrame(ValueError):
+    """Every frame on a page that carries a tick label failed to read as a plot (an axis with under two labels).
+
+    Returning no plot would look exactly like a page that holds none, so the page and its frames are named instead.
+    """
 
 
 class UnrecognisedFrame(ValueError):
@@ -240,18 +280,34 @@ class _Edge:
 def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = None) -> list[Plot]:
     """Every vector plot on ``page``; ``x_scale``/``y_scale`` force an axis scale instead of inferring it."""
     edges = _edges(page.paths)
-    labels = _labels(page.spans, [e for e in edges if not e.vertical and e.length <= DASH_MAX])
-    outlined = _outline_words(page.paths)
-    labels += _outline_labels(outlined, [e for e in edges if not e.vertical and e.length <= DASH_MAX])
-    unread = [box for value, text, box in outlined if value is None and text is None]
+    dashes = _dashes(page.paths)
+    labels = _labels(page.spans, dashes)
+    filled, (drawn, lettering_paths) = _outline_words(page.paths), _stroke_words(page.paths)
+    outlined = [*filled, *drawn]
+    labels += _outline_labels(outlined, dashes)
+    unread = [box for value, text, box in filled if value is None and text is None]
+    unread_drawn = [box for value, text, box in drawn if value is None and text is None]
+    lettering = _stroked_words(page.paths)
     words = [*page.spans, *_text_spans(page, outlined)]  # a legend may be outlined
     # A grid line may stop short of the far edge (a legend sits there), so a long rule anchored on an edge counts.
-    found = []
+    found, unread_frames, stroked = [], [], []
     for frame in _frames(edges):
-        xs = _decade_mantissas(_aligned(_one_size(_x_labels(frame, labels)), vertical=False), vertical=False)
-        ys = _decade_mantissas(_aligned(_one_size(_y_labels(frame, labels)), vertical=True), vertical=True)
-        _refuse_unread(page, frame, xs, ys, unread)
+        x_marks, y_marks = _marks(frame, edges, vertical=True), _marks(frame, edges, vertical=False)
+        xs = _aligned(_one_size(_x_labels(frame, labels)), vertical=False)
+        ys = _aligned(_one_size(_y_labels(frame, labels)), vertical=True)
+        xs = _decade_mantissas(_multiplied(xs, x_marks, vertical=False), vertical=False)
+        ys = _decade_mantissas(_multiplied(ys, y_marks, vertical=True), vertical=True)
+        # The stroke font holds only the characters its sheets print: a stroked word (``A/m``, a lone degree sign)
+        # unread for a missing character refuses the frame only when it is the size of the frame's labels.
+        sizes = {lb.size for lb in (*xs, *ys)}
+        sized = [b for b in unread_drawn if any(abs(round(b.height, 1) - s) <= SIZE_TOL for s in sizes)]
+        _refuse_unread(page, frame, (xs, ys), [*unread, *sized], (x_marks, y_marks))
         if len(xs) < 2 or len(ys) < 2:  # noqa: PLR2004 -- a line needs two points
+            box = _stroked_label(frame, lettering, (x_marks, y_marks))
+            if box is not None:
+                stroked.append((frame, box))
+            elif xs or ys:
+                unread_frames.append((frame, len(xs), len(ys)))
             continue
         x_ticks = _snap(
             [((lb.box.x0 + lb.box.x1) / 2, lb.value) for lb in xs],
@@ -265,7 +321,7 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
         )
         x_axis, y_axis = _fit(x_ticks, x_scale), _fit(y_ticks, y_scale)
         legend, paths = [], []
-        for path in _joined(_curve_paths(frame, page.paths)):
+        for path in _joined(_curve_paths(frame, [p for p in page.paths if id(p) not in lettering_paths])):
             label = _sample_label(path, words)
             if label is None:
                 paths.append(path)
@@ -289,26 +345,131 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
         if not curves:
             _refuse_raster(page, frame)
         found.append(Plot(frame, x_axis, y_axis, curves, tuple(legend), page.paths[0].provenance.at(bbox=frame)))
+    if not found and stroked:
+        named = '; '.join(
+            f'{tuple(round(v, 1) for v in frame)} (first at {tuple(round(v, 1) for v in box)})'
+            for frame, box in stroked
+        )
+        msg = (
+            f'page {page.number}: no frame reads as a plot, and these draw their tick labels as stroked lines '
+            f'(stroke-font lettering), which the glyph reader does not read: {named}: an unrecognised frame'
+        )
+        raise UnrecognisedFrame(msg)
+    if not found and unread_frames:
+        named = '; '.join(
+            f'{tuple(round(v, 1) for v in frame)} with {nx} x and {ny} y tick labels' for frame, nx, ny in unread_frames
+        )
+        msg = f'page {page.number}: no frame reads as a plot, each needs two tick labels per axis: {named}'
+        raise UnreadFrame(msg)
     return found
 
 
-def _refuse_unread(page: Page, frame: BBox, xs: Sequence[_Label], ys: Sequence[_Label], unread: Sequence[BBox]) -> None:
+def _dashes(paths: Sequence[VectorPath]) -> list[_Edge]:
+    """Each drawn minus candidate: a path that is WHOLLY one short flat stroke (or a thin filled rule).
+
+    A short flat segment of a longer path is part of a curve (one continuing past the frame under the PDF clip, or
+    crossing the label row), never a minus: DMEGC and SIFERRIT curves read so negated a tick label.
+    """
+    out = []
+    for path in paths:
+        box = path.provenance.bbox
+        if box is not None and box.width <= DASH_MAX + AXIS_TOL and box.height <= RULE_MAX:
+            out.extend(e for e in _edges([path]) if not e.vertical and e.length <= DASH_MAX)
+    return out
+
+
+def _refuse_unread(
+    page: Page,
+    frame: BBox,
+    read: tuple[Sequence[_Label], Sequence[_Label]],
+    unread: Sequence[BBox],
+    marks: tuple[Sequence[float], Sequence[float]],
+) -> None:
     """Raise :class:`UnrecognisedFrame` when an unreadable outlined word sits among the frame's tick labels.
 
     Among means on the x-label row (between the read labels' top and bottom) or the y-label column (within the read
-    labels' extent across); an unreadable word farther out is a title, not a label.
+    labels' extent across); an unreadable word farther out is a title, not a label. On an axis that draws tick marks
+    or grid lines (``marks``: x positions, y positions), a word with no mark within half its own extent along the
+    axis labels no tick (a unit or title set between labels, as SIFERRIT Pv figures set ``kW/m3``), and is not one.
     """
+    xs, ys = read
     for box in unread:
         probe = [_Label(math.nan, box, round(box.height, 1))]
         cy, cx = (box.y0 + box.y1) / 2, (box.x0 + box.x1) / 2
         on_row = xs and _x_labels(frame, probe) and min(b.box.y0 for b in xs) <= cy <= max(b.box.y1 for b in xs)
         on_col = ys and _y_labels(frame, probe) and min(b.box.x0 for b in ys) <= cx <= max(b.box.x1 for b in ys)
+        on_row = on_row and _on_a_mark(cx, box.width / 2, marks[0])
+        on_col = on_col and _on_a_mark(cy, box.height / 2, marks[1])
         if on_row or on_col:
             msg = (
                 f'page {page.number}: the plot framed at {tuple(round(v, 1) for v in frame)} has a tick label at '
                 f'{tuple(round(v, 1) for v in box)} whose glyphs read as no number or word: an unrecognised frame'
             )
             raise UnrecognisedFrame(msg)
+
+
+def _stroked_label(
+    frame: BBox, lettering: Sequence[BBox], marks: tuple[Sequence[float], Sequence[float]]
+) -> BBox | None:
+    """The first stroked word where a tick label of ``frame`` belongs, or None.
+
+    SIFERRIT sheets (N72 p3) draw labels as stroke-font polylines; where they do not read (a character the stroke font
+    lacks) a page of such frames would return no plot, exactly like a page that holds none (:func:`plots` refuses it).
+    Where a label belongs is the x-label band below the frame or the y-label band left of it, on a tick mark or grid
+    line as :func:`_refuse_unread` asks.
+    """
+    for box in lettering:
+        probe = [_Label(math.nan, box, round(box.height, 1))]
+        cx, cy = (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2
+        on_row = bool(_x_labels(frame, probe)) and _on_a_mark(cx, box.width / 2, marks[0])
+        on_col = bool(_y_labels(frame, probe)) and _on_a_mark(cy, box.height / 2, marks[1])
+        if on_row or on_col:
+            return box
+    return None
+
+
+def _stroked_words(paths: Sequence[VectorPath]) -> list[BBox]:
+    """Each row of glyph-sized stroked polylines (three or more points: not a tick, rule or arrow shaft), as a box."""
+    boxes = [
+        p.provenance.bbox
+        for p in paths
+        if p.stroke is not None
+        and p.provenance.bbox is not None
+        and len(p.points) > 2  # noqa: PLR2004 -- a bend: a straight stroke is a tick, rule or shaft
+        and max(p.provenance.bbox.width, p.provenance.bbox.height) <= GLYPH_MAX
+    ]
+    return [union([boxes[i] for i in word]) for word in _words(boxes)]
+
+
+def _multiplied(labels: list[_Label], marks: Sequence[float], *, vertical: bool) -> list[_Label]:
+    """An axis whose one power-of-ten label is stacked against its end label, scaled by it (a unit multiplier).
+
+    TDK SIFERRIT sheets set ``250`` over ``10^-6`` at the top of a temperature-factor axis (N48 p3): the axis is in
+    units of 10^-6, and the power labels no tick. It is a multiplier when it is the axis' only power label, its box
+    abuts or overlaps (within ``EDGE_TOL`` along the axis) the first or last other label's, and it sits on no
+    tick mark or grid line; every other label is then multiplied by it. Any other power label is a tick.
+    """
+    powers = [lb for lb in labels if lb.power]
+    if len(powers) != 1 or len(labels) < 3:  # noqa: PLR2004 -- a multiplier and two ticks
+        return labels
+
+    def at(lb: _Label) -> float:
+        return (lb.box.y0 + lb.box.y1) / 2 if vertical else (lb.box.x0 + lb.box.x1) / 2
+
+    (power,) = powers
+    rest = sorted((lb for lb in labels if lb is not power), key=at)
+    neighbour = min((rest[0], rest[-1]), key=lambda lb: abs(at(lb) - at(power)))
+    lo, hi = ('y0', 'y1') if vertical else ('x0', 'x1')
+    gap = max(getattr(power.box, lo) - getattr(neighbour.box, hi), getattr(neighbour.box, lo) - getattr(power.box, hi))
+    half = (getattr(power.box, hi) - getattr(power.box, lo)) / 2
+    if gap > EDGE_TOL or (marks and _on_a_mark(at(power), half, marks)):
+        return labels
+    return [_Label(lb.value * power.value, lb.box, lb.size) for lb in rest]
+
+
+def _on_a_mark(centre: float, half: float, marks: Sequence[float]) -> bool:
+    """Whether a word centred at ``centre`` could label a mark: one lies within ``half`` of it, or none is drawn."""
+    return not marks or any(abs(m - centre) <= half + SNAP_TOL for m in marks)
 
 
 def _edges(paths: Sequence[VectorPath]) -> list[_Edge]:
@@ -335,17 +496,31 @@ def _edges(paths: Sequence[VectorPath]) -> list[_Edge]:
 def _frames(edges: Sequence[_Edge]) -> list[BBox]:
     """A frame per bottom-left corner: a long horizontal edge (the x axis) meeting a long vertical one (the y axis).
 
-    A corner where several edges meet (a grid line cut short along the x axis) keeps its largest frame.
+    The two meet at their ends, or cross with each running on past the other by at most ``TICK_MAX`` (axes drawn
+    through the origin, an outward tick at the corner); of the edges crossing there the lowest horizontal and the
+    leftmost vertical are the axes, so a grid line just inside is not one. A corner where several edges meet (a grid
+    line cut short along the x axis) keeps its largest frame.
     """
     long = [e for e in edges if e.length >= MIN_FRAME]
+    flat = [e for e in long if not e.vertical]
+    upright = [e for e in long if e.vertical]
+
+    def meet(h: _Edge, v: _Edge) -> bool:
+        return -EDGE_TOL <= v.at - h.lo <= TICK_MAX and -EDGE_TOL <= v.hi - h.at <= TICK_MAX and v.lo < h.at
+
     corners: dict[tuple[float, float], BBox] = {}
-    for h in (e for e in long if not e.vertical):
-        for v in (e for e in long if e.vertical):
-            if abs(h.lo - v.at) <= EDGE_TOL and abs(h.at - v.hi) <= EDGE_TOL:
-                box = BBox(v.at, v.lo, h.hi, h.at)
-                key = (round(box.x0), round(box.y1))
-                if key not in corners or box.width * box.height > corners[key].width * corners[key].height:
-                    corners[key] = box
+    for h in flat:
+        for v in upright:
+            if not meet(h, v):
+                continue
+            if any(meet(o, v) and o.at > h.at + EDGE_TOL for o in flat):  # a lower x axis crosses this y axis
+                continue
+            if any(meet(h, o) and o.at < v.at - EDGE_TOL for o in upright):  # a y axis further left crosses it
+                continue
+            box = BBox(v.at, v.lo, h.hi, h.at)
+            key = (round(box.x0), round(box.y1))
+            if key not in corners or box.width * box.height > corners[key].width * corners[key].height:
+                corners[key] = box
     return list(corners.values())
 
 
@@ -405,22 +580,38 @@ def _outline_labels(outlined: Sequence[tuple[float | None, str | None, BBox]], d
 def outline_text(page: Page) -> list[TextSpan]:
     """Each word ``page`` sets as filled glyph OUTLINES that reads as text (a unit, a grade), as a span.
 
-    A word that spells a number is a tick label (read by :func:`plots`), not text; a word the reader refuses is
-    absent. The span's size is the word's ink height and its font ``outline``.
+    A word that spells a number is a tick label (read by :func:`plots`), not text -- unless a ``min.`` or ``max.``
+    word follows it, when the two are one span (``12.5 min.``, read by :func:`document_lab.numbers.bound`); a word
+    the reader refuses is absent. The span's size is the word's ink height and its font ``outline``.
     """
     return _text_spans(page, _outline_words(page.paths))
 
 
 def _text_spans(page: Page, outlined: Sequence[tuple[float | None, str | None, BBox]]) -> list[TextSpan]:
-    return [
-        TextSpan(text, round(box.height, 1), 'outline', page.paths[0].provenance.at(bbox=box))
-        for value, text, box in outlined
-        if value is None and text is not None
-    ]
+    """The outlined words that read as text; a number set just left of a ``min.``/``max.`` word joins it (a bound)."""
+    out = []
+    for value, text, box in outlined:
+        if value is not None or text is None:
+            continue
+        if text.rstrip('.').lower() in {'min', 'max'}:
+            number = next(
+                (
+                    (v, b)
+                    for v, _, b in outlined
+                    if v is not None
+                    and b.y0 <= (box.y0 + box.y1) / 2 <= b.y1
+                    and -EDGE_TOL <= box.x0 - b.x1 <= BOUND_GAP * box.height
+                ),
+                None,
+            )
+            if number is not None:
+                text, box = f'{number[0]:g} {text}', union([number[1], box])  # noqa: PLW2901 -- the joined word
+        out.append(TextSpan(text, round(box.height, 1), 'outline', page.paths[0].provenance.at(bbox=box)))
+    return out
 
 
 def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, str | None, BBox]]:
-    """Each row of outlined glyphs with the number it reads as, else the text it reads as (each ``None`` if not)."""
+    """Each row of outlined (filled) glyphs with what it reads as against Helvetica (:func:`_read_words`)."""
     shapes = [
         p
         for p in paths
@@ -428,6 +619,7 @@ def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, str 
         and p.provenance.bbox is not None
         and len(p.points) > 2  # noqa: PLR2004 -- a fill needs an area
         and max(p.provenance.bbox.width, p.provenance.bbox.height) <= GLYPH_MAX
+        and min(p.provenance.bbox.width, p.provenance.bbox.height) >= SLIVER
     ]
     shapes.sort(key=lambda p: -p.provenance.bbox.width * p.provenance.bbox.height)
     glyphs: list[tuple[BBox, list[tuple[tuple[float, float], ...]]]] = []
@@ -439,25 +631,196 @@ def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, str 
             glyphs.append((box, [shape.points]))
         else:
             host[1].append(shape.points)
+    glyphs = _dotted([g for g in glyphs if not (len(g[1]) == 1 and _arrowhead(g[1][0], g[0]))])
+    return _read_words([Glyph(rasterise(polys, tuple(box)), tuple(box)) for box, polys in glyphs], HELVETICA)
+
+
+def _stroke_words(paths: Sequence[VectorPath]) -> tuple[list[tuple[float | None, str | None, BBox]], set[int]]:
+    """Each row of STROKE-FONT glyphs with what it reads as (as :func:`_outline_words`), and its lettering's path ids.
+
+    The ids are of the paths drawing the words that read: lettering inside a frame (``300 mT``) is never a curve.
+
+    TDK SIFERRIT sheets (N27, N30, N41, N72) draw each glyph as its outline stroked in hairline fragments. A glyph is
+    the fragments that bend (or close), each within ``STROKE_TOUCH`` of another's box, with every straight fragment
+    touching one of them (a crossbar joins the two bars of an ``H``); a straight fragment touching none is a tick or
+    a rule. A glyph larger than ``GLYPH_MAX`` is a curve, and a solid wedge read as no character an arrowhead
+    (:func:`_solid_triangle`). Each glyph is read against :data:`document_lab.glyphs.STROKE`.
+    """
+    glyphs, groups = [], []
+    for group in _stroke_groups(paths):
+        box = union([p.provenance.bbox for p in group])
+        if max(box.width, box.height) <= GLYPH_MAX:
+            drawn = [(p.points + p.points[:1]) if p.closed else p.points for p in group]
+            glyph = Glyph(stroke(drawn, max(p.width or 0.0 for p in group)), tuple(box))
+            if not (_solid_triangle(glyph.ink) and not _reads(glyph)):
+                glyphs.append(glyph)
+                groups.append(group)
+    words = _read_words(glyphs, STROKE)
+    read = [box for value, text, box in words if value is not None or text is not None]
+    lettering = {
+        id(path)
+        for glyph, group in zip(glyphs, groups, strict=True)
+        if any(box.contains(glyph.box[0], glyph.box[1]) and box.contains(glyph.box[2], glyph.box[3]) for box in read)
+        for path in group
+    }
+    return words, lettering
+
+
+def _stroke_groups(paths: Sequence[VectorPath]) -> list[list[VectorPath]]:
+    """The glyph-sized stroked fragments grouped as :func:`_stroke_words` describes, each group one glyph."""
+    lines = [
+        p
+        for p in paths
+        if p.stroke is not None
+        and p.provenance.bbox is not None
+        and max(p.provenance.bbox.width, p.provenance.bbox.height) <= GLYPH_MAX
+    ]
+    bent = sorted(
+        (p for p in lines if p.closed or len(p.points) > 2),  # noqa: PLR2004 -- a bend
+        key=lambda p: p.provenance.bbox.x0,
+    )
+    boxes = [p.provenance.bbox for p in bent]
+    starts = [b.x0 for b in boxes]
+    parent = list(range(len(bent)))
+
+    def root(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def touching(box: BBox) -> list[int]:
+        reach = STROKE_TOUCH
+        lo = bisect.bisect_left(starts, box.x0 - reach - GLYPH_MAX)
+        hi = bisect.bisect_right(starts, box.x1 + reach)
+        return [
+            i
+            for i in range(lo, hi)
+            if box.x0 - reach <= boxes[i].x1 and box.y0 - reach <= boxes[i].y1 and boxes[i].y0 <= box.y1 + reach
+        ]
+
+    members: dict[int, list[VectorPath]] = defaultdict(list)
+    for i, box in enumerate(boxes):
+        for j in touching(box):
+            parent[root(i)] = root(j)
+    for straight in (p for p in lines if not (p.closed or len(p.points) > 2)):  # noqa: PLR2004 -- a bend
+        touched = touching(straight.provenance.bbox)
+        for i in touched[1:]:
+            parent[root(i)] = root(touched[0])
+        if touched:
+            members[touched[0]].append(straight)
+    groups: dict[int, list[VectorPath]] = defaultdict(list)
+    for i, path in enumerate(bent):
+        groups[root(i)].extend([path, *members[i]])
+    return list(groups.values())
+
+
+def _solid_triangle(ink: np.ndarray) -> bool:
+    """Whether ``ink`` is a solid wedge: an arrowhead hatched with strokes (SIFERRIT N22 p3 sets one beside ``300``).
+
+    Solid along rows (or columns): every row's ink is one run, and the runs widen steadily from at most
+    ``WEDGE_TIP`` of the widest at one end to at least ``WEDGE_BASE`` of it at the other. A ``1``, ``L`` or ``T`` is
+    as solid, so only a glyph that also reads as no character is dropped as one (:func:`_stroke_words`).
+    """
+    for grid in (ink, ink.T):
+        runs = [np.flatnonzero(row) for row in grid if row.any()]
+        if len(runs) < 4 or any(run[-1] - run[0] + 1 != len(run) for run in runs):  # noqa: PLR2004 -- a wedge
+            continue
+        widths = np.array([len(run) for run in runs])
+        steps = np.diff(widths)
+        widest = widths.max()
+        steady = bool((steps >= -1).all() or (steps <= 1).all())
+        tip, base = sorted((widths[0], widths[-1]))
+        if steady and tip <= WEDGE_TIP * widest and base >= WEDGE_BASE * widest:
+            return True
+    return False
+
+
+def _reads(glyph: Glyph) -> bool:
+    """Whether ``glyph`` alone reads as a stroke-font character, by shape."""
+    try:
+        read_word([glyph], STROKE)
+    except UnreadableGlyph:
+        return False
+    return True
+
+
+def _read_words(glyphs: Sequence[Glyph], font: Font) -> list[tuple[float | None, str | None, BBox]]:
+    """Each row of ``glyphs`` with the number it reads as in ``font``, else the text (each ``None`` if not).
+
+    A row that reads as neither but holds a glyph that reads clearly as a letter is a word (a unit such as ``kW/m3``
+    whose ``/`` the reader lacks), never a tick label: it is left out, so it can neither refuse a frame nor be text.
+    """
     out: list[tuple[float | None, str | None, BBox]] = []
-    for word in _words([g[0] for g in glyphs]):
-        members = [glyphs[i] for i in word]
-        shapes = [Glyph(rasterise(polys, tuple(box)), tuple(box)) for box, polys in members]
+    for word in _words([BBox(*g.box) for g in glyphs]):
+        shapes = [glyphs[i] for i in word]
         value: float | None = None
         text: str | None = None
         try:
-            value = read_number(shapes)
+            value = read_number(shapes, font)
         except UnreadableGlyph:
             with contextlib.suppress(UnreadableGlyph):
-                text = read_word(shapes)
-        out.append((value, text, union([g[0] for g in members])))
+                text = read_word(shapes, font)
+        if value is None and text is None and has_letter(shapes, font):
+            continue
+        out.append((value, text, union([BBox(*g.box) for g in shapes])))
+    return out
+
+
+def _arrowhead(points: Sequence[tuple[float, float]], box: BBox) -> bool:
+    """Whether a glyph's one fill is a triangle: an arrowhead (SIFERRIT N48 p4 heads its axis-title arrow so).
+
+    Only a fill with no hole: a ``4``'s counter is a triangle too. Corners closer than ``CORNER_MERGE`` of the
+    fill's larger side are one (a head's apex is cut 0.3 points wide).
+    """
+    reach = CORNER_MERGE * max(box.width, box.height)
+    corners: list[tuple[float, float]] = []
+    for x, y in points:
+        if all(math.hypot(x - cx, y - cy) > reach for cx, cy in corners):
+            corners.append((x, y))
+    return len(corners) == 3  # noqa: PLR2004 -- a triangle
+
+
+def _dotted(
+    glyphs: list[tuple[BBox, list[tuple[tuple[float, float], ...]]]],
+) -> list[tuple[BBox, list[tuple[tuple[float, float], ...]]]]:
+    """Each small mark just above a taller glyph whose extent across holds its centre, joined to it (an ``i``'s dot).
+
+    Just above is a gap of at most ``DOT_GAP`` of the glyph's height; the joined glyph is read as one shape.
+    """
+    marks = {
+        i
+        for i, (box, _) in enumerate(glyphs)
+        if any(
+            box.width <= other.width + EDGE_TOL
+            and box.height < MARK_HEIGHT_PT * other.height
+            and other.x0 <= (box.x0 + box.x1) / 2 <= other.x1
+            and 0 <= other.y0 - box.y1 <= DOT_GAP * other.height
+            for j, (other, _) in enumerate(glyphs)
+            if j != i
+        )
+    }
+    out = [(box, list(polys)) for i, (box, polys) in enumerate(glyphs) if i not in marks]
+    for i in marks:
+        box, polys = glyphs[i]
+        cx = (box.x0 + box.x1) / 2
+        k = min(
+            (k for k, (other, _) in enumerate(out) if other.x0 <= cx <= other.x1 and other.y0 >= box.y1),
+            key=lambda k: out[k][0].y0 - box.y1,
+            default=None,
+        )
+        if k is None:  # its host was itself a mark (a colon's upper dot over the lower): keep it
+            out.append((box, list(polys)))
+            continue
+        out[k] = (union([out[k][0], box]), [*out[k][1], *polys])
     return out
 
 
 def _words(boxes: Sequence[BBox]) -> list[list[int]]:
     """Glyph boxes grouped into words, as indices left to right: one row, gaps under ``WORD_GAP`` of the height.
 
-    A raised smaller glyph (an exponent) starts a word of its own: raised above the word's median glyph bottom.
+    A raised smaller glyph (an exponent) starts a word of its own: raised above the word's median glyph bottom. A
+    raised MARK (taller than wide, at most ``MARK_HEIGHT_PT`` of the word's height: a prime in ``mu'``) does not.
     """
     words: list[list[int]] = []
     for i in sorted(range(len(boxes)), key=lambda k: boxes[k].x0):
@@ -468,7 +831,10 @@ def _words(boxes: Sequence[BBox]) -> list[list[int]]:
             same_row = wb.y0 <= cy <= wb.y1 or box.y0 <= (wb.y0 + wb.y1) / 2 <= box.y1
             base = float(np.median([boxes[k].y1 for k in word]))  # a descender (``g``) is not the baseline
             raised = box.height < RAISED * wb.height and box.y1 < base - (1 - RAISED) * wb.height
-            if same_row and not raised and -EDGE_TOL <= box.x0 - wb.x1 <= WORD_GAP * max(wb.height, box.height):
+            prime = box.height > box.width and box.height <= MARK_HEIGHT_PT * wb.height and wb.y0 < box.y1 < wb.y1
+            if (prime or (same_row and not raised)) and -EDGE_TOL <= box.x0 - wb.x1 <= WORD_GAP * max(
+                wb.height, box.height
+            ):
                 word.append(i)
                 break
         else:
@@ -575,14 +941,14 @@ def _exponent_of(i: int, spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> 
         if not raised:
             continue
         gap = ob.x0 - bb.x1
-        if -EDGE_TOL <= gap <= EDGE_TOL:
-            return j, int(power)
         minus = _minus_before(ob, spans, ())
         if 0 < gap <= DASH_MAX + EDGE_TOL and minus is not None and minus.x0 >= bb.x1 - EDGE_TOL and power > 0:
             return j, -int(power)
         dashed = any(bb.x1 - EDGE_TOL <= d.lo and d.hi <= ob.x0 + EDGE_TOL and bb.y0 <= d.at <= ob.y1 for d in dashes)
         if 0 < gap <= DASH_MAX + EDGE_TOL and dashed and power > 0:
             return j, -int(power)
+        if -EDGE_TOL <= gap <= max(EDGE_TOL, WORD_GAP * base.size):  # TDK sets the exponent a space apart (N48 p4)
+            return j, int(power)
     return None
 
 
@@ -757,18 +1123,83 @@ def _misfit(pos: np.ndarray, target: np.ndarray) -> float:
 
 
 def _curve_paths(frame: BBox, paths: Sequence[VectorPath]) -> list[VectorPath]:
-    """Stroked open paths inside the frame that are not a single tick mark, grid line or frame edge."""
+    """Stroked open paths inside the frame (clipped to it) that are not a single tick mark, grid line or frame edge."""
     out = []
     for path in paths:
         if path.stroke is None or path.closed or len(path.points) < 2:  # noqa: PLR2004
             continue
-        if not all(frame.contains(x, y, tol=EDGE_TOL) for x, y in path.points):
-            continue
-        rules = _edges([path])
-        if len(path.points) == 2 and rules and _is_rule(rules[0], frame):  # noqa: PLR2004
-            continue
-        out.append(path)
+        for piece in _clipped(path, frame):
+            rules = _edges([piece])
+            if len(piece.points) == 2 and rules and _is_rule(rules[0], frame):  # noqa: PLR2004
+                continue
+            out.append(piece)
     return out
+
+
+def _clipped(path: VectorPath, frame: BBox) -> list[VectorPath]:
+    """The runs of ``path`` inside the frame, each cut where it crosses the frame's edge.
+
+    A sheet draws a curve past its frame and clips it there (DMEGC): the part inside is the curve. A path wholly
+    inside (to ``EDGE_TOL``) is returned as it is.
+    """
+    if all(frame.contains(x, y, tol=EDGE_TOL) for x, y in path.points):
+        return [path]
+    box = frame
+    runs: list[list[tuple[float, float]]] = []
+    current: list[tuple[float, float]] = []
+    for a, b in itertools.pairwise(path.points):
+        cut = _clip_segment(a, b, box)
+        if cut is None:
+            if current:
+                runs.append(current)
+            current = []
+            continue
+        start, end = cut
+        if current and current[-1] == start:
+            current.append(end)
+        else:
+            if current:
+                runs.append(current)
+            current = [start, end]
+        if end != b:
+            runs.append(current)
+            current = []
+    if current:
+        runs.append(current)
+    return [
+        VectorPath(tuple(run), path.stroke, path.width, path.dashes, False, path.provenance.at(bbox=_points_box(run)))  # noqa: FBT003
+        for run in runs
+        if len(run) >= 2 and run[0] != run[-1]  # noqa: PLR2004 -- a curve needs two points
+    ]
+
+
+def _clip_segment(
+    a: tuple[float, float], b: tuple[float, float], box: BBox
+) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """The part of segment ``a``-``b`` inside ``box`` (Liang-Barsky), its ends kept exact where they are inside."""
+    (x0, y0), (x1, y1) = a, b
+    dx, dy = x1 - x0, y1 - y0
+    lo, hi = 0.0, 1.0
+    for p, q in ((-dx, x0 - box.x0), (dx, box.x1 - x0), (-dy, y0 - box.y0), (dy, box.y1 - y0)):
+        if p == 0:
+            if q < 0:
+                return None
+            continue
+        t = q / p
+        if p < 0:
+            lo = max(lo, t)
+        else:
+            hi = min(hi, t)
+    if lo > hi:
+        return None
+    start = a if lo == 0 else (x0 + lo * dx, y0 + lo * dy)
+    end = b if hi == 1 else (x0 + hi * dx, y0 + hi * dy)
+    return start, end
+
+
+def _points_box(points: Sequence[tuple[float, float]]) -> BBox:
+    xs, ys = [p[0] for p in points], [p[1] for p in points]
+    return BBox(min(xs), min(ys), max(xs), max(ys))
 
 
 def _joined(paths: Sequence[VectorPath]) -> list[VectorPath]:
@@ -860,11 +1291,14 @@ def raster_plot(
     """The plot in a RASTER image: its frame, axes calibrated from its tick labels, and its curves traced.
 
     The frame is found as in :func:`plots`, from the image's long dark (not coloured) horizontal and vertical pixel
-    runs: the largest with two or more label glyph rows below it and left of it (a drop shadow frames none). A
+    runs: of those with two or more aligned label glyph rows below it and left of it (a drop shadow frames none), the
+    one whose fewer-labelled axis READS the most labels, then has the most, then the largest (a border box around the
+    figure, with a caption's numbers below it, is not the plot's frame). A
     tick label is a row of ink glyphs below the frame (x) or left of it (y), read by :mod:`document_lab.glyphs`; one
     the reader refuses raises :class:`UnreadableTickLabels` -- unless the caller states the axis' labelled values
     (``x_values`` left to right, ``y_values`` bottom to top), which are then paired with the label positions found
-    (their counts must agree). Positions snap to tick marks and grid lines as for vector plots.
+    and checked against those that read (:func:`_stated`). Positions snap to tick marks and grid lines as for vector
+    plots.
 
     Curves are the frame's ink less its grid lines (rows or columns inked across ``GRID_INK`` of it). Coloured ink is
     one curve per ``HUE_SECTOR`` (so two crossing curves of two colours stay two); dark ink is one curve per
@@ -883,16 +1317,21 @@ def raster_plot(
     chroma = rgb.max(axis=2) - rgb.min(axis=2)
     ink = (1 - rgb.mean(axis=2) > INK_LEVEL) | (chroma > CHROMA_MIN)
     edges = _pixel_edges(ink & (chroma <= CHROMA_MIN), box, scale)  # a frame is drawn dark, not in colour
-    for frame in sorted(_frames(edges), key=lambda f: -f.width * f.height):
+    candidates = []
+    for frame in _frames(edges):
         labels, refusals = _raster_labels(ink, 1 - rgb.mean(axis=2), frame, box, scale)
-        if len(_x_labels(frame, labels)) >= 2 and len(_y_labels(frame, labels)) >= 2:  # noqa: PLR2004 -- a line
-            break
-    else:
+        rows = [_aligned(_x_labels(frame, labels), vertical=False), _aligned(_y_labels(frame, labels), vertical=True)]
+        if min(len(r) for r in rows) >= 2:  # noqa: PLR2004 -- a line needs two points
+            read = min(sum(not math.isnan(lb.value) for lb in r) for r in rows)
+            rank = (read, min(len(r) for r in rows), frame.width * frame.height)
+            candidates.append((rank, frame, labels, refusals))
+    if not candidates:
         msg = (
             f'no plot frame in the raster at {tuple(round(v, 1) for v in box)}: no long lines meet at a corner '
             'with two or more labels below it and left of it'
         )
         raise NoPlotFrame(msg)
+    _, frame, labels, refusals = max(candidates, key=lambda c: c[0])
     found = {'labels': labels, 'refusals': refusals, 'edges': edges}
     x_axis = _raster_axis('x', frame, values=x_values, scale=x_scale, **found)
     y_axis = _raster_axis('y', frame, values=y_values, scale=y_scale, **found)
@@ -1021,22 +1460,37 @@ def _raster_axis(
     near = _y_labels(frame, labels) if vertical else _x_labels(frame, labels)
     row = sorted(_aligned(near, vertical=vertical), key=lambda lb: (lb.box.y0 + lb.box.y1) if vertical else lb.box.x0)
     centre = (lambda b: (b.y0 + b.y1) / 2) if vertical else (lambda b: (b.x0 + b.x1) / 2)
+    marks = _marks(frame, edges, vertical=not vertical)
     if values is not None:
-        ordered = row[::-1] if vertical else row  # values run bottom to top, positions top to bottom
-        if len(ordered) != len(values):
-            msg = f'{name} axis: {len(ordered)} labels found, {len(values)} values stated'
+        return _fit(_stated(name, row, values, marks, centre), scale)
+    ticks = [(centre(lb.box), lb.value) for lb in row if not math.isnan(lb.value)]
+    if len(ticks) < 2:  # noqa: PLR2004 -- a line needs two points
+        refused = next((refusals[labels.index(lb)] for lb in row if math.isnan(lb.value)), None)
+        msg = (
+            f'{name} axis: {len(ticks)} of {len(row)} labels read; state them '
+            f'({name}_values=) or read the plot at a finer resolution'
+        )
+        raise UnreadableTickLabels(msg) from refused
+    return _fit(_snap(ticks, marks), scale)
+
+
+def _stated(
+    name: str, row: Sequence[_Label], values: Sequence[float], marks: Sequence[float], centre: Callable[[BBox], float]
+) -> tuple[tuple[float, float], ...]:
+    """The caller's ``values`` (left to right, bottom to top) paired with the axis' labels, snapped to ``marks``.
+
+    There must be as many labels as values, and every label that DID read must read as its stated value: a stated
+    value is checked against what the page shows, never trusted blind. Else :class:`UnreadableTickLabels` is raised.
+    """
+    ordered = list(row[::-1] if name == 'y' else row)  # values run bottom to top, positions top to bottom
+    if len(ordered) != len(values):
+        msg = f'{name} axis: {len(ordered)} labels found, {len(values)} values stated'
+        raise UnreadableTickLabels(msg)
+    for lb, v in zip(ordered, values, strict=True):
+        if not math.isnan(lb.value) and not math.isclose(lb.value, v, rel_tol=1e-9, abs_tol=0.0):
+            msg = f'{name} axis: the label at {centre(lb.box):.1f} reads {lb.value:g}, the stated value is {v:g}'
             raise UnreadableTickLabels(msg)
-        ticks = [(centre(lb.box), float(v)) for lb, v in zip(ordered, values, strict=True)]
-    else:
-        ticks = [(centre(lb.box), lb.value) for lb in row if not math.isnan(lb.value)]
-        if len(ticks) < 2:  # noqa: PLR2004 -- a line needs two points
-            refused = next((refusals[labels.index(lb)] for lb in row if math.isnan(lb.value)), None)
-            msg = (
-                f'{name} axis: {len(ticks)} of {len(row)} labels read; state them '
-                f'({name}_values=) or read the plot at a finer resolution'
-            )
-            raise UnreadableTickLabels(msg) from refused
-    return _fit(_snap(ticks, _marks(frame, edges, vertical=not vertical)), scale)
+    return _snap([(centre(lb.box), float(v)) for lb, v in zip(ordered, values, strict=True)], marks)
 
 
 def _curve_masks(

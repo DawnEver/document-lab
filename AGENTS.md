@@ -11,7 +11,7 @@ consumer's vocabulary here -- schemas live in consumers. Modules and usage: `REA
 
 - Dependency arrow: `paper`, `ai` -> `extract`; `paper` -> `markdown`, `regions`, `pdf`; `per_page` -> `markdown`, `regions`,
   `pdf`; `markdown`, `regions` -> `layout` -> `ir`;
-  `extract` -> `plot`, `pdf`, `html` -> `numbers`, `ir`; `plot` -> `glyphs`; `strokes` -> `plot`, `ir`; `ocr` imports
+  `extract` -> `plot`, `pdf`, `html` -> `numbers`, `ir`; `plot` -> `glyphs` -> `strokefont`; `strokes` -> `plot`, `ir`; `ocr` imports
   nothing of ours; `capture` is apart (`cli` -> `session` -> `stitch`; `cli` -> `desktop`, `export`, `ocr`, `join` ->
   `export`, `stitch`), imported only by `__main__`. OCR is `ocr`'s alone: no other module calls Tesseract. The base imports
   without `ai_lab` (`tests/unit/test_ai.py` proves it in a subprocess).

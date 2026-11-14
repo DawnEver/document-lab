@@ -330,10 +330,10 @@ def capture(
     scroll: Callable[[int], None] | None,
     sink: Callable[[np.ndarray], None],
     *,
-    limits: Limits = Limits(),  # noqa: B008 -- frozen
+    limits: Limits = Limits(),
     match: Match = Match(),  # noqa: B008 -- frozen
-    settling: Settling = Settling(),  # noqa: B008 -- frozen
-    pace: Pace = Pace(),  # noqa: B008 -- frozen
+    settling: Settling = Settling(),
+    pace: Pace = Pace(),
     drop_overlays: bool = False,
     aborted: Callable[[], bool] = _never,
     paused: Callable[[], bool] = _never,
@@ -407,7 +407,7 @@ def follow(
     *,
     aborted: Callable[[], bool],
     interval: float = 0.1,
-    limits: Limits = Limits(),  # noqa: B008 -- frozen
+    limits: Limits = Limits(),
     match: Match = Match(),  # noqa: B008 -- frozen
     drop_overlays: bool = False,
     paused: Callable[[], bool] = _never,

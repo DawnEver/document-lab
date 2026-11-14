@@ -14,8 +14,15 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 | `numbers` | the one number grammar: `parse_number` (whole text) and `first_number` (a cell's leading value) |
 | `extract` | typed values against the caller's `Schema` from key-value (`from_rows`) or column (`from_columns`) tables |
 | `ai` | `ask(responder, schema, page_or_table)`: the same values read by a model through ai-lab (`[ai]` extra) |
+| `ocr` | `document-lab ocr <pdf> [-o out] [--lang eng]`: a Tesseract text layer over every page that is one image and has no text; the pixels kept exactly, a page never laid twice |
+| `layout` | `lines(page)` / `ordered(lines)`: a page's spans as lines in reading order (columns, a clause number with its title); `wordy(text)` tells words from OCR noise |
+| `markdown` | `to_markdown(doc)` / `page_markdowns(doc)`: the IR as markdown -- headings, paragraphs -- whole, or each page standing alone |
+| `regions` | `regions(page, body)`: a page's figures, tables and equations from its text alone -- a caption and the prose around it, an equation number and the noise beside it -- so an OCR'd capture has them too |
+| `per_page` | `document-lab pages <pdf> <out>`: a PDF as `page-NNN.md` (its text) and `page-NNN.png` (the page as seen, a captured page's own pixels) per page, each region cut out (`page-NNN-figure-2.png`, `-table-1`, `-equation-a-1`) and linked where its caption or number is, and `INDEX.md` -- for standards, manuals and data sheets, cited by clause on their page. OCR'd text is for finding; a formula's or a table's values are read off its picture |
 | `paper` | `document-lab paper <pdf> <out>`: a paper as per-section markdown (written from the IR, or marker-pdf on a GPU) plus cropped figures/tables/equations; a table-of-contents page opens no sections, and a page that is one picture (a screen-captured or scanned PDF) is linked whole, once, never cropped into copies |
-| `capture` | `document-lab capture <out.pdf>`: any window or screen region, scrolled to its end and stitched losslessly, to a PDF -- the stage before `read_pdf` (Windows, `[capture]` extra); `--resume` and `capture-merge` join captures where they overlap |
+| `capture` | `document-lab capture <out.pdf>`: any window or screen region, scrolled to its end and stitched losslessly, to a PDF of page images -- the stage before `ocr` (Windows, `[capture]` extra; `--ocr LANGS` runs `ocr` on the result); `--resume` and `capture-merge` join captures where they overlap |
+
+A screen-captured standard, end to end: `capture std.pdf` -> `ocr std.pdf` -> `pages std.pdf std/`.
 
 ```python
 from document_lab.pdf import read_pdf
@@ -107,8 +114,8 @@ mean squared difference of every row at every offset, by FFT. An offset that is 
 taken from the frame that showed it least covered. `--ignore-top/--ignore-bottom` exclude chrome that changes as it
 scrolls. PDF: `--page-height` (pixels; default A4-shaped, `0` one page; `auto` finds the reader's page separators --
 rows that recur, equally spaced, from the first page to the end, not a viewer border repeating at the scroll step --
-and starts each page on one, A4-shaped if there are none, and says which; `capture.pages.page_rhythm`), `--dpi`, `--ocr [LANGS]` (Tesseract, default
-`eng`), `--png`; page size and OCR are checked before the capture starts.
+and starts each page on one, A4-shaped if there are none, and says which; `capture.pages.page_rhythm`), `--dpi`, `--ocr [LANGS]` (the finished
+PDF through `ocr`, default `eng`), `--png`; page size and Tesseract are checked before the capture starts.
 
 Resuming: a capture that stopped part way -- Finish, a lost view, a crash -- goes on with `--resume part.pdf`: bring
 the view to anywhere overlapping where it ended and Start; a start whose area is not as wide, or whose view shows

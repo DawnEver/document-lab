@@ -1,12 +1,13 @@
-"""The ``ocr`` part: a captured image of known words, exported with a Tesseract text layer, reads back as those
-words on pages of the asked size. Its own part, never tests/base: it needs Tesseract with English data, and FAILS
+"""The ``ocr`` part: a captured image of known words, given a Tesseract text layer, reads back as those words, its
+pixels and page size unchanged. Its own part, never tests/base: it needs Tesseract with English data, and FAILS
 naming what is missing where there is none; it is never skipped."""
 
 import numpy as np
 import pymupdf
 import pytest
 
-from document_lab.capture.export import check_ocr, to_pdf
+from document_lab.capture.export import to_pdf
+from document_lab.ocr import check, text_layer
 from document_lab.pdf import read_pdf
 
 pytestmark = pytest.mark.ocr
@@ -24,14 +25,18 @@ def rendered(words: tuple[str, ...]) -> np.ndarray:
     return np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)[..., :3].copy()
 
 
-def test_the_text_layer_reads_back(tmp_path):
-    check_ocr('eng')
+def test_the_text_layer_reads_back_over_the_same_pixels(tmp_path):
+    check('eng')
     image = rendered(WORDS)
-    out = to_pdf(image, tmp_path / 'ocr.pdf', page_height=0, dpi=96, ocr='eng')
-    with pymupdf.open(out) as doc:
-        assert doc.page_count == 1
-        assert doc[0].rect.width == pytest.approx(image.shape[1] * 72 / 96, abs=1)
-        assert doc[0].rect.height == pytest.approx(image.shape[0] * 72 / 96, abs=1)
-    text = ' '.join(span.text for page in read_pdf(out, tables=False).pages for span in page.spans).casefold()
+    capture = to_pdf(image, tmp_path / 'capture.pdf', page_height=0, dpi=96)
+    assert text_layer(capture, tmp_path / 'ocr.pdf') == 1
+    with pymupdf.open(capture) as before, pymupdf.open(tmp_path / 'ocr.pdf') as after:
+        assert after.page_count == 1
+        assert after[0].rect == before[0].rect
+        ((xref, *_),) = after[0].get_images()
+        pix = pymupdf.Pixmap(after, xref)
+        assert np.array_equal(np.frombuffer(pix.samples, dtype=np.uint8).reshape(image.shape), image)
+    text = ' '.join(span.text for page in read_pdf(tmp_path / 'ocr.pdf', tables=False).pages for span in page.spans)
     for word in WORDS:
-        assert word in text
+        assert word in text.casefold()
+    assert text_layer(tmp_path / 'ocr.pdf', tmp_path / 'again.pdf') == 0  # a page with text is never laid twice

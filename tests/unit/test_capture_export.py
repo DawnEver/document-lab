@@ -11,7 +11,6 @@ from document_lab.capture.export import (
     PngWriter,
     a4_page_height,
     check_name,
-    check_ocr,
     save_png,
     to_pdf,
 )
@@ -66,22 +65,6 @@ def test_png_keeps_the_pixels(tmp_path):
 def no_tesseract():
     msg = 'No tessdata specified and Tesseract is not installed'
     raise RuntimeError(msg)
-
-
-def test_ocr_without_tesseract_refuses_before_writing(tmp_path, monkeypatch):
-    monkeypatch.setattr(pymupdf, 'get_tessdata', no_tesseract)
-    out = tmp_path / 'f.pdf'
-    with pytest.raises(OSError, match='Tesseract'):
-        to_pdf(image(50), out, ocr='eng')
-    assert not out.exists()
-
-
-def test_ocr_without_the_language_refuses(tmp_path, monkeypatch):
-    (tmp_path / 'eng.traineddata').write_bytes(b'')
-    monkeypatch.setattr(pymupdf, 'get_tessdata', lambda: str(tmp_path))
-    check_ocr('eng')
-    with pytest.raises(OSError, match='chi_sim'):
-        check_ocr('chi_sim+eng')
 
 
 def test_rows_written_in_pieces_make_the_same_pdf_across_incremental_saves(tmp_path):

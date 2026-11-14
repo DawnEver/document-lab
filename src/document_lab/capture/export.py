@@ -6,9 +6,8 @@
 they come and fills the height in at the end. Both write ``<name>.part`` beside the target and rename it into place
 when closed -- also when the capture stopped early -- so a reader never sees a half-written file under the real name.
 
-Sizes are in pixels; ``dpi`` turns them into PDF points (72 per inch). ``ocr`` names the Tesseract languages
-(``'eng'``, ``'chi_sim+eng'``) of an invisible text layer laid over each page, so `document_lab.pdf.read_pdf` can read
-the words back; :func:`check_ocr` refuses a missing Tesseract or language before any work is spent.
+Sizes are in pixels; ``dpi`` turns them into PDF points (72 per inch). The pages are images only: a text layer
+is `document_lab.ocr`'s, laid over the finished PDF.
 """
 
 from __future__ import annotations
@@ -33,7 +32,6 @@ __all__ = [
     'PngWriter',
     'a4_page_height',
     'check_name',
-    'check_ocr',
     'check_page',
     'save_png',
     'to_pdf',
@@ -82,19 +80,6 @@ def check_name(path: Path) -> None:
         raise ValueError(msg)
 
 
-def check_ocr(languages: str) -> None:
-    """Refuse, naming what is missing, unless Tesseract and every ``+``-joined language in ``languages`` exist."""
-    try:
-        tessdata = Path(pymupdf.get_tessdata())
-    except RuntimeError as exc:
-        msg = f'OCR needs Tesseract (and TESSDATA_PREFIX if it is not on PATH): {exc}'
-        raise OSError(msg) from exc
-    missing = [lang for lang in languages.split('+') if not (tessdata / f'{lang}.traineddata').is_file()]
-    if missing:
-        msg = f'Tesseract in {tessdata} has no language data for {missing}'
-        raise OSError(msg)
-
-
 def check_page(width: int, page_height: int | None, dpi: float) -> None:
     """Refuse a page size no PDF reader must accept; ``page_height`` 0 (one page) is checked when it is written."""
     step = a4_page_height(width) if page_height is None else page_height
@@ -120,16 +105,13 @@ class PdfWriter:
         *,
         page_height: int | Literal['auto'] | None = None,
         dpi: float = SCREEN_DPI,
-        ocr: str | None = None,
     ) -> None:
-        """Check the page size and OCR before anything is written."""
-        self.path, self.width, self.dpi, self.ocr = path, width, dpi, ocr
+        """Check the page size before anything is written."""
+        self.path, self.width, self.dpi = path, width, dpi
         self.auto = page_height == 'auto'
         self.step = a4_page_height(width) if page_height is None or self.auto else int(page_height)
         if self.step:
             check_page(width, self.step, dpi)
-        if ocr:
-            check_ocr(ocr)
         self.rhythm: Rhythm | None = None
         self.pages = 0
         self._rows: list[np.ndarray] = []
@@ -191,13 +173,8 @@ class PdfWriter:
         if self._doc is None:
             self._doc = pymupdf.open(_part(self.path)) if self._saved else pymupdf.open()
         pix = _pixmap(image)
-        if self.ocr:
-            pix.set_dpi(round(self.dpi), round(self.dpi))  # the OCR page is sized from the pixmap's resolution
-            with pymupdf.open('pdf', pix.pdfocr_tobytes(language=self.ocr)) as page_pdf:
-                self._doc.insert_pdf(page_pdf)
-        else:
-            rect = pymupdf.Rect(0, 0, pix.width * 72 / self.dpi, pix.height * 72 / self.dpi)
-            self._doc.new_page(width=rect.width, height=rect.height).insert_image(rect, pixmap=pix)
+        rect = pymupdf.Rect(0, 0, pix.width * 72 / self.dpi, pix.height * 72 / self.dpi)
+        self._doc.new_page(width=rect.width, height=rect.height).insert_image(rect, pixmap=pix)
         self.pages += 1
         if self.pages % PAGES_PER_SAVE == 0:
             self._save()
@@ -291,10 +268,9 @@ def to_pdf(
     *,
     page_height: int | Literal['auto'] | None = None,
     dpi: float = SCREEN_DPI,
-    ocr: str | None = None,
 ) -> Path:
     """Write ``image`` (``(h, w, 3)`` uint8) to ``path`` through a :class:`PdfWriter` and return it."""
-    with PdfWriter(path, image.shape[1], page_height=page_height, dpi=dpi, ocr=ocr) as pdf:
+    with PdfWriter(path, image.shape[1], page_height=page_height, dpi=dpi) as pdf:
         pdf.write(image)
     return path
 

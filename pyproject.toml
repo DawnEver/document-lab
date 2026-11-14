@@ -92,18 +92,11 @@ trunk = 'main'
 sessions = ['integrate/main']
 prune_merged = true
 
-[tool.lab_commons.hpc]
-# PIN + FRESHNESS (user ruling 2026-10-17): the venv is exactly the committed lock, and the lock keys it.
-install = 'uv sync --frozen --extra dev'
-dependency_inputs = ['pyproject.toml', 'uv.lock']
-source_roots = ['src']
-collect = 'tests'
-
 [tool.dev_lab.parts]
 output = "output/logs"
 # No resource exists on a hosted runner: `gpu` needs a CUDA GPU and the gpu extra, `vendor` a vendor PDF that may
-# never be committed, `ocr` Tesseract with English data. Each is produced
-# where it exists, by hand; base never selects them.
+# never be committed, `ocr` Tesseract with English data. This repo's tests run on GitHub Actions alone (user ruling
+# 2026-11-11), so no part here produces them: they stay marked, and a consumer's unified run selects them by marker.
 unproduced = ["gpu", "vendor", "ocr"]
 
 [tool.lab_commons.tests]
@@ -129,7 +122,7 @@ breakglass = ["app:5704921", "role:admin"]  # the ops App merges break-glass; ad
 
 # The setup every job shares, with the base's `--all-extras` narrowed to the extras a HOSTED runner uses: `dev`
 # (which carries `ai`). `gpu` is an unproduced part ([tool.dev_lab.parts]); installing it on a hosted runner only
-# built marker-pdf's pillow from source and failed `parts` (e0b6e02). The same install [tool.lab_commons.hpc] runs.
+# built marker-pdf's pillow from source and failed `parts` (e0b6e02).
 [tool.dev_lab.ci._steps]
 setup = [
     { uses = "actions/checkout@v4", with = { ref = "${{ env.HEAD_SHA }}", fetch-depth = 0 } },

@@ -26,9 +26,12 @@ def _parser() -> argparse.ArgumentParser:
     ocr.add_argument('pdf', type=Path)
     ocr.add_argument('-o', '--out', type=Path, help='the PDF to write (default: the PDF itself, replaced when whole)')
     ocr.add_argument('--lang', default='eng', help="Tesseract's languages, '+'-joined (default eng; e.g. chi_sim+eng)")
-    pages = sub.add_parser('pages', help='a PDF as page-NNN.md and page-NNN.png per page, and INDEX.md')
+    pages = sub.add_parser(
+        'pages',
+        help='a PDF as page-NNN.md and page-NNN.png per page, its regions cut out, and INDEX.md (a directory or a .zip)',
+    )
     pages.add_argument('pdf', type=Path)
-    pages.add_argument('out', type=Path, help='the directory to write the pages into')
+    pages.add_argument('out', type=Path, help='the directory to write the pages into, or a .zip archive of them')
     paper = sub.add_parser('paper', help='a paper PDF to per-section markdown and cropped figures')
     paper.add_argument('pdf', type=Path)
     paper.add_argument('out', type=Path, help='the directory to write the paper layout into')

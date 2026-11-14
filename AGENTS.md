@@ -2,13 +2,15 @@
 
 Documents (PDF first, HTML tables second) to typed data that carries its provenance. The pipeline, one stage a
 module: `capture` makes a PDF of page images from the screen (the long screenshot); `ocr` lays a Tesseract text layer
-over it; `pdf` reads any PDF into the IR; `markdown` writes the IR as markdown; `per_page` (`document-lab pages`) and
-`paper` lay a document out -- page by page (standards, manuals) or by section (papers). Generic and domain-free: no
+over it; `pdf` reads any PDF into the IR; `layout` makes a page's lines and reading order, on which `markdown`
+writes it as markdown and `regions` finds its figures, tables and equations from its text alone; `per_page`
+(`document-lab pages`) and `paper` lay a document out -- page by page (standards, manuals) or by section (papers). Generic and domain-free: no
 consumer's vocabulary here -- schemas live in consumers. Modules and usage: `README.md`.
 
 ## Rules here
 
-- Dependency arrow: `paper`, `ai` -> `extract`; `paper`, `per_page` -> `markdown`, `pdf`; `markdown` -> `ir`;
+- Dependency arrow: `paper`, `ai` -> `extract`; `paper` -> `markdown`, `pdf`; `per_page` -> `markdown`, `regions`,
+  `pdf`; `markdown`, `regions` -> `layout` -> `ir`;
   `extract` -> `plot`, `pdf`, `html` -> `numbers`, `ir`; `plot` -> `glyphs`; `strokes` -> `plot`, `ir`; `ocr` imports
   nothing of ours; `capture` is apart (`cli` -> `session` -> `stitch`; `cli` -> `desktop`, `export`, `ocr`, `join` ->
   `export`, `stitch`), imported only by `__main__`. OCR is `ocr`'s alone: no other module calls Tesseract. The base imports

@@ -36,3 +36,29 @@ def test_a_page_that_is_one_image_keeps_its_own_pixels(tmp_path):
     assert done.textless == (1,)
     pix = pymupdf.Pixmap(str(tmp_path / 'out' / 'page-001.png'))
     assert np.array_equal(np.frombuffer(pix.samples, dtype=np.uint8).reshape(90, 70, 3), image)
+
+
+def test_figures_tables_and_equations_are_cut_out_and_linked_where_their_text_is(tmp_path):
+    prose = 'The rated output is the mechanical power available at the shaft and shall be expressed in watts.'
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=600, height=840)
+        page.insert_text((50, 100), prose, fontsize=10)
+        page.draw_rect(pymupdf.Rect(150, 140, 450, 320), color=(0, 0, 0))
+        page.insert_text((200, 360), 'Figure 2 - Short-time duty', fontsize=10)
+        page.insert_text((50, 420), prose, fontsize=10)
+        page.insert_text((230, 470), 'U = R I', fontsize=20)
+        page.insert_text((520, 470), '(3)', fontsize=10)
+        page.insert_text((50, 520), prose, fontsize=10)
+        page.insert_text((200, 600), 'Table 1 - Preferred voltage ratings', fontsize=10)
+        page.insert_text((120, 630), 'Rated voltage', fontsize=9)
+        doc.save(tmp_path / 'std.pdf')
+    write_pages(tmp_path / 'std.pdf', tmp_path / 'out')
+    out = tmp_path / 'out'
+    for name in ('page-001-figure-2.png', 'page-001-equation-3.png', 'page-001-table-1.png'):
+        assert (out / name).is_file(), name
+    md = (out / 'page-001.md').read_text(encoding='utf-8')
+    figure = md.index('![Figure 2](page-001-figure-2.png)')
+    assert md.index('Figure 2 - Short-time duty') < figure < md.index(prose, md.index('Figure 2'))
+    assert '![(3)](page-001-equation-3.png)' in md
+    assert '![Table 1](page-001-table-1.png) (continues on the next page)' in md
+    assert 'Figure 2, (3), Table 1' in (out / 'INDEX.md').read_text(encoding='utf-8')

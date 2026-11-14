@@ -74,6 +74,8 @@ class PlotSpec:
     border: pymupdf.Rect | None = None
     grid_reach: float = 1.0  # the fraction of the frame width a horizontal grid line spans (a legend cuts it)
     stray: Sequence[tuple[str, float, float, float]] = ()  # extra text: (text, x, y, size)
+    #: A y-axis title set ROTATED 90 degrees (reading upward) with its baseline at x, starting at y: (text, x, y, size).
+    y_title: tuple[str, float, float, float] | None = None
     fragments: int = 1  # each curve drawn as this many polylines meeting end to end, every other one reversed
     #: Legend entries inside the frame's top right: (label, colour, PDF dash string or None), a sample line each.
     legend: Sequence[tuple[str, tuple[float, float, float], str | None]] = ()
@@ -325,6 +327,9 @@ def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
     _y_axis(page, spec)
     for text, x, y, size in spec.stray:
         page.insert_text((x, y), text, fontname='helv', fontsize=size)
+    if spec.y_title is not None:
+        text, x, y, size = spec.y_title
+        page.insert_text((x, y), text, fontname='helv', fontsize=size, rotate=90)
     for fn, xs, colour, *dashes in spec.curves:
         points = [to_page(spec, x, fn(x)) for x in xs]
         step = math.ceil((len(points) - 1) / spec.fragments)

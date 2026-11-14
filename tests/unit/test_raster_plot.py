@@ -8,7 +8,7 @@ from document_lab.glyphs import UnreadableGlyph
 from document_lab.ir import BBox
 from document_lab.pdf import read_raster
 from document_lab.plot import NoCurveOfColour, NoPlotFrame, UnreadableTickLabels, raster_plot
-from tests.synthetic import BLUE, RED, Axis, PlotSpec, raster_pdf
+from tests.synthetic import BLUE, FRAME, RED, Axis, PlotSpec, raster_pdf
 
 XS = [float(x) for x in range(0, 101, 5)]
 
@@ -165,3 +165,24 @@ def test_stated_values_a_readable_label_contradicts_are_refused(tmp_path):
         raster_plot(raster, x_values=[0, 40, 100])
     plot = raster_plot(raster, x_values=[0, 50, 100])  # the control: the stated values the labels agree with
     assert sorted(v for _, v in plot.x.ticks) == [0, 50, 100]
+
+
+@pytest.mark.parametrize('title', ['Initial permeability', 'PFe', 'Induction (T)'])
+def test_a_rotated_y_title_in_the_label_column_is_no_raster_tick_label(tmp_path, title):
+    """Issue 30 (VITROPERM Fig. 2, ATM B-P): a turned y title read as extra y labels; the lanes cropped it off by hand.
+
+    The labels are stated, so a title counted as labels is a count mismatch, as on those figures.
+    """
+    y = Axis([0, 25, 50, 75, 100])
+    label_left = FRAME.x0 - 4 - pymupdf.get_text_length('100', fontname='helv', fontsize=8)
+    planted = (title, label_left + 3, 262.0, 6.0)  # reads upward across the 25 tick, left of its label
+    plots = []
+    for name, spec in (
+        ('titled', PlotSpec(Axis([0, 50, 100]), y, [(lambda x: x, XS, RED)], y_title=planted)),
+        ('control', PlotSpec(Axis([0, 50, 100]), y, [(lambda x: x, XS, RED)])),
+    ):
+        (tmp_path / name).mkdir()
+        plots.append(raster_plot(_raster(tmp_path / name, spec, dpi=200), y_values=[0, 25, 50, 75, 100]))
+    plot, bare = plots
+    assert sorted(v for _, v in plot.y.ticks) == [0, 25, 50, 75, 100]
+    assert plot.y.ticks == bare.y.ticks  # the title removed gives the same ticks

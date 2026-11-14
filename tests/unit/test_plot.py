@@ -9,7 +9,7 @@ import pytest
 from document_lab.numbers import bound
 from document_lab.pdf import read_pdf
 from document_lab.plot import RasterPlot, UnreadFrame, UnrecognisedFrame, outline_text, plots
-from tests.synthetic import BLUE, RED, Axis, PlotSpec, draw_plot, plot_pdf, to_page
+from tests.synthetic import BLUE, FRAME, RED, Axis, PlotSpec, draw_plot, plot_pdf, to_page
 
 XS = [float(x) for x in range(0, 101, 10)]
 
@@ -844,3 +844,27 @@ def test_an_unread_stroke_inside_a_frame_is_still_a_curve(tmp_path):
     spec = _stroke_plot()
     (plot,) = plots(_stroke_page(tmp_path, spec, lambda page: _spiral(page, 300.0, 280.0)))
     assert sorted(len(c.x) for c in plot.curves) == sorted([len(XS_WIDE), len(SPIRAL)])
+
+
+@pytest.mark.parametrize('title', ['Initial permeability', 'PFe', 'Induction (T)'])
+def test_a_rotated_outlined_y_title_in_the_label_column_is_no_tick_label(tmp_path, title):
+    """Issue 30 (Proterial hj-b3-e p18/p41, VITROPERM Fig. 2, ATM B-P): a y title set rotated, as glyph outlines,
+    in the column where the y tick labels sit, was taken for a tick label and refused the frame.
+    """
+    y = Axis([0, 250, 500, 750, 1000])
+    label_left = FRAME.x0 - 4 - pymupdf.get_text_length('1000', fontname='helv', fontsize=8)
+    planted = (
+        title,
+        label_left + 3,
+        262.0,
+        6.0,
+    )  # reads upward across the 250 tick, left of its label, inside the labels' column
+    titled = PlotSpec(Axis([0, 50, 100]), y, [(lambda x: x, XS, RED)], y_title=planted)
+    control = PlotSpec(Axis([0, 50, 100]), y, [(lambda x: x, XS, RED)])
+    read = [
+        plots(read_pdf(plot_pdf(tmp_path / f'{k}.pdf', spec, outlined=True), tables=False).page(1))
+        for k, spec in enumerate((titled, control))
+    ]
+    (plot,), (bare,) = read
+    assert sorted(v for _, v in plot.y.ticks) == [0, 250, 500, 750, 1000]
+    assert plot.y.ticks == bare.y.ticks  # the title removed gives the same ticks

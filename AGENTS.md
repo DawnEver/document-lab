@@ -9,7 +9,7 @@ consumer's vocabulary here -- schemas live in consumers. Modules and usage: `REA
 
 ## Rules here
 
-- Dependency arrow: `paper`, `ai` -> `extract`; `paper` -> `markdown`, `pdf`; `per_page` -> `markdown`, `regions`,
+- Dependency arrow: `paper`, `ai` -> `extract`; `paper` -> `markdown`, `regions`, `pdf`; `per_page` -> `markdown`, `regions`,
   `pdf`; `markdown`, `regions` -> `layout` -> `ir`;
   `extract` -> `plot`, `pdf`, `html` -> `numbers`, `ir`; `plot` -> `glyphs`; `strokes` -> `plot`, `ir`; `ocr` imports
   nothing of ours; `capture` is apart (`cli` -> `session` -> `stitch`; `cli` -> `desktop`, `export`, `ocr`, `join` ->

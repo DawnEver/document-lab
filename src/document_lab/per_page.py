@@ -12,11 +12,17 @@ where OCR'd text cannot be trusted (a formula, a table's numbers), the picture b
 page's foot is marked as continuing on the next page. ``INDEX.md`` lists the pages with the clause headings each
 opens and the regions it holds. A page without text is written all the same, its markdown empty, and named in
 :attr:`Paged.textless` -- never silently dropped.
+
+The PDF itself goes with them, so the layout stands alone. ``out`` is a directory, or -- ending ``.zip`` -- one
+archive holding the same files (written beside as ``<out>.part`` and moved into place when whole): a document is
+one file to keep, send or index.
 """
 
 from __future__ import annotations
 
 import re
+import zipfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
@@ -29,6 +35,7 @@ from document_lab.pdf import read_pdf
 from document_lab.regions import Region, regions
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
 __all__ = ['RENDER_DPI', 'Paged', 'write_pages']
@@ -85,37 +92,58 @@ def _linked(text: str, links: list[tuple[str, str]]) -> str:
     return '\n\n'.join(blocks + tail) + '\n' if blocks or tail else ''
 
 
+@contextmanager
+def _files(out: Path) -> Iterator[Callable[[str, bytes], None]]:
+    """A ``put(name, data)`` into ``out``: a directory, or a ``.zip`` archive moved into place only when whole."""
+    if out.suffix.lower() != '.zip':
+        out.mkdir(parents=True, exist_ok=True)
+        yield lambda name, data: (out / name).write_bytes(data)
+        return
+    part = out.with_name(out.name + '.part')
+    try:
+        with zipfile.ZipFile(part, 'w') as archive:
+
+            def put(name: str, data: bytes) -> None:
+                stored = name.endswith('.png')  # a PNG is compressed already: deflating it again gains nothing
+                archive.writestr(name, data, zipfile.ZIP_STORED if stored else zipfile.ZIP_DEFLATED)
+
+            yield put
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+    part.replace(out)
+
+
 def _clauses(markdown: str) -> str:
     """The clause headings a page opens (``##`` and deeper), ``; ``-joined: what the index names it by."""
     return '; '.join(line.lstrip('#').strip() for line in markdown.splitlines() if line.startswith('##'))
 
 
 def write_pages(pdf: Path, out: Path) -> Paged:
-    """Write ``pdf`` page by page into the directory ``out`` (made if missing)."""
-    out.mkdir(parents=True, exist_ok=True)
+    """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive."""
     read = read_pdf(pdf, tables=False)
     body = layout.body_size(read)
     texts = page_markdowns(read)
     width = max(3, len(str(len(texts))))
     index = [f'# {pdf.stem}', '']
     textless = []
-    with pymupdf.open(pdf) as doc:
+    with pymupdf.open(pdf) as doc, _files(out) as put:
+        if out / pdf.name != pdf:  # the layout stands alone; a PDF already where it goes is not copied onto itself
+            put(pdf.name, pdf.read_bytes())
         for number, (page, text, ir_page) in enumerate(zip(doc, texts, read.pages, strict=True), start=1):
             name = f'page-{number:0{width}d}'
             pix, scale = _picture(page)
-            pix.save(out / f'{name}.png')
+            put(f'{name}.png', pix.tobytes('png'))
             links = []
             for region in (found := regions(ir_page, body)):
                 file = _file(name, region)
-                _cut(pix, scale, region).save(out / file)
+                put(file, _cut(pix, scale, region).tobytes('png'))
                 more = ' (continues on the next page)' if region.bbox.y1 >= page.rect.height - _FOOT else ''
                 links.append((region.label, f'![{region.label}]({file}){more}'))
-            (out / f'{name}.md').write_text(
-                f'[{pdf.name}, page {number}]({name}.png)\n\n{_linked(text, links)}', encoding='utf-8'
-            )
+            put(f'{name}.md', f'[{pdf.name}, page {number}]({name}.png)\n\n{_linked(text, links)}'.encode())
             if not text.strip():
                 textless.append(number)
             notes = [part for part in (_clauses(text), ', '.join(r.label for r in found)) if part]
             index.append(f'- [page {number}]({name}.md)' + (f' -- {" | ".join(notes)}' if notes else ''))
-    (out / 'INDEX.md').write_text('\n'.join(index) + '\n', encoding='utf-8')
+        put('INDEX.md', ('\n'.join(index) + '\n').encode())
     return Paged(out, len(texts), tuple(textless))

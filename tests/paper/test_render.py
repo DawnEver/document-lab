@@ -44,3 +44,23 @@ def test_two_figures_on_a_picture_page_share_one_whole_page_image(tmp_path):
     assert images['Figure 1'] == images['Figure 2'] == 'img/sec01/page-01.png'
     assert images['Figure 3'] == 'img/sec01/page-02-figure-3.png'  # a drawn page is still cropped per label
     assert sorted(p.name for p in (out / 'img' / 'sec01').glob('*.png')) == ['page-01.png', 'page-02-figure-3.png']
+
+
+def test_a_figure_on_a_picture_page_its_text_locates_is_cut_out_not_linked_whole(tmp_path):
+    pdf = tmp_path / 'captured.pdf'
+    prose = 'The rated output is the mechanical power available at the shaft and shall be expressed in watts.'
+    doc = pymupdf.open()
+    page = doc.new_page()
+    pixels = np.random.default_rng(7).integers(0, 256, (842, 595, 3), dtype=np.uint8)
+    page.insert_image(page.rect, pixmap=pymupdf.Pixmap(pymupdf.csRGB, 595, 842, pixels.tobytes(), 0))
+    for y, text in ((100, prose), (115, prose), (360, 'Figure 4 - Short-time duty'), (420, prose)):
+        page.insert_text((60, y), text, fontsize=10, render_mode=3)  # an OCR layer over the picture
+    doc.save(pdf)
+    out = tmp_path / 'out'
+    (out / 'md').mkdir(parents=True)
+    body = 'Figure 4 - Short-time duty\n'
+    (out / 'md' / '01-duty.md').write_text(body, encoding='utf-8')
+    images, _ = render_figure_pages(pdf, out, [('## Duty', body)])
+    assert images['Figure 4'] == 'img/sec01/page-01-figure-4.png'
+    pix = pymupdf.Pixmap(str(out / images['Figure 4']))
+    assert pix.height < pix.width  # the band between the prose and the caption, not the whole page

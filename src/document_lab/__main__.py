@@ -28,7 +28,7 @@ def _parser() -> argparse.ArgumentParser:
     ocr.add_argument('--lang', default='eng', help="Tesseract's languages, '+'-joined (default eng; e.g. chi_sim+eng)")
     pages = sub.add_parser(
         'pages',
-        help='a PDF as page-NNN.md and page-NNN.png per page, its regions cut out, and INDEX.md (a directory or a .zip)',
+        help='a PDF as page-NNN.md and page-NNN.png per page, its regions cut out, and INDEX.md (a folder or a .zip)',
     )
     pages.add_argument('pdf', type=Path)
     pages.add_argument('out', type=Path, help='the directory to write the pages into, or a .zip archive')

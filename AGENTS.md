@@ -12,8 +12,8 @@ consumer's vocabulary here -- schemas live in consumers. Modules and usage: `REA
 - Dependency arrow: `paper`, `ai` -> `extract`; `paper` -> `markdown`, `regions`, `pdf`; `per_page` -> `markdown`, `regions`,
   `ink`, `pdf`; `markdown`, `regions` -> `layout` -> `ir`; `ink` -> `ir` (`regions` takes its drawings as boxes, never pixels);
   `extract` -> `plot`, `pdf`, `html` -> `numbers`, `ir`; `plot` -> `glyphs` -> `strokefont`; `strokes` -> `plot`, `ir`; `ocr` imports
-  nothing of ours; `capture` is apart (`cli` -> `session` -> `stitch`; `cli` -> `desktop`, `export`, `ocr`, `join` ->
-  `export`, `stitch`), imported only by `__main__`. OCR is `ocr`'s alone: no other module calls Tesseract. The base imports
+  nothing of ours; `capture` is apart (`cli` -> `session` -> `stitch`; `cli` -> `desktop`, `export`, `ocr`, `files` ->
+  `desktop`, `export`; `join` -> `export`, `stitch`), imported only by `__main__`. OCR is `ocr`'s alone: no other module calls Tesseract. The base imports
   without `ai_lab` (`tests/unit/test_ai.py` proves it in a subprocess).
 - A test that needs expected values builds a SYNTHETIC PDF (`tests/synthetic.py`); vendor PDFs are never
   committed. The three real papers are checked STRUCTURALLY against what each PDF says

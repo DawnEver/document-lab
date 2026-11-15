@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Final
 
 from lab_commons.log import emit
 
+from document_lab.capture.export import SCREEN_DPI
 from document_lab.capture.join import JOIN_TOLERANCE
 from document_lab.capture.session import Pace, Settling
 from document_lab.capture.stitch import Match
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
     from document_lab.capture.session import Capture, Lost
     from document_lab.capture.stitch import Stitcher
 
-__all__ = ['add_merge_parser', 'add_parser', 'run', 'run_merge']
+__all__ = ['add_files_parser', 'add_merge_parser', 'add_parser', 'run', 'run_files', 'run_merge']
 
 
 def _rect(text: str) -> tuple[int, int, int, int]:
@@ -211,6 +212,92 @@ def add_merge_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser
     merge.add_argument('--outliers', type=float, default=Match.outliers, help='as for capture')
     merge.add_argument('--overwrite', action='store_true', help='replace an existing output')
     return merge
+
+
+def add_files_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
+    """Add the ``capture-files`` subcommand to ``sub`` and return its parser."""
+    files = sub.add_parser(
+        'capture-files',
+        help='each PDF opened in its viewer (Acrobat) and captured whole, one PDF each (Windows)',
+        description='Each PDF is opened in the viewer, its window maximised and shown full screen (one page at a '
+        'time); each page is taken as it shows, paged on to the last, one PDF page each; the window is closed.',
+    )
+    files.add_argument('sources', type=Path, nargs='+', metavar='SOURCE', help='PDFs, directories of PDFs, or lists')
+    files.add_argument('-o', '--out', type=Path, required=True, help='the directory the captures go to, one each')
+    files.add_argument(
+        '--area',
+        default='mark',
+        help="what is taken of each page: 'mark' (default) -- you mark it once, on the first PDF, from the area "
+        "last confirmed, and every page after uses it; 'view' -- the part each page fills of the viewer's page view, "
+        'found page by page; or L,T,W,H in physical pixels',
+    )
+    files.add_argument('--viewer', type=Path, help='the viewer program (default: Adobe Acrobat where installed)')
+    files.add_argument(
+        '--monitor',
+        type=int,
+        default=0,
+        help='the monitor the viewer is maximised on: 0 the primary (default), then left to right; a portrait one '
+        'shows a page taller and sharper',
+    )
+    files.add_argument('--open-wait', type=float, default=60.0, help='seconds the window of a PDF may take to appear')
+    files.add_argument('--overwrite', action='store_true', help='capture again a PDF whose capture exists')
+    files.add_argument('--dpi', type=float, default=SCREEN_DPI, help='pixels per inch the pages are laid out at')
+    files.add_argument(
+        '--ocr', nargs='?', const='eng', metavar='LANGS', help="a text layer over each capture (Tesseract; 'eng')"
+    )
+    return files
+
+
+def run_files(args: argparse.Namespace) -> int:
+    """Run ``document-lab capture-files``; 0 when every PDF was captured whole."""
+    from document_lab.capture import desktop, files  # noqa: PLC0415 -- the run alone touches the desktop
+
+    pdfs = files.listed(args.sources)
+    viewer = files.Viewer(args.viewer) if args.viewer else files.Viewer.acrobat()
+    args.out.mkdir(parents=True, exist_ok=True)
+    marked = None if args.area in {'mark', 'view'} else desktop.Region(*_rect(args.area))
+    shown = desktop.monitors()
+    if not 0 <= args.monitor < len(shown):
+        emit(
+            f'no monitor {args.monitor}: there are {len(shown)} -- '
+            + '; '.join(f'{n}: {m}' for n, m in enumerate(shown))
+        )
+        return 1
+    monitor = shown[args.monitor]
+    failed: list[str] = []
+    for number, pdf in enumerate(pdfs, start=1):
+        out = args.out / f'{pdf.stem}.pdf'
+        if out.exists() and not args.overwrite:
+            emit(f'[{number}/{len(pdfs)}] {pdf.name}: captured already ({out}), kept')
+            continue
+        emit(f'[{number}/{len(pdfs)}] {pdf.name}')
+        try:
+            window = files.open_in(viewer, pdf, args.open_wait, monitor)
+        except (OSError, LookupError, ValueError) as refused:
+            failed.append(f'{pdf.name}: not opened -- {refused}')
+            continue
+        try:
+            if args.area == 'mark' and marked is None:
+                emit('mark the page to capture (it opens on the area last confirmed), then Enter or Confirm')
+                shown = desktop.view(window, viewer.view)
+                chosen = desktop.select(desktop.recall(desktop.virtual_screen()) or shown)
+                marked = chosen.client() if isinstance(chosen, desktop.Window) else chosen
+            shapes = files.page_shapes(pdf)
+            taken = files.page_through(window, viewer, out, area=marked, shapes=shapes, dpi=args.dpi)
+            emit(f'  {taken} page(s) to {out}')
+            if args.ocr is not None:
+                from document_lab.ocr import text_layer  # noqa: PLC0415
+
+                emit(f'  text layer on {text_layer(out, out, args.ocr)} page(s)')
+        except (OSError, LookupError, ValueError) as refused:
+            failed.append(f'{pdf.name}: {refused}')
+        finally:
+            with contextlib.suppress(OSError):
+                desktop.close(window)
+    emit(f'{len(pdfs) - len(failed)} of {len(pdfs)} PDF(s) captured to {args.out}')
+    for line in failed:
+        emit(f'  FAILED {line}')
+    return 1 if failed else 0
 
 
 def run_merge(args: argparse.Namespace) -> int:

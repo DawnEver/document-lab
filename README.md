@@ -132,7 +132,9 @@ fit more than one place, or differ in width are refused, never butted together.
 A PDF only its viewer may open (a secured standard): `capture-files <pdf|dir|list.txt>... -o <dir>` opens each in
 Adobe Acrobat (`--viewer` names another), maximises the window, clears it of panes and toolbars (read mode,
 `ctrl+h`) and shows a whole page (`ctrl+0`); then each page is taken as it shows and the viewer paged on (`pagedown`):
-one image a page, one PDF page each, no stitching. `--area mark` (default) asks you to mark the page once, on the first
+one image a page, one PDF page each, no stitching. Acrobat's page layout must be Single Page (Edit > Preferences >
+Page Display > Page Layout), set once: in a continuous layout the last page sits lower than the others and is taken
+shifted. `--monitor N` maximises the viewer on another monitor (0 the primary); a portrait one shows a page sharper. `--area mark` (default) asks you to mark the page once, on the first
 PDF, from the area last confirmed; `--area view` finds the page against the viewer's backdrop on every page;
 `L,T,W,H` names it. It stops at the PDF's own page count when the PDF opens here, else when paging on changes nothing;
 a PDF already captured is kept (`--overwrite` takes it again); `--ocr` lays a text layer over each. A PDF that fails

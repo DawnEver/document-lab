@@ -36,6 +36,8 @@ __all__ = [
     'find_window',
     'grab',
     'maximize',
+    'monitors',
+    'park_cursor',
     'press',
     'scroll',
     'select',
@@ -59,6 +61,9 @@ _VK_ESCAPE: Final = 0x1B
 _VK_LBUTTON: Final = 0x01
 _WM_CLOSE: Final = 0x0010
 _SW_MAXIMIZE: Final = 3
+_SW_RESTORE: Final = 9
+_SWP_NOZORDER: Final = 0x0004
+FRONT_TRIES: Final = 5  # tries to bring a window to the front before it is refused
 #: The named keys a chord (:func:`press`) may hold; a letter or digit is its own code.
 _VK_NAMED: Final = {
     'ctrl': 0x11,
@@ -173,6 +178,9 @@ def _dll(name: str) -> ctypes.WinDLL:
                 'GetWindowRect': (b, [h, ctypes.POINTER(wintypes.RECT)]),
                 'IsWindow': (b, [h]),
                 'ShowWindow': (b, [h, i]),
+                'BringWindowToTop': (b, [h]),
+                'SetWindowPos': (b, [h, h, i, i, i, i, u]),
+                'EnumDisplayMonitors': (b, [h, ctypes.c_void_p, ctypes.c_void_p, wintypes.LPARAM]),
             },
             gdi32: {
                 'CreateCompatibleDC': (h, [h]),
@@ -327,10 +335,54 @@ def press(window: Window, chord: str) -> None:
     time.sleep(0.2)
 
 
-def maximize(window: Window) -> None:
-    """Maximise ``window``: every window of a program then shows its view at the same place."""
-    _dll('user32').ShowWindow(window.hwnd, _SW_MAXIMIZE)
+def monitors() -> list[Region]:
+    """Each monitor's rectangle on the virtual screen, the primary first, then left to right."""
+    user32 = _dll('user32')
+    found: list[tuple[bool, Region]] = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+    def visit(_monitor: int, _dc: int, rect: ctypes.POINTER(wintypes.RECT), _: int) -> bool:
+        r = rect.contents
+        found.append((r.left == 0 and r.top == 0, Region(r.left, r.top, r.right - r.left, r.bottom - r.top)))
+        return True
+
+    user32.EnumDisplayMonitors(None, None, visit, 0)
+    return [region for _, region in sorted(found, key=lambda f: (not f[0], f[1].left, f[1].top))]
+
+
+def maximize(window: Window, monitor: Region | None = None) -> None:
+    """Maximise ``window`` on ``monitor`` (default: the primary), so every window shows its view at the same place.
+
+    A program reopens where it last was; the window is restored and moved to the monitor's corner first, so it
+    maximises there.
+    """
+    user32 = _dll('user32')
+    where = monitor or monitors()[0]
+    user32.ShowWindow(window.hwnd, _SW_RESTORE)
+    user32.SetWindowPos(window.hwnd, 0, where.left, where.top, 800, 600, _SWP_NOZORDER)
+    user32.ShowWindow(window.hwnd, _SW_MAXIMIZE)
     time.sleep(0.5)
+
+
+def park_cursor(window: Window) -> None:
+    """Move the mouse off ``window``, to a corner of the virtual screen it does not cover (another monitor).
+
+    A viewer floats its toolbar over a page while the mouse rests on it, and shows its hidden panes when it nears the
+    top; with no screen beyond the window the mouse is left where it is.
+    """
+    user32 = _dll('user32')
+    rect = wintypes.RECT()
+    if not user32.GetWindowRect(window.hwnd, ctypes.byref(rect)):
+        return
+    screen = virtual_screen()
+    corners = [
+        (x, y)
+        for x in (screen.left + 1, screen.left + screen.width - 2)
+        for y in (screen.top + 1, screen.top + screen.height - 2)
+    ]
+    off = [(x, y) for x, y in corners if not (rect.left <= x < rect.right and rect.top <= y < rect.bottom)]
+    if off:
+        user32.SetCursorPos(*off[0])
 
 
 def close(window: Window, timeout: float = 10.0) -> None:
@@ -787,19 +839,22 @@ def _require_on_top(target: Window | Region, x: int, y: int) -> None:
 def _bring_to_front(window: int) -> None:
     """Make ``window`` the keyboard target, or refuse: keys sent elsewhere would end the capture short, silently."""
     user32 = _dll('user32')
-    front = user32.GetForegroundWindow()
-    if front != window:
-        # Windows refuses the foreground to a background caller; sharing the front window's input state lifts that
-        # without sending a key that the front window could act on.
+    for _ in range(FRONT_TRIES):
+        front = user32.GetForegroundWindow()
+        if front == window:
+            return
+        # Windows refuses the foreground to a background caller; sharing the input state of the front window and of
+        # the target lifts that without sending a key that the front window could act on.
         mine = ctypes.WinDLL('kernel32').GetCurrentThreadId()
-        theirs = user32.GetWindowThreadProcessId(front, None)
-        attached = theirs != mine and user32.AttachThreadInput(mine, theirs, 1)
+        threads = {user32.GetWindowThreadProcessId(hwnd, None) for hwnd in (front, window)} - {mine}
+        attached = [thread for thread in threads if user32.AttachThreadInput(mine, thread, 1)]
         try:
+            user32.BringWindowToTop(window)
             user32.SetForegroundWindow(window)
         finally:
-            if attached:
-                user32.AttachThreadInput(mine, theirs, 0)
-        time.sleep(0.05)
+            for thread in attached:
+                user32.AttachThreadInput(mine, thread, 0)
+        time.sleep(0.2)
     if user32.GetForegroundWindow() != window:
         msg = f'{_title(window)!r} could not be brought to the front for method keys: click it first (or method wheel)'
         raise OSError(msg)

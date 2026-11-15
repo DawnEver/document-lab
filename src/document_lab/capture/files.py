@@ -47,10 +47,16 @@ ACROBAT: Final = (
 )
 #: Seconds a viewer takes to redraw after a key: one pressed mid-redraw is lost, a page grabbed mid-redraw is torn.
 REDRAW: Final = 1.0
-#: The page against its viewer's backdrop: the outermost columns are the backdrop, a pixel this many grey levels off
+#: A page is taken when two grabs this many seconds apart are alike (a floating toolbar faded), or after SETTLE.
+STILL: Final = 0.5
+SETTLE: Final = 5.0
+#: A cleared window's page view is at least this share of it wide; the keys are pressed this many times to get there.
+CLEARED: Final = 0.95
+CLEAR_TRIES: Final = 2
+#: The page against its viewer's backdrop: corners this many pixels square are the backdrop, a pixel this many off
 #: it is the page's, a column is the page's when this share of its rows is, and a page is at least this share wide.
 PAGE_EDGE: Final = 3
-PAGE_CONTRAST: Final = 8
+PAGE_CONTRAST: Final = 3  # Acrobat's read-mode backdrop is 248 to the page's 255
 PAGE_ROWS: Final = 0.5
 PAGE_SHARE: Final = 0.2
 #: Mean grey levels two takes may differ by and be the same page: paging on past the last page changes nothing.
@@ -66,7 +72,8 @@ class Viewer:
     ``program`` with ``options`` opens a file in a window of its own; ``view`` titles the child window that shows
     the pages; the key ``chords``, pressed in order, clear the window of everything but the pages (Acrobat's read
     mode, ``ctrl+h``: no tools pane, toolbars or assistant) and bring a document to its first page with the whole page
-    in view (``ctrl+0``); ``next`` shows the next page.
+    in view (``ctrl+0``); ``next`` shows the next page. Acrobat's page layout is to be Single Page (its preferences, set
+    once): continuous, it shows the last page lower than the others, the document's end reached.
     """
 
     program: Path
@@ -124,18 +131,22 @@ def page_count(pdf: Path) -> int | None:
 def page_box(pixels: np.ndarray) -> tuple[int, int, int, int]:
     """``(top, bottom, left, right)``: the part of a viewer's view (rows of RGB) its page fills, no backdrop round it.
 
-    The backdrop is the colour of the outermost columns; a pixel differing from it by :data:`PAGE_CONTRAST` is the
-    page's, a column (then a row, within those columns) is when :data:`PAGE_ROWS` of it is, and the page is the widest
-    run of those. Refused when no page stands apart (no backdrop, or a run under :data:`PAGE_SHARE` of the view), or
-    when it runs off the top or the foot of the view: a whole page, backdrop above and below, is all that is taken --
-    never a part, or two halves across a page break (a ``pagedown`` that scrolled rather than paged).
+    The backdrop is the colour of the view's corners -- a page fitted whole leaves them bare, beside it or above and
+    below it; a pixel differing from it by :data:`PAGE_CONTRAST` is the page's, a column (then a row, within those
+    columns) is when :data:`PAGE_ROWS` of it is, and the page is the widest run of those -- the view's whole width
+    when the page fits it across (a portrait screen). Refused when no page stands apart (no backdrop, or a run under
+    :data:`PAGE_SHARE` of the view), or when it runs off the top or the foot of the view but not both: a page fitted
+    to the view's height fills it from top to foot, while one cut by a page break -- a ``pagedown`` that scrolled
+    rather than paged -- reaches only one.
     """
     rgb = pixels[..., :3].astype(float)
-    edges = np.concatenate([rgb[:, :PAGE_EDGE], rgb[:, -PAGE_EDGE:]], axis=1).reshape(-1, 3)
-    differs = np.abs(rgb - np.median(edges, axis=0)).max(axis=2) > PAGE_CONTRAST
+    e = PAGE_EDGE
+    corners = [rgb[:e, :e], rgb[:e, -e:], rgb[-e:, :e], rgb[-e:, -e:]]  # beside or above the page, as it fits the view
+    backdrop = np.median(np.concatenate(corners).reshape(-1, 3), axis=0)
+    differs = np.abs(rgb - backdrop).max(axis=2) > PAGE_CONTRAST
     left, right = _widest(differs.mean(axis=0) > PAGE_ROWS, 'columns')
     top, bottom = _widest(differs[:, left:right].mean(axis=1) > PAGE_ROWS, 'rows')
-    if top == 0 or bottom == len(rgb):  # the page runs off the view: a part of it, or two pages across a page break
+    if (top == 0) != (bottom == len(rgb)):  # cut by one edge: two pages across a page break, the gap in view
         msg = (
             f'the page runs off the view (rows {top}..{bottom} of {len(rgb)}): the viewer is not showing one whole page'
         )
@@ -148,37 +159,68 @@ def _widest(page: np.ndarray, what: str) -> tuple[int, int]:
     bounds = np.flatnonzero(np.diff(np.concatenate(([0], page.astype(np.int8), [0]))))
     runs = list(zip(bounds[::2].tolist(), bounds[1::2].tolist(), strict=True))
     start, end = max(runs, key=lambda run: run[1] - run[0], default=(0, 0))
-    if end - start < PAGE_SHARE * len(page) or (what == 'columns' and end - start == len(page)):
+    if end - start < PAGE_SHARE * len(page):
         msg = f'no page stands apart from the backdrop ({what} {start}..{end} of {len(page)}): is a whole page in view?'
         raise LookupError(msg)
     return start, end
 
 
 def same_page(a: np.ndarray, b: np.ndarray) -> bool:
-    """Whether two takes show the same page: paging on past the last page changes nothing."""
+    """Whether two grabs show the same thing: paging on past the last page, or a view holding still."""
     return a.shape == b.shape and float(np.abs(a.astype(float) - b.astype(float)).mean()) <= SAME_PAGE
 
 
-def open_in(viewer: Viewer, pdf: Path, timeout: float) -> Window:
+def open_in(viewer: Viewer, pdf: Path, timeout: float, monitor: Region | None = None) -> Window:
     """``pdf`` opened in ``viewer``, its window maximised and cleared, at its first page with the whole page in view.
 
-    The window is waited for up to ``timeout`` seconds (the viewer starting); one this opened is closed again when
-    it cannot be brought so far.
+    The window is maximised on ``monitor`` (default: the primary). It is waited for up to ``timeout`` seconds (the
+    viewer starting). Cleared is the page view filling the
+    window (:data:`CLEARED`): a key the viewer missed (it was still drawing) is pressed again; still not, it is
+    refused. A window this opened is closed again when it cannot be brought so far.
     """
     from document_lab.capture import desktop  # noqa: PLC0415 -- the run alone touches the desktop
 
     subprocess.Popen([str(viewer.program), *viewer.options, str(pdf)])
     window = desktop.wait_for_window(pdf.name, timeout)
     try:
-        desktop.maximize(window)
+        desktop.maximize(window, monitor)
         desktop.view(window, viewer.view)  # the page view is there: the document is open, not a dialog
-        for chord in viewer.chords:
-            desktop.press(window, chord)
-            time.sleep(REDRAW)
+        for _ in range(CLEAR_TRIES):
+            for chord in viewer.chords:
+                desktop.press(window, chord)
+                time.sleep(REDRAW)
+            if desktop.view(window, viewer.view).width >= CLEARED * window.client().width:
+                break
+        else:
+            _not_cleared(window, viewer)
     except (OSError, LookupError, ValueError):
         desktop.close(window)
         raise
     return window
+
+
+def _settled(area: Region) -> np.ndarray:
+    """``area`` once it holds still: two grabs :data:`STILL` seconds apart alike.
+
+    A viewer fades its floating toolbar in and out; what is taken is the page without it. After :data:`SETTLE`
+    seconds the last grab is taken as it is.
+    """
+    from document_lab.capture import desktop  # noqa: PLC0415
+
+    end = time.monotonic() + SETTLE
+    last = desktop.grab(area)
+    while time.monotonic() < end:
+        time.sleep(STILL)
+        now = desktop.grab(area)
+        if same_page(last, now):
+            return now
+        last = now
+    return last
+
+
+def _not_cleared(window: Window, viewer: Viewer) -> None:
+    msg = f'{window.title!r}: its panes stay open after {viewer.chords}: the pages do not fill the window'
+    raise LookupError(msg)
 
 
 def page_through(
@@ -197,12 +239,13 @@ def page_through(
     last = None
     with PageWriter(out, dpi) as pdf:
         for number in range(pages or MAX_PAGES):
+            desktop.park_cursor(window)
+            shown = _settled(area or desktop.view(window, viewer.view))
             if area is None:
-                shown = desktop.grab(desktop.view(window, viewer.view))
                 top, bottom, left, right = page_box(shown)
                 take = shown[top:bottom, left:right]
             else:
-                take = desktop.grab(area)
+                take = shown
             if last is not None and same_page(last, take):
                 if pages is None:  # paged past the last page: the end of a PDF whose count is not known here
                     emit(f'  stopped after page {number}: paging on changed nothing (its count is not known here)')

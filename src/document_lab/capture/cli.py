@@ -233,6 +233,13 @@ def add_files_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser
         'found page by page; or L,T,W,H in physical pixels',
     )
     files.add_argument('--viewer', type=Path, help='the viewer program (default: Adobe Acrobat where installed)')
+    files.add_argument(
+        '--monitor',
+        type=int,
+        default=0,
+        help='the monitor the viewer is maximised on: 0 the primary (default), then left to right; a portrait one '
+        'shows a page taller and sharper',
+    )
     files.add_argument('--open-wait', type=float, default=60.0, help='seconds the window of a PDF may take to appear')
     files.add_argument('--overwrite', action='store_true', help='capture again a PDF whose capture exists')
     files.add_argument('--dpi', type=float, default=SCREEN_DPI, help='pixels per inch the pages are laid out at')
@@ -250,6 +257,14 @@ def run_files(args: argparse.Namespace) -> int:
     viewer = files.Viewer(args.viewer) if args.viewer else files.Viewer.acrobat()
     args.out.mkdir(parents=True, exist_ok=True)
     marked = None if args.area in {'mark', 'view'} else desktop.Region(*_rect(args.area))
+    shown = desktop.monitors()
+    if not 0 <= args.monitor < len(shown):
+        emit(
+            f'no monitor {args.monitor}: there are {len(shown)} -- '
+            + '; '.join(f'{n}: {m}' for n, m in enumerate(shown))
+        )
+        return 1
+    monitor = shown[args.monitor]
     failed: list[str] = []
     for number, pdf in enumerate(pdfs, start=1):
         out = args.out / f'{pdf.stem}.pdf'
@@ -258,7 +273,7 @@ def run_files(args: argparse.Namespace) -> int:
             continue
         emit(f'[{number}/{len(pdfs)}] {pdf.name}')
         try:
-            window = files.open_in(viewer, pdf, args.open_wait)
+            window = files.open_in(viewer, pdf, args.open_wait, monitor)
         except (OSError, LookupError, ValueError) as refused:
             failed.append(f'{pdf.name}: not opened -- {refused}')
             continue

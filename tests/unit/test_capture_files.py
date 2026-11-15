@@ -60,7 +60,7 @@ def test_the_page_is_the_part_of_the_view_that_differs_from_its_backdrop():
 
 def test_a_view_the_page_fills_wholly_is_refused_as_no_whole_page_in_view():
     with pytest.raises(LookupError, match='whole page in view'):
-        page_box(np.full((300, 400, 3), 255, dtype=np.uint8))  # zoomed past the page: no backdrop beside it
+        page_box(np.full((300, 400, 3), 255, dtype=np.uint8))  # zoomed past the page: no backdrop round it
     with pytest.raises(LookupError, match='whole page in view'):
         page_box(_view(page=(40, 260, 190, 210)))  # a sliver, not a page
 
@@ -71,6 +71,15 @@ def test_a_page_running_off_the_top_or_foot_of_the_view_is_refused_as_no_whole_p
         page_box(_view(page=(0, 200, 120, 280)))
     with pytest.raises(LookupError, match='runs off the view'):
         page_box(_view(page=(100, 300, 120, 280)))
+
+
+def test_a_page_fitted_to_the_view_height_fills_it_top_to_foot_and_is_taken():
+    """Acrobat's whole-page zoom of an A4 page: as high as the view, no backdrop above or below; a backdrop 248."""
+    assert page_box(_view(page=(0, 300, 120, 280), backdrop=248)) == (0, 300, 120, 280)
+
+
+def test_a_page_fitted_across_a_portrait_view_fills_its_width_with_the_backdrop_above_and_below():
+    assert page_box(_view(height=500, width=300, page=(60, 440, 0, 300), backdrop=248)) == (60, 440, 0, 300)
 
 
 def test_paging_past_the_last_page_changes_nothing_and_a_new_page_does():

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import numpy as np
+from lab_commons.log import emit
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -125,14 +126,20 @@ def page_box(pixels: np.ndarray) -> tuple[int, int, int, int]:
 
     The backdrop is the colour of the outermost columns; a pixel differing from it by :data:`PAGE_CONTRAST` is the
     page's, a column (then a row, within those columns) is when :data:`PAGE_ROWS` of it is, and the page is the widest
-    run of those. Refused when no page stands apart (no backdrop, or a run under :data:`PAGE_SHARE` of the view):
-    the whole page is not in view.
+    run of those. Refused when no page stands apart (no backdrop, or a run under :data:`PAGE_SHARE` of the view), or
+    when it runs off the top or the foot of the view: a whole page, backdrop above and below, is all that is taken --
+    never a part, or two halves across a page break (a ``pagedown`` that scrolled rather than paged).
     """
     rgb = pixels[..., :3].astype(float)
     edges = np.concatenate([rgb[:, :PAGE_EDGE], rgb[:, -PAGE_EDGE:]], axis=1).reshape(-1, 3)
     differs = np.abs(rgb - np.median(edges, axis=0)).max(axis=2) > PAGE_CONTRAST
     left, right = _widest(differs.mean(axis=0) > PAGE_ROWS, 'columns')
     top, bottom = _widest(differs[:, left:right].mean(axis=1) > PAGE_ROWS, 'rows')
+    if top == 0 or bottom == len(rgb):  # the page runs off the view: a part of it, or two pages across a page break
+        msg = (
+            f'the page runs off the view (rows {top}..{bottom} of {len(rgb)}): the viewer is not showing one whole page'
+        )
+        raise LookupError(msg)
     return top, bottom, left, right
 
 
@@ -180,7 +187,9 @@ def page_through(
     """Take each page ``window`` shows into ``out``, paging on to the last; how many were taken.
 
     A page is ``area`` when given (the user's mark), else the part it fills of the viewer's view. ``pages`` pages
-    are taken when known; else up to the page that paging on leaves unchanged (at most :data:`MAX_PAGES`).
+    are taken when known, and a page that shows what the one before did is refused (the viewer did not page on);
+    else up to the page that paging on leaves unchanged (at most :data:`MAX_PAGES`), said so -- two blank pages in a
+    row end it there.
     """
     from document_lab.capture import desktop  # noqa: PLC0415
     from document_lab.capture.export import PageWriter  # noqa: PLC0415
@@ -194,8 +203,12 @@ def page_through(
                 take = shown[top:bottom, left:right]
             else:
                 take = desktop.grab(area)
-            if pages is None and last is not None and same_page(last, take):
-                break
+            if last is not None and same_page(last, take):
+                if pages is None:  # paged past the last page: the end of a PDF whose count is not known here
+                    emit(f'  stopped after page {number}: paging on changed nothing (its count is not known here)')
+                    break
+                msg = f'page {number + 1} of {pages} shows what page {number} did: the viewer did not page on'
+                raise LookupError(msg)
             pdf.add(take)
             last = take
             if number + 1 < (pages or MAX_PAGES):

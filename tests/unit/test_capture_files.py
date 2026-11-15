@@ -65,6 +65,14 @@ def test_a_view_the_page_fills_wholly_is_refused_as_no_whole_page_in_view():
         page_box(_view(page=(40, 260, 190, 210)))  # a sliver, not a page
 
 
+def test_a_page_running_off_the_top_or_foot_of_the_view_is_refused_as_no_whole_page():
+    """A pagedown that scrolled a screenful: the page break mid-view, each page cut by the view's edge."""
+    with pytest.raises(LookupError, match='runs off the view'):
+        page_box(_view(page=(0, 200, 120, 280)))
+    with pytest.raises(LookupError, match='runs off the view'):
+        page_box(_view(page=(100, 300, 120, 280)))
+
+
 def test_paging_past_the_last_page_changes_nothing_and_a_new_page_does():
     first = _view()
     assert same_page(first, first.copy())

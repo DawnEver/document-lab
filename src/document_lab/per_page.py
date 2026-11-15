@@ -6,7 +6,8 @@ from the PDF's text layer -- a page of a capture needs `document_lab.ocr` first)
 the page as it is seen: a page that is one image gives that image's own pixels, any other page is rendered at
 :data:`RENDER_DPI`.
 
-Each figure, table and equation the page's text locates (`document_lab.regions`) is cut out of that picture as
+Each figure, table and equation the page's text and drawn ink locate (`document_lab.regions`, told the picture's
+drawings by `document_lab.ink`) is cut out of that picture as
 ``page-NNN-<kind>-<label>.png`` and linked in the markdown after the paragraph holding its caption or number --
 where OCR'd text cannot be trusted (a formula, a table's numbers), the picture beside it can. A region reaching the
 page's foot is marked as continuing on the next page. ``INDEX.md`` lists the pages with the clause headings each
@@ -30,6 +31,8 @@ import numpy as np
 import pymupdf
 
 from document_lab import layout
+from document_lab.ink import Drawing, drawings
+from document_lab.ir import BBox
 from document_lab.markdown import page_markdowns
 from document_lab.pdf import read_pdf
 from document_lab.regions import Region, regions
@@ -38,10 +41,14 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from pathlib import Path
 
+    from document_lab.ir import Page
+
 __all__ = ['RENDER_DPI', 'Paged', 'write_pages']
 
 RENDER_DPI: Final = 150  # a page that is not one image is rendered at this resolution
-_FOOT: Final = 1.0  # points from the page's foot within which a region runs on to the next page
+_FOOT: Final = 1.0
+#: Ink within this many body sizes of other ink is one drawing (`document_lab.ink`); lines of text sit further apart.
+DRAWING_REACH: Final = 0.5  # points from the page's foot within which a region runs on to the next page
 
 
 @dataclass(frozen=True)
@@ -62,6 +69,16 @@ def _picture(page: pymupdf.Page) -> tuple[pymupdf.Pixmap, float]:
     else:
         pix = page.get_pixmap(dpi=RENDER_DPI)
     return pix, pix.width / page.rect.width
+
+
+def _drawings(pix: pymupdf.Pixmap, scale: float, page: Page, body: float) -> list[Drawing]:
+    """The drawn ink of the page's picture (`document_lab.ink`), its text left out: what regions tell drawings by.
+
+    Ink within :data:`DRAWING_REACH` ``body`` sizes of other ink is one drawing: a figure's parts sit that close.
+    """
+    pixels = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    text = [BBox(ln.x0, ln.y0, ln.x1, ln.y1) for ln in layout.lines(page, weighted=False)]
+    return drawings(pixels, scale, text, DRAWING_REACH * body)
 
 
 def _cut(pix: pymupdf.Pixmap, scale: float, region: Region) -> pymupdf.Pixmap:
@@ -135,7 +152,7 @@ def write_pages(pdf: Path, out: Path) -> Paged:
             pix, scale = _picture(page)
             put(f'{name}.png', pix.tobytes('png'))
             links = []
-            for region in (found := regions(ir_page, body)):
+            for region in (found := regions(ir_page, body, _drawings(pix, scale, ir_page, body))):
                 file = _file(name, region)
                 put(file, _cut(pix, scale, region).tobytes('png'))
                 more = ' (continues on the next page)' if region.bbox.y1 >= page.rect.height - _FOOT else ''

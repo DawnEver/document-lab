@@ -79,3 +79,21 @@ def test_a_zip_out_holds_the_pdf_and_everything_a_directory_would(tmp_path):
         assert 'std.pdf' in names
         assert archive.read('page-001.md') == (tmp_path / 'dir' / 'page-001.md').read_bytes()
     assert sorted(p.name for p in tmp_path.iterdir()) == ['dir', 'std.pdf', 'std.zip']  # nothing left beside it
+
+
+def test_a_ruled_table_whose_words_no_reader_has_is_cut_out_by_its_rules(tmp_path):
+    """A two-column table ('Draft | Report on voting'): the page's picture has its rules, regions their box."""
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=600, height=840)
+        prose = 'The rated output is the mechanical power available at the shaft and shall be expressed in watts.'
+        page.insert_text((50, 100), prose, fontsize=10)
+        for y in (150, 180, 210):
+            page.draw_line((180, y), (420, y), width=1)
+        for x in (180, 300, 420):
+            page.draw_line((x, 150), (x, 210), width=1)
+        page.insert_text((50, 300), prose, fontsize=10)
+        doc.save(tmp_path / 'std.pdf')
+    write_pages(tmp_path / 'std.pdf', tmp_path / 'out.zip')
+    with zipfile.ZipFile(tmp_path / 'out.zip') as archive:
+        assert 'page-001-table-untitled-1.png' in archive.namelist()
+        assert '![Untitled table 1](page-001-table-untitled-1.png)' in archive.read('page-001.md').decode()

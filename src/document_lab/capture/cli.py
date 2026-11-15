@@ -316,6 +316,7 @@ def run_files(args: argparse.Namespace) -> int:
     stop_file = args.stop_file
     panel = _panel(args, shown)
     gate = _gate(panel, stop_file)
+    park = files.Park()
 
     failed: list[str] = []
     for number, pdf in enumerate(pdfs, start=1):
@@ -336,7 +337,9 @@ def run_files(args: argparse.Namespace) -> int:
                 chosen = desktop.select(desktop.recall(desktop.virtual_screen()) or shown)
                 marked = chosen.client() if isinstance(chosen, desktop.Window) else chosen
             shapes = files.page_shapes(pdf)
-            taken = files.page_through(window, viewer, out, area=marked, shapes=shapes, dpi=args.dpi, gate=gate)
+            taken = files.page_through(
+                window, viewer, out, area=marked, shapes=shapes, dpi=args.dpi, gate=gate, park=park
+            )
             emit(f'  {taken} page(s) to {out}')
             if args.ocr is not None:
                 from document_lab.ocr import text_layer  # noqa: PLC0415
@@ -352,6 +355,7 @@ def run_files(args: argparse.Namespace) -> int:
         finally:
             with contextlib.suppress(OSError):
                 desktop.close(window)
+    park.restore()  # the mouse goes back where the user left it
     return _report(pdfs, failed, args.out, panel)
 
 

@@ -413,20 +413,27 @@ def move_cursor(x: int, y: int) -> None:
     _dll('user32').SetCursorPos(x, y)
 
 
-def park_cursor(window: Window) -> tuple[int, int]:
-    """Move the mouse off ``window``, to :func:`parking_spot`, and give back where it was.
+def park_cursor(window: Window) -> tuple[int, int] | None:
+    """Move the mouse off ``window`` when it is on it, to :func:`parking_spot`, and give back where it was.
 
     A viewer floats its toolbar over a page while the mouse rests on it, and shows its hidden panes when it nears the
-    top; with no screen beyond the window the mouse is left where it is. Where it was is given back so a capture can
-    put it back (:func:`move_cursor`) rather than leaving it where the capture wanted it.
+    top -- but a mouse already off the window is the user's, and is not touched: None says it was left alone (as does
+    a window that covers the whole screen, with nowhere to park).
     """
     user32 = _dll('user32')
     was = cursor()
     rect = wintypes.RECT()
-    if user32.GetWindowRect(window.hwnd, ctypes.byref(rect)):
-        covered = Region(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
-        if (spot := parking_spot(virtual_screen(), covered)) is not None:
-            move_cursor(*spot)
+    if not user32.GetWindowRect(window.hwnd, ctypes.byref(rect)):
+        return None
+    covered = Region(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
+    on_it = covered.left <= was[0] < covered.left + covered.width
+    on_it = on_it and covered.top <= was[1] < covered.top + covered.height
+    if not on_it:
+        return None
+    spot = parking_spot(virtual_screen(), covered)
+    if spot is None:
+        return None
+    move_cursor(*spot)
     return was
 
 

@@ -90,6 +90,39 @@ class Stopped(Exception):
     """The run was told to stop (``--stop-file`` appeared): the pages taken so far are kept, and the run ends."""
 
 
+class Park:
+    """The mouse while a run goes on: off the viewer's page, and back where the user left it.
+
+    A viewer floats its toolbar over a page while the mouse rests on it, so a page is taken with the mouse off the
+    window (:func:`desktop.park_cursor`). Where the user last put it is remembered across the whole run -- not given
+    back after each document only to be taken away again -- and given back when the run ends or waits for the user.
+    A mouse the user takes back while a run goes on teaches the new place: it is where it will be given back.
+    """
+
+    def __init__(self) -> None:
+        """Remember where the mouse is now: the user's place until they put it somewhere else."""
+        from document_lab.capture import desktop  # noqa: PLC0415
+
+        self.where = desktop.cursor()
+        self.at: tuple[int, int] | None = None  # where the run parked it; None when it is the user's again
+
+    def go(self, window: Window) -> None:
+        """Take the mouse off ``window`` when it is on it, keeping the user's place for :meth:`restore`."""
+        from document_lab.capture import desktop  # noqa: PLC0415
+
+        was = desktop.park_cursor(window)
+        if was is not None:  # it was on the window: that is the user's place, and the mouse is parked now
+            self.where, self.at = was, desktop.cursor()
+
+    def restore(self) -> None:
+        """Give the mouse back where the user left it, unless they have moved it since it was parked."""
+        from document_lab.capture import desktop  # noqa: PLC0415
+
+        if self.at is not None and desktop.cursor() == self.at:
+            desktop.move_cursor(*self.where)
+        self.at = None
+
+
 @dataclass(frozen=True)
 class Viewer:
     """A PDF viewer: how it opens a file, where it shows the pages, and the keys that clear it and page it.
@@ -316,7 +349,9 @@ def _settled(area: Region) -> np.ndarray:
     return last
 
 
-def _take(window: Window, viewer: Viewer, area: Region | None, shape: float | None) -> tuple[np.ndarray, np.ndarray]:
+def _take(
+    window: Window, viewer: Viewer, area: Region | None, shape: float | None, park: Park | None = None
+) -> tuple[np.ndarray, np.ndarray]:
     """The page ``window`` shows and the view it was taken from: ``area``, else the part it fills of the view.
 
     A take of another shape than the PDF's page -- the page still being drawn, a viewer still turning to full screen
@@ -331,7 +366,7 @@ def _take(window: Window, viewer: Viewer, area: Region | None, shape: float | No
     view = shown
     tries = 0
     while tries < TAKE_TRIES:
-        desktop.park_cursor(window)
+        (park.go(window) if park is not None else desktop.park_cursor(window))
         view = _settled(area or desktop.view(window, viewer.view))
         shown = view
         if area is None:
@@ -366,6 +401,7 @@ def page_through(
     shapes: list[float] | None,
     dpi: float,
     gate: Gate | None = None,
+    park: Park | None = None,
 ) -> int:
     """Take each page ``window`` shows into ``out``, paging on to the last; how many were taken.
 
@@ -376,14 +412,8 @@ def page_through(
     else up to the page that paging on leaves unchanged (at most :data:`MAX_PAGES`), said so -- two blank pages in a
     row end it there.
     """
-    from document_lab.capture import desktop  # noqa: PLC0415
-
     pages = len(shapes) if shapes is not None else None
-    was = desktop.cursor()  # the mouse is parked off the window page by page: given back where the user left it
-    try:
-        return _through(window, viewer, out, area=area, shapes=shapes, pages=pages, dpi=dpi, gate=gate)
-    finally:
-        desktop.move_cursor(*was)
+    return _through(window, viewer, out, area=area, shapes=shapes, pages=pages, dpi=dpi, gate=gate, park=park)
 
 
 def _through(
@@ -396,6 +426,7 @@ def _through(
     pages: int | None,
     dpi: float,
     gate: Gate | None,
+    park: Park | None,
 ) -> int:
     """The pages of :func:`page_through`'s run, the writer and the loop."""
     from document_lab.capture import desktop  # noqa: PLC0415
@@ -407,13 +438,13 @@ def _through(
             if gate is not None:
                 gate(f'{out.stem}: page {number + 1} of {pages or "?"}')
             shape = None if shapes is None else shapes[number]
-            take, view = _take(window, viewer, area, shape)
+            take, view = _take(window, viewer, area, shape, park)
             for _ in range(TURN_TRIES if last is not None else 0):  # a key the viewer missed mid-draw: press it again
                 if not same_page(last, take):
                     break
                 desktop.press(window, viewer.next)
                 _turned(window, viewer, view)
-                take, view = _take(window, viewer, area, shape)
+                take, view = _take(window, viewer, area, shape, park)
             if last is not None and same_page(last, take):
                 if pages is None:  # paged past the last page: the end of a PDF whose count is not known here
                     emit(f'  stopped after page {number}: paging on changed nothing (its count is not known here)')
@@ -423,7 +454,7 @@ def _through(
             pdf.add(take)
             last = take
             if number + 1 < (pages or MAX_PAGES):
-                _yield_to_user(window, gate)
+                _yield_to_user(window, gate, park)
                 desktop.press(window, viewer.next)
                 _turned(window, viewer, view)
         return pdf.pages
@@ -434,7 +465,7 @@ def held(*, front: bool, idle: float) -> bool:
     return not front and idle < USER_IDLE
 
 
-def _yield_to_user(window: Window, gate: Gate | None) -> None:
+def _yield_to_user(window: Window, gate: Gate | None, park: Park | None = None) -> None:
     """Hold the capture while the user is working in another window, and say so.
 
     Every key the capture sends takes the foreground for the viewer (:func:`desktop.press`), so a page turned while
@@ -446,6 +477,8 @@ def _yield_to_user(window: Window, gate: Gate | None) -> None:
 
     told = False
     while held(front=desktop.in_front(window), idle=desktop.idle_seconds()):
+        if park is not None:
+            park.restore()  # the mouse is the user's while they are at the machine
         if gate is not None:
             gate('held while you use the machine')
         if not told:

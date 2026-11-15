@@ -4,6 +4,8 @@ the prose around it bound a figure or table, an equation number the noise lines 
 import pymupdf
 
 from document_lab import layout
+from document_lab.ink import Drawing
+from document_lab.ir import BBox
 from document_lab.pdf import read_pdf
 from document_lab.regions import regions
 
@@ -180,3 +182,57 @@ def test_a_long_line_in_a_narrow_column_is_prose_not_a_cell(tmp_path):
             )
 
     assert regions(*_page(tmp_path, draw)) == []
+
+
+def _drawn(box, rules=(0, 0), loose=0.0, stroke=100.0):
+    return Drawing(BBox(*box), rules, loose, stroke)
+
+
+def test_a_ruled_table_of_two_columns_its_words_unread_is_a_table(tmp_path):
+    """IEC voting tables ('Draft | Report on voting'): two columns, words too small for OCR; the rules tell it."""
+
+    def draw(page):
+        _text(page, 100, PROSE)
+        _text(page, 300, PROSE)
+
+    page, body = _page(tmp_path, draw)
+    found = regions(page, body, [_drawn((150, 150, 440, 230), rules=(3, 3), loose=6)])
+    assert [(r.kind, r.label) for r in found] == [('table', 'Untitled table 1')]
+
+
+def test_a_frame_round_a_lines_words_a_margin_note_and_a_short_line_are_no_regions(tmp_path):
+    def draw(page):
+        _text(page, 100, PROSE)
+        _text(page, 200, 'IEC 60034-18-41 applies', x=60)
+
+    page, body = _page(tmp_path, draw)
+    link = _drawn((55, 190, 150, 204), rules=(2, 2))  # a link's frame round words of the line
+    margin = _drawn((5, 100, 20, 700))  # a sideways licence note beside the text column
+    rule = _drawn((50, 400, 500, 401))  # a rule under a header
+    words = _drawn((60, 500, 120, 540), stroke=8)  # words OCR missed: glyphs, no drawn line
+    beside = _drawn((42, 190, 58, 222))  # a link's frame just before the line, its words unread, a line below caught
+    assert regions(page, body, [link, margin, rule, words, beside]) == []
+
+
+def test_a_drawings_views_side_by_side_are_one_figure_and_prose_parts_two(tmp_path):
+    def draw(page):
+        _text(page, 100, PROSE)
+        _text(page, 420, PROSE)
+
+    page, body = _page(tmp_path, draw)
+    left, right = _drawn((80, 150, 220, 380)), _drawn((300, 160, 460, 390))
+    below = _drawn((80, 450, 460, 650))
+    found = regions(page, body, [left, right, below])
+    assert [(r.kind, r.label) for r in found] == [('figure', 'Untitled figure 1'), ('figure', 'Untitled figure 2')]
+    assert found[0].bbox.x0 < 80 and found[0].bbox.x1 > 460 and found[0].bbox.y1 < 420
+
+
+def test_a_short_drawing_with_no_word_in_it_is_an_equation_without_a_number(tmp_path):
+    def draw(page):
+        _text(page, 100, PROSE)
+        _text(page, 160, 'he = h - d1 - d2', x=200)  # a formula, OCR'd, beside its fraction bars
+        _text(page, 260, PROSE)
+
+    page, body = _page(tmp_path, draw)
+    found = regions(page, body, [_drawn((180, 145, 420, 175), stroke=60)])  # three lines high, under four
+    assert [(r.kind, r.label) for r in found] == [('equation', 'Untitled equation 1')]

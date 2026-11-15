@@ -8,7 +8,7 @@ import pymupdf
 import pytest
 
 from document_lab.capture.export import PageWriter
-from document_lab.capture.files import document_window, listed, page_box, page_shapes, same_page
+from document_lab.capture.files import document_window, held, listed, page_box, page_shapes, same_page
 
 
 @dataclass(frozen=True)
@@ -153,3 +153,9 @@ def test_two_windows_the_viewer_opened_are_refused_as_one_document_in_one_window
     two = _Window(0x12, 'Library - Adobe Acrobat Reader (64-bit)')
     with pytest.raises(LookupError, match=r"2 of the viewer's 2 window"):
         document_window([one, two], {0x10}, 'BS EN IEC 60072-1_2022')
+
+
+def test_the_capture_holds_while_the_user_works_in_another_window():
+    assert held(front=False, idle=0.4)  # another window in front, and the machine used half a second ago
+    assert not held(front=False, idle=30.0)  # the user has left the machine: the page may turn
+    assert not held(front=True, idle=0.1)  # the viewer holds the keyboard: the input is the capture's own

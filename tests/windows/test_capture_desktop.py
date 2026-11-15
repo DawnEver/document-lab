@@ -105,6 +105,12 @@ def test_a_posted_wheel_places_every_row_it_captures(viewer):
     assert np.array_equal(got, image[: len(got)])
 
 
+def test_the_desktop_says_how_long_it_has_been_idle_and_whether_a_window_holds_the_keyboard(viewer):
+    window, _ = viewer
+    assert 0.0 <= desktop.idle_seconds() < 86_400.0
+    assert isinstance(desktop.in_front(window), bool)
+
+
 def test_the_first_frame_is_the_view(viewer):
     window, image = viewer
     assert np.array_equal(desktop.grab(window), image[:VIEW])

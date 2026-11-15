@@ -241,6 +241,13 @@ def add_files_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser
     )
     files.add_argument('--open-wait', type=float, default=60.0, help='seconds the window of a PDF may take to appear')
     files.add_argument('--overwrite', action='store_true', help='capture again a PDF whose capture exists')
+    files.add_argument(
+        '--stop-file',
+        type=Path,
+        metavar='PATH',
+        help='the run stops when a file appears here: the page in hand is finished, its pages kept as '
+        '<name>.partial.pdf, and the PDFs after it are left for the next run -- the safe word of a long run',
+    )
     files.add_argument('--dpi', type=float, default=SCREEN_DPI, help='pixels per inch the pages are laid out at')
     files.add_argument(
         '--ocr', nargs='?', const='eng', metavar='LANGS', help="a text layer over each capture (Tesseract; 'eng')"
@@ -264,6 +271,7 @@ def run_files(args: argparse.Namespace) -> int:
         )
         return 1
     monitor = shown[args.monitor]
+    stop = args.stop_file.exists if args.stop_file is not None else None
     failed: list[str] = []
     for number, pdf in enumerate(pdfs, start=1):
         out = args.out / f'{pdf.stem}.pdf'
@@ -283,12 +291,17 @@ def run_files(args: argparse.Namespace) -> int:
                 chosen = desktop.select(desktop.recall(desktop.virtual_screen()) or shown)
                 marked = chosen.client() if isinstance(chosen, desktop.Window) else chosen
             shapes = files.page_shapes(pdf)
-            taken = files.page_through(window, viewer, out, area=marked, shapes=shapes, dpi=args.dpi)
+            taken = files.page_through(window, viewer, out, area=marked, shapes=shapes, dpi=args.dpi, stop=stop)
             emit(f'  {taken} page(s) to {out}')
             if args.ocr is not None:
                 from document_lab.ocr import text_layer  # noqa: PLC0415
 
                 emit(f'  text layer on {text_layer(out, out, args.ocr)} page(s)')
+        except files.Stopped:
+            with contextlib.suppress(OSError):
+                out.replace(out.with_suffix('.partial.pdf'))
+            emit(f'stopped: {out.with_suffix(".partial.pdf").name} keeps the pages taken; {pdf.name} is captured again')
+            return 2
         except (OSError, LookupError, ValueError) as refused:
             failed.append(f'{pdf.name}: {refused}')
         finally:

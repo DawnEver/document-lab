@@ -25,14 +25,17 @@ import numpy as np
 from lab_commons.log import emit
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
+    from collections.abc import Callable, Collection, Sequence
 
     from document_lab.capture.desktop import Region, Window
+
+    Stop = Callable[[], bool]  # asked between pages: True ends the run, the pages taken so far kept
 
 __all__ = [
     'ACROBAT',
     'MAX_PAGES',
     'PAGE_CONTRAST',
+    'Stopped',
     'Viewer',
     'document_window',
     'listed',
@@ -57,10 +60,12 @@ TURN_TRIES: Final = 2
 SHAPE_TOL: Final = 0.02
 TAKE_TRIES: Final = 3
 #: A page is taken when two grabs this many seconds apart are alike (a floating toolbar faded), or after SETTLE.
-STILL: Final = 0.5
+STILL: Final = 0.25
 SETTLE: Final = 5.0
 #: Seconds a viewer may take to show a page at all: a secured document is decrypted and laid out before the first.
 PAGE_WAIT: Final = 30.0
+#: Seconds between looks at the view while a viewer turns to the next page.
+TURN_POLL: Final = 0.1
 #: A cleared window's page view is at least this share of it wide; the keys are pressed this many times to get there.
 CLEARED: Final = 0.95
 CLEAR_TRIES: Final = 2
@@ -77,6 +82,12 @@ PAGE_GAP_PX: Final = 3
 SAME_PAGE: Final = 1.0
 #: The most pages taken of a PDF whose page count is not known here: a viewer that never stops is not followed.
 MAX_PAGES: Final = 2000
+#: Seconds without input that say the user has left the machine and the capture may take the foreground again.
+USER_IDLE: Final = 2.0
+
+
+class Stopped(Exception):
+    """The run was told to stop (``--stop-file`` appeared): the pages taken so far are kept, and the run ends."""
 
 
 @dataclass(frozen=True)
@@ -85,13 +96,15 @@ class Viewer:
 
     ``program`` with ``options`` opens a file in a window of its own; ``view`` titles the child window that shows
     the pages; the key ``chords``, pressed in order, show a document full screen (Acrobat's ``ctrl+l``: one page at a
-    time, fitted to the monitor on a black backdrop, nothing else) at its first page; ``next`` shows the next page.
+    time, fitted to the monitor on a black backdrop, nothing else) at its first page -- ``ctrl+0`` (fit page) because
+    a viewer remembers the zoom a document was last read at, and fit width cuts the page's head and foot off;
+    ``next`` shows the next page.
     """
 
     program: Path
     options: tuple[str, ...] = ('/n',)
     view: str = 'AVPageView'
-    chords: tuple[str, ...] = ('ctrl+l', 'home')
+    chords: tuple[str, ...] = ('ctrl+l', 'ctrl+0', 'home')
     next: str = 'pagedown'
 
     @classmethod
@@ -303,21 +316,24 @@ def _settled(area: Region) -> np.ndarray:
     return last
 
 
-def _take(window: Window, viewer: Viewer, area: Region | None, shape: float | None) -> np.ndarray:
-    """The page ``window`` shows: ``area``, else the part it fills of the view; once drawn whole.
+def _take(window: Window, viewer: Viewer, area: Region | None, shape: float | None) -> tuple[np.ndarray, np.ndarray]:
+    """The page ``window`` shows and the view it was taken from: ``area``, else the part it fills of the view.
 
     A take of another shape than the PDF's page -- the page still being drawn, a viewer still turning to full screen
     -- is taken again; so is a view no page stands apart from yet (a viewer still laying its first page out, a bare
-    backdrop), until :data:`PAGE_WAIT` seconds have passed, then refused.
+    backdrop), until :data:`PAGE_WAIT` seconds have passed, then refused. The view goes back with the page so the
+    next page turn can be waited for as a change of it (:func:`_turned`).
     """
     from document_lab.capture import desktop  # noqa: PLC0415
 
     end = time.monotonic() + PAGE_WAIT
     shown = np.zeros((1, 1, 3), dtype=np.uint8)
+    view = shown
     tries = 0
     while tries < TAKE_TRIES:
         desktop.park_cursor(window)
-        shown = _settled(area or desktop.view(window, viewer.view))
+        view = _settled(area or desktop.view(window, viewer.view))
+        shown = view
         if area is None:
             try:
                 top, bottom, left, right = page_box(shown)
@@ -329,7 +345,7 @@ def _take(window: Window, viewer: Viewer, area: Region | None, shape: float | No
             shown = shown[top:bottom, left:right]
         off = shape is not None and abs(len(shown) / shown.shape[1] - shape) > SHAPE_TOL * shape
         if area is not None or not off:
-            return shown
+            return shown, view
         tries += 1
         time.sleep(SETTLE)
     msg = f'the page shows {shown.shape[1]}x{len(shown)} px, not the {shape:.3f} height to width the PDF states'
@@ -342,7 +358,14 @@ def _not_cleared(window: Window, viewer: Viewer) -> None:
 
 
 def page_through(
-    window: Window, viewer: Viewer, out: Path, *, area: Region | None, shapes: list[float] | None, dpi: float
+    window: Window,
+    viewer: Viewer,
+    out: Path,
+    *,
+    area: Region | None,
+    shapes: list[float] | None,
+    dpi: float,
+    stop: Stop | None = None,
 ) -> int:
     """Take each page ``window`` shows into ``out``, paging on to the last; how many were taken.
 
@@ -357,17 +380,19 @@ def page_through(
     from document_lab.capture.export import PageWriter  # noqa: PLC0415
 
     pages = len(shapes) if shapes is not None else None
-    last = None
+    last, view = None, None
     with PageWriter(out, dpi) as pdf:
         for number in range(pages or MAX_PAGES):
+            if stop is not None and stop():
+                raise Stopped
             shape = None if shapes is None else shapes[number]
-            take = _take(window, viewer, area, shape)
+            take, view = _take(window, viewer, area, shape)
             for _ in range(TURN_TRIES if last is not None else 0):  # a key the viewer missed mid-draw: press it again
                 if not same_page(last, take):
                     break
                 desktop.press(window, viewer.next)
-                time.sleep(REDRAW)
-                take = _take(window, viewer, area, shape)
+                _turned(window, viewer, view)
+                take, view = _take(window, viewer, area, shape)
             if last is not None and same_page(last, take):
                 if pages is None:  # paged past the last page: the end of a PDF whose count is not known here
                     emit(f'  stopped after page {number}: paging on changed nothing (its count is not known here)')
@@ -377,6 +402,51 @@ def page_through(
             pdf.add(take)
             last = take
             if number + 1 < (pages or MAX_PAGES):
+                _yield_to_user(window, stop)
                 desktop.press(window, viewer.next)
-                time.sleep(REDRAW)
+                _turned(window, viewer, view)
         return pdf.pages
+
+
+def held(*, front: bool, idle: float) -> bool:
+    """Whether the capture holds its page: another window in front, and the machine used within :data:`USER_IDLE`."""
+    return not front and idle < USER_IDLE
+
+
+def _yield_to_user(window: Window, stop: Stop | None) -> None:
+    """Hold the capture while the user is working in another window, and say so.
+
+    Every key the capture sends takes the foreground for the viewer (:func:`desktop.press`), so a page turned while
+    the user types takes their keystrokes and their window loses the front. While another window is in front and
+    the machine has been used within :data:`USER_IDLE` seconds, the page is held; the user away from the keyboard,
+    or back in the viewer, and the run goes on -- or ``stop`` is asked, and the run ends.
+    """
+    from document_lab.capture import desktop  # noqa: PLC0415
+
+    told = False
+    while held(front=desktop.in_front(window), idle=desktop.idle_seconds()):
+        if stop is not None and stop():
+            raise Stopped
+        if not told:
+            emit('  held while you use the machine')
+            told = True
+        time.sleep(STILL)
+    if told:
+        emit('  going on')
+
+
+def _turned(window: Window, viewer: Viewer, last: np.ndarray) -> bool:
+    """Whether the page view differs from ``last`` within :data:`REDRAW` seconds of the page turn.
+
+    A viewer draws the next page in well under :data:`REDRAW`; waiting the whole of it on every page is most of a
+    capture's time given away. The view is looked at until it changes -- the page is then waited for to hold still
+    by :func:`_settled` -- and False is said when it does not (a key lost mid-draw, or the last page).
+    """
+    from document_lab.capture import desktop  # noqa: PLC0415
+
+    end = time.monotonic() + REDRAW
+    while time.monotonic() < end:
+        time.sleep(TURN_POLL)
+        if not same_page(last, desktop.grab(desktop.view(window, viewer.view))):
+            return True
+    return False

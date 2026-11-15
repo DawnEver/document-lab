@@ -35,6 +35,8 @@ __all__ = [
     'escape_pressed',
     'find_window',
     'grab',
+    'idle_seconds',
+    'in_front',
     'maximize',
     'monitors',
     'park_cursor',
@@ -58,6 +60,7 @@ _KEYEVENTF_KEYUP: Final = 0x0002
 _VK_DOWN: Final = 0x28
 _VK_UP: Final = 0x26
 _VK_ESCAPE: Final = 0x1B
+_GA_ROOT: Final = 2
 _VK_LBUTTON: Final = 0x01
 _WM_CLOSE: Final = 0x0010
 _SW_MAXIMIZE: Final = 3
@@ -124,6 +127,10 @@ class _Input(ctypes.Structure):
     _fields_ = (('type', wintypes.DWORD), ('u', _InputUnion))
 
 
+class _LastInput(ctypes.Structure):
+    _fields_ = (('cbSize', wintypes.UINT), ('dwTime', wintypes.DWORD))
+
+
 class _BitmapInfoHeader(ctypes.Structure):
     _fields_ = (
         ('biSize', wintypes.DWORD),
@@ -167,6 +174,7 @@ def _dll(name: str) -> ctypes.WinDLL:
                 'PostMessageW': (b, [h, u, wintypes.WPARAM, wintypes.LPARAM]),
                 'SetForegroundWindow': (b, [h]),
                 'GetForegroundWindow': (h, []),
+                'GetLastInputInfo': (b, [ctypes.POINTER(_LastInput)]),
                 'GetWindowThreadProcessId': (wintypes.DWORD, [h, ctypes.c_void_p]),
                 'AttachThreadInput': (b, [wintypes.DWORD, wintypes.DWORD, b]),
                 'GetAsyncKeyState': (wintypes.SHORT, [i]),
@@ -1067,6 +1075,24 @@ def open_file(path: Path) -> None:
 def escape_pressed() -> bool:
     """Is Esc held down right now (anywhere)?"""
     return bool(_dll('user32').GetAsyncKeyState(_VK_ESCAPE) & 0x8000)
+
+
+def idle_seconds() -> float:
+    """Seconds since the last keyboard or mouse input anywhere on this machine."""
+    user32 = _dll('user32')
+    info = _LastInput(ctypes.sizeof(_LastInput), 0)
+    if not user32.GetLastInputInfo(ctypes.byref(info)):
+        msg = 'GetLastInputInfo was refused: the idle time of the machine is unknown'
+        raise OSError(msg)
+    ticks = ctypes.WinDLL('kernel32').GetTickCount()  # the same clock GetLastInputInfo counts on; kernel32, not user32
+    return ((ticks - info.dwTime) & 0xFFFFFFFF) / 1000.0
+
+
+def in_front(window: Window) -> bool:
+    """Whether ``window``, or a window of its own, holds the keyboard: what the user types goes to it."""
+    user32 = _dll('user32')
+    front = user32.GetForegroundWindow()
+    return bool(front) and user32.GetAncestor(front, _GA_ROOT) == window.hwnd
 
 
 @dataclass(frozen=True)

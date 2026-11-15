@@ -60,7 +60,7 @@ TURN_TRIES: Final = 2
 SHAPE_TOL: Final = 0.02
 TAKE_TRIES: Final = 3
 #: A page is taken when two grabs this many seconds apart are alike (a floating toolbar faded), or after SETTLE.
-STILL: Final = 0.25
+STILL: Final = 0.15
 SETTLE: Final = 5.0
 #: Seconds a viewer may take to show a page at all: a secured document is decrypted and laid out before the first.
 PAGE_WAIT: Final = 30.0
@@ -330,16 +330,18 @@ def _wait_for_document(viewer: Viewer, name: str, before: Collection[int], timeo
         time.sleep(0.5)
 
 
-def _settled(area: Region) -> np.ndarray:
+def _settled(area: Region, seen: np.ndarray | None = None) -> np.ndarray:
     """``area`` once it holds still: two grabs :data:`STILL` seconds apart alike.
 
-    A viewer fades its floating toolbar in and out; what is taken is the page without it. After :data:`SETTLE`
-    seconds the last grab is taken as it is.
+    The page a viewer was just told to turn to is drawn over a moment: the first frame after ``next`` can be a page
+    half drawn, so it is taken only when a second look is the same. ``seen`` is a grab of ``area`` already made (the
+    page turn's own, :func:`_turned`), taken as the first look rather than grabbed again; a viewer's floating toolbar
+    fading in or out is caught by the same rule. After :data:`SETTLE` seconds the last grab is taken as it is.
     """
     from document_lab.capture import desktop  # noqa: PLC0415
 
     end = time.monotonic() + SETTLE
-    last = desktop.grab(area)
+    last = desktop.grab(area) if seen is None else seen
     while time.monotonic() < end:
         time.sleep(STILL)
         now = desktop.grab(area)
@@ -350,7 +352,13 @@ def _settled(area: Region) -> np.ndarray:
 
 
 def _take(
-    window: Window, viewer: Viewer, area: Region | None, shape: float | None, park: Park | None = None
+    window: Window,
+    viewer: Viewer,
+    area: Region | None,
+    shape: float | None,
+    *,
+    park: Park | None = None,
+    seen: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """The page ``window`` shows and the view it was taken from: ``area``, else the part it fills of the view.
 
@@ -367,7 +375,8 @@ def _take(
     tries = 0
     while tries < TAKE_TRIES:
         (park.go(window) if park is not None else desktop.park_cursor(window))
-        view = _settled(area or desktop.view(window, viewer.view))
+        view = _settled(area or desktop.view(window, viewer.view), seen)
+        seen = None  # the turn's grab is spent: a later try looks twice
         shown = view
         if area is None:
             try:
@@ -432,19 +441,19 @@ def _through(
     from document_lab.capture import desktop  # noqa: PLC0415
     from document_lab.capture.export import PageWriter  # noqa: PLC0415
 
-    last, view = None, None
+    last, view, seen = None, None, None
     with PageWriter(out, dpi) as pdf:
         for number in range(pages or MAX_PAGES):
             if gate is not None:
                 gate(f'{out.stem}: page {number + 1} of {pages or "?"}')
             shape = None if shapes is None else shapes[number]
-            take, view = _take(window, viewer, area, shape, park)
+            take, view = _take(window, viewer, area, shape, park=park, seen=seen)
             for _ in range(TURN_TRIES if last is not None else 0):  # a key the viewer missed mid-draw: press it again
                 if not same_page(last, take):
                     break
                 desktop.press(window, viewer.next)
-                _turned(window, viewer, view)
-                take, view = _take(window, viewer, area, shape, park)
+                seen = _turned(window, viewer, view)
+                take, view = _take(window, viewer, area, shape, park=park, seen=seen)
             if last is not None and same_page(last, take):
                 if pages is None:  # paged past the last page: the end of a PDF whose count is not known here
                     emit(f'  stopped after page {number}: paging on changed nothing (its count is not known here)')
@@ -453,10 +462,11 @@ def _through(
                 raise LookupError(msg)
             pdf.add(take)
             last = take
+            seen = None
             if number + 1 < (pages or MAX_PAGES):
                 _yield_to_user(window, gate, park)
                 desktop.press(window, viewer.next)
-                _turned(window, viewer, view)
+                seen = _turned(window, viewer, view)
         return pdf.pages
 
 
@@ -489,18 +499,20 @@ def _yield_to_user(window: Window, gate: Gate | None, park: Park | None = None) 
         emit('  going on')
 
 
-def _turned(window: Window, viewer: Viewer, last: np.ndarray) -> bool:
-    """Whether the page view differs from ``last`` within :data:`REDRAW` seconds of the page turn.
+def _turned(window: Window, viewer: Viewer, last: np.ndarray) -> np.ndarray | None:
+    """The page view once it differs from ``last`` within :data:`REDRAW` seconds of the page turn, or None.
 
     A viewer draws the next page in well under :data:`REDRAW`; waiting the whole of it on every page is most of a
-    capture's time given away. The view is looked at until it changes -- the page is then waited for to hold still
-    by :func:`_settled` -- and False is said when it does not (a key lost mid-draw, or the last page).
+    capture's time given away. The view is looked at until it changes -- that grab is handed to :func:`_settled` as
+    its first look, the page then being taken only once it holds still -- and None is said when it does not change
+    (a key lost mid-draw, or the last page).
     """
     from document_lab.capture import desktop  # noqa: PLC0415
 
     end = time.monotonic() + REDRAW
     while time.monotonic() < end:
         time.sleep(TURN_POLL)
-        if not same_page(last, desktop.grab(desktop.view(window, viewer.view))):
-            return True
-    return False
+        seen = desktop.grab(desktop.view(window, viewer.view))
+        if not same_page(last, seen):
+            return seen
+    return None

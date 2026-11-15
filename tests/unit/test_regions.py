@@ -210,7 +210,8 @@ def test_a_frame_round_a_lines_words_a_margin_note_and_a_short_line_are_no_regio
     margin = _drawn((5, 100, 20, 700))  # a sideways licence note beside the text column
     rule = _drawn((50, 400, 500, 401))  # a rule under a header
     words = _drawn((60, 500, 120, 540), stroke=8)  # words OCR missed: glyphs, no drawn line
-    assert regions(page, body, [link, margin, rule, words]) == []
+    beside = _drawn((42, 190, 58, 222))  # a link's frame just before the line, its words unread, a line below caught
+    assert regions(page, body, [link, margin, rule, words, beside]) == []
 
 
 def test_a_drawings_views_side_by_side_are_one_figure_and_prose_parts_two(tmp_path):

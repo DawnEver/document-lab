@@ -30,8 +30,9 @@ __all__ = ['DARK', 'RULE_SHARE', 'Drawing', 'drawings']
 
 #: A pixel darker than this grey level (0 black .. 255 white) is ink.
 DARK: Final = 128
-#: The grid ink is judged on, in points a cell: finer than any rule's spacing, coarse enough to be quick.
-CELL: Final = 1.0
+#: Drawings are found on a grid of this many cells to ``reach`` -- coarse enough to be quick on a page of millions of
+#: pixels -- and measured on their own pixels.
+REACH_CELLS: Final = 3
 #: A rule runs across at least this share of its drawing.
 RULE_SHARE: Final = 0.5
 
@@ -58,17 +59,18 @@ def drawings(pixels: np.ndarray, scale: float, text: Sequence[BBox], reach: floa
     within ``reach`` points of other ink is one drawing.
     """
     grey = pixels if pixels.ndim == 2 else pixels[..., :3].mean(axis=2)  # noqa: PLR2004 -- rows by columns
-    step = max(1, round(CELL * scale))
-    rows, cols = -(-grey.shape[0] // step), -(-grey.shape[1] // step)
-    dark = np.zeros((rows * step, cols * step), dtype=bool)
-    dark[: grey.shape[0], : grey.shape[1]] = grey < DARK
-    grid = dark.reshape(rows, step, cols, step).any(axis=(1, 3))
-    cell = step / scale  # points a cell
-    for box in text:
-        grid[int(box.y0 / cell) : math.ceil(box.y1 / cell) + 1, int(box.x0 / cell) : math.ceil(box.x1 / cell) + 1] = (
-            False
-        )
-    reach_cells = max(1, round(reach / cell))
+    dark = grey < DARK
+    for box in text:  # the text's ink, wiped pixel by pixel
+        dark[
+            int(box.y0 * scale) : math.ceil(box.y1 * scale) + 1, int(box.x0 * scale) : math.ceil(box.x1 * scale) + 1
+        ] = False
+    # Drawings are found on a coarse grid (quick on millions of pixels) and measured on their own pixels (exact).
+    step = max(1, round(reach / REACH_CELLS * scale))
+    rows, cols = -(-dark.shape[0] // step), -(-dark.shape[1] // step)
+    padded = np.zeros((rows * step, cols * step), dtype=bool)
+    padded[: dark.shape[0], : dark.shape[1]] = dark
+    grid = padded.reshape(rows, step, cols, step).any(axis=(1, 3))
+    reach_cells = max(1, round(reach * scale / step))
     grown = grid.copy()
     for shift in range(1, reach_cells + 1):  # ink within reach joins: grow it by reach both ways
         grown[shift:] |= grid[:-shift]
@@ -79,15 +81,21 @@ def drawings(pixels: np.ndarray, scale: float, text: Sequence[BBox], reach: floa
         wide[:, :-shift] |= grown[:, shift:]
     out = []
     for cells in _components(wide):
-        held = [(r, c) for r, c in cells if grid[r, c]]  # its own ink, not the reach grown round it
-        if not held:
+        rs, cs = (np.array(v) for v in zip(*cells, strict=True))
+        r0, c0 = rs.min(), cs.min()
+        mask = np.zeros((rs.max() - r0 + 1, cs.max() - c0 + 1), dtype=bool)
+        mask[rs - r0, cs - c0] = True
+        top, left = r0 * step, c0 * step
+        cut = padded[top : top + mask.shape[0] * step, left : left + mask.shape[1] * step]
+        own = cut & np.repeat(np.repeat(mask, step, axis=0), step, axis=1)  # its own ink, not the reach round it
+        ys, xs = np.nonzero(own)
+        if not ys.size:
             continue
-        rs, cs = [r for r, _ in held], [c for _, c in held]
-        own = np.zeros((max(rs) - min(rs) + 1, max(cs) - min(cs) + 1), dtype=bool)
-        own[np.array(rs) - min(rs), np.array(cs) - min(cs)] = True
-        box = BBox(min(cs) * cell, min(rs) * cell, (max(cs) + 1) * cell, (max(rs) + 1) * cell)
+        own = own[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1]
+        y0, x0 = top + ys.min(), left + xs.min()
+        box = BBox(x0 / scale, y0 / scale, (x0 + own.shape[1]) / scale, (y0 + own.shape[0]) / scale)
         rules, loose = _rules(own)
-        out.append(Drawing(box, rules, loose * cell, _longest(own) * cell))
+        out.append(Drawing(box, rules, loose / scale, _longest(own) / scale))
     return sorted(out, key=lambda d: (d.box.y0, d.box.x0))
 
 
@@ -95,7 +103,7 @@ def _rules(own: np.ndarray) -> tuple[tuple[int, int], int]:
     """The horizontal and vertical rules ``own`` (one drawing's ink) is drawn with, and its largest piece off them.
 
     A rule is a run of rows (columns) each inked across :data:`RULE_SHARE` of the drawing. The piece is the larger
-    side, in cells, of the largest connected ink off every rule (0 when there is none): a table's words, a plot's
+    side, in pixels, of the largest connected ink off every rule (0 when there is none): a table's words, a plot's
     curve.
     """
     rows = own.sum(axis=1) >= RULE_SHARE * own.shape[1]

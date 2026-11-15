@@ -74,6 +74,7 @@ DRAWN_MIN: Final = 1.5
 DRAWN_STROKE: Final = 2.0
 #: A drawing in a text line's band at most this many times the line's height frames its words (a link, a header).
 FRAME_LINES: Final = 3.0
+FRAME_FILL: Final = 0.8
 #: A drawing at most this many body sizes high whose text reads as no word is an equation without a number.
 EQUATION_HEIGHT: Final = 4.0
 _HEADING: Final = re.compile(r'^\d+(?:\.\d+)*\.?\s+[A-Z]')
@@ -306,13 +307,19 @@ def _joined(page: _Page, boxes: list[BBox]) -> list[BBox]:
 
 
 def _round_words(box: BBox, line: layout.Line) -> bool:
-    """Is ``box`` set in a wordy ``line``'s band, at most :data:`FRAME_LINES` its height: a frame round its words?
+    """Is ``box`` a frame round ``line``'s words, as a link's or a header's is?
 
-    Across the line's words or beside them: OCR may miss the framed words, leaving their ink inside the frame.
+    Sharing half the line's band or more, across the line or beside it, at most :data:`FRAME_LINES` its height, the
+    line reading as words or filling
+    :data:`FRAME_FILL` of it (a header's code): a formula's bars frame no such line. Across the line's words or
+    beside them: OCR may miss the framed words, leaving their ink inside the frame.
     """
-    middle = (box.y0 + box.y1) / 2
-    framed = line.y0 <= middle <= line.y1 and box.height <= FRAME_LINES * (line.y1 - line.y0)
-    return framed and layout.wordy(line.text)  # a formula's line, OCR'd, reads as noise: its bars are no frame
+    height = line.y1 - line.y0
+    shared = min(box.y1, line.y1) - max(box.y0, line.y0)  # how much of the line's band the box shares
+    touches = line.x0 - height <= box.x1 and box.x0 <= line.x1 + height  # across the line or just beside it
+    framed = shared >= height / 2 and touches and box.height <= FRAME_LINES * height
+    fills = line.x1 - line.x0 >= FRAME_FILL * box.width  # a header's code fills its frame; a formula's noise does not
+    return framed and (layout.wordy(line.text) or fills)
 
 
 def _bands_of(page: _Page, lines: list[layout.Line]) -> list[list[layout.Line]]:

@@ -261,7 +261,7 @@ def add_files_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser
     return files
 
 
-def _report(pdfs: list[Path], failed: list[str], out: Path, panel: Panel | None) -> int:
+def _report_files(pdfs: list[Path], failed: list[str], out: Path, panel: Panel | None) -> int:
     """Close the panel, say how the run went, and give its exit status."""
     if panel is not None:
         panel.close()
@@ -356,7 +356,7 @@ def run_files(args: argparse.Namespace) -> int:
             with contextlib.suppress(OSError):
                 desktop.close(window)
     park.restore()  # the mouse goes back where the user left it
-    return _report(pdfs, failed, args.out, panel)
+    return _report_files(pdfs, failed, args.out, panel)
 
 
 def run_merge(args: argparse.Namespace) -> int:

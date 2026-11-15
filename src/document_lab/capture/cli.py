@@ -219,9 +219,8 @@ def add_files_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser
     files = sub.add_parser(
         'capture-files',
         help='each PDF opened in its viewer (Acrobat) and captured whole, one PDF each (Windows)',
-        description='Each PDF is opened in the viewer, its window maximised and cleared of panes and toolbars (read '
-        'mode), a whole page in view; each page is taken as it shows, paged on to the last, one PDF page each; '
-        'the window is closed.',
+        description='Each PDF is opened in the viewer, its window maximised and shown full screen (one page at a '
+        'time); each page is taken as it shows, paged on to the last, one PDF page each; the window is closed.',
     )
     files.add_argument('sources', type=Path, nargs='+', metavar='SOURCE', help='PDFs, directories of PDFs, or lists')
     files.add_argument('-o', '--out', type=Path, required=True, help='the directory the captures go to, one each')
@@ -283,8 +282,8 @@ def run_files(args: argparse.Namespace) -> int:
                 shown = desktop.view(window, viewer.view)
                 chosen = desktop.select(desktop.recall(desktop.virtual_screen()) or shown)
                 marked = chosen.client() if isinstance(chosen, desktop.Window) else chosen
-            count = files.page_count(pdf)
-            taken = files.page_through(window, viewer, out, area=marked, pages=count, dpi=args.dpi)
+            shapes = files.page_shapes(pdf)
+            taken = files.page_through(window, viewer, out, area=marked, shapes=shapes, dpi=args.dpi)
             emit(f'  {taken} page(s) to {out}')
             if args.ocr is not None:
                 from document_lab.ocr import text_layer  # noqa: PLC0415

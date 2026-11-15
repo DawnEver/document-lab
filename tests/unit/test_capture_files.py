@@ -6,7 +6,7 @@ import pymupdf
 import pytest
 
 from document_lab.capture.export import PageWriter
-from document_lab.capture.files import listed, page_box, page_count, same_page
+from document_lab.capture.files import listed, page_box, page_shapes, same_page
 
 
 def _pdf(path, pages=1, password=None):
@@ -39,10 +39,10 @@ def test_a_source_naming_nothing_is_refused_not_skipped(tmp_path):
         listed([tmp_path / 'missing'])
 
 
-def test_the_page_count_is_known_when_the_pdf_opens_here_and_not_when_it_is_secured(tmp_path):
-    assert page_count(_pdf(tmp_path / 'open.pdf', pages=3)) == 3
+def test_the_page_shapes_are_known_when_the_pdf_opens_here_and_not_when_it_is_secured(tmp_path):
+    assert page_shapes(_pdf(tmp_path / 'open.pdf', pages=3)) == pytest.approx([842 / 595] * 3)
     secret = 'only the viewer'  # noqa: S105 -- a planted secured PDF's, not a credential
-    assert page_count(_pdf(tmp_path / 'secured.pdf', pages=3, password=secret)) is None
+    assert page_shapes(_pdf(tmp_path / 'secured.pdf', pages=3, password=secret)) is None
 
 
 def _view(height=300, width=400, page=(40, 260, 120, 280), backdrop=110):
@@ -80,6 +80,14 @@ def test_a_page_fitted_to_the_view_height_fills_it_top_to_foot_and_is_taken():
 
 def test_a_page_fitted_across_a_portrait_view_fills_its_width_with_the_backdrop_above_and_below():
     assert page_box(_view(height=500, width=300, page=(60, 440, 0, 300), backdrop=248)) == (60, 440, 0, 300)
+
+
+def test_a_table_rule_as_dark_as_the_backdrop_does_not_cut_the_page():
+    """Full screen puts the page on black; a table's black rules across it are the page's, not the backdrop."""
+    view = _view(height=600, width=300, page=(50, 550, 0, 300), backdrop=0)
+    for y in (300, 330, 360):
+        view[y : y + 3, 40:260] = 0
+    assert page_box(view) == (50, 550, 0, 300)
 
 
 def test_paging_past_the_last_page_changes_nothing_and_a_new_page_does():

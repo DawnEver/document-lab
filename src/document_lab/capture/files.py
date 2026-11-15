@@ -2,11 +2,11 @@
 
 A PDF only its viewer may open (a secured standard) is captured from the screen, as a person would: each is opened
 in the viewer (:class:`Viewer`, Adobe Acrobat by default), its window maximised, cleared of its panes and toolbars
-(Acrobat's read mode) and brought to its first page with the whole page in view -- sharp enough at a screen's height.
+-- shown full screen (Acrobat's ``ctrl+l``: one page at a time, fitted to the monitor, on black) at its first page.
 Then each page is taken as it shows -- the part it fills (:func:`page_box`) or the area the user marked -- and
 the viewer paged on (``pagedown``): one image a page, written as one PDF page each, no stitching to lose its place
 and no blank stretch to pass for the end. It stops after the PDF's own page count when the PDF opens here
-(:func:`page_count`); a secured one that does not stops when paging on changes nothing. The run is the caller's: it
+(:func:`page_shapes`); a secured one that does not stops when paging on changes nothing. The run is the caller's: it
 names what this module opens and closes.
 """
 
@@ -34,7 +34,7 @@ __all__ = [
     'listed',
     'open_in',
     'page_box',
-    'page_count',
+    'page_shapes',
     'page_through',
     'same_page',
 ]
@@ -47,6 +47,11 @@ ACROBAT: Final = (
 )
 #: Seconds a viewer takes to redraw after a key: one pressed mid-redraw is lost, a page grabbed mid-redraw is torn.
 REDRAW: Final = 1.0
+#: Times ``next`` is pressed again when the page did not turn (the viewer was drawing) before it is the end.
+TURN_TRIES: Final = 2
+#: A take whose height over width is off the page's by more than this share is taken again, this many times at most.
+SHAPE_TOL: Final = 0.02
+TAKE_TRIES: Final = 3
 #: A page is taken when two grabs this many seconds apart are alike (a floating toolbar faded), or after SETTLE.
 STILL: Final = 0.5
 SETTLE: Final = 5.0
@@ -56,9 +61,12 @@ CLEAR_TRIES: Final = 2
 #: The page against its viewer's backdrop: corners this many pixels square are the backdrop, a pixel this many off
 #: it is the page's, a column is the page's when this share of its rows is, and a page is at least this share wide.
 PAGE_EDGE: Final = 3
-PAGE_CONTRAST: Final = 3  # Acrobat's read-mode backdrop is 248 to the page's 255
+PAGE_CONTRAST: Final = 3  # a backdrop near the page's own white (248 to 255) is still told from it
 PAGE_ROWS: Final = 0.5
 PAGE_SHARE: Final = 0.2
+#: A run off the backdrop this short (a share of the view, or pixels) inside the page is a rule, not the backdrop.
+PAGE_GAP: Final = 0.01
+PAGE_GAP_PX: Final = 3
 #: Mean grey levels two takes may differ by and be the same page: paging on past the last page changes nothing.
 SAME_PAGE: Final = 1.0
 #: The most pages taken of a PDF whose page count is not known here: a viewer that never stops is not followed.
@@ -70,16 +78,14 @@ class Viewer:
     """A PDF viewer: how it opens a file, where it shows the pages, and the keys that clear it and page it.
 
     ``program`` with ``options`` opens a file in a window of its own; ``view`` titles the child window that shows
-    the pages; the key ``chords``, pressed in order, clear the window of everything but the pages (Acrobat's read
-    mode, ``ctrl+h``: no tools pane, toolbars or assistant) and bring a document to its first page with the whole page
-    in view (``ctrl+0``); ``next`` shows the next page. Acrobat's page layout is to be Single Page (its preferences, set
-    once): continuous, it shows the last page lower than the others, the document's end reached.
+    the pages; the key ``chords``, pressed in order, show a document full screen (Acrobat's ``ctrl+l``: one page at a
+    time, fitted to the monitor on a black backdrop, nothing else) at its first page; ``next`` shows the next page.
     """
 
     program: Path
     options: tuple[str, ...] = ('/n',)
     view: str = 'AVPageView'
-    chords: tuple[str, ...] = ('ctrl+h', 'ctrl+0', 'home')
+    chords: tuple[str, ...] = ('ctrl+l', 'home')
     next: str = 'pagedown'
 
     @classmethod
@@ -117,13 +123,13 @@ def listed(sources: Sequence[Path]) -> list[Path]:
     return out
 
 
-def page_count(pdf: Path) -> int | None:
-    """How many pages ``pdf`` has, when it opens here; None when only its viewer may open it (secured)."""
+def page_shapes(pdf: Path) -> list[float] | None:
+    """Each page's height over its width, when ``pdf`` opens here; None when only its viewer may open it (secured)."""
     import pymupdf  # noqa: PLC0415
 
     try:
         with pymupdf.open(pdf) as doc:
-            return None if doc.needs_pass else len(doc)
+            return None if doc.needs_pass else [page.rect.height / page.rect.width for page in doc]
     except (RuntimeError, ValueError):
         return None
 
@@ -157,7 +163,12 @@ def page_box(pixels: np.ndarray) -> tuple[int, int, int, int]:
 def _widest(page: np.ndarray, what: str) -> tuple[int, int]:
     """The ``[start, end)`` of the widest run of True in ``page``; refused when it is no page (see :func:`page_box`)."""
     bounds = np.flatnonzero(np.diff(np.concatenate(([0], page.astype(np.int8), [0]))))
-    runs = list(zip(bounds[::2].tolist(), bounds[1::2].tolist(), strict=True))
+    runs: list[tuple[int, int]] = []
+    for start, end in zip(bounds[::2].tolist(), bounds[1::2].tolist(), strict=True):
+        if runs and start - runs[-1][1] <= max(PAGE_GAP_PX, PAGE_GAP * len(page)):
+            runs[-1] = (runs[-1][0], end)  # a rule as dark as the backdrop (a table's) is the page's, not a gap
+        else:
+            runs.append((start, end))
     start, end = max(runs, key=lambda run: run[1] - run[0], default=(0, 0))
     if end - start < PAGE_SHARE * len(page):
         msg = f'no page stands apart from the backdrop ({what} {start}..{end} of {len(page)}): is a whole page in view?'
@@ -218,34 +229,61 @@ def _settled(area: Region) -> np.ndarray:
     return last
 
 
+def _take(window: Window, viewer: Viewer, area: Region | None, shape: float | None) -> np.ndarray:
+    """The page ``window`` shows: ``area``, else the part it fills of the view; once drawn whole.
+
+    Found in the view, with the page's ``shape`` (its height over its width) known, a take of another shape -- the
+    page still being drawn, a viewer still turning to full screen -- is taken again, up to :data:`TAKE_TRIES` times,
+    then refused.
+    """
+    from document_lab.capture import desktop  # noqa: PLC0415
+
+    for _ in range(TAKE_TRIES):
+        desktop.park_cursor(window)
+        shown = _settled(area or desktop.view(window, viewer.view))
+        if area is None:
+            top, bottom, left, right = page_box(shown)
+            shown = shown[top:bottom, left:right]
+        off = shape is not None and abs(len(shown) / shown.shape[1] - shape) > SHAPE_TOL * shape
+        if area is not None or not off:
+            return shown
+        time.sleep(SETTLE)
+    msg = f'the page shows {shown.shape[1]}x{len(shown)} px, not the {shape:.3f} height to width the PDF states'
+    raise LookupError(msg)
+
+
 def _not_cleared(window: Window, viewer: Viewer) -> None:
     msg = f'{window.title!r}: its panes stay open after {viewer.chords}: the pages do not fill the window'
     raise LookupError(msg)
 
 
 def page_through(
-    window: Window, viewer: Viewer, out: Path, *, area: Region | None, pages: int | None, dpi: float
+    window: Window, viewer: Viewer, out: Path, *, area: Region | None, shapes: list[float] | None, dpi: float
 ) -> int:
     """Take each page ``window`` shows into ``out``, paging on to the last; how many were taken.
 
-    A page is ``area`` when given (the user's mark), else the part it fills of the viewer's view. ``pages`` pages
-    are taken when known, and a page that shows what the one before did is refused (the viewer did not page on);
+    A page is ``area`` when given (the user's mark), else the part it fills of the viewer's view. As many pages
+    are taken when the PDF's own page ``shapes`` are known -- each take checked against its page's (:func:`_take`) --
+    and a page that shows what the one before did, ``next`` pressed again :data:`TURN_TRIES` times, is refused (the
+    viewer did not page on);
     else up to the page that paging on leaves unchanged (at most :data:`MAX_PAGES`), said so -- two blank pages in a
     row end it there.
     """
     from document_lab.capture import desktop  # noqa: PLC0415
     from document_lab.capture.export import PageWriter  # noqa: PLC0415
 
+    pages = len(shapes) if shapes is not None else None
     last = None
     with PageWriter(out, dpi) as pdf:
         for number in range(pages or MAX_PAGES):
-            desktop.park_cursor(window)
-            shown = _settled(area or desktop.view(window, viewer.view))
-            if area is None:
-                top, bottom, left, right = page_box(shown)
-                take = shown[top:bottom, left:right]
-            else:
-                take = shown
+            shape = None if shapes is None else shapes[number]
+            take = _take(window, viewer, area, shape)
+            for _ in range(TURN_TRIES if last is not None else 0):  # a key the viewer missed mid-draw: press it again
+                if not same_page(last, take):
+                    break
+                desktop.press(window, viewer.next)
+                time.sleep(REDRAW)
+                take = _take(window, viewer, area, shape)
             if last is not None and same_page(last, take):
                 if pages is None:  # paged past the last page: the end of a PDF whose count is not known here
                     emit(f'  stopped after page {number}: paging on changed nothing (its count is not known here)')

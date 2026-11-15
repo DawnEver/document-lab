@@ -1,7 +1,9 @@
 """PDFs captured page by page as their viewer shows them: ``document-lab capture-files`` (Windows).
 
 A PDF only its viewer may open (a secured standard) is captured from the screen, as a person would: each is opened
-in the viewer (:class:`Viewer`, Adobe Acrobat by default), its window maximised, cleared of its panes and toolbars
+in the viewer (:class:`Viewer`, Adobe Acrobat by default), the window it opens found (:func:`document_window`: the
+one that was not there before, or titled with the file's name -- a secured standard is titled with its own, ``BS EN
+IEC 60072-1:2022 (SECURED)``), maximised, cleared of its panes and toolbars
 -- shown full screen (Acrobat's ``ctrl+l``: one page at a time, fitted to the monitor, on black) at its first page.
 Then each page is taken as it shows -- the part it fills (:func:`page_box`) or the area the user marked -- and
 the viewer paged on (``pagedown``): one image a page, written as one PDF page each, no stitching to lose its place
@@ -12,6 +14,7 @@ names what this module opens and closes.
 
 from __future__ import annotations
 
+import contextlib
 import subprocess
 import time
 from dataclasses import dataclass
@@ -22,7 +25,7 @@ import numpy as np
 from lab_commons.log import emit
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Sequence
 
     from document_lab.capture.desktop import Region, Window
 
@@ -31,6 +34,7 @@ __all__ = [
     'MAX_PAGES',
     'PAGE_CONTRAST',
     'Viewer',
+    'document_window',
     'listed',
     'open_in',
     'page_box',
@@ -55,6 +59,8 @@ TAKE_TRIES: Final = 3
 #: A page is taken when two grabs this many seconds apart are alike (a floating toolbar faded), or after SETTLE.
 STILL: Final = 0.5
 SETTLE: Final = 5.0
+#: Seconds a viewer may take to show a page at all: a secured document is decrypted and laid out before the first.
+PAGE_WAIT: Final = 30.0
 #: A cleared window's page view is at least this share of it wide; the keys are pressed this many times to get there.
 CLEARED: Final = 0.95
 CLEAR_TRIES: Final = 2
@@ -181,18 +187,41 @@ def same_page(a: np.ndarray, b: np.ndarray) -> bool:
     return a.shape == b.shape and float(np.abs(a.astype(float) - b.astype(float)).mean()) <= SAME_PAGE
 
 
+def document_window(shown: Sequence[Window], before: Collection[int], name: str) -> Window:
+    """The one window the viewer opened for ``name`` among ``shown`` (each holding the viewer's page view).
+
+    A viewer may title a document by its own title instead of the file's name -- a secured standard opens as ``BS EN
+    IEC 60072-1:2022 (SECURED)``, not ``BS EN IEC 60072-1_2022.pdf`` -- so the window that was not there before
+    ``before`` (the handles shown before the viewer was started) is the document's too, and taken first. One titled
+    with the file's name is, for a viewer that opens each file in the window it already has. None or several is
+    refused, naming what the viewer shows.
+    """
+    found = [w for w in shown if w.hwnd not in before] or [w for w in shown if name.casefold() in w.title.casefold()]
+    if len(found) == 1:
+        return found[0]
+    listing = '; '.join(repr(w.title) for w in found) or 'none'
+    msg = (
+        f"{len(found)} of the viewer's {len(shown)} window(s) show {name!r} ({listing}): one document in one window "
+        'each, or none opened'
+    )
+    raise LookupError(msg)
+
+
 def open_in(viewer: Viewer, pdf: Path, timeout: float, monitor: Region | None = None) -> Window:
     """``pdf`` opened in ``viewer``, its window maximised and cleared, at its first page with the whole page in view.
 
-    The window is maximised on ``monitor`` (default: the primary). It is waited for up to ``timeout`` seconds (the
-    viewer starting). Cleared is the page view filling the
+    The window is the one that was not there before the viewer was started, or titled with the file's name
+    (:func:`document_window`: a secured PDF is titled with its own). It is waited for up to ``timeout`` seconds (the
+    viewer starting); windows it opened are closed again when it is not found. Maximised on ``monitor`` (default:
+    the primary). Cleared is the page view filling the
     window (:data:`CLEARED`): a key the viewer missed (it was still drawing) is pressed again; still not, it is
     refused. A window this opened is closed again when it cannot be brought so far.
     """
     from document_lab.capture import desktop  # noqa: PLC0415 -- the run alone touches the desktop
 
+    before = {w.hwnd for w in desktop.windows()}
     subprocess.Popen([str(viewer.program), *viewer.options, str(pdf)])
-    window = desktop.wait_for_window(pdf.name, timeout)
+    window = _wait_for_document(viewer, pdf.stem, before, timeout)
     try:
         desktop.maximize(window, monitor)
         desktop.view(window, viewer.view)  # the page view is there: the document is open, not a dialog
@@ -200,7 +229,7 @@ def open_in(viewer: Viewer, pdf: Path, timeout: float, monitor: Region | None = 
             for chord in viewer.chords:
                 desktop.press(window, chord)
                 time.sleep(REDRAW)
-            if desktop.view(window, viewer.view).width >= CLEARED * window.client().width:
+            if _cleared(window, viewer):
                 break
         else:
             _not_cleared(window, viewer)
@@ -208,6 +237,51 @@ def open_in(viewer: Viewer, pdf: Path, timeout: float, monitor: Region | None = 
         desktop.close(window)
         raise
     return window
+
+
+def _cleared(window: Window, viewer: Viewer) -> bool:
+    """Whether ``window``'s page view fills it within :data:`SETTLE` seconds.
+
+    A viewer takes a moment to apply a chord -- a big secured document longer -- and judging it after one
+    :data:`REDRAW` reads a slow viewer as an uncleared one: the chord pressed again would take the full screen back
+    off. So the width is read until it fills the window, or the viewer is given up on.
+    """
+    from document_lab.capture import desktop  # noqa: PLC0415
+
+    end = time.monotonic() + SETTLE
+    while True:
+        if desktop.view(window, viewer.view).width >= CLEARED * window.client().width:
+            return True
+        if time.monotonic() > end:
+            return False
+        time.sleep(STILL)
+
+
+def _wait_for_document(viewer: Viewer, name: str, before: Collection[int], timeout: float) -> Window:
+    """The window the viewer opened for ``name``, waited for up to ``timeout`` seconds (the viewer starting).
+
+    Only windows holding the viewer's page view (:attr:`Viewer.view`) are the document's -- a dialog it puts up is
+    not. One it opened and cannot settle on by ``timeout`` is closed, so a refused run leaves none behind.
+    """
+    from document_lab.capture import desktop  # noqa: PLC0415
+
+    end = time.monotonic() + timeout
+    while True:
+        shown = []
+        for candidate in desktop.windows():
+            with contextlib.suppress(LookupError):
+                desktop.view(candidate, viewer.view)
+                shown.append(candidate)
+        try:
+            return document_window(shown, before, name)
+        except LookupError:
+            if time.monotonic() > end:
+                for window in shown:
+                    if window.hwnd not in before:
+                        with contextlib.suppress(OSError):
+                            desktop.close(window)
+                raise
+        time.sleep(0.5)
 
 
 def _settled(area: Region) -> np.ndarray:
@@ -232,21 +306,31 @@ def _settled(area: Region) -> np.ndarray:
 def _take(window: Window, viewer: Viewer, area: Region | None, shape: float | None) -> np.ndarray:
     """The page ``window`` shows: ``area``, else the part it fills of the view; once drawn whole.
 
-    Found in the view, with the page's ``shape`` (its height over its width) known, a take of another shape -- the
-    page still being drawn, a viewer still turning to full screen -- is taken again, up to :data:`TAKE_TRIES` times,
-    then refused.
+    A take of another shape than the PDF's page -- the page still being drawn, a viewer still turning to full screen
+    -- is taken again; so is a view no page stands apart from yet (a viewer still laying its first page out, a bare
+    backdrop), until :data:`PAGE_WAIT` seconds have passed, then refused.
     """
     from document_lab.capture import desktop  # noqa: PLC0415
 
-    for _ in range(TAKE_TRIES):
+    end = time.monotonic() + PAGE_WAIT
+    shown = np.zeros((1, 1, 3), dtype=np.uint8)
+    tries = 0
+    while tries < TAKE_TRIES:
         desktop.park_cursor(window)
         shown = _settled(area or desktop.view(window, viewer.view))
         if area is None:
-            top, bottom, left, right = page_box(shown)
+            try:
+                top, bottom, left, right = page_box(shown)
+            except LookupError:  # no page in view yet: the viewer is still laying one out
+                if time.monotonic() > end:
+                    raise
+                time.sleep(STILL)
+                continue
             shown = shown[top:bottom, left:right]
         off = shape is not None and abs(len(shown) / shown.shape[1] - shape) > SHAPE_TOL * shape
         if area is not None or not off:
             return shown
+        tries += 1
         time.sleep(SETTLE)
     msg = f'the page shows {shown.shape[1]}x{len(shown)} px, not the {shape:.3f} height to width the PDF states'
     raise LookupError(msg)

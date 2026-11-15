@@ -1,12 +1,20 @@
 """capture-files without a desktop: which PDFs a run names, a page told from its viewer's backdrop, the end of paging,
 and the pages written one image each."""
 
+from dataclasses import dataclass
+
 import numpy as np
 import pymupdf
 import pytest
 
 from document_lab.capture.export import PageWriter
-from document_lab.capture.files import listed, page_box, page_shapes, same_page
+from document_lab.capture.files import document_window, listed, page_box, page_shapes, same_page
+
+
+@dataclass(frozen=True)
+class _Window:  # what document_window reads of a window: its handle and title (desktop.Window is the real one)
+    hwnd: int
+    title: str
 
 
 def _pdf(path, pages=1, password=None):
@@ -113,3 +121,35 @@ def test_a_writer_given_no_page_writes_nothing(tmp_path):
     with PageWriter(tmp_path / 'none.pdf') as pdf:
         assert pdf.pages == 0
     assert not (tmp_path / 'none.pdf').exists()
+
+
+def test_the_document_window_is_the_one_the_viewer_opened_though_titled_with_the_documents_own_title():
+    """A secured standard opens as 'BS EN IEC 60072\u20111:2022 (SECURED)' (a U+2011 hyphen, a colon), not the file."""
+    home = _Window(0x10, 'Adobe Acrobat Reader (64-bit)')
+    opened = _Window(0x11, 'BS EN IEC 60072\u20111:2022 (SECURED) - Adobe Acrobat Reader (64-bit)')
+    assert document_window([opened, home], {0x10}, 'BS EN IEC 60072-1_2022') == opened
+
+
+def test_a_window_titled_with_the_files_name_is_the_document_for_a_viewer_reusing_its_window():
+    reused = _Window(0x10, 'BS EN IEC 60072-2_2025.pdf - SumatraPDF')
+    assert document_window([reused], {0x10}, 'BS EN IEC 60072-2_2025') == reused
+
+
+def test_a_left_over_window_title_does_not_stand_for_a_window_the_viewer_opened():
+    """Two windows of one standard, one left over from an earlier run: the one this run opened is taken."""
+    left_over = _Window(0x10, 'BS EN IEC 60072-3_2026.pdf - Adobe Acrobat Reader (64-bit)')
+    opened = _Window(0x11, 'BS EN IEC 60072\u20113:2026 (SECURED) - Adobe Acrobat Reader (64-bit)')
+    assert document_window([opened, left_over], {0x10}, 'BS EN IEC 60072-3_2026') == opened
+
+
+def test_no_new_window_and_none_named_after_the_file_is_refused_naming_what_shows():
+    home = _Window(0x10, 'Adobe Acrobat Reader (64-bit)')
+    with pytest.raises(LookupError, match=r'none opened'):
+        document_window([home], {0x10}, 'BS EN IEC 60072-1_2022')
+
+
+def test_two_windows_the_viewer_opened_are_refused_as_one_document_in_one_window():
+    one = _Window(0x11, 'BS EN IEC 60072\u20111:2022 (SECURED) - Adobe Acrobat Reader (64-bit)')
+    two = _Window(0x12, 'Library - Adobe Acrobat Reader (64-bit)')
+    with pytest.raises(LookupError, match=r"2 of the viewer's 2 window"):
+        document_window([one, two], {0x10}, 'BS EN IEC 60072-1_2022')

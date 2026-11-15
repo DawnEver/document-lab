@@ -21,7 +21,7 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 | `ink` | `drawings(pixels, scale, text, reach)`: the drawn ink of a page's picture, its text left out -- each drawing's box, its rules, the ink off them and its longest stroke |
 | `per_page` | `document-lab pages <pdf> <out>`: a PDF as `page-NNN.md` (its text) and `page-NNN.png` (the page as seen, a captured page's own pixels) per page, each region cut out (`page-NNN-figure-2.png`, `-table-1`, `-equation-a-1`) and linked where its caption or number is, and `INDEX.md`, with the PDF itself -- into a directory, or one archive when `out` ends `.zip` -- for standards, manuals and data sheets, cited by clause on their page. OCR'd text is for finding; a formula's or a table's values are read off its picture |
 | `paper` | `document-lab paper <pdf> <out>`: a paper as per-section markdown (written from the IR, or marker-pdf on a GPU) plus cropped figures/tables/equations; a table-of-contents page opens no sections, and on a page that is one picture (a screen-captured or scanned PDF, OCR'd) a figure, table or equation is cut out where its text locates it (`regions`), else the page is linked whole, once |
-| `capture` | `document-lab capture <out.pdf>`: any window or screen region, scrolled to its end and stitched losslessly, to a PDF of page images -- the stage before `ocr` (Windows, `[capture]` extra; `--ocr LANGS` runs `ocr` on the result); `--resume` and `capture-merge` join captures where they overlap |
+| `capture` | `document-lab capture <out.pdf>`: any window or screen region, scrolled to its end and stitched losslessly, to a PDF of page images -- the stage before `ocr` (Windows, `[capture]` extra; `--ocr LANGS` runs `ocr` on the result); `--resume` and `capture-merge` join captures where they overlap; `capture-files` takes each PDF of a directory or list page by page as its viewer (Acrobat) shows it, one PDF each |
 
 A screen-captured standard, end to end: `capture std.pdf` -> `ocr std.pdf` -> `pages std.pdf std.zip`.
 
@@ -59,6 +59,7 @@ document-lab capture --list                        # the capturable windows and 
 document-lab capture out.pdf --page-height auto    # pages cut on the reader's own page separators
 document-lab capture --resume part.pdf             # go on from where part.pdf ended, into part.pdf
 document-lab capture-merge a.pdf b.pdf -o ab.pdf   # join captures where each overlaps the one before
+document-lab capture-files raw/ -o captured/         # each PDF as Acrobat shows it, page by page (mark the page once)
 document-lab capture out.pdf --open                # open the PDF once written
 ```
 
@@ -127,6 +128,15 @@ once, matched at `--join-tolerance` (`capture-merge --tolerance`; default 20, as
 text ~15 grey levels apart); the search reaches back as far as the earlier capture goes; only the seam is redrawn,
 every other page copied as it is (its OCR layer too). Captures that share nothing,
 fit more than one place, or differ in width are refused, never butted together.
+
+A PDF only its viewer may open (a secured standard): `capture-files <pdf|dir|list.txt>... -o <dir>` opens each in
+Adobe Acrobat (`--viewer` names another), maximises the window, clears it of panes and toolbars (read mode,
+`ctrl+h`) and shows a whole page (`ctrl+0`); then each page is taken as it shows and the viewer paged on (`pagedown`):
+one image a page, one PDF page each, no stitching. `--area mark` (default) asks you to mark the page once, on the first
+PDF, from the area last confirmed; `--area view` finds the page against the viewer's backdrop on every page;
+`L,T,W,H` names it. It stops at the PDF's own page count when the PDF opens here, else when paging on changes nothing;
+a PDF already captured is kept (`--overwrite` takes it again); `--ocr` lays a text layer over each. A PDF that fails
+is named at the end, and the run goes on to the next.
 
 Any length: frames only move down, so every stitched row above the current view is final and is written at once --
 PDF pages as they fill (saved incrementally), the PNG compressed as it grows -- and a capture holds about one view in

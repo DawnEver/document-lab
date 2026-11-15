@@ -31,12 +31,17 @@ __all__ = [
     'Region',
     'Source',
     'Window',
+    'close',
     'escape_pressed',
     'find_window',
     'grab',
+    'maximize',
+    'press',
     'scroll',
     'select',
+    'view',
     'virtual_screen',
+    'wait_for_window',
     'window',
     'window_at',
     'windows',
@@ -52,6 +57,25 @@ _VK_DOWN: Final = 0x28
 _VK_UP: Final = 0x26
 _VK_ESCAPE: Final = 0x1B
 _VK_LBUTTON: Final = 0x01
+_WM_CLOSE: Final = 0x0010
+_SW_MAXIMIZE: Final = 3
+#: The named keys a chord (:func:`press`) may hold; a letter or digit is its own code.
+_VK_NAMED: Final = {
+    'ctrl': 0x11,
+    'shift': 0x10,
+    'alt': 0x12,
+    'home': 0x24,
+    'end': 0x23,
+    'pageup': 0x21,
+    'pagedown': 0x22,
+    'up': 0x26,
+    'down': 0x28,
+    'left': 0x25,
+    'right': 0x27,
+    'enter': 0x0D,
+    'escape': 0x1B,
+    'tab': 0x09,
+} | {f'f{n}': 0x6F + n for n in range(1, 13)}  # F1..F12
 _GA_ROOT: Final = 2
 _PW_CLIENT_FULL: Final = 0x1 | 0x2  # PW_CLIENTONLY | PW_RENDERFULLCONTENT
 _SRCCOPY_CAPTUREBLT: Final = 0x00CC0020 | 0x40000000
@@ -145,6 +169,10 @@ def _dll(name: str) -> ctypes.WinDLL:
                 'GetDC': (h, [h]),
                 'ReleaseDC': (i, [h, h]),
                 'PrintWindow': (b, [h, h, u]),
+                'EnumChildWindows': (b, [h, ctypes.WINFUNCTYPE(b, h, wintypes.LPARAM), wintypes.LPARAM]),
+                'GetWindowRect': (b, [h, ctypes.POINTER(wintypes.RECT)]),
+                'IsWindow': (b, [h]),
+                'ShowWindow': (b, [h, i]),
             },
             gdi32: {
                 'CreateCompatibleDC': (h, [h]),
@@ -243,6 +271,78 @@ def window(hwnd: int) -> Window:
     """The window with handle ``hwnd``."""
     Window(hwnd, '').client()  # refuses a handle that names no window
     return Window(hwnd, _title(hwnd))
+
+
+def wait_for_window(title: str, timeout: float) -> Window:
+    """The one window whose title contains ``title``, waited for up to ``timeout`` seconds (a program starting)."""
+    end = time.monotonic() + timeout
+    while True:
+        try:
+            return find_window(title)
+        except LookupError:
+            if time.monotonic() > end:
+                raise
+        time.sleep(0.5)
+
+
+def view(window: Window, title: str) -> Region:
+    """The screen rectangle of ``window``'s largest visible descendant titled ``title`` (a viewer's page view).
+
+    Refused when it has none: the program's layout is not the one named.
+    """
+    user32 = _dll('user32')
+    found: list[Region] = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HANDLE, wintypes.LPARAM)
+    def visit(hwnd: int, _: int) -> bool:
+        rect = wintypes.RECT()
+        if user32.IsWindowVisible(hwnd) and _title(hwnd) == title and user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            found.append(Region(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top))
+        return True
+
+    user32.EnumChildWindows(window.hwnd, visit, 0)
+    if not found:
+        msg = f'{window.title!r} holds no visible view titled {title!r}'
+        raise LookupError(msg)
+    return max(found, key=lambda r: r.width * r.height)
+
+
+def press(window: Window, chord: str) -> None:
+    """Press ``chord`` in ``window``, brought to the front first.
+
+    A chord is keys ``+``-joined, held in order and let go in reverse: ``ctrl+2``, ``home``; a key is a letter, a
+    digit or one of the named keys.
+    """
+    codes = []
+    for name in chord.lower().split('+'):
+        code = _VK_NAMED.get(name) or (ord(name.upper()) if len(name) == 1 and name.isalnum() else None)
+        if code is None:
+            msg = f'{name!r} in {chord!r} is no key: one of {sorted(_VK_NAMED)}, a letter or a digit'
+            raise ValueError(msg)
+        codes.append(code)
+    _bring_to_front(window.hwnd)
+    downs = [_Input(1, _InputUnion(ki=_KeybdInput(code, 0, 0, 0, 0))) for code in codes]
+    ups = [_Input(1, _InputUnion(ki=_KeybdInput(code, 0, _KEYEVENTF_KEYUP, 0, 0))) for code in reversed(codes)]
+    _send(*downs, *ups)
+    time.sleep(0.2)
+
+
+def maximize(window: Window) -> None:
+    """Maximise ``window``: every window of a program then shows its view at the same place."""
+    _dll('user32').ShowWindow(window.hwnd, _SW_MAXIMIZE)
+    time.sleep(0.5)
+
+
+def close(window: Window, timeout: float = 10.0) -> None:
+    """Ask ``window`` to close and wait until it has; refused when it is still there after ``timeout`` seconds."""
+    user32 = _dll('user32')
+    user32.PostMessageW(window.hwnd, _WM_CLOSE, 0, 0)
+    end = time.monotonic() + timeout
+    while user32.IsWindow(window.hwnd):
+        if time.monotonic() > end:
+            msg = f'{window.title!r} did not close within {timeout:g} s'
+            raise OSError(msg)
+        time.sleep(0.2)
 
 
 def virtual_screen() -> Region:

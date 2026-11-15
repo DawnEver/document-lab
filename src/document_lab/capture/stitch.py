@@ -482,8 +482,8 @@ class Stitcher:
         """Place ``frame`` after the last one; the rows it scrolled (0: it adds nothing)."""
         exact = self._at + _place(self.last, frame, self.match)
         moved = round(exact) - self._top
-        if not moved:
-            return 0  # less than a row so far: the next frame is measured from the same last one, nothing lost
+        if moved <= 0:  # less than a row so far, or a fraction back (the view settling): nothing new, nothing lost
+            return 0
         self._at = exact
         rows = len(frame)
         if not self.drop_overlays:

@@ -1,6 +1,7 @@
 """The one ``document-lab`` command line.
 
-``capture`` and ``capture-merge`` make a PDF of page images from the screen; ``ocr`` lays a text layer over one;
+``capture`` and ``capture-merge`` make a PDF of page images from the screen, ``capture-files`` one for each PDF its
+viewer shows; ``ocr`` lays a text layer over one;
 ``pages`` writes any PDF as a markdown file and an image per page (standards, manuals); ``paper`` writes a paper as
 sections with its figures.
 """
@@ -22,6 +23,7 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest='command', required=True)
     capture_cli.add_parser(sub)
     capture_cli.add_merge_parser(sub)
+    capture_cli.add_files_parser(sub)
     ocr = sub.add_parser('ocr', help='a text layer over a PDF of page images (Tesseract); the pixels kept exactly')
     ocr.add_argument('pdf', type=Path)
     ocr.add_argument('-o', '--out', type=Path, help='the PDF to write (default: the PDF itself, replaced when whole)')
@@ -74,6 +76,7 @@ def _paper(args: argparse.Namespace) -> int:
 _RUN = {
     'capture': capture_cli.run,
     'capture-merge': capture_cli.run_merge,
+    'capture-files': capture_cli.run_files,
     'ocr': _ocr,
     'pages': _pages,
     'paper': _paper,

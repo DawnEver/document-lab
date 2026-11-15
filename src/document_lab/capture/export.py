@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 __all__ = [
     'MAX_PAGE_PT',
     'PAGES_PER_SAVE',
+    'PageWriter',
     'PdfWriter',
     'PngWriter',
     'a4_page_height',
@@ -208,6 +209,64 @@ class PdfWriter:
 
 
 _PNG: Final = b'\x89PNG\r\n\x1a\n'
+
+
+class PageWriter:
+    """A PDF written one image a page, as the pages arrive: each page as wide as its image.
+
+    Saved every :data:`PAGES_PER_SAVE` pages, so the document is never held whole; written as ``<name>.part`` and
+    moved into place when closed. What :class:`PdfWriter` is for a strip cut into pages, this is for pages taken one
+    by one (a viewer paged through).
+    """
+
+    def __init__(self, path: Path, dpi: float = SCREEN_DPI) -> None:
+        """Write to ``path``, ``dpi`` pixels to the inch; refused at once when the name is no file Windows takes."""
+        check_name(path)
+        self.path, self.dpi, self.pages = path, dpi, 0
+        self._doc: pymupdf.Document | None = None
+        self._saved = False
+        _part(path).unlink(missing_ok=True)
+
+    def __enter__(self) -> Self:
+        """The writer."""
+        return self
+
+    def __exit__(
+        self, kind: type[BaseException] | None, error: BaseException | None, trace: TracebackType | None
+    ) -> None:
+        """Close it, keeping the pages added whatever stopped the run."""
+        self.close()
+
+    def add(self, image: np.ndarray) -> None:
+        """Add ``image`` (``(h, w, 3+)`` uint8) as the next page."""
+        check_page(image.shape[1], image.shape[0], self.dpi)
+        if self._doc is None:
+            self._doc = pymupdf.open(_part(self.path)) if self._saved else pymupdf.open()
+        pix = _pixmap(image)
+        rect = pymupdf.Rect(0, 0, pix.width * 72 / self.dpi, pix.height * 72 / self.dpi)
+        self._doc.new_page(width=rect.width, height=rect.height).insert_image(rect, pixmap=pix)
+        self.pages += 1
+        if self.pages % PAGES_PER_SAVE == 0:
+            self._save()
+
+    def _save(self) -> None:
+        if self._doc is None:
+            return
+        if self._saved:
+            self._doc.save(_part(self.path), incremental=True, encryption=pymupdf.PDF_ENCRYPT_KEEP)
+        else:
+            self._doc.save(_part(self.path), deflate=True)
+        self._doc.close()
+        self._doc, self._saved = None, True
+
+    def close(self) -> Path | None:
+        """Save and move the PDF into place; the path, or None when no page was added (nothing is written)."""
+        self._save()
+        if not self._saved:
+            return None
+        self._saved = False
+        _part(self.path).replace(self.path)
+        return self.path
 
 
 def _chunk(out: BinaryIO, kind: bytes, data: bytes) -> None:

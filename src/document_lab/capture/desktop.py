@@ -32,6 +32,7 @@ __all__ = [
     'Source',
     'Window',
     'close',
+    'cursor',
     'escape_pressed',
     'find_window',
     'grab',
@@ -39,7 +40,9 @@ __all__ = [
     'in_front',
     'maximize',
     'monitors',
+    'move_cursor',
     'park_cursor',
+    'parking_spot',
     'press',
     'scroll',
     'select',
@@ -372,25 +375,59 @@ def maximize(window: Window, monitor: Region | None = None) -> None:
     time.sleep(0.5)
 
 
-def park_cursor(window: Window) -> None:
-    """Move the mouse off ``window``, to a corner of the virtual screen it does not cover (another monitor).
+_PARK_INSET: Final = 40  # pixels a parked mouse keeps off a screen's edges: a hot corner sits in the last pixel
+
+
+def parking_spot(screen: Region, window: Region) -> tuple[int, int] | None:
+    """Where to park the mouse: an inset corner of ``screen`` that ``window`` does not cover, bottom ones first.
+
+    A screen's top right corner is the close button of the window that is there -- a mouse parked on it closes the
+    very window being captured -- so the bottom corners come first, and every corner is taken an inset from the
+    screen's edge. None when the window covers the whole screen (nowhere to park).
+    """
+    corners = [
+        (screen.left + _PARK_INSET, screen.top + screen.height - _PARK_INSET),
+        (screen.left + screen.width - _PARK_INSET, screen.top + screen.height - _PARK_INSET),
+        (screen.left + _PARK_INSET, screen.top + _PARK_INSET),
+        (screen.left + screen.width - _PARK_INSET, screen.top + _PARK_INSET),
+    ]
+    return next(
+        (
+            (x, y)
+            for x, y in corners
+            if not (window.left <= x < window.left + window.width and window.top <= y < window.top + window.height)
+        ),
+        None,
+    )
+
+
+def cursor() -> tuple[int, int]:
+    """Where the mouse is, in physical pixels."""
+    point = wintypes.POINT()
+    _dll('user32').GetCursorPos(ctypes.byref(point))
+    return point.x, point.y
+
+
+def move_cursor(x: int, y: int) -> None:
+    """Put the mouse at ``x, y``."""
+    _dll('user32').SetCursorPos(x, y)
+
+
+def park_cursor(window: Window) -> tuple[int, int]:
+    """Move the mouse off ``window``, to :func:`parking_spot`, and give back where it was.
 
     A viewer floats its toolbar over a page while the mouse rests on it, and shows its hidden panes when it nears the
-    top; with no screen beyond the window the mouse is left where it is.
+    top; with no screen beyond the window the mouse is left where it is. Where it was is given back so a capture can
+    put it back (:func:`move_cursor`) rather than leaving it where the capture wanted it.
     """
     user32 = _dll('user32')
+    was = cursor()
     rect = wintypes.RECT()
-    if not user32.GetWindowRect(window.hwnd, ctypes.byref(rect)):
-        return
-    screen = virtual_screen()
-    corners = [
-        (x, y)
-        for x in (screen.left + 1, screen.left + screen.width - 2)
-        for y in (screen.top + 1, screen.top + screen.height - 2)
-    ]
-    off = [(x, y) for x, y in corners if not (rect.left <= x < rect.right and rect.top <= y < rect.bottom)]
-    if off:
-        user32.SetCursorPos(*off[0])
+    if user32.GetWindowRect(window.hwnd, ctypes.byref(rect)):
+        covered = Region(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
+        if (spot := parking_spot(virtual_screen(), covered)) is not None:
+            move_cursor(*spot)
+    return was
 
 
 def close(window: Window, timeout: float = 10.0) -> None:

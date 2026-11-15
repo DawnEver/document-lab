@@ -377,9 +377,30 @@ def page_through(
     row end it there.
     """
     from document_lab.capture import desktop  # noqa: PLC0415
-    from document_lab.capture.export import PageWriter  # noqa: PLC0415
 
     pages = len(shapes) if shapes is not None else None
+    was = desktop.cursor()  # the mouse is parked off the window page by page: given back where the user left it
+    try:
+        return _through(window, viewer, out, area=area, shapes=shapes, pages=pages, dpi=dpi, stop=stop)
+    finally:
+        desktop.move_cursor(*was)
+
+
+def _through(
+    window: Window,
+    viewer: Viewer,
+    out: Path,
+    *,
+    area: Region | None,
+    shapes: list[float] | None,
+    pages: int | None,
+    dpi: float,
+    stop: Stop | None,
+) -> int:
+    """The pages of :func:`page_through`'s run, the writer and the loop."""
+    from document_lab.capture import desktop  # noqa: PLC0415
+    from document_lab.capture.export import PageWriter  # noqa: PLC0415
+
     last, view = None, None
     with PageWriter(out, dpi) as pdf:
         for number in range(pages or MAX_PAGES):

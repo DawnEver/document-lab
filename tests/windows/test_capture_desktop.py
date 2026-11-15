@@ -105,6 +105,21 @@ def test_a_posted_wheel_places_every_row_it_captures(viewer):
     assert np.array_equal(got, image[: len(got)])
 
 
+def test_the_mouse_is_parked_at_a_bottom_corner_never_the_close_button_one():
+    """A screen's top right corner is a close button: the left monitor is covered, so the parking is bottom right."""
+    screen = desktop.Region(-1600, 0, 5440, 2560)
+    left = desktop.Region(-1600, 0, 1600, 2560)
+    x, y = desktop.parking_spot(screen, left)
+    assert y > screen.height - 100  # a bottom corner: never the top right corner, the close button of the window there
+    assert screen.left + 39 < x < screen.left + screen.width - 39  # inset from the hot edge
+    assert not left.left <= x < left.left + left.width
+
+
+def test_a_window_covering_the_whole_virtual_screen_leaves_the_mouse_where_it_is():
+    screen = desktop.Region(0, 0, 3840, 2160)
+    assert desktop.parking_spot(screen, screen) is None
+
+
 def test_the_desktop_says_how_long_it_has_been_idle_and_whether_a_window_holds_the_keyboard(viewer):
     window, _ = viewer
     assert 0.0 <= desktop.idle_seconds() < 86_400.0

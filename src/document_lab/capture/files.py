@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
     from document_lab.capture.desktop import Region, Window
 
-    Stop = Callable[[], bool]  # asked between pages: True ends the run, the pages taken so far kept
+    Gate = Callable[[str], None]  # between pages: shows what is in hand, waits while paused, raises Stopped
 
 __all__ = [
     'ACROBAT',
@@ -365,7 +365,7 @@ def page_through(
     area: Region | None,
     shapes: list[float] | None,
     dpi: float,
-    stop: Stop | None = None,
+    gate: Gate | None = None,
 ) -> int:
     """Take each page ``window`` shows into ``out``, paging on to the last; how many were taken.
 
@@ -381,7 +381,7 @@ def page_through(
     pages = len(shapes) if shapes is not None else None
     was = desktop.cursor()  # the mouse is parked off the window page by page: given back where the user left it
     try:
-        return _through(window, viewer, out, area=area, shapes=shapes, pages=pages, dpi=dpi, stop=stop)
+        return _through(window, viewer, out, area=area, shapes=shapes, pages=pages, dpi=dpi, gate=gate)
     finally:
         desktop.move_cursor(*was)
 
@@ -395,7 +395,7 @@ def _through(
     shapes: list[float] | None,
     pages: int | None,
     dpi: float,
-    stop: Stop | None,
+    gate: Gate | None,
 ) -> int:
     """The pages of :func:`page_through`'s run, the writer and the loop."""
     from document_lab.capture import desktop  # noqa: PLC0415
@@ -404,8 +404,8 @@ def _through(
     last, view = None, None
     with PageWriter(out, dpi) as pdf:
         for number in range(pages or MAX_PAGES):
-            if stop is not None and stop():
-                raise Stopped
+            if gate is not None:
+                gate(f'{out.stem}: page {number + 1} of {pages or "?"}')
             shape = None if shapes is None else shapes[number]
             take, view = _take(window, viewer, area, shape)
             for _ in range(TURN_TRIES if last is not None else 0):  # a key the viewer missed mid-draw: press it again
@@ -423,7 +423,7 @@ def _through(
             pdf.add(take)
             last = take
             if number + 1 < (pages or MAX_PAGES):
-                _yield_to_user(window, stop)
+                _yield_to_user(window, gate)
                 desktop.press(window, viewer.next)
                 _turned(window, viewer, view)
         return pdf.pages
@@ -434,7 +434,7 @@ def held(*, front: bool, idle: float) -> bool:
     return not front and idle < USER_IDLE
 
 
-def _yield_to_user(window: Window, stop: Stop | None) -> None:
+def _yield_to_user(window: Window, gate: Gate | None) -> None:
     """Hold the capture while the user is working in another window, and say so.
 
     Every key the capture sends takes the foreground for the viewer (:func:`desktop.press`), so a page turned while
@@ -446,8 +446,8 @@ def _yield_to_user(window: Window, stop: Stop | None) -> None:
 
     told = False
     while held(front=desktop.in_front(window), idle=desktop.idle_seconds()):
-        if stop is not None and stop():
-            raise Stopped
+        if gate is not None:
+            gate('held while you use the machine')
         if not told:
             emit('  held while you use the machine')
             told = True

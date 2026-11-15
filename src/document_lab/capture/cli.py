@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
     import numpy as np
 
-    from document_lab.capture.desktop import Hud, Region, Window
+    from document_lab.capture.desktop import Hud, Panel, Region, Window
     from document_lab.capture.export import PdfWriter
     from document_lab.capture.pages import Rhythm
     from document_lab.capture.session import Capture, Lost
@@ -242,6 +242,12 @@ def add_files_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser
     files.add_argument('--open-wait', type=float, default=60.0, help='seconds the window of a PDF may take to appear')
     files.add_argument('--overwrite', action='store_true', help='capture again a PDF whose capture exists')
     files.add_argument(
+        '--panel',
+        action='store_true',
+        help='a small always-on-top panel beside the viewer while the run goes on: Pause / Resume and Stop, and the '
+        'page in hand (needs tkinter; --stop-file works without it)',
+    )
+    files.add_argument(
         '--stop-file',
         type=Path,
         metavar='PATH',
@@ -253,6 +259,42 @@ def add_files_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser
         '--ocr', nargs='?', const='eng', metavar='LANGS', help="a text layer over each capture (Tesseract; 'eng')"
     )
     return files
+
+
+def _report(pdfs: list[Path], failed: list[str], out: Path, panel: Panel | None) -> int:
+    """Close the panel, say how the run went, and give its exit status."""
+    if panel is not None:
+        panel.close()
+    emit(f'{len(pdfs) - len(failed)} of {len(pdfs)} PDF(s) captured to {out}')
+    for line in failed:
+        emit(f'  FAILED {line}')
+    return 1 if failed else 0
+
+
+def _panel(args: argparse.Namespace, shown: list[Region]) -> Panel | None:
+    """The Pause/Stop panel, on a monitor the viewer is not on (None when the run asks for no panel)."""
+    if not args.panel:
+        return None
+    from document_lab.capture import desktop  # noqa: PLC0415 -- only a run with a panel opens one
+
+    others = [monitor for number, monitor in enumerate(shown) if number != args.monitor] or shown
+    return desktop.Panel(others[0])
+
+
+def _gate(panel: Panel | None, stop_file: Path | None) -> Callable[[str], None]:
+    """Between pages: say what is in hand, hold while the panel is paused, and end the run when told to."""
+    from document_lab.capture.files import Stopped  # noqa: PLC0415 -- only the gate raises it
+
+    def gate(what: str) -> None:
+        if panel is not None:
+            panel.say(what)
+        while panel is not None and panel.paused and not panel.stopped:
+            time.sleep(0.1)
+            panel.pump()
+        if (stop_file is not None and stop_file.exists()) or (panel is not None and panel.stopped):
+            raise Stopped
+
+    return gate
 
 
 def run_files(args: argparse.Namespace) -> int:
@@ -271,7 +313,10 @@ def run_files(args: argparse.Namespace) -> int:
         )
         return 1
     monitor = shown[args.monitor]
-    stop = args.stop_file.exists if args.stop_file is not None else None
+    stop_file = args.stop_file
+    panel = _panel(args, shown)
+    gate = _gate(panel, stop_file)
+
     failed: list[str] = []
     for number, pdf in enumerate(pdfs, start=1):
         out = args.out / f'{pdf.stem}.pdf'
@@ -291,7 +336,7 @@ def run_files(args: argparse.Namespace) -> int:
                 chosen = desktop.select(desktop.recall(desktop.virtual_screen()) or shown)
                 marked = chosen.client() if isinstance(chosen, desktop.Window) else chosen
             shapes = files.page_shapes(pdf)
-            taken = files.page_through(window, viewer, out, area=marked, shapes=shapes, dpi=args.dpi, stop=stop)
+            taken = files.page_through(window, viewer, out, area=marked, shapes=shapes, dpi=args.dpi, gate=gate)
             emit(f'  {taken} page(s) to {out}')
             if args.ocr is not None:
                 from document_lab.ocr import text_layer  # noqa: PLC0415
@@ -307,10 +352,7 @@ def run_files(args: argparse.Namespace) -> int:
         finally:
             with contextlib.suppress(OSError):
                 desktop.close(window)
-    emit(f'{len(pdfs) - len(failed)} of {len(pdfs)} PDF(s) captured to {args.out}')
-    for line in failed:
-        emit(f'  FAILED {line}')
-    return 1 if failed else 0
+    return _report(pdfs, failed, args.out, panel)
 
 
 def run_merge(args: argparse.Namespace) -> int:

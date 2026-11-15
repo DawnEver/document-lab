@@ -1153,3 +1153,67 @@ class Source:
     def scroll(self, notches: int | None = None) -> None:
         """Scroll the target down ``notches`` notches (or Down presses); ``self.notches`` when None."""
         scroll(self.target, self.notches if notches is None else notches, self.method)
+
+
+class Panel:
+    """A small window beside the viewer while a batch runs: Pause / Resume, Stop, and what is being captured.
+
+    Out of the viewer's monitor, always on top, in the capture's own thread: :meth:`pump` (called between pages, and
+    while it waits) keeps it drawn, so nothing is shared and nothing of it can be captured.
+    """
+
+    def __init__(self, monitor: Region | None = None) -> None:
+        """Open the panel at the bottom left of ``monitor`` (default: the primary, away from the viewer)."""
+        import tkinter as tk  # noqa: PLC0415 -- only a running batch shows this
+
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.window = tk.Toplevel(self.root)
+        self.window.overrideredirect(True)  # noqa: FBT003 -- tk's own call signature
+        self.window.attributes('-topmost', True)  # noqa: FBT003
+        self.window.configure(bg=_PANEL)
+        self.paused = False  # toggled by Pause / Resume: nothing is grabbed or keyed while it is set
+        self.stopped = False  # set by Stop: the pages taken are kept and the run ends (files.Stopped)
+        style = {'fg': 'white', 'font': ('Segoe UI', 10, 'bold'), 'relief': 'flat', 'pady': 4, 'padx': 10}
+        row = tk.Frame(self.window, bg=_PANEL)
+        row.pack(fill='x', padx=8, pady=(8, 4))
+        self.pause = tk.Button(row, text='Pause', command=self.toggle_pause, **style)
+        self.pause.configure(bg='#8a6d00', activebackground='#a88700')
+        self.pause.pack(side='left', fill='x', expand=True)
+        self.stop = tk.Button(row, text='Stop', command=self.halt, **style)
+        self.stop.configure(bg='#8c2f2f', activebackground='#a63a3a')
+        self.stop.pack(side='left', fill='x', expand=True, padx=(6, 0))
+        self.text = tk.Label(self.window, fg='white', bg=_PANEL, font=('Segoe UI', 9), justify='left', wraplength=260)
+        self.text.pack(fill='x', padx=10, pady=(0, 8))
+        self.text.configure(text='capture-files')
+        self.window.update_idletasks()
+        self._place(monitor or (monitors() or [Region(0, 0, 1920, 1080)])[0])
+
+    def _place(self, monitor: Region) -> None:
+        height = self.window.winfo_reqheight()
+        self.window.geometry(f'+{monitor.left + 24}+{monitor.top + monitor.height - height - 96}')
+
+    def toggle_pause(self) -> None:
+        """Hold the run, or let it go on."""
+        self.paused = not self.paused
+        self.pause.configure(text='Resume' if self.paused else 'Pause')
+        self.pause.configure(bg='#1f6f3f' if self.paused else '#8a6d00')
+        self.pump()
+
+    def halt(self) -> None:
+        """End the run after the page in hand."""
+        self.stopped = True
+        self.pump()
+
+    def say(self, what: str) -> None:
+        """Show what the run is doing."""
+        self.text.configure(text=what)
+        self.pump()
+
+    def pump(self) -> None:
+        """Draw what changed; called between pages and while waiting."""
+        self.root.update()
+
+    def close(self) -> None:
+        """Take the panel away."""
+        self.root.destroy()

@@ -7,7 +7,7 @@ import numpy as np
 import pymupdf
 import pytest
 
-from document_lab.capture.export import PageWriter
+from document_lab.capture.export import PAGES_PER_SAVE, PageWriter
 from document_lab.capture.files import document_window, held, listed, page_box, page_shapes, same_page
 
 
@@ -159,3 +159,15 @@ def test_the_capture_holds_while_the_user_works_in_another_window():
     assert held(front=False, idle=0.4)  # another window in front, and the machine used half a second ago
     assert not held(front=False, idle=30.0)  # the user has left the machine: the page may turn
     assert not held(front=True, idle=0.1)  # the viewer holds the keyboard: the input is the capture's own
+
+
+def test_every_page_image_is_deflated_even_after_the_incremental_saves(tmp_path):
+    """An incremental save leaves the images it adds raw: the writer rewrites the file before moving it into place."""
+    out = tmp_path / 'many.pdf'
+    page = _view(height=226, width=160)
+    with PageWriter(out, dpi=72) as pdf:
+        for _ in range(PAGES_PER_SAVE + 2):
+            pdf.add(page)
+    with pymupdf.open(out) as doc:
+        filters = {doc.xref_get_key(doc[i].get_images(full=True)[0][0], 'Filter')[1] for i in range(doc.page_count)}
+    assert filters == {'/FlateDecode'}

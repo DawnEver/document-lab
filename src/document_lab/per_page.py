@@ -7,12 +7,12 @@ the page as it is seen: a page that is one image gives that image's own pixels, 
 :data:`RENDER_DPI`.
 
 Each figure, table and equation the page's text and drawn ink locate (`document_lab.regions`, told the picture's
-drawings by `document_lab.ink`) is cut out of that picture as
-``page-NNN-<kind>-<label>.png`` and linked in the markdown after the paragraph holding its caption or number --
-where OCR'd text cannot be trusted (a formula, a table's numbers), the picture beside it can. A region reaching the
-page's foot is marked as continuing on the next page. ``INDEX.md`` lists the pages with the clause headings each
-opens and the regions it holds. A page without text is written all the same, its markdown empty, and named in
-:attr:`Paged.textless` -- never silently dropped.
+drawings by `document_lab.ink`, less those half the pages repeat: a logo, a running frame) is cut out of that
+picture as ``page-NNN-<kind>-<label>.png`` and linked in the markdown after the paragraph holding its caption or
+number -- where OCR'd text cannot be trusted (a formula, a table's numbers), the picture beside it can. A region
+reaching the page's foot is marked as continuing on the next page. ``INDEX.md`` lists the pages with the clause
+headings each opens and the regions it holds. A page without text is written all the same, its markdown empty, and
+named in :attr:`Paged.textless` -- never silently dropped.
 
 The PDF itself goes with them, so the layout stands alone. ``out`` is a directory, or -- ending ``.zip`` -- one
 archive holding the same files (written beside as ``<out>.part`` and moved into place when whole): a document is
@@ -48,7 +48,9 @@ __all__ = ['RENDER_DPI', 'Paged', 'write_pages']
 RENDER_DPI: Final = 150  # a page that is not one image is rendered at this resolution
 _FOOT: Final = 1.0
 #: Ink within this many body sizes of other ink is one drawing (`document_lab.ink`); lines of text sit further apart.
-DRAWING_REACH: Final = 0.5  # points from the page's foot within which a region runs on to the next page
+DRAWING_REACH: Final = 0.5
+#: A drawing at the same place on at least this share of the pages is the pages' furniture (a header's logo).
+FURNITURE_SHARE: Final = 0.5  # points from the page's foot within which a region runs on to the next page
 
 
 @dataclass(frozen=True)
@@ -79,6 +81,23 @@ def _drawings(pix: pymupdf.Pixmap, scale: float, page: Page, body: float) -> lis
     pixels = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
     text = [BBox(ln.x0, ln.y0, ln.x1, ln.y1) for ln in layout.lines(page, weighted=False)]
     return drawings(pixels, scale, text, DRAWING_REACH * body)
+
+
+def _without_furniture(drawn: list[list[Drawing]], body: float) -> list[list[Drawing]]:
+    """Each page's drawings less the pages' furniture: a header's logo, a running frame.
+
+    Furniture is a drawing at the same place on :data:`FURNITURE_SHARE` of the pages or more (two at least). The same
+    place is every edge within one ``body`` size; only the whole document can tell, so it is judged here.
+    """
+
+    def same(a: BBox, b: BBox) -> bool:
+        return all(abs(u - v) <= body for u, v in zip(a, b, strict=True))
+
+    def recurs(d: Drawing) -> bool:
+        pages = sum(any(same(d.box, o.box) for o in page) for page in drawn)
+        return pages >= max(2, FURNITURE_SHARE * len(drawn))
+
+    return [[d for d in page if not recurs(d)] for page in drawn]
 
 
 def _cut(pix: pymupdf.Pixmap, scale: float, region: Region) -> pymupdf.Pixmap:
@@ -144,6 +163,9 @@ def write_pages(pdf: Path, out: Path) -> Paged:
     width = max(3, len(str(len(texts))))
     index = [f'# {pdf.stem}', '']
     textless = []
+    with pymupdf.open(pdf) as doc:
+        drawn = [_drawings(*_picture(page), ir_page, body) for page, ir_page in zip(doc, read.pages, strict=True)]
+    drawn = _without_furniture(drawn, body)
     with pymupdf.open(pdf) as doc, _files(out) as put:
         if out / pdf.name != pdf:  # the layout stands alone; a PDF already where it goes is not copied onto itself
             put(pdf.name, pdf.read_bytes())
@@ -152,7 +174,7 @@ def write_pages(pdf: Path, out: Path) -> Paged:
             pix, scale = _picture(page)
             put(f'{name}.png', pix.tobytes('png'))
             links = []
-            for region in (found := regions(ir_page, body, _drawings(pix, scale, ir_page, body))):
+            for region in (found := regions(ir_page, body, drawn[number - 1])):
                 file = _file(name, region)
                 put(file, _cut(pix, scale, region).tobytes('png'))
                 more = ' (continues on the next page)' if region.bbox.y1 >= page.rect.height - _FOOT else ''

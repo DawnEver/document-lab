@@ -97,3 +97,28 @@ def test_a_ruled_table_whose_words_no_reader_has_is_cut_out_by_its_rules(tmp_pat
     with zipfile.ZipFile(tmp_path / 'out.zip') as archive:
         assert 'page-001-table-untitled-1.png' in archive.namelist()
         assert '![Untitled table 1](page-001-table-untitled-1.png)' in archive.read('page-001.md').decode()
+
+
+def test_a_drawing_every_page_repeats_is_furniture_and_one_page_s_table_is_still_cut(tmp_path):
+    """A JMAG whitepaper's header logo: its letters' strokes read as a ruled table on every one of its pages."""
+
+    def grid(page, x0, y0):
+        for y in (y0, y0 + 30, y0 + 60):
+            page.draw_line((x0, y), (x0 + 240, y), width=1)
+        for x in (x0, x0 + 120, x0 + 240):
+            page.draw_line((x, y0), (x, y0 + 60), width=1)
+
+    prose = 'The rated output is the mechanical power available at the shaft and shall be expressed in watts.'
+    with pymupdf.open() as doc:
+        for number in (1, 2):
+            page = doc.new_page(width=600, height=840)
+            grid(page, 180, 120)  # the same place on both pages: furniture
+            page.insert_text((50, 250), prose, fontsize=10)
+            if number == 1:
+                grid(page, 180, 300)  # this page's own table
+            page.insert_text((50, 450), prose, fontsize=10)
+        doc.save(tmp_path / 'std.pdf')
+    write_pages(tmp_path / 'std.pdf', tmp_path / 'out.zip')
+    with zipfile.ZipFile(tmp_path / 'out.zip') as archive:
+        cut = sorted(n for n in archive.namelist() if '-table-' in n)
+    assert cut == ['page-001-table-untitled-1.png']

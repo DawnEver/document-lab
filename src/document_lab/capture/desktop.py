@@ -38,6 +38,7 @@ __all__ = [
     'grab',
     'idle_seconds',
     'in_front',
+    'key',
     'maximize',
     'monitors',
     'move_cursor',
@@ -326,12 +327,8 @@ def view(window: Window, title: str) -> Region:
     return max(found, key=lambda r: r.width * r.height)
 
 
-def press(window: Window, chord: str) -> None:
-    """Press ``chord`` in ``window``, brought to the front first.
-
-    A chord is keys ``+``-joined, held in order and let go in reverse: ``ctrl+2``, ``home``; a key is a letter, a
-    digit or one of the named keys.
-    """
+def _codes(chord: str) -> list[int]:
+    """The virtual-key codes of ``chord``: keys ``+``-joined, held in order and let go in reverse."""
     codes = []
     for name in chord.lower().split('+'):
         code = _VK_NAMED.get(name) or (ord(name.upper()) if len(name) == 1 and name.isalnum() else None)
@@ -339,11 +336,35 @@ def press(window: Window, chord: str) -> None:
             msg = f'{name!r} in {chord!r} is no key: one of {sorted(_VK_NAMED)}, a letter or a digit'
             raise ValueError(msg)
         codes.append(code)
-    _bring_to_front(window.hwnd)
+    return codes
+
+
+def _type(codes: list[int]) -> None:
+    """Hold ``codes`` in order, let them go in reverse: what a press is."""
     downs = [_Input(1, _InputUnion(ki=_KeybdInput(code, 0, 0, 0, 0))) for code in codes]
     ups = [_Input(1, _InputUnion(ki=_KeybdInput(code, 0, _KEYEVENTF_KEYUP, 0, 0))) for code in reversed(codes)]
     _send(*downs, *ups)
     time.sleep(0.2)
+
+
+def press(window: Window, chord: str) -> None:
+    """Press ``chord`` in ``window``, brought to the front first.
+
+    A chord is keys ``+``-joined, held in order and let go in reverse: ``ctrl+2``, ``home``; a key is a letter, a
+    digit or one of the named keys.
+    """
+    codes = _codes(chord)
+    _bring_to_front(window.hwnd)
+    _type(codes)
+
+
+def key(chord: str) -> None:
+    """Press ``chord`` wherever the keyboard is, bringing nothing to the front.
+
+    A dialog of a viewer's own -- Acrobat's missing-font notice -- holds the keyboard and answers its own button;
+    the window behind it takes no key until it is answered.
+    """
+    _type(_codes(chord))
 
 
 def monitors() -> list[Region]:

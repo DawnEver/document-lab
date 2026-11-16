@@ -293,16 +293,33 @@ def open_in(viewer: Viewer, pdf: Path, timeout: float, monitor: Region | None = 
         desktop.view(window, viewer.view)  # the page view is there: the document is open, not a dialog
         for _ in range(CLEAR_TRIES):
             for chord in viewer.chords:
-                desktop.press(window, chord)
+                _press(window, chord)
                 time.sleep(REDRAW)
             if _cleared(window, viewer):
                 break
         else:
             _not_cleared(window, viewer)
     except (OSError, LookupError, ValueError):
-        desktop.close(window)
+        with contextlib.suppress(OSError):  # a close that fails must not hide why the window could not be used
+            desktop.close(window)
         raise
     return window
+
+
+def _press(window: Window, chord: str) -> None:
+    """Press ``chord`` in ``window``; a modal dialog it put up first -- Acrobat's missing-font notice -- is answered.
+
+    A dialog of the viewer's own holds the keyboard, so its window takes no key and cannot even be brought to the
+    front: Enter answers the dialog's own button, and the press goes in.
+    """
+    from document_lab.capture import desktop  # noqa: PLC0415
+
+    try:
+        desktop.press(window, chord)
+    except (LookupError, OSError):
+        desktop.key('enter')
+        time.sleep(REDRAW)
+        desktop.press(window, chord)
 
 
 def _cleared(window: Window, viewer: Viewer) -> bool:
@@ -463,7 +480,6 @@ def _through(
     park: Park | None,
 ) -> int:
     """The pages of :func:`page_through`'s run, the writer and the loop."""
-    from document_lab.capture import desktop  # noqa: PLC0415
     from document_lab.capture.export import PageWriter  # noqa: PLC0415
 
     last, view, seen = None, None, None
@@ -476,7 +492,7 @@ def _through(
             for _ in range(TURN_TRIES if last is not None else 0):  # a key the viewer missed mid-draw: press it again
                 if not same_page(last, take):
                     break
-                desktop.press(window, viewer.next)
+                _press(window, viewer.next)
                 seen = _turned(window, viewer, view)
                 take, view = _take(window, viewer, area, shape, park=park, seen=seen)
             if last is not None and same_page(last, take):
@@ -490,7 +506,7 @@ def _through(
             seen = None
             if number + 1 < (pages or MAX_PAGES):
                 _yield_to_user(window, gate, park)
-                desktop.press(window, viewer.next)
+                _press(window, viewer.next)
                 seen = _turned(window, viewer, view)
         return pdf.pages
 

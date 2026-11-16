@@ -85,3 +85,19 @@ the bar (twice), 0-8 (5 -> 34 pages), 17 (6 -> 16), 12 (22 -> 18+back page), 18 
 - PR: branch pr/capture-files pushed; **draft PR #40** opened (a draft merges nothing until the user marks it ready).
 - Resume or re-check: `bash output/iec2/run-all.sh` (skips what exists), `bash output/iec2/fixup-run.sh`,
   `python -I output/iec2/audit.py <family>...`.
+
+## 2026-11-16, after the user came back
+- **ToSort deduplicated**: 52 standards existed twice -- Downloads\ToSort root (downloaded again, spaces) and the
+  family folder (dashed, archived) -- byte-identical pairs; the root copies were deleted and the family ones kept.
+  Left: 61 files, 7 family folders.
+- **Nine standards found under the root that the corpus did not have**: BS EN 60349-1/-2 (joined IEC-60349) and
+  BS ISO 21782-1..7 (a new family; ISO standards live in `ISO-21782`, so the scratch scripts learned that a family
+  may name its own folder). Captured, OCR'd, paged, shrunk, audited: **0 findings**.
+- **Fault tolerance the user asked for** (they closed a full-screen viewer by hand mid-run): `capture-files --tries
+  N` (default 2) takes a document again from its first page when the viewer fails it part way, the failed take's
+  pages removed first (`_attempt`). Proven on the run: BS-ISO-21782-2 failed once, was retaken, and captured whole.
+- **A papercut fixed**: `document-lab pages out/dir/name.zip` died with FileNotFoundError when the directory did not
+  exist; it is made now (`per_page._files`). That is why the ISO family's first extraction produced nothing.
+- Final: **132 standards, 10 families** (60072 3, 60317 68, 60404 23, 60216 12, 60455 8, 60464 4, 60626 3, 60349 3,
+  60085 1, ISO-21782 7); `audit.py` 0 findings; `scanned` lossless-shrunk.
+- PR #40 carries the capture work; the retry and pages fixes are on it too (heads after f01cd20).

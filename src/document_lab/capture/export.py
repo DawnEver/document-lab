@@ -184,7 +184,7 @@ class PdfWriter:
         if self._doc is None:
             return
         if self._saved:
-            self._doc.save(_part(self.path), incremental=True, encryption=pymupdf.PDF_ENCRYPT_KEEP)
+            self._doc.save(_part(self.path), incremental=True, deflate=True, encryption=pymupdf.PDF_ENCRYPT_KEEP)
         else:
             self._doc.save(_part(self.path), deflate=True)
         self._doc.close()
@@ -203,6 +203,7 @@ class PdfWriter:
         self._save()
         if not self._saved:
             return None
+        _slim(_part(self.path))
         _part(self.path).replace(self.path)
         self._saved = False
         return self.path
@@ -253,7 +254,7 @@ class PageWriter:
         if self._doc is None:
             return
         if self._saved:
-            self._doc.save(_part(self.path), incremental=True, encryption=pymupdf.PDF_ENCRYPT_KEEP)
+            self._doc.save(_part(self.path), incremental=True, deflate=True, encryption=pymupdf.PDF_ENCRYPT_KEEP)
         else:
             self._doc.save(_part(self.path), deflate=True)
         self._doc.close()
@@ -265,8 +266,24 @@ class PageWriter:
         if not self._saved:
             return None
         self._saved = False
+        _slim(_part(self.path))
         _part(self.path).replace(self.path)
         return self.path
+
+
+def _slim(path: Path) -> None:
+    """Rewrite a finished PDF with every stream deflated: an incremental save leaves each later page's image raw.
+
+    The document is not held whole to write it small: it is saved page by page (:data:`PAGES_PER_SAVE`) and the
+    incremental saves that follow the first leave the images they add uncompressed, which for page images is most of
+    the file (a 40-page capture written 252 MB, rewritten 7 MB, pixels equal).
+    """
+    import pymupdf  # noqa: PLC0415 -- the writers' one dependency
+
+    slim = path.with_name(path.name + '.slim')
+    with pymupdf.open(path) as doc:
+        doc.save(slim, garbage=4, deflate=True)
+    slim.replace(path)
 
 
 def _chunk(out: BinaryIO, kind: bytes, data: bytes) -> None:

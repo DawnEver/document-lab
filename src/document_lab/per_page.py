@@ -135,6 +135,7 @@ def _files(out: Path) -> Iterator[Callable[[str, bytes], None]]:
         out.mkdir(parents=True, exist_ok=True)
         yield lambda name, data: (out / name).write_bytes(data)
         return
+    out.parent.mkdir(parents=True, exist_ok=True)  # made where it was asked for, as a directory's own name is
     part = out.with_name(out.name + '.part')
     try:
         with zipfile.ZipFile(part, 'w') as archive:

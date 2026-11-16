@@ -32,12 +32,18 @@ __all__ = [
     'Source',
     'Window',
     'close',
+    'cursor',
     'escape_pressed',
     'find_window',
     'grab',
+    'idle_seconds',
+    'in_front',
+    'key',
     'maximize',
     'monitors',
+    'move_cursor',
     'park_cursor',
+    'parking_spot',
     'press',
     'scroll',
     'select',
@@ -58,6 +64,7 @@ _KEYEVENTF_KEYUP: Final = 0x0002
 _VK_DOWN: Final = 0x28
 _VK_UP: Final = 0x26
 _VK_ESCAPE: Final = 0x1B
+_GA_ROOT: Final = 2
 _VK_LBUTTON: Final = 0x01
 _WM_CLOSE: Final = 0x0010
 _SW_MAXIMIZE: Final = 3
@@ -124,6 +131,10 @@ class _Input(ctypes.Structure):
     _fields_ = (('type', wintypes.DWORD), ('u', _InputUnion))
 
 
+class _LastInput(ctypes.Structure):
+    _fields_ = (('cbSize', wintypes.UINT), ('dwTime', wintypes.DWORD))
+
+
 class _BitmapInfoHeader(ctypes.Structure):
     _fields_ = (
         ('biSize', wintypes.DWORD),
@@ -167,6 +178,7 @@ def _dll(name: str) -> ctypes.WinDLL:
                 'PostMessageW': (b, [h, u, wintypes.WPARAM, wintypes.LPARAM]),
                 'SetForegroundWindow': (b, [h]),
                 'GetForegroundWindow': (h, []),
+                'GetLastInputInfo': (b, [ctypes.POINTER(_LastInput)]),
                 'GetWindowThreadProcessId': (wintypes.DWORD, [h, ctypes.c_void_p]),
                 'AttachThreadInput': (b, [wintypes.DWORD, wintypes.DWORD, b]),
                 'GetAsyncKeyState': (wintypes.SHORT, [i]),
@@ -315,12 +327,8 @@ def view(window: Window, title: str) -> Region:
     return max(found, key=lambda r: r.width * r.height)
 
 
-def press(window: Window, chord: str) -> None:
-    """Press ``chord`` in ``window``, brought to the front first.
-
-    A chord is keys ``+``-joined, held in order and let go in reverse: ``ctrl+2``, ``home``; a key is a letter, a
-    digit or one of the named keys.
-    """
+def _codes(chord: str) -> list[int]:
+    """The virtual-key codes of ``chord``: keys ``+``-joined, held in order and let go in reverse."""
     codes = []
     for name in chord.lower().split('+'):
         code = _VK_NAMED.get(name) or (ord(name.upper()) if len(name) == 1 and name.isalnum() else None)
@@ -328,11 +336,35 @@ def press(window: Window, chord: str) -> None:
             msg = f'{name!r} in {chord!r} is no key: one of {sorted(_VK_NAMED)}, a letter or a digit'
             raise ValueError(msg)
         codes.append(code)
-    _bring_to_front(window.hwnd)
+    return codes
+
+
+def _type(codes: list[int]) -> None:
+    """Hold ``codes`` in order, let them go in reverse: what a press is."""
     downs = [_Input(1, _InputUnion(ki=_KeybdInput(code, 0, 0, 0, 0))) for code in codes]
     ups = [_Input(1, _InputUnion(ki=_KeybdInput(code, 0, _KEYEVENTF_KEYUP, 0, 0))) for code in reversed(codes)]
     _send(*downs, *ups)
     time.sleep(0.2)
+
+
+def press(window: Window, chord: str) -> None:
+    """Press ``chord`` in ``window``, brought to the front first.
+
+    A chord is keys ``+``-joined, held in order and let go in reverse: ``ctrl+2``, ``home``; a key is a letter, a
+    digit or one of the named keys.
+    """
+    codes = _codes(chord)
+    _bring_to_front(window.hwnd)
+    _type(codes)
+
+
+def key(chord: str) -> None:
+    """Press ``chord`` wherever the keyboard is, bringing nothing to the front.
+
+    A dialog of a viewer's own -- Acrobat's missing-font notice -- holds the keyboard and answers its own button;
+    the window behind it takes no key until it is answered.
+    """
+    _type(_codes(chord))
 
 
 def monitors() -> list[Region]:
@@ -364,25 +396,66 @@ def maximize(window: Window, monitor: Region | None = None) -> None:
     time.sleep(0.5)
 
 
-def park_cursor(window: Window) -> None:
-    """Move the mouse off ``window``, to a corner of the virtual screen it does not cover (another monitor).
+_PARK_INSET: Final = 40  # pixels a parked mouse keeps off a screen's edges: a hot corner sits in the last pixel
+
+
+def parking_spot(screen: Region, window: Region) -> tuple[int, int] | None:
+    """Where to park the mouse: an inset corner of ``screen`` that ``window`` does not cover, bottom ones first.
+
+    A screen's top right corner is the close button of the window that is there -- a mouse parked on it closes the
+    very window being captured -- so the bottom corners come first, and every corner is taken an inset from the
+    screen's edge. None when the window covers the whole screen (nowhere to park).
+    """
+    corners = [
+        (screen.left + _PARK_INSET, screen.top + screen.height - _PARK_INSET),
+        (screen.left + screen.width - _PARK_INSET, screen.top + screen.height - _PARK_INSET),
+        (screen.left + _PARK_INSET, screen.top + _PARK_INSET),
+        (screen.left + screen.width - _PARK_INSET, screen.top + _PARK_INSET),
+    ]
+    return next(
+        (
+            (x, y)
+            for x, y in corners
+            if not (window.left <= x < window.left + window.width and window.top <= y < window.top + window.height)
+        ),
+        None,
+    )
+
+
+def cursor() -> tuple[int, int]:
+    """Where the mouse is, in physical pixels."""
+    point = wintypes.POINT()
+    _dll('user32').GetCursorPos(ctypes.byref(point))
+    return point.x, point.y
+
+
+def move_cursor(x: int, y: int) -> None:
+    """Put the mouse at ``x, y``."""
+    _dll('user32').SetCursorPos(x, y)
+
+
+def park_cursor(window: Window) -> tuple[int, int] | None:
+    """Move the mouse off ``window`` when it is on it, to :func:`parking_spot`, and give back where it was.
 
     A viewer floats its toolbar over a page while the mouse rests on it, and shows its hidden panes when it nears the
-    top; with no screen beyond the window the mouse is left where it is.
+    top -- but a mouse already off the window is the user's, and is not touched: None says it was left alone (as does
+    a window that covers the whole screen, with nowhere to park).
     """
     user32 = _dll('user32')
+    was = cursor()
     rect = wintypes.RECT()
     if not user32.GetWindowRect(window.hwnd, ctypes.byref(rect)):
-        return
-    screen = virtual_screen()
-    corners = [
-        (x, y)
-        for x in (screen.left + 1, screen.left + screen.width - 2)
-        for y in (screen.top + 1, screen.top + screen.height - 2)
-    ]
-    off = [(x, y) for x, y in corners if not (rect.left <= x < rect.right and rect.top <= y < rect.bottom)]
-    if off:
-        user32.SetCursorPos(*off[0])
+        return None
+    covered = Region(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
+    on_it = covered.left <= was[0] < covered.left + covered.width
+    on_it = on_it and covered.top <= was[1] < covered.top + covered.height
+    if not on_it:
+        return None
+    spot = parking_spot(virtual_screen(), covered)
+    if spot is None:
+        return None
+    move_cursor(*spot)
+    return was
 
 
 def close(window: Window, timeout: float = 10.0) -> None:
@@ -1069,6 +1142,24 @@ def escape_pressed() -> bool:
     return bool(_dll('user32').GetAsyncKeyState(_VK_ESCAPE) & 0x8000)
 
 
+def idle_seconds() -> float:
+    """Seconds since the last keyboard or mouse input anywhere on this machine."""
+    user32 = _dll('user32')
+    info = _LastInput(ctypes.sizeof(_LastInput), 0)
+    if not user32.GetLastInputInfo(ctypes.byref(info)):
+        msg = 'GetLastInputInfo was refused: the idle time of the machine is unknown'
+        raise OSError(msg)
+    ticks = ctypes.WinDLL('kernel32').GetTickCount()  # the same clock GetLastInputInfo counts on; kernel32, not user32
+    return ((ticks - info.dwTime) & 0xFFFFFFFF) / 1000.0
+
+
+def in_front(window: Window) -> bool:
+    """Whether ``window``, or a window of its own, holds the keyboard: what the user types goes to it."""
+    user32 = _dll('user32')
+    front = user32.GetForegroundWindow()
+    return bool(front) and user32.GetAncestor(front, _GA_ROOT) == window.hwnd
+
+
 @dataclass(frozen=True)
 class Source:
     """``target`` as the grab/scroll pair `document_lab.capture.session.capture` takes."""
@@ -1090,3 +1181,67 @@ class Source:
     def scroll(self, notches: int | None = None) -> None:
         """Scroll the target down ``notches`` notches (or Down presses); ``self.notches`` when None."""
         scroll(self.target, self.notches if notches is None else notches, self.method)
+
+
+class Panel:
+    """A small window beside the viewer while a batch runs: Pause / Resume, Stop, and what is being captured.
+
+    Out of the viewer's monitor, always on top, in the capture's own thread: :meth:`pump` (called between pages, and
+    while it waits) keeps it drawn, so nothing is shared and nothing of it can be captured.
+    """
+
+    def __init__(self, monitor: Region | None = None) -> None:
+        """Open the panel at the bottom left of ``monitor`` (default: the primary, away from the viewer)."""
+        import tkinter as tk  # noqa: PLC0415 -- only a running batch shows this
+
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.window = tk.Toplevel(self.root)
+        self.window.overrideredirect(True)  # noqa: FBT003 -- tk's own call signature
+        self.window.attributes('-topmost', True)  # noqa: FBT003
+        self.window.configure(bg=_PANEL)
+        self.paused = False  # toggled by Pause / Resume: nothing is grabbed or keyed while it is set
+        self.stopped = False  # set by Stop: the pages taken are kept and the run ends (files.Stopped)
+        style = {'fg': 'white', 'font': ('Segoe UI', 10, 'bold'), 'relief': 'flat', 'pady': 4, 'padx': 10}
+        row = tk.Frame(self.window, bg=_PANEL)
+        row.pack(fill='x', padx=8, pady=(8, 4))
+        self.pause = tk.Button(row, text='Pause', command=self.toggle_pause, **style)
+        self.pause.configure(bg='#8a6d00', activebackground='#a88700')
+        self.pause.pack(side='left', fill='x', expand=True)
+        self.stop = tk.Button(row, text='Stop', command=self.halt, **style)
+        self.stop.configure(bg='#8c2f2f', activebackground='#a63a3a')
+        self.stop.pack(side='left', fill='x', expand=True, padx=(6, 0))
+        self.text = tk.Label(self.window, fg='white', bg=_PANEL, font=('Segoe UI', 9), justify='left', wraplength=260)
+        self.text.pack(fill='x', padx=10, pady=(0, 8))
+        self.text.configure(text='capture-files')
+        self.window.update_idletasks()
+        self._place(monitor or (monitors() or [Region(0, 0, 1920, 1080)])[0])
+
+    def _place(self, monitor: Region) -> None:
+        height = self.window.winfo_reqheight()
+        self.window.geometry(f'+{monitor.left + 24}+{monitor.top + monitor.height - height - 96}')
+
+    def toggle_pause(self) -> None:
+        """Hold the run, or let it go on."""
+        self.paused = not self.paused
+        self.pause.configure(text='Resume' if self.paused else 'Pause')
+        self.pause.configure(bg='#1f6f3f' if self.paused else '#8a6d00')
+        self.pump()
+
+    def halt(self) -> None:
+        """End the run after the page in hand."""
+        self.stopped = True
+        self.pump()
+
+    def say(self, what: str) -> None:
+        """Show what the run is doing."""
+        self.text.configure(text=what)
+        self.pump()
+
+    def pump(self) -> None:
+        """Draw what changed; called between pages and while waiting."""
+        self.root.update()
+
+    def close(self) -> None:
+        """Take the panel away."""
+        self.root.destroy()

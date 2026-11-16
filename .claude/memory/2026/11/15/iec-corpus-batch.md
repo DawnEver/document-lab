@@ -82,5 +82,6 @@ the bar (twice), 0-8 (5 -> 34 pages), 17 (6 -> 16), 12 (22 -> 18+back page), 18 
 - Commits: window by title (84b1c54), hold/stop-file/speed (5188d0c), bottom-corner parking (f7eaae2), --panel
   (f4e1b0e), mouse once per run (4c5d0b1), `_report` shadowing (23674c1), settle reuse (fa02368), deflated images
   (aebe1fd), ctrl+w close (685fa32), dialogs closed (7a3f1da), modal answered (c85187c).
+- PR: branch pr/capture-files pushed; **draft PR #40** opened (a draft merges nothing until the user marks it ready).
 - Resume or re-check: `bash output/iec2/run-all.sh` (skips what exists), `bash output/iec2/fixup-run.sh`,
   `python -I output/iec2/audit.py <family>...`.

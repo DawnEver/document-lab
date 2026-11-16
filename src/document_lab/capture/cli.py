@@ -354,7 +354,7 @@ def run_files(args: argparse.Namespace) -> int:
             failed.append(f'{pdf.name}: {refused}')
         finally:
             with contextlib.suppress(OSError):
-                desktop.close(window)
+                files.shut(window, viewer)
     park.restore()  # the mouse goes back where the user left it
     return _report_files(pdfs, failed, args.out, panel)
 

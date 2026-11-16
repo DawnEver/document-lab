@@ -139,6 +139,7 @@ class Viewer:
     view: str = 'AVPageView'
     chords: tuple[str, ...] = ('ctrl+l', 'ctrl+0', 'home')
     next: str = 'pagedown'
+    close: str | None = 'ctrl+w'  # closing the document rather than its window: a window killed marks a crash
 
     @classmethod
     def acrobat(cls) -> Viewer:
@@ -251,6 +252,25 @@ def document_window(shown: Sequence[Window], before: Collection[int], name: str)
         'each, or none opened'
     )
     raise LookupError(msg)
+
+
+def shut(window: Window, viewer: Viewer) -> None:
+    """Close the document ``window`` shows, the way its viewer takes it, and its window with it.
+
+    ``window``'s close button (a window message) is what Windows does when a viewer is ended from outside: Acrobat
+    counts that as closed abruptly and opens the next document with a recovery bar over the first page -- which a
+    capture would take for the page. The viewer's own close key (Acrobat's ``ctrl+w``) leaves it shut down cleanly.
+    """
+    from document_lab.capture import desktop  # noqa: PLC0415
+
+    if viewer.close is not None:
+        with contextlib.suppress(LookupError, OSError, ValueError):
+            desktop.press(window, viewer.close)
+            end = time.monotonic() + REDRAW * 5
+            while time.monotonic() < end and desktop.windows() and window.hwnd in {w.hwnd for w in desktop.windows()}:
+                time.sleep(STILL)
+    if window.hwnd in {w.hwnd for w in desktop.windows()}:
+        desktop.close(window)
 
 
 def open_in(viewer: Viewer, pdf: Path, timeout: float, monitor: Region | None = None) -> Window:

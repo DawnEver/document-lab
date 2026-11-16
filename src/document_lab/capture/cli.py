@@ -242,6 +242,14 @@ def add_files_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser
     files.add_argument('--open-wait', type=float, default=60.0, help='seconds the window of a PDF may take to appear')
     files.add_argument('--overwrite', action='store_true', help='capture again a PDF whose capture exists')
     files.add_argument(
+        '--tries',
+        type=int,
+        default=2,
+        metavar='N',
+        help='times a PDF is taken when the viewer fails it part way (its window closed, the viewer crashed): '
+        'the pages of a failed take are dropped and the document is opened again (default 2)',
+    )
+    files.add_argument(
         '--panel',
         action='store_true',
         help='a small always-on-top panel beside the viewer while the run goes on: Pause / Resume and Stop, and the '
@@ -297,6 +305,39 @@ def _gate(panel: Panel | None, stop_file: Path | None) -> Callable[[str], None]:
     return gate
 
 
+def _attempt(
+    files: object,
+    desktop: object,
+    args: argparse.Namespace,
+    viewer: object,
+    pdf: Path,
+    *,
+    out: Path,
+    gate: object,
+    park: object,
+    monitor: object,
+    marked: object,
+) -> tuple[int, object]:
+    """Open ``pdf``, take its pages and shut it: (pages, the area marked), or the failure raised."""
+    window = files.open_in(viewer, pdf, args.open_wait, monitor)
+    try:
+        if args.area == 'mark' and marked is None:
+            emit('mark the page to capture (it opens on the area last confirmed), then Enter or Confirm')
+            shown = desktop.view(window, viewer.view)
+            chosen = desktop.select(desktop.recall(desktop.virtual_screen()) or shown)
+            marked = chosen.client() if isinstance(chosen, desktop.Window) else chosen
+        shapes = files.page_shapes(pdf)
+        taken = files.page_through(window, viewer, out, area=marked, shapes=shapes, dpi=args.dpi, gate=gate, park=park)
+        if args.ocr is not None:
+            from document_lab.ocr import text_layer  # noqa: PLC0415
+
+            emit(f'  text layer on {text_layer(out, out, args.ocr)} page(s)')
+        return taken, marked
+    finally:
+        with contextlib.suppress(OSError):
+            files.shut(window, viewer)
+
+
 def run_files(args: argparse.Namespace) -> int:
     """Run ``document-lab capture-files``; 0 when every PDF was captured whole."""
     from document_lab.capture import desktop, files  # noqa: PLC0415 -- the run alone touches the desktop
@@ -325,36 +366,26 @@ def run_files(args: argparse.Namespace) -> int:
             emit(f'[{number}/{len(pdfs)}] {pdf.name}: captured already ({out}), kept')
             continue
         emit(f'[{number}/{len(pdfs)}] {pdf.name}')
-        try:
-            window = files.open_in(viewer, pdf, args.open_wait, monitor)
-        except (OSError, LookupError, ValueError) as refused:
-            failed.append(f'{pdf.name}: not opened -- {refused}')
-            continue
-        try:
-            if args.area == 'mark' and marked is None:
-                emit('mark the page to capture (it opens on the area last confirmed), then Enter or Confirm')
-                shown = desktop.view(window, viewer.view)
-                chosen = desktop.select(desktop.recall(desktop.virtual_screen()) or shown)
-                marked = chosen.client() if isinstance(chosen, desktop.Window) else chosen
-            shapes = files.page_shapes(pdf)
-            taken = files.page_through(
-                window, viewer, out, area=marked, shapes=shapes, dpi=args.dpi, gate=gate, park=park
-            )
-            emit(f'  {taken} page(s) to {out}')
-            if args.ocr is not None:
-                from document_lab.ocr import text_layer  # noqa: PLC0415
-
-                emit(f'  text layer on {text_layer(out, out, args.ocr)} page(s)')
-        except files.Stopped:
-            with contextlib.suppress(OSError):
-                out.replace(out.with_suffix('.partial.pdf'))
-            emit(f'stopped: {out.with_suffix(".partial.pdf").name} keeps the pages taken; {pdf.name} is captured again')
-            return 2
-        except (OSError, LookupError, ValueError) as refused:
-            failed.append(f'{pdf.name}: {refused}')
-        finally:
-            with contextlib.suppress(OSError):
-                files.shut(window, viewer)
+        why = ''
+        for attempt in range(1, max(args.tries, 1) + 1):
+            try:
+                taken, marked = _attempt(
+                    files, desktop, args, viewer, pdf, out=out, gate=gate, park=park, monitor=monitor, marked=marked
+                )
+                emit(f'  {taken} page(s) to {out}')
+                break
+            except files.Stopped:
+                with contextlib.suppress(OSError):
+                    out.replace(out.with_suffix('.partial.pdf'))
+                emit(f'stopped: {out.with_suffix(".partial.pdf").name} keeps the pages taken; {pdf.name} taken again')
+                return 2
+            except (OSError, LookupError, ValueError) as refused:
+                why = str(refused)
+                out.unlink(missing_ok=True)  # the pages a take cut short wrote are not the document
+                if attempt < max(args.tries, 1):
+                    emit(f'  {why} -- taking {pdf.name} again ({attempt + 1} of {args.tries})')
+        else:
+            failed.append(f'{pdf.name}: {why}')
     park.restore()  # the mouse goes back where the user left it
     return _report_files(pdfs, failed, args.out, panel)
 

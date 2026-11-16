@@ -335,9 +335,14 @@ def _wait_for_document(viewer: Viewer, name: str, before: Collection[int], timeo
     while True:
         shown = []
         for candidate in desktop.windows():
-            with contextlib.suppress(LookupError):
+            try:
                 desktop.view(candidate, viewer.view)
-                shown.append(candidate)
+            except LookupError:
+                if candidate.hwnd not in before:  # a dialog the viewer put up: Acrobat's crash-recovery bar is one,
+                    with contextlib.suppress(OSError):  # drawn over the page and captured as if it were the page
+                        desktop.close(candidate)
+                continue
+            shown.append(candidate)
         try:
             return document_window(shown, before, name)
         except LookupError:

@@ -131,14 +131,18 @@ setup = [
 ]
 
 # Git hooks: the family base (dev_lab/dev/githooks/base.toml) plus one merged row. The lock is generated and
-# measures 532 KB because the `gpu` extra (marker-pdf -> torch) resolves in it; the size check guards against
+# exceeds the 500 KB large-files bound because the `gpu` extra (marker-pdf -> torch) resolves in it; the size check guards against
 # committed blobs, which a lock is not.
 [tool.dev_lab.hooks]
 
 [[tool.dev_lab.hooks.pre-commit]]
-id = "check-added-large-files"
-# Also the three papers the paper e2e goldens were measured on (paper_pdf_ingest's own test data, up to 1.6 MB).
-exclude = '^(uv\.lock|tests/paper/data/[^/]+\.pdf)$'
+id = "filechecks"
+# The base row restated with one narrowing: large-files also passes the three papers the paper e2e goldens were
+# measured on (paper_pdf_ingest's own test data, up to 1.6 MB).
+run = [
+    "python", "-m", "dev_lab.dev.filechecks", "all",
+    "--exclude", 'large-files=^(uv\.lock|tests/paper/data/[^/]+\.pdf)$',
+]
 
 [tool.dev_lab.doors]
 BARE-TEST-INVOCATION = "<venv python> -m dev_lab.dev.verify [-- <pytest args>]  (the verdict door; a hand-written pytest line has none)"

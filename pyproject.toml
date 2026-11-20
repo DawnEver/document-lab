@@ -90,7 +90,10 @@ ignore = ["COM812", "D203", "D213", "D400", "D401", "N818", "PLR0913", "Q000", "
 [tool.dev_lab.branchset]
 trunk = 'main'
 sessions = ['integrate/main']
+ephemeral = ['pr/*']  # a PR head: deleted with its merge
 prune_merged = true
+max_ahead = 10  # an unlanded branch holding more than 10 commits integration lacks is an alarm
+max_idle_hours = 12  # a branch idle 12 h is pruned when merged, alarmed when not
 
 [tool.dev_lab.parts]
 output = "output/logs"

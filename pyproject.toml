@@ -92,8 +92,8 @@ trunk = 'main'
 sessions = ['integrate/main']
 ephemeral = ['pr/*']  # a PR head: deleted with its merge
 prune_merged = true
-max_ahead = 10  # an unlanded branch holding more than 10 commits integration lacks is an alarm
-max_idle_hours = 12  # a branch idle 12 h is pruned when merged, alarmed when not
+max_ahead = 30  # an unlanded branch holding more than 30 commits integration lacks is an alarm
+max_idle_hours = 24  # a branch idle 24 h is pruned when merged, alarmed when not
 
 [tool.dev_lab.parts]
 output = "output/logs"
@@ -105,6 +105,10 @@ unproduced = ["gpu", "vendor", "ocr"]
 [tool.lab_commons.tests]
 produce = ["-m", "dev_lab.dev.verify", "--part", "{part}"]
 resources = ["gpu", "vendor", "ocr", "windows"]
+
+[tool.dev_lab.dep]
+extras = ["dev", "ai", "capture"]  # gpu pulls marker-pdf (and torch): installed only where a gpu test or job needs it
+needs = { gpu = "gpu" }
 
 # The family branch flow: integrate/main coordinates; main moves only by `integrate promote` (fast-forward).
 [tool.dev_lab.integrator]

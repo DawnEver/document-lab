@@ -27,6 +27,7 @@ _SHIPPED: Final = frozenset(
         'CI-CRON-NEEDS-CONSENT',  # gained 2026-11-17 with dev-lab b9875921
         'COMMIT-HOOKS-RUN',  # gained 2026-11-13 with dev-lab 6cc2d023
         'CONSENT-CODE-FROM-THE-USER',
+        'FAMILY-REPO-IS-CHECKED-OUT',  # gained 2026-11-21 with dev-lab 5e4e0334
         'FORGE-WRITE-VIA-CLI',
         'FORGE-WRITE-VIA-GH-API',
         'FORGE-WRITE-VIA-HTTP',
@@ -36,6 +37,7 @@ _SHIPPED: Final = frozenset(
         'GIT-STASH',
         'HEAVY-IS-THE-MAIN-SESSIONS',  # gained 2026-11-17 with dev-lab b9875921
         'HPC-THROUGH-THE-DOOR',  # gained 2026-11-07 with dev-lab 8c4ab734
+        'MACHINE-FILE-IS-RENDERED',  # gained 2026-11-21 with dev-lab 5e4e0334
         'PUSH-FORCE',
         'PUSH-NO-VERIFY',
         'PUSH-REMOTE-DELETE',

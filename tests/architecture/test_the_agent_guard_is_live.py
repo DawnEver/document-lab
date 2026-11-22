@@ -38,6 +38,7 @@ _SHIPPED: Final = frozenset(
         'HEAVY-IS-THE-MAIN-SESSIONS',  # gained 2026-11-17 with dev-lab b9875921
         'HPC-THROUGH-THE-DOOR',  # gained 2026-11-07 with dev-lab 8c4ab734
         'MACHINE-FILE-IS-RENDERED',  # gained 2026-11-21 with dev-lab 5e4e0334
+        'OUTPUT-HOLDS-NO-CODE',  # gained 2026-11-22 with dev-lab e8646709
         'PUSH-FORCE',
         'PUSH-NO-VERIFY',
         'PUSH-REMOTE-DELETE',

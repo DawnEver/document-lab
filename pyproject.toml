@@ -102,6 +102,12 @@ output = "output/logs"
 # 2026-11-11), so no part here produces them: they stay marked, and a consumer's unified run selects them by marker.
 unproduced = ["gpu", "vendor", "ocr"]
 
+# The extras every environment carries: `dev` (the kit, pytest, ruff; it carries `ai`). `gpu` (marker-pdf -> torch)
+# is installed only for an environment whose need-set holds the `gpu` resource marker; `capture` is empty.
+[tool.dev_lab.dep]
+extras = ["dev"]
+needs = { gpu = "gpu" }
+
 [tool.lab_commons.tests]
 produce = ["-m", "dev_lab.dev.verify", "--part", "{part}"]
 resources = ["gpu", "vendor", "ocr", "windows"]
@@ -122,16 +128,6 @@ breakglass = ["app:5704921", "role:admin"]  # the ops App merges break-glass; ad
 # GitHub Actions: the family's one PR lifecycle (dev_lab/dev/ci_base.toml) as is; rendered to
 # .github/workflows/ci.yml by `python -m dev_lab.dev.ciworkflows render`, never hand-edited.
 [tool.dev_lab.ci."ci.yml"]
-
-# The setup every job shares, with the base's `--all-extras` narrowed to the extras a HOSTED runner uses: `dev`
-# (which carries `ai`). `gpu` is an unproduced part ([tool.dev_lab.parts]); installing it on a hosted runner only
-# built marker-pdf's pillow from source and failed `parts` (e0b6e02).
-[tool.dev_lab.ci._steps]
-setup = [
-    { uses = "actions/checkout@v4", with = { ref = "${{ env.HEAD_SHA }}", fetch-depth = 0 } },
-    { name = "Install uv", uses = "astral-sh/setup-uv@v5", with = { enable-cache = true } },
-    { name = "Sync the environment", run = "uv sync --frozen --extra dev" },
-]
 
 # Git hooks: the family base (dev_lab/dev/githooks/base.toml) plus one merged row. The lock is generated and
 # exceeds the 500 KB large-files bound because the `gpu` extra (marker-pdf -> torch) resolves in it; the size check guards against

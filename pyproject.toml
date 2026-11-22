@@ -112,10 +112,6 @@ needs = { gpu = "gpu" }
 produce = ["-m", "dev_lab.dev.verify", "--part", "{part}"]
 resources = ["gpu", "vendor", "ocr", "windows"]
 
-[tool.dev_lab.dep]
-extras = ["dev", "ai", "capture"]  # gpu pulls marker-pdf (and torch): installed only where a gpu test or job needs it
-needs = { gpu = "gpu" }
-
 # The family branch flow: integrate/main coordinates; main moves only by `integrate promote` (fast-forward).
 [tool.dev_lab.integrator]
 trunk = "main"

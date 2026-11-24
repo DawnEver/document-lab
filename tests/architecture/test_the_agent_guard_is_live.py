@@ -20,6 +20,7 @@ from deny_rules import ADOPTION  # noqa: E402
 #: THE FLOOR, BY NAME: the rules document-lab ships (adopted with dev-lab c9eaa7f).
 _SHIPPED: Final = frozenset(
     {
+        'ARCHIVE-IS-NO-STORE',  # gained 2026-11-24 with dev-lab cbecf58a (relock-family-1124)
         'BACKGROUND-SHELL-IS-BOUNDED',  # gained 2026-11-15 with dev-lab 2d1bc207
         'BARE-INTERPRETER',
         'BARE-PYTHON',

@@ -11,9 +11,11 @@
 //! read as [`spans`] (runs of text) and [`paths`] (subpaths, curves flattened).
 //! [`writer`] writes a PDF of image pages, or of pages copied from a [`File`].
 
+mod accents;
 mod base14;
 pub mod cmap;
 pub mod color;
+mod compositions;
 pub mod content;
 pub mod crypt;
 pub mod error;

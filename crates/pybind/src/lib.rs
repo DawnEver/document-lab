@@ -1,7 +1,7 @@
 //! `document_lab._pdf`: the `pdf` crate, exposed to Python as plain values -- no PDF logic of its own.
 //!
-//! `open(data, password)` reads a file; its `page(number, curve_samples)` returns what the page draws as tuples,
-//! which `document_lab.pdf` turns into the IR, and its `image(object)` an image's samples. `create(path)` writes a
+//! `open(data, password)` reads a file; its `page(number, curve_samples=, flatness=)` returns what the page draws
+//! as tuples and columns, which `document_lab.pdf` turns into the IR, and its `image(object)` an image's samples. `create(path)` writes a
 //! PDF of image pages, or of pages copied from a `Reader` (`document_lab.capture`).
 //!
 //! A refusal raises by its kind: [`Refused`] and its kinds when the reader refuses the input, `ValueError` for a
@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use pdf::error::Kind;
 use pdf::geometry::Rect;
 use pdf::interpret::{Event, PathEvent};
-use pdf::paths::Polylines;
+use pdf::paths::{Flattening, Polylines};
 use pdf::writer::Image;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyOSError, PyValueError};
@@ -124,14 +124,27 @@ impl Reader {
             .collect()
     }
 
-    /// What page `number` (1-based) draws: (spans, paths, images, warnings); each curve flattened to
-    /// `curve_samples` points.
+    /// What page `number` (1-based) draws: (spans, paths, images, warnings); each curve flattened into
+    /// `curve_samples` segments, or into as few as keep within `flatness` points of it -- one of the two
+    /// (`pdf::paths::Flattening`).
+    #[pyo3(signature = (number, *, curve_samples = None, flatness = None))]
     fn page<'py>(
         &self,
         py: Python<'py>,
         number: usize,
-        curve_samples: usize,
+        curve_samples: Option<usize>,
+        flatness: Option<f64>,
     ) -> PyResult<PageRows<'py>> {
+        let flattening = match (curve_samples, flatness) {
+            (Some(n), None) if n > 0 => Flattening::Samples(n),
+            (None, Some(d)) if d > 0.0 => Flattening::Flatness(d),
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "a curve is flattened by a curve_samples above 0 or by a flatness above 0, one of the two; \
+                     given {curve_samples:?} and {flatness:?}"
+                )));
+            }
+        };
         let page = self.at(number)?;
         let pdf::Content { events, warnings } =
             self.file.interpret(page).map_err(|e| refused(&e))?;
@@ -157,7 +170,7 @@ impl Reader {
         for event in events {
             match event {
                 Event::Path(path) => {
-                    lines.add(&path.segments, curve_samples);
+                    lines.add(&path.segments, flattening);
                     groups.resize(lines.len(), styles.len());
                     styles.push(style(&path));
                 }

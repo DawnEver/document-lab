@@ -3,13 +3,14 @@
 //! the slowest files first. Of interpreting, the part spent decoding the pages' own content streams and lexing
 //! them into operations is timed apart as well (a Form's content is not in it): the rest is running them.
 //!
-//! `cargo run --release --example timing -- [--samples N] <file-or-directory>...` -- a measurement against real
+//! `cargo run --release --example timing -- [--samples N | --flatness D] <file-or-directory>...` (default: 8
+//! samples a curve) -- a measurement against real
 //! documents kept outside the repository; nothing is written.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use pdf::paths::Polylines;
+use pdf::paths::{Flattening, Polylines};
 
 fn pdfs(path: &Path, out: &mut Vec<PathBuf>) {
     if path.is_dir() {
@@ -73,7 +74,7 @@ impl Stages {
     }
 }
 
-fn time(path: &Path, samples: usize) -> Option<Stages> {
+fn time(path: &Path, flattening: Flattening) -> Option<Stages> {
     let data = std::fs::read(path).ok()?;
     let mut s = Stages::default();
     let start = Instant::now();
@@ -99,7 +100,7 @@ fn time(path: &Path, samples: usize) -> Option<Stages> {
         let mut lines = Polylines::new();
         for event in &content.events {
             if let pdf::Event::Path(path) = event {
-                lines.add(&path.segments, samples);
+                lines.add(&path.segments, flattening);
             }
         }
         s.flatten += start.elapsed();
@@ -129,13 +130,22 @@ fn contents(file: &pdf::File, page: &pdf::Page) -> Vec<u8> {
 
 fn main() {
     let mut args = std::env::args_os().skip(1).peekable();
-    let mut samples = 8;
-    if args.peek().is_some_and(|a| a == "--samples") {
-        args.next();
-        samples = args
-            .next()
-            .and_then(|n| n.to_str()?.parse().ok())
-            .expect("--samples takes a count");
+    let mut flattening = Flattening::Samples(8);
+    if let Some(option) = args.next_if(|a| a == "--samples" || a == "--flatness") {
+        let value = args.next().and_then(|v| v.into_string().ok());
+        flattening = if option == "--samples" {
+            Flattening::Samples(
+                value
+                    .and_then(|v| v.parse().ok())
+                    .expect("--samples takes a count"),
+            )
+        } else {
+            Flattening::Flatness(
+                value
+                    .and_then(|v| v.parse().ok())
+                    .expect("--flatness takes points"),
+            )
+        };
     }
     let mut files = Vec::new();
     for arg in args {
@@ -143,7 +153,7 @@ fn main() {
     }
     let mut timed: Vec<(PathBuf, Stages)> = files
         .into_iter()
-        .filter_map(|f| time(&f, samples).map(|s| (f, s)))
+        .filter_map(|f| time(&f, flattening).map(|s| (f, s)))
         .collect();
     timed.sort_by_key(|(_, s)| std::cmp::Reverse(s.total()));
     let mut all = Stages::default();

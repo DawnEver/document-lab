@@ -5,7 +5,7 @@ import pymupdf
 import pytest
 
 from document_lab.ir import BBox
-from document_lab.pdf import Locked, Malformed, NotPdf, Refused, Unsupported, read_pdf, read_raster
+from document_lab.pdf import CURVE_SAMPLES, Locked, Malformed, NotPdf, Refused, Unsupported, read_pdf, read_raster
 from tests.synthetic import RED, mixed_pdf, table_cell_rect
 
 
@@ -78,6 +78,34 @@ def test_a_curve_is_flattened_to_the_samples_asked(tmp_path):
     (fine,) = read_pdf(tmp_path / 'c.pdf', curve_samples=16).page(1).paths
     assert (len(coarse.points), len(fine.points)) == (3, 17)
     np.testing.assert_allclose(fine.points[-1], (40, 10), atol=1e-6)
+
+
+def test_a_curve_is_flattened_within_the_flatness_asked(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.draw_bezier((100, 100), (100, 400), (400, 400), (400, 100), color=(0, 0, 0))  # a large arch
+    page.draw_bezier((10, 10), (10.1, 9.9), (10.2, 9.9), (10.3, 10), color=(0, 0, 0))  # a hook bowing 0.075 pt
+    doc.save(tmp_path / 'c.pdf')
+    t = np.linspace(0, 1, 2001)[:, None]
+    arch = (1 - t) ** 3 * [100, 100] + 3 * (1 - t) ** 2 * t * [100, 400] + 3 * (1 - t) * t**2 * [400, 400]
+    arch += t**3 * [400, 100]
+    for flatness in (0.5, 0.1, 0.02):
+        large, small = read_pdf(tmp_path / 'c.pdf', flatness=flatness).page(1).paths
+        start, step = large.points[:-1], np.diff(large.points, axis=0)
+        reach = np.clip(((arch[:, None] - start) * step).sum(-1) / (step * step).sum(-1), 0, 1)
+        nearest = np.linalg.norm(arch[:, None] - (start + reach[..., None] * step), axis=-1).min(axis=1)
+        assert nearest.max() <= flatness
+        assert len(small.points) == (2 if flatness >= 0.1 else 3)  # one segment unless it bows past the flatness
+    default = read_pdf(tmp_path / 'c.pdf').page(1).paths[0]
+    assert len(default.points) == CURVE_SAMPLES + 1
+
+
+@pytest.mark.parametrize(
+    'choice', [{'curve_samples': 8, 'flatness': 0.1}, {'curve_samples': 0}, {'flatness': 0.0}, {'flatness': -1.0}]
+)
+def test_an_ambiguous_or_empty_flattening_is_refused_at_once(tmp_path, choice):
+    with pytest.raises(ValueError, match='flatten'):
+        read_pdf(mixed_pdf(tmp_path / 'mixed.pdf'), **choice)
 
 
 def test_points_are_a_read_only_array_of_rows(doc):

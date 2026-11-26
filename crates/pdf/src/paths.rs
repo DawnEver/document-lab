@@ -1,14 +1,56 @@
 //! Painted paths to subpaths: each a polyline in page space, the unit a page's drawing is read in.
 //!
 //! A subpath runs from one `MoveTo` to the next; its straight segments give their ends, and each cubic Bezier
-//! curve is flattened to points evenly spaced in its parameter, its end the last. A subpath of a lone point (a
-//! `MoveTo` with nothing drawn from it) draws nothing and is left out.
+//! curve is flattened to points evenly spaced in its parameter, its end the last -- as many as [`Flattening`]
+//! says: a count for every curve, or as many as keep the polyline within a distance of the curve. A subpath of a
+//! lone point (a `MoveTo` with nothing drawn from it) draws nothing and is left out.
 //!
 //! Subpaths are kept as [`Polylines`]: every point in one run, each subpath a range of it -- a page's drawing is
 //! hundreds of thousands of subpaths, and one buffer hands over whole (`document_lab._pdf`).
 
 use crate::geometry::Point;
 use crate::interpret::Segment;
+
+/// The most segments one curve is flattened to: a bound on what absurd coordinates can cost, far past any
+/// curve a page draws within a flatness of a hundredth of a point.
+pub const MAX_SEGMENTS: usize = 4096;
+
+/// How a curve is flattened.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Flattening {
+    /// Into this many segments, whatever its size (at least one).
+    Samples(usize),
+    /// Into as few segments as keep every point of the polyline within this distance (page-space points) of the
+    /// curve: a glyph's curve takes one or two, a page-wide arc dozens.
+    Flatness(f64),
+}
+
+impl Flattening {
+    /// The segments the cubic Bezier curve with control points `p` is flattened into.
+    ///
+    /// For a flatness `d`, Wang's formula: `n` segments even in the parameter keep the polyline within
+    /// `3/4 L / n^2` of the curve, `L` the larger of its two second differences `|p0 - 2 p1 + p2|` and
+    /// `|p1 - 2 p2 + p3|`; so `n = ceil(sqrt(3/4 L / d))`, at most [`MAX_SEGMENTS`].
+    #[must_use]
+    pub fn segments(self, p: [Point; 4]) -> usize {
+        match self {
+            Self::Samples(n) => n.max(1),
+            Self::Flatness(d) => {
+                let second = |a: Point, b: Point, c: Point| {
+                    (a.x - 2.0 * b.x + c.x).hypot(a.y - 2.0 * b.y + c.y)
+                };
+                let bend = second(p[0], p[1], p[2]).max(second(p[1], p[2], p[3]));
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "a float casts saturating: NaN (a degenerate flatness) and below 0 to 0"
+                )]
+                let n = (0.75 * bend / d).sqrt().ceil() as usize;
+                n.clamp(1, MAX_SEGMENTS)
+            }
+        }
+    }
+}
 
 /// Subpaths, their points one run: subpath `i` is `points[bounds[i]..bounds[i + 1]]`.
 #[derive(Debug, Clone, PartialEq)]
@@ -56,9 +98,8 @@ impl Polylines {
         &self.points[self.bounds[i]..self.bounds[i + 1]]
     }
 
-    /// Append the subpaths `segments` draw, each curve flattened to `samples` points (at least one: its end).
-    pub fn add(&mut self, segments: &[Segment], samples: usize) {
-        let samples = samples.max(1);
+    /// Append the subpaths `segments` draw, each curve flattened as `flattening` says.
+    pub fn add(&mut self, segments: &[Segment], flattening: Flattening) {
         let mut closed = false;
         let mut last = Point { x: 0.0, y: 0.0 };
         for segment in segments {
@@ -70,10 +111,12 @@ impl Polylines {
                 }
                 Segment::LineTo(p) => self.points.push(p),
                 Segment::CurveTo(c1, c2, p) => {
+                    let curve = [last, c1, c2, p];
+                    let samples = flattening.segments(curve);
                     self.points.extend((1..=samples).map(|i| {
                         #[expect(clippy::cast_precision_loss, reason = "a sample count is small")]
                         let t = i as f64 / samples as f64;
-                        cubic([last, c1, c2, p], t)
+                        cubic(curve, t)
                     }));
                 }
                 Segment::Close => closed = true,
@@ -122,9 +165,9 @@ mod tests {
         Point { x, y }
     }
 
-    fn flattened(segments: &[Segment], samples: usize) -> Polylines {
+    fn flattened(segments: &[Segment], flattening: Flattening) -> Polylines {
         let mut lines = Polylines::new();
-        lines.add(segments, samples);
+        lines.add(segments, flattening);
         lines
     }
 
@@ -134,7 +177,7 @@ mod tests {
             Segment::MoveTo(pt(10.0, 10.0)),
             Segment::CurveTo(pt(20.0, 0.0), pt(30.0, 0.0), pt(40.0, 10.0)),
         ];
-        let lines = flattened(&segments, 4);
+        let lines = flattened(&segments, Flattening::Samples(4));
         assert_eq!(lines.len(), 1);
         let path = lines.subpath(0);
         assert_eq!(path.len(), 5);
@@ -150,7 +193,10 @@ mod tests {
             Segment::MoveTo(pt(0.0, 0.0)),
             Segment::CurveTo(pt(1.0, 1.0), pt(2.0, 1.0), pt(3.0, 0.0)),
         ];
-        assert_eq!(flattened(&segments, 0).points, [pt(0.0, 0.0), pt(3.0, 0.0)]);
+        assert_eq!(
+            flattened(&segments, Flattening::Samples(0)).points,
+            [pt(0.0, 0.0), pt(3.0, 0.0)]
+        );
     }
 
     #[test]
@@ -164,7 +210,7 @@ mod tests {
             Segment::MoveTo(pt(7.0, 7.0)),
             Segment::LineTo(pt(8.0, 7.0)),
         ];
-        let lines = flattened(&segments, 8);
+        let lines = flattened(&segments, Flattening::Samples(8));
         assert_eq!(lines.bounds, [0, 3, 5]);
         assert_eq!(lines.closed, [true, false]);
         assert_eq!(lines.subpath(1), [pt(7.0, 7.0), pt(8.0, 7.0)]);
@@ -175,19 +221,113 @@ mod tests {
         let mut lines = Polylines::new();
         lines.add(
             &[Segment::MoveTo(pt(0.0, 0.0)), Segment::LineTo(pt(1.0, 0.0))],
-            8,
+            Flattening::Samples(8),
         );
-        lines.add(&[Segment::MoveTo(pt(9.0, 9.0))], 8);
+        lines.add(&[Segment::MoveTo(pt(9.0, 9.0))], Flattening::Samples(8));
         lines.add(
             &[
                 Segment::MoveTo(pt(2.0, 2.0)),
                 Segment::LineTo(pt(3.0, 2.0)),
                 Segment::LineTo(pt(3.0, 3.0)),
             ],
-            8,
+            Flattening::Samples(8),
         );
         assert_eq!(lines.bounds, [0, 2, 5]);
         assert_eq!(lines.points.len(), 5, "the lone point left no trace");
         assert_eq!(lines.subpath(1)[0], pt(2.0, 2.0));
+    }
+
+    /// The farthest a point of the curve `p` lies from `polyline` (dense samples of the curve, each to its nearest
+    /// segment).
+    fn distance(p: [Point; 4], polyline: &[Point]) -> f64 {
+        let to_segment = |q: Point, a: Point, b: Point| {
+            let (dx, dy) = (b.x - a.x, b.y - a.y);
+            let length = dx * dx + dy * dy;
+            let t = if length > 0.0 {
+                (((q.x - a.x) * dx + (q.y - a.y) * dy) / length).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            (q.x - a.x - t * dx).hypot(q.y - a.y - t * dy)
+        };
+        (0..=2000)
+            .map(|i| cubic(p, f64::from(i) / 2000.0))
+            .map(|q| {
+                polyline
+                    .windows(2)
+                    .map(|w| to_segment(q, w[0], w[1]))
+                    .fold(f64::INFINITY, f64::min)
+            })
+            .fold(0.0, f64::max)
+    }
+
+    #[test]
+    fn a_flatness_keeps_the_polyline_that_close_to_the_curve_with_few_points() {
+        // A quarter circle of radius 100 points, and the same shape a thousandth the size (a glyph's curve).
+        let k = 0.552_284_75;
+        for scale in [100.0, 0.1] {
+            let curve = [
+                pt(scale, 0.0),
+                pt(scale, scale * k),
+                pt(scale * k, scale),
+                pt(0.0, scale),
+            ];
+            for flatness in [0.5, 0.1, 0.01] {
+                let lines = flattened(
+                    &[
+                        Segment::MoveTo(curve[0]),
+                        Segment::CurveTo(curve[1], curve[2], curve[3]),
+                    ],
+                    Flattening::Flatness(flatness),
+                );
+                let far = distance(curve, lines.subpath(0));
+                assert!(far <= flatness, "{scale} {flatness}: {far}");
+                if scale < 1.0 && flatness >= 0.1 {
+                    assert_eq!(
+                        lines.points.len(),
+                        2,
+                        "a curve flatter than asked is one segment"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_fixed_count_can_miss_a_large_curve_by_more_than_a_flatness_does() {
+        let k = 0.552_284_75;
+        let curve = [
+            pt(300.0, 0.0),
+            pt(300.0, 300.0 * k),
+            pt(300.0 * k, 300.0),
+            pt(0.0, 300.0),
+        ];
+        let draw = [
+            Segment::MoveTo(curve[0]),
+            Segment::CurveTo(curve[1], curve[2], curve[3]),
+        ];
+        let fixed = distance(curve, flattened(&draw, Flattening::Samples(8)).subpath(0));
+        let tolerant = distance(
+            curve,
+            flattened(&draw, Flattening::Flatness(0.1)).subpath(0),
+        );
+        assert!(fixed > 0.5 && tolerant <= 0.1, "{fixed} {tolerant}");
+    }
+
+    #[test]
+    fn a_degenerate_flatness_still_reaches_the_end() {
+        let curve = [pt(0.0, 0.0), pt(1e300, 0.0), pt(-1e300, 1.0), pt(3.0, 0.0)];
+        for flatness in [0.0, -1.0, f64::NAN] {
+            let n = Flattening::Flatness(flatness).segments(curve);
+            assert!((1..=MAX_SEGMENTS).contains(&n), "{flatness}: {n}");
+        }
+        let lines = flattened(
+            &[
+                Segment::MoveTo(curve[0]),
+                Segment::CurveTo(curve[1], curve[2], curve[3]),
+            ],
+            Flattening::Flatness(f64::NAN),
+        );
+        assert_eq!(lines.points.last(), Some(&pt(3.0, 0.0)));
     }
 }

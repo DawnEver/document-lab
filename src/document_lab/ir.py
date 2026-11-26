@@ -113,7 +113,7 @@ class TextSpan:
 
 @dataclass(frozen=True, slots=True, eq=False)
 class VectorPath:
-    """One subpath of a page's vector drawing, curves flattened to points (``read_pdf``'s ``curve_samples`` each).
+    """One subpath of a page's vector drawing, curves flattened to points (as ``read_pdf`` says).
 
     A color is RGB in 0..1 when its color space defines one, else its own components (a separation's tint).
 

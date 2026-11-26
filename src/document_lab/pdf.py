@@ -33,33 +33,55 @@ __all__ = [
     'read_raster',
 ]
 
-#: Points per cubic Bezier segment when a curve is flattened.
+#: The segments each curve is flattened into by default. Measured 2026-11-26 against a flatness (the other way):
+#: on 283 real PDFs (6499 pages) a flatness of 0.1 point makes 8.1M points where 8 per curve make 22.5M, and
+#: bounds the error on a large arc that 8 per curve exceed (half a point on an arc a few inches across); but a
+#: glyph drawn as an outline is read off a raster 32 rows high (:mod:`document_lab.glyphs`), and on 1991 such
+#: shapes of the heaviest documents, rasterized against 64 per curve, 8 per curve differ in 0.14% of the pixels
+#: where a flatness of 0.1, 0.05, 0.02, 0.01 point differs in 7.2%, 3.0%, 1.7%, 0.8%: a point is coarse at a
+#: glyph's scale.
 CURVE_SAMPLES: Final = 8
 #: The resolution (dpi) a region holding no image renders at.
 VECTOR_DPI: Final = 300.0
 
 
-def read_pdf(path: Path | str, *, password: str = '', curve_samples: int = CURVE_SAMPLES) -> Document:
+def read_pdf(
+    path: Path | str, *, password: str = '', flatness: float | None = None, curve_samples: int | None = None
+) -> Document:
     """The PDF at ``path``, opened with ``password`` when it is encrypted; each page read when first asked for.
 
     The file is read whole here, hashed, and kept in memory for the document's life: no file handle stays open,
     and the pages read later are those of the bytes hashed, whatever becomes of the file.
 
-    ``curve_samples``: the points each curve of a vector path is flattened to.
+    Each curve of a vector path is flattened into a polyline: into as few segments as keep it within ``flatness``
+    points of the curve, or into ``curve_samples`` segments each, whatever its size; neither given, into
+    :data:`CURVE_SAMPLES` each.
 
     Raises:
+        ValueError: both ``flatness`` and ``curve_samples`` are given, or one is not above 0.
         NotPdf: the file is no PDF.
         Locked: it is encrypted and ``password`` opens it for no one.
         Unsupported: it uses what the reader does not read.
         Malformed: it is not what a PDF must be.
 
     """
+    if curve_samples is not None and flatness is not None:
+        msg = f'a curve is flattened by a flatness or by curve_samples, not both: {flatness}, {curve_samples}'
+        raise ValueError(msg)
+    flattening = (
+        {'flatness': flatness}
+        if flatness is not None
+        else {'curve_samples': CURVE_SAMPLES if curve_samples is None else curve_samples}
+    )
+    if (flatness is not None and not flatness > 0) or (curve_samples is not None and curve_samples < 1):
+        msg = f'a curve is flattened within a flatness above 0, or into curve_samples of 1 or more: {flattening}'
+        raise ValueError(msg)
     path = Path(path)
     data = path.read_bytes()
     sha = hashlib.sha256(data).hexdigest()
     uri = path.resolve().as_uri()
     reader = _pdf.open(data, password.encode())
-    return Document(sha256=sha, uri=uri, pages=_Pages(reader, sha, uri, curve_samples), repairs=_Repairs(reader))
+    return Document(sha256=sha, uri=uri, pages=_Pages(reader, sha, uri, flattening), repairs=_Repairs(reader))
 
 
 class _Repairs(Sequence[str]):
@@ -93,10 +115,10 @@ class _Pages(Sequence[Page]):
     array, no Python object per point -- so every page kept costs no more than reading them all at once did.
     """
 
-    __slots__ = ('_kept', '_reader', '_samples', '_sha', '_sizes', '_uri')
+    __slots__ = ('_flattening', '_kept', '_reader', '_sha', '_sizes', '_uri')
 
-    def __init__(self, reader: _pdf.Reader, sha: str, uri: str, samples: int) -> None:
-        self._reader, self._sha, self._uri, self._samples = reader, sha, uri, samples
+    def __init__(self, reader: _pdf.Reader, sha: str, uri: str, flattening: dict[str, float]) -> None:
+        self._reader, self._sha, self._uri, self._flattening = reader, sha, uri, flattening
         self._sizes: list[tuple[int, float, float]] = reader.pages
         self._kept: list[Page | None] = [None] * len(self._sizes)
 
@@ -115,15 +137,17 @@ class _Pages(Sequence[Page]):
         if page is None:
             number, width, height = self._sizes[i]
             here = Provenance(self._sha, self._uri, page=number)
-            page = self._kept[i] = _page(self._reader, number, (width, height), here, self._samples)
+            page = self._kept[i] = _page(self._reader, number, (width, height), here, self._flattening)
         return page
 
     def __repr__(self) -> str:
         return f'<{len(self)} pages, {sum(p is not None for p in self._kept)} read>'
 
 
-def _page(reader: _pdf.Reader, number: int, size: tuple[float, float], here: Provenance, samples: int) -> Page:
-    spans, paths, images, warnings = reader.page(number, samples)
+def _page(
+    reader: _pdf.Reader, number: int, size: tuple[float, float], here: Provenance, flattening: dict[str, float]
+) -> Page:
+    spans, paths, images, warnings = reader.page(number, **flattening)
     cite = partial(Provenance, here.sha256, here.uri, number)  # a box on this page: a Provenance made directly
     return Page(
         number=number,
@@ -197,7 +221,7 @@ def read_raster(path: Path | str, page: int, bbox: BBox, *, dpi: float | None = 
     path = Path(path)
     data = path.read_bytes()
     if dpi is None:
-        _, _, images, _ = _pdf.open(data, password.encode()).page(page, 1)
+        _, _, images, _ = _pdf.open(data, password.encode()).page(page, curve_samples=1)  # its images alone
         native = [
             72 * w / (box[2] - box[0])
             for box, w, _, _ in images

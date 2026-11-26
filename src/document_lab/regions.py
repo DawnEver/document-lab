@@ -13,7 +13,7 @@ A table without a caption (a standard's normative-reference annex, a list set in
 :data:`TABLE_ROWS` or more bands of :data:`ROW_CELLS` or more cells side by side, set near the body size, no prose
 among them; a cell's further lines -- words, starting within one of the row's cells -- belong to it, and anything
 else (a formula, a note, prose) ends it. It runs from its first row to its last and is
-labelled ``Untitled table N`` in page order. Two columns of prose have two cells a band, so they are no table; a
+labeled ``Untitled table N`` in page order. Two columns of prose have two cells a band, so they are no table; a
 band a captioned region already holds is not found again. A table whose cells OCR read no words from has nothing to
 be told by here, and is not found.
 
@@ -230,9 +230,9 @@ def _untitled_tables(page: _Page, held: list[Region]) -> list[Region]:
 
 
 def _drawn(page: _Page, drawings: Sequence[Drawing], held: list[Region]) -> list[Region]:
-    """The drawings no caption, number or row of cells told, labelled ``Untitled ...``.
+    """The drawings no caption, number or row of cells told, labeled ``Untitled ...``.
 
-    A drawing counts when it lies within the text's column (a margin's sideways licence note, a cover's band to the
+    A drawing counts when it lies within the text's column (a margin's sideways license note, a cover's band to the
     page edge do not), is at least :data:`DRAWN_MIN` body sizes high and wide (a rule under a header is not), is no
     box round a line's words (a link's frame), draws a stroke :data:`DRAWN_STROKE` body sizes long (words OCR missed
     draw none), crosses no prose (a box round a note, links over lines do) and lies in no region found.

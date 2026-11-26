@@ -21,7 +21,7 @@ def _boxes(rows):
 
 
 def test_a_key_value_table_yields_typed_values_citing_their_cells():
-    rows = (('Lef [mm]', '274'), ('Turns', '12'), ('Material', ' 3C90 '), ('Colour', 'grey'))
+    rows = (('Lef [mm]', '274'), ('Turns', '12'), ('Material', ' 3C90 '), ('Color', 'grey'))
     values = from_rows(Table(rows, _boxes(rows), SRC), SCHEMA)
     assert values['length'].value == 274.0
     assert values['count'].value == 12
@@ -40,7 +40,7 @@ def test_a_value_keeps_the_text_it_was_read_from():
 
 
 def test_a_field_with_no_matching_row_is_absent_not_none():
-    rows = (('Colour', 'grey'),)
+    rows = (('Color', 'grey'),)
     assert from_rows(Table(rows, _boxes(rows), SRC), SCHEMA) == {}
 
 

@@ -105,7 +105,7 @@ def _split_plaintext(md: str) -> list[tuple[str, str]]:
 def split_sections(md: str) -> list[tuple[str, str]]:
     """Split markdown into (heading, body) pairs. heading='' for preamble.
 
-    Picks the *shallowest* heading level that has ≥3 matches (favours
+    Picks the *shallowest* heading level that has ≥3 matches (favors
     top-level sections over fine-grained subsections).  Falls back to
     plain-text heuristics (Roman numerals, ALL-CAPS lines) when no
     markdown headings are found — handles flat converter output for
@@ -181,7 +181,7 @@ def classify_section(heading: str, body: str) -> str:
     clean_body = strip_formatting(body)
     clean_heading = re.sub(r'[*#]', '', heading).strip()
 
-    # A recognised section heading is a section however short its body (a one-line acknowledgment).
+    # A recognized section heading is a section however short its body (a one-line acknowledgment).
     if _ROMAN_HEADING_RE.match(clean_heading) or _STANDALONE_RE.match(clean_heading):
         return 'keep'
 

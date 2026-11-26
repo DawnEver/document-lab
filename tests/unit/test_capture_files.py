@@ -170,4 +170,4 @@ def test_every_page_image_is_deflated_even_after_the_incremental_saves(tmp_path)
             pdf.add(page)
     with pymupdf.open(out) as doc:
         filters = {doc.xref_get_key(doc[i].get_images(full=True)[0][0], 'Filter')[1] for i in range(doc.page_count)}
-    assert filters == {'/FlateDecode'}
+    assert filters == {'/FlateDecode'}  # spelling-ignore-line: the PDF filter's own name

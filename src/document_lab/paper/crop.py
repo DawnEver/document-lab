@@ -216,9 +216,9 @@ def _find_caption_rect(blocks: list, label: str) -> pymupdf.Rect | None:
 
     Also tries the "Fig. N." short form when *label* is "Figure N", so that
     captions using the abbreviated form are found even when the caller passes
-    the normalised form.
+    the normalized form.
     """
-    label = re.sub(r'\s+', ' ', label).strip()  # normalise newlines from 2-col extraction
+    label = re.sub(r'\s+', ' ', label).strip()  # normalize newlines from 2-col extraction
     patterns = [re.compile(re.escape(label) + r'\.', re.IGNORECASE)]
     m = re.match(r'^Figure\s+(\d+)$', label, re.IGNORECASE)
     if m:
@@ -349,7 +349,7 @@ def _build_crop_rect(
 def _find_eq_number_pos(blocks: list, eq_num: str) -> tuple[float | None, float | None]:
     """Find the y/x position of equation number (N) on the page.
 
-    Returns the y/x centre of the specific LINE (not block) containing "(N)" so that
+    Returns the y/x center of the specific LINE (not block) containing "(N)" so that
     the crop region is tight even when (N) appears at the bottom of a multi-line block.
     Matches both standalone "(N)" blocks and inline "formula... (N)" at end of block.
     """

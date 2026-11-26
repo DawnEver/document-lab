@@ -7,7 +7,7 @@ import pytest
 from document_lab.glyphs import UnreadableGlyph
 from document_lab.ir import BBox
 from document_lab.pdf import read_raster
-from document_lab.plot import NoCurveOfColour, NoPlotFrame, UnreadableTickLabels, raster_plot
+from document_lab.plot import NoCurveOfColor, NoPlotFrame, UnreadableTickLabels, raster_plot
 from tests.synthetic import BLUE, FRAME, RED, Axis, PlotSpec, raster_pdf
 
 XS = [float(x) for x in range(0, 101, 5)]
@@ -51,12 +51,12 @@ def test_a_vector_curve_says_its_basis_and_has_no_pixel_uncertainty(tmp_path):
     assert (curve.basis, curve.x_uncertainty, curve.y_uncertainty) == ('vector', None, None)
 
 
-def test_two_crossing_curves_of_two_colours_stay_separate(tmp_path):
+def test_two_crossing_curves_of_two_colors_stay_separate(tmp_path):
     spec = PlotSpec(
         Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED), (lambda x: 100 - x, XS, BLUE)], grid=True
     )
     plot = raster_plot(_raster(tmp_path, spec, dpi=200))
-    assert len(plot.curves) == 2  # one per colour; the grid is not a curve
+    assert len(plot.curves) == 2  # one per color; the grid is not a curve
     by_hue = {int(np.argmax(c.stroke)): c for c in plot.curves}
     assert _within_pixels(by_hue[0], lambda x: x, 1).all()  # red
     assert _within_pixels(by_hue[2], lambda x: 100 - x, -1).all()  # blue
@@ -107,8 +107,8 @@ def test_a_dark_curve_crossing_grid_lines_stays_one_curve(tmp_path):
     assert _within_pixels(curve, lambda x: x, 1).all()
 
 
-def test_a_curve_of_a_stated_colour_is_traced_into_data_coordinates_alone(tmp_path):
-    """VITROPERM loss figures: one curve per colour, and the caller names the one it wants."""
+def test_a_curve_of_a_stated_color_is_traced_into_data_coordinates_alone(tmp_path):
+    """VITROPERM loss figures: one curve per color, and the caller names the one it wants."""
     spec = PlotSpec(
         Axis([0, 50, 100]),
         Axis([0, 50, 100]),
@@ -116,20 +116,20 @@ def test_a_curve_of_a_stated_colour_is_traced_into_data_coordinates_alone(tmp_pa
         grid=True,
     )
     raster = _raster(tmp_path, spec, dpi=200)
-    (curve,) = raster_plot(raster, colour=BLUE).curves
+    (curve,) = raster_plot(raster, color=BLUE).curves
     assert curve.y == pytest.approx(30 + 0.004 * curve.x**2, abs=1.0)  # data units of y: a pixel is 0.18 here
     assert curve.x.min() <= 2 and curve.x.max() >= 98  # data units of x: the whole curve
-    (red,) = raster_plot(raster, colour=RED).curves  # the control: the other colour is the other curve
+    (red,) = raster_plot(raster, color=RED).curves  # the control: the other color is the other curve
     assert red.y == pytest.approx(red.x, abs=1.0)  # data units of y
 
 
-def test_a_colour_no_curve_is_drawn_in_raises_by_name(tmp_path):
+def test_a_color_no_curve_is_drawn_in_raises_by_name(tmp_path):
     spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)])
     raster = _raster(tmp_path, spec, dpi=200)
-    with pytest.raises(NoCurveOfColour, match='colour'):
-        raster_plot(raster, colour=(0.0, 0.6, 0.0))
-    with pytest.raises(NoCurveOfColour):
-        raster_plot(raster, colour=(0.0, 0.0, 0.0))  # dark ink: the frame is no curve
+    with pytest.raises(NoCurveOfColor, match='color'):
+        raster_plot(raster, color=(0.0, 0.6, 0.0))
+    with pytest.raises(NoCurveOfColor):
+        raster_plot(raster, color=(0.0, 0.0, 0.0))  # dark ink: the frame is no curve
 
 
 def test_raster_axes_drawn_through_the_corner_still_frame_the_plot(tmp_path):
@@ -190,7 +190,7 @@ def test_a_rotated_y_title_in_the_label_column_is_no_raster_tick_label(tmp_path,
 
 def test_a_curve_drawn_over_the_x_axis_from_the_origin_still_frames_the_plot(tmp_path):
     """A curve that starts along the x axis (a B-H or loss curve from zero) covers the axis' dark pixels with its
-    colour: the axis read from dark ink alone broke there -- no frame, or one cut short where the curve leaves it.
+    color: the axis read from dark ink alone broke there -- no frame, or one cut short where the curve leaves it.
     """
     xs = [float(x) for x in range(0, 101, 5)]
     spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: max(0.0, 2 * (x - 50)), xs, RED)])

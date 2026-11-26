@@ -114,22 +114,22 @@ def _cut(frame: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Each row cut into at most :data:`BINS` column bins.
 
     Per channel the bin's mean, ``(rows, bins * 3)``, and whether the bin is blank -- one value across it and the
-    same as its neighbours on the row -- ``(rows, bins)``.
+    same as its neighbors on the row -- ``(rows, bins)``.
     """
     width = frame.shape[1]
     edges = np.linspace(0, width, min(BINS, width) + 1).astype(int)[:-1]
     sums = np.add.reduceat(frame, edges, axis=1, dtype=np.uint32)  # summed as integers: no float copy of the frame
     means = sums.astype(np.float32) / np.diff([*edges, width]).astype(np.float32)[None, :, None]
     blank = (np.maximum.reduceat(frame, edges, axis=1) == np.minimum.reduceat(frame, edges, axis=1)).all(axis=2)
-    same = (means[:, 1:] == means[:, :-1]).all(axis=2)  # a bin and its right neighbour
+    same = (means[:, 1:] == means[:, :-1]).all(axis=2)  # a bin and its right neighbor
     blank[:, 1:] &= same
     blank[:, :-1] &= same
     return means.reshape(len(frame), -1), blank
 
 
 _CANDIDATES: Final = 15  # offsets the squared-difference ranking hands on to be judged in full
-_NEAR: Final = 2  # offsets this close to the best are its neighbours: a fractional scroll makes them nearly as good
-_UNIQUE: Final = 2.0  # every offset but a neighbour must err at least this many times the best
+_NEAR: Final = 2  # offsets this close to the best are its neighbors: a fractional scroll makes them nearly as good
+_UNIQUE: Final = 2.0  # every offset but a neighbor must err at least this many times the best
 _FLOOR: Final = 1.0  # grey levels: errors closer than this are not told apart
 _STILL: Final = 1.0  # grey levels a cell may change in place and still count as unchanged
 _EXACT: Final = 0.25  # grey levels of error under which an offset is a whole-row match, not refined
@@ -224,10 +224,10 @@ def _place(a: np.ndarray, b: np.ndarray, match: Match) -> float:
     """Rows the view scrolled from frame ``a`` to frame ``b``, to a fraction of a row (0: it did not move).
 
     At 175% scaling a scroll is a fraction of a row: the whole-row offset that fits best is refined by the parabola
-    through its error and its two neighbours', so a stitcher that adds the fractions up never drifts.
+    through its error and its two neighbors', so a stitcher that adds the fractions up never drifts.
 
     The offset at which the frames are most alike: its trimmed mean error at most ``match.tolerance`` grey levels,
-    and every offset but its neighbours erring :data:`_UNIQUE` times as much. Raises :class:`NoOverlap` or
+    and every offset but its neighbors erring :data:`_UNIQUE` times as much. Raises :class:`NoOverlap` or
     :class:`AmbiguousOverlap` rather than return an offset that may be wrong.
     """
     if a.shape != b.shape:

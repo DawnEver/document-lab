@@ -3,7 +3,7 @@
 A PDF only its viewer may open (a secured standard) is captured from the screen, as a person would: each is opened
 in the viewer (:class:`Viewer`, Adobe Acrobat by default), the window it opens found (:func:`document_window`: the
 one that was not there before, or titled with the file's name -- a secured standard is titled with its own, ``BS EN
-IEC 60072-1:2022 (SECURED)``), maximised, cleared of its panes and toolbars
+IEC 60072-1:2022 (SECURED)``), maximized, cleared of its panes and toolbars
 -- shown full screen (Acrobat's ``ctrl+l``: one page at a time, fitted to the monitor, on black) at its first page.
 Then each page is taken as it shows -- the part it fills (:func:`page_box`) or the area the user marked -- and
 the viewer paged on (``pagedown``): one image a page, written as one PDF page each, no stitching to lose its place
@@ -190,7 +190,7 @@ def page_shapes(pdf: Path) -> list[float] | None:
 def page_box(pixels: np.ndarray) -> tuple[int, int, int, int]:
     """``(top, bottom, left, right)``: the part of a viewer's view (rows of RGB) its page fills, no backdrop round it.
 
-    The backdrop is the colour of the view's corners -- a page fitted whole leaves them bare, beside it or above and
+    The backdrop is the color of the view's corners -- a page fitted whole leaves them bare, beside it or above and
     below it; a pixel differing from it by :data:`PAGE_CONTRAST` is the page's, a column (then a row, within those
     columns) is when :data:`PAGE_ROWS` of it is, and the page is the widest run of those -- the view's whole width
     when the page fits it across (a portrait screen). Refused when no page stands apart (no backdrop, or a run under
@@ -274,11 +274,11 @@ def shut(window: Window, viewer: Viewer) -> None:
 
 
 def open_in(viewer: Viewer, pdf: Path, timeout: float, monitor: Region | None = None) -> Window:
-    """``pdf`` opened in ``viewer``, its window maximised and cleared, at its first page with the whole page in view.
+    """``pdf`` opened in ``viewer``, its window maximized and cleared, at its first page with the whole page in view.
 
     The window is the one that was not there before the viewer was started, or titled with the file's name
     (:func:`document_window`: a secured PDF is titled with its own). It is waited for up to ``timeout`` seconds (the
-    viewer starting); windows it opened are closed again when it is not found. Maximised on ``monitor`` (default:
+    viewer starting); windows it opened are closed again when it is not found. Maximized on ``monitor`` (default:
     the primary). Cleared is the page view filling the
     window (:data:`CLEARED`): a key the viewer missed (it was still drawing) is pressed again; still not, it is
     refused. A window this opened is closed again when it cannot be brought so far.

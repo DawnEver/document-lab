@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import os
 import sys
 import time
 from datetime import datetime
@@ -29,6 +30,11 @@ if TYPE_CHECKING:
     from document_lab.capture.stitch import Stitcher
 
 __all__ = ['add_files_parser', 'add_merge_parser', 'add_parser', 'run', 'run_files', 'run_merge']
+
+
+def memory() -> Path:
+    """Where the last area confirmed is kept: this user's, on this machine (the environment is read here, the entry)."""
+    return Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'document-lab' / 'capture-area.json'
 
 
 def _rect(text: str) -> tuple[int, int, int, int]:
@@ -219,7 +225,7 @@ def add_files_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser
     files = sub.add_parser(
         'capture-files',
         help='each PDF opened in its viewer (Acrobat) and captured whole, one PDF each (Windows)',
-        description='Each PDF is opened in the viewer, its window maximised and shown full screen (one page at a '
+        description='Each PDF is opened in the viewer, its window maximized and shown full screen (one page at a '
         'time); each page is taken as it shows, paged on to the last, one PDF page each; the window is closed.',
     )
     files.add_argument('sources', type=Path, nargs='+', metavar='SOURCE', help='PDFs, directories of PDFs, or lists')
@@ -236,7 +242,7 @@ def add_files_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser
         '--monitor',
         type=int,
         default=0,
-        help='the monitor the viewer is maximised on: 0 the primary (default), then left to right; a portrait one '
+        help='the monitor the viewer is maximized on: 0 the primary (default), then left to right; a portrait one '
         'shows a page taller and sharper',
     )
     files.add_argument('--open-wait', type=float, default=60.0, help='seconds the window of a PDF may take to appear')
@@ -324,7 +330,7 @@ def _attempt(
         if args.area == 'mark' and marked is None:
             emit('mark the page to capture (it opens on the area last confirmed), then Enter or Confirm')
             shown = desktop.view(window, viewer.view)
-            chosen = desktop.select(desktop.recall(desktop.virtual_screen()) or shown)
+            chosen = desktop.select(memory(), desktop.recall(desktop.virtual_screen(), memory()) or shown)
             marked = chosen.client() if isinstance(chosen, desktop.Window) else chosen
         shapes = files.page_shapes(pdf)
         taken = files.page_through(window, viewer, out, area=marked, shapes=shapes, dpi=args.dpi, gate=gate, park=park)
@@ -433,7 +439,7 @@ def _target(args: argparse.Namespace) -> Window | Region:
     if args.rect is not None:
         return desktop.Region(*args.rect)
     emit('click a window or drag a rectangle, then Enter or Confirm (Esc cancels); then Start on the panel')
-    return desktop.select()
+    return desktop.select(memory())
 
 
 _BACK: Final = {
@@ -563,7 +569,7 @@ def _started(
         hud.close()
         if answer == 'cancel':
             return None
-        target = desktop.select(target)
+        target = desktop.select(memory(), target)
 
 
 def _prepare(args: argparse.Namespace) -> str | None:
@@ -593,7 +599,9 @@ def _prepare(args: argparse.Namespace) -> str | None:
             check_name(path)
     _refuse_existing(args)
 
-    return desktop.tk_problem()  # the selection and the panel are tkinter windows
+    return desktop.tk_problem(
+        tuple(sys.version_info[:3]), sys.prefix, sys.base_prefix, os.environ
+    )  # the selection and the panel are tkinter windows
 
 
 def _refuse_existing(args: argparse.Namespace) -> None:

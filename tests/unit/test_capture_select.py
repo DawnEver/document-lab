@@ -31,21 +31,20 @@ def test_an_edge_dragged_past_the_other_stops_short_of_collapsing():
 SCREEN = Region(-1920, 0, 3840, 1080)  # two monitors, the second left of the primary
 
 
-def test_the_last_area_confirmed_is_recalled_while_it_is_on_the_screen(tmp_path, monkeypatch):
-    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path))
-    assert recall(SCREEN) is None  # nothing confirmed yet
-    remember(Region(-500, 100, 800, 600))
-    remember(BOX)  # the last one wins
-    assert recall(SCREEN) == BOX
-    assert recall(Region(0, 0, 350, 300)) is None  # a smaller screen no longer holds it: not opened on
+def test_the_last_area_confirmed_is_recalled_while_it_is_on_the_screen(tmp_path):
+    memory = tmp_path / 'capture-area.json'
+    assert recall(SCREEN, memory) is None  # nothing confirmed yet
+    remember(Region(-500, 100, 800, 600), memory)
+    remember(BOX, memory)  # the last one wins
+    assert recall(SCREEN, memory) == BOX
+    assert recall(Region(0, 0, 350, 300), memory) is None  # a smaller screen no longer holds it: not opened on
 
 
-def test_a_memory_this_code_did_not_write_is_ignored(tmp_path, monkeypatch):
-    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path))
-    (tmp_path / 'document-lab').mkdir()
+def test_a_memory_this_code_did_not_write_is_ignored(tmp_path):
+    memory = tmp_path / 'capture-area.json'
     for junk in ('{', '{"left": 1}', '[1, 2]'):
-        (tmp_path / 'document-lab' / 'capture-area.json').write_text(junk, encoding='utf-8')
-        assert recall(SCREEN) is None
+        memory.write_text(junk, encoding='utf-8')
+        assert recall(SCREEN, memory) is None
 
 
 def test_the_size_shows_above_the_marks_corner_or_inside_it_at_the_screens_top():

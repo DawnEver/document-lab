@@ -235,12 +235,12 @@ def test_a_click_marks_the_window_and_start_confirms_it(viewer):
     window, _ = viewer
     area = window.client()
     drag = ('drag', (area.left + 10, area.top + 20), (area.left + 110, area.top + 70))  # replaced by the click
-    assert selected(drag, ('click', area.centre), ('confirm',)) == repr(window)
+    assert selected(drag, ('click', area.center), ('confirm',)) == repr(window)
 
 
 def test_nothing_is_taken_before_it_is_confirmed(viewer):
     window, _ = viewer
-    assert selected(('click', window.client().centre), ('key', '<Escape>')) == 'None'
+    assert selected(('click', window.client().center), ('key', '<Escape>')) == 'None'
 
 
 def test_confirming_by_the_confirm_button_does_not_free_the_canvas_under_its_own_event():

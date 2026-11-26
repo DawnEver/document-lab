@@ -64,7 +64,7 @@ PLACE_WEIGHT: Final = 8.0
 #: Two characters whose references (nearest phases, with place) are this close are one shape to the reader: at 32
 #: rows ``I``/``l`` are 1.65 apart, anti-aliasing noise, and the nearest distinct pair ``O``/``Q`` 1.91 (2026-11-10).
 TWIN: Final = 1.8
-#: A minus' centre sits at least this far (ems) above the baseline; a point (as wide as tall) sits on it.
+#: A minus' center sits at least this far (ems) above the baseline; a point (as wide as tall) sits on it.
 MINUS_FLOOR: Final = 0.12
 #: A mark taller than wide whose bottom sits at least this far (ems) above the baseline is a prime (``mu'``).
 PRIME_FLOOR: Final = 0.3
@@ -359,13 +359,13 @@ def _twins(rows: int, font: Font, *, placed: bool = True) -> dict[str, tuple[str
     refs = font.letters(rows)
 
     def distance(a: str, b: str) -> float:
-        (ta, ba), (tb, bb) = refs[a][1], refs[b][1]
+        (top_a, bottom_a), (top_b, bottom_b) = refs[a][1], refs[b][1]
         shape = min(
             float(np.linalg.norm(fa - fb) + ASPECT_WEIGHT * abs(aa - ab))
             for fa, aa in refs[a][0]
             for fb, ab in refs[b][0]
         )
-        return shape + (PLACE_WEIGHT * (abs(ta - tb) + abs(ba - bb)) if placed else 0.0)
+        return shape + (PLACE_WEIGHT * (abs(top_a - top_b) + abs(bottom_a - bottom_b)) if placed else 0.0)
 
     return {a: tuple(b for b in refs if b != a and distance(a, b) <= TWIN) for a in refs}
 

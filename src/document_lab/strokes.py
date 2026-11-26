@@ -40,10 +40,10 @@ DOT_PT = 2.2  # a fragment no longer than this is a dot
 
 @dataclass(frozen=True)
 class Fragment:
-    """One connected piece of thick ink: its centre-line samples in page pt, and its stroke width.
+    """One connected piece of thick ink: its center-line samples in page pt, and its stroke width.
 
     ``axis``: ``(x, y, slope)`` of its ink's principal axis through the ink centroid, when read from pixels. A short
-    dash's ends lie on it: its centre-line samples bend towards the caps, its pixels do not.
+    dash's ends lie on it: its center-line samples bend towards the caps, its pixels do not.
     """
 
     x: np.ndarray
@@ -77,7 +77,7 @@ def fragments(
     """The thick-ink fragments of ``raster`` after an opening of side ``opening_pt``.
 
     ``exclude``: page-pt boxes ``(x0, y0, x1, y1)`` blanked first (a legend). A fragment shorter than ``min_pt`` is
-    dropped. Each is sampled per pixel column at its run centres, per row where it is taller than wide.
+    dropped. Each is sampled per pixel column at its run centers, per row where it is taller than wide.
     """
     x0, y0, x1, y1 = raster.provenance.bbox  # type: ignore[misc]
     rows, cols = raster.pixels.shape[:2]
@@ -99,14 +99,14 @@ def fragments(
         xs, ys, widths = [], [], []
         for j, line in enumerate(mask if rowwise else mask.T):
             for lo, hi in _runs(line):
-                centre = (lo + hi - 1) / 2 + 0.5
+                center = (lo + hi - 1) / 2 + 0.5
                 if rowwise:
-                    xs.append(x0 + (c0 + centre) * sx)
+                    xs.append(x0 + (c0 + center) * sx)
                     ys.append(y0 + (r0 + j + 0.5) * sy)
                     widths.append((hi - lo) * sx)
                 else:
                     xs.append(x0 + (c0 + j + 0.5) * sx)
-                    ys.append(y0 + (r0 + centre) * sy)
+                    ys.append(y0 + (r0 + center) * sy)
                     widths.append((hi - lo) * sy)
         px, py = x0 + (cc + 0.5) * sx, y0 + (rr + 0.5) * sy
         out.append(Fragment(np.array(xs), np.array(ys), float(np.median(widths)), _principal_axis(px, py)))
@@ -131,7 +131,7 @@ End = tuple[float, float, float | None]
 def _ends(f: Fragment, end_pt: float) -> tuple[End, End]:
     """``(x, y, slope)`` at the left and the right end.
 
-    A dot (no longer than ``DOT_PT``) has no direction: its slope is ``None`` and both its ends sit at its centre
+    A dot (no longer than ``DOT_PT``) has no direction: its slope is ``None`` and both its ends sit at its center
     height. A fragment too short to hold ``end_pt`` of line beyond a cap at each end has its ends on its ink's
     principal axis. A longer one fits a line on the ``end_pt`` of x just inside each cap (one stroke from the end) and
     takes the end on that line: a column through a sloped stroke's cap samples a corner, not the line.
@@ -140,8 +140,8 @@ def _ends(f: Fragment, end_pt: float) -> tuple[End, End]:
     x, y = f.x[o], f.y[o]
     lo, hi = float(x[0]), float(x[-1])
     if f.length <= DOT_PT:
-        centre = float(np.mean(y))
-        return (lo, centre, None), (hi, centre, None)
+        center = float(np.mean(y))
+        return (lo, center, None), (hi, center, None)
     cap = f.stroke
     if hi - lo < 2 * (cap + end_pt) and f.axis is not None:
         cx, cy, slope = f.axis
@@ -208,7 +208,7 @@ def coverage(frags: Sequence[Fragment], chain: Sequence[int]) -> float:
     return float(sum(b - a for a, b in spans) / max(hi - lo, 1e-9))
 
 
-def centre_line(
+def center_line(
     frags: Sequence[Fragment], chain: Sequence[int], *, bin_pt: float = 1.0
 ) -> tuple[np.ndarray, np.ndarray]:
     """The chain's samples averaged per ``bin_pt`` of x: one ``(x, y)`` per bin, x increasing."""
@@ -234,7 +234,7 @@ def bands(
     fragment joins the band a ``majority`` of its samples vote for, else it is an orphan. Returns the members per
     solid (in the order given) and the orphans.
     """
-    lines = [centre_line(frags, ch) for ch in solids]
+    lines = [center_line(frags, ch) for ch in solids]
     used = {i for ch in solids for i in ch}
     members: list[list[int]] = [[] for _ in solids]
     orphans = []
@@ -267,15 +267,15 @@ def split_by_dots(
     """``frags`` split into those on the dash-dot curve the ``dots`` trace, and the rest.
 
     The dots of one dash-dot curve, read with an opening small enough to keep them, trace that curve: the polyline
-    through their centres (x increasing). A fragment whose samples lie on it -- median miss within ``off_pt`` over the
+    through their centers (x increasing). A fragment whose samples lie on it -- median miss within ``off_pt`` over the
     samples within ``reach_pt`` of the dots' x span -- is the dash-dot curve's; every other fragment is not. A curve
     two strokes away is told apart where the dash lengths cannot be (both are dashes). Needs two dots or more.
     """
     if len(dots) < 2:  # noqa: PLR2004 -- a line needs two points
         msg = f'{len(dots)} dot(s): a dash-dot curve is traced by two or more'
         raise ValueError(msg)
-    centres = sorted((float(d.x.mean()), float(d.y.mean())) for d in dots)
-    dx, dy = np.array([c[0] for c in centres]), np.array([c[1] for c in centres])
+    centers = sorted((float(d.x.mean()), float(d.y.mean())) for d in dots)
+    dx, dy = np.array([c[0] for c in centers]), np.array([c[1] for c in centers])
     on, off = [], []
     for i, f in enumerate(frags):
         near = (f.x >= dx[0] - reach_pt) & (f.x <= dx[-1] + reach_pt)

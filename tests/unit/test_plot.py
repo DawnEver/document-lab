@@ -1,4 +1,4 @@
-"""Curves digitised from synthetic vector plots whose data are known exactly (the planted controls)."""
+"""Curves digitized from synthetic vector plots whose data are known exactly (the planted controls)."""
 
 import math
 
@@ -8,7 +8,7 @@ import pytest
 
 from document_lab.numbers import bound
 from document_lab.pdf import read_pdf
-from document_lab.plot import RasterPlot, UnreadFrame, UnrecognisedFrame, outline_text, plots
+from document_lab.plot import RasterPlot, UnreadFrame, UnrecognizedFrame, outline_text, plots
 from tests.synthetic import BLUE, FRAME, RED, Axis, PlotSpec, draw_plot, plot_pdf, to_page
 
 XS = [float(x) for x in range(0, 101, 10)]
@@ -64,16 +64,16 @@ def test_each_stroked_curve_is_its_own_curve_and_grid_and_ticks_are_not_curves(t
         grid=True,
     )
     plot = _one_plot(tmp_path, spec)
-    by_colour = {c.stroke: c for c in plot.curves}
-    assert set(by_colour) == {RED, BLUE}
-    assert by_colour[BLUE].y == pytest.approx([200 - x for x in XS], abs=0.02)
+    by_color = {c.stroke: c for c in plot.curves}
+    assert set(by_color) == {RED, BLUE}
+    assert by_color[BLUE].y == pytest.approx([200 - x for x in XS], abs=0.02)
 
 
 def test_without_tick_marks_the_labels_alone_calibrate(tmp_path):
     spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 10, 20]), [(lambda x: x / 5, XS, RED)], tick_marks=False)
     (curve,) = _one_plot(tmp_path, spec).curves
     assert curve.x == pytest.approx(XS, abs=0.05)
-    assert curve.y == pytest.approx([x / 5 for x in XS], abs=0.2)  # a label's box centre is not its tick
+    assert curve.y == pytest.approx([x / 5 for x in XS], abs=0.2)  # a label's box center is not its tick
 
 
 def test_a_caller_can_force_the_scale(tmp_path):
@@ -149,7 +149,7 @@ def test_the_tick_values_are_the_label_values(tmp_path):
 
 
 def test_minor_log_grid_lines_do_not_capture_a_decade_label(tmp_path):
-    # Real sheets draw 2..9 x grid lines inside each decade; a label box centre sits nearer a minor line than its own.
+    # Real sheets draw 2..9 x grid lines inside each decade; a label box center sits nearer a minor line than its own.
     spec = PlotSpec(
         Axis([0, 50, 100]),
         Axis([10, 100, 1000, 10000], log=True, power_labels=True, label_drop=4.0),
@@ -246,9 +246,9 @@ def test_a_curve_carries_its_dash_array_and_a_solid_one_none(tmp_path):
         Axis([0, 50, 100]),
         [(lambda x: x, XS, RED), (lambda x: 100 - x, XS, BLUE, '[3 1.5] 0')],
     )
-    by_colour = {c.stroke: c for c in _one_plot(tmp_path, spec).curves}
-    assert by_colour[RED].dashes == ()
-    assert by_colour[BLUE].dashes == (3.0, 1.5)  # points: on, off
+    by_color = {c.stroke: c for c in _one_plot(tmp_path, spec).curves}
+    assert by_color[RED].dashes == ()
+    assert by_color[BLUE].dashes == (3.0, 1.5)  # points: on, off
 
 
 def test_fragments_meeting_end_to_end_in_one_style_are_one_curve(tmp_path):
@@ -258,11 +258,11 @@ def test_fragments_meeting_end_to_end_in_one_style_are_one_curve(tmp_path):
         [(lambda x: 2 * x, XS, RED), (lambda x: 200 - x, XS, BLUE, '[3 1.5] 0')],
         fragments=4,
     )
-    by_colour = {c.stroke: c for c in _one_plot(tmp_path, spec).curves}
-    assert set(by_colour) == {RED, BLUE}
-    assert sorted(by_colour[RED].x) == pytest.approx(XS, abs=0.01)  # data units of x, each sample once
-    assert by_colour[RED].y == pytest.approx([2 * x for x in by_colour[RED].x], abs=0.02)
-    assert by_colour[BLUE].dashes == (3.0, 1.5)
+    by_color = {c.stroke: c for c in _one_plot(tmp_path, spec).curves}
+    assert set(by_color) == {RED, BLUE}
+    assert sorted(by_color[RED].x) == pytest.approx(XS, abs=0.01)  # data units of x, each sample once
+    assert by_color[RED].y == pytest.approx([2 * x for x in by_color[RED].x], abs=0.02)
+    assert by_color[BLUE].dashes == (3.0, 1.5)
 
 
 def test_fragments_of_different_styles_are_not_joined(tmp_path):
@@ -379,7 +379,7 @@ def test_an_outlined_exponent_set_a_point_apart_is_still_the_power(tmp_path):
     assert sorted(v for _, v in plot.y.ticks) == pytest.approx([1, 10, 100, 1000], rel=1e-12, abs=0)
 
 
-def test_a_non_uniform_axis_maps_linearly_between_each_pair_of_labelled_ticks(tmp_path):
+def test_a_non_uniform_axis_maps_linearly_between_each_pair_of_labeled_ticks(tmp_path):
     # 4S2F's B-H loop: -50..100 every 50 over 60 % of the axis, then 100, 500, 1000 over the rest.
     x = Axis([-50, 0, 50, 100, 500, 1000], at=[0, 0.2, 0.4, 0.6, 0.8, 1])
     xs = [-50.0, -20.0, 0.0, 70.0, 100.0, 300.0, 750.0, 1000.0]
@@ -413,7 +413,7 @@ def test_labels_set_as_glyph_outlines_calibrate_the_axes(tmp_path):
     assert sorted(v for _, v in plot.x.ticks) == [-50, 0, 50, 100, 500, 1000]
     assert sorted(v for _, v in plot.y.ticks) == [0, 100, 200, 300, 400, 500]
     (curve,) = plot.curves
-    assert curve.x == pytest.approx(xs, abs=0.5)  # data units of x; a glyph box centre is not its tick
+    assert curve.x == pytest.approx(xs, abs=0.5)  # data units of x; a glyph box center is not its tick
     assert curve.y == pytest.approx([v / 4 + 200 for v in xs], abs=1.0)  # data units of y
 
 
@@ -465,11 +465,11 @@ def test_an_unreadable_outlined_tick_label_refuses_the_frame_by_name(tmp_path, l
     """Older SIFERRIT sheets: a label the glyph reader cannot read was dropped and the axis fit from the rest."""
     spec = PlotSpec(Axis([0, 50, 100], labels=['0', '50', label]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)])
     page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False).page(1)
-    with pytest.raises(UnrecognisedFrame, match='unrecognised frame'):
+    with pytest.raises(UnrecognizedFrame, match='unrecognized frame'):
         plots(page)
 
 
-def test_a_recognised_outlined_frame_still_reads_beside_an_outlined_axis_title(tmp_path):
+def test_a_recognized_outlined_frame_still_reads_beside_an_outlined_axis_title(tmp_path):
     spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=[('Il', 240.0, 325.0, 8.0)])
     page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False).page(1)
     (plot,) = plots(page)  # an unreadable word below the label row is a title, not a label
@@ -530,7 +530,7 @@ def _one_plot_list(tmp_path, spec):
     return plots(read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec), tables=False).page(1))
 
 
-def test_a_page_whose_every_labelled_frame_fails_to_read_raises_naming_the_page_and_frame(tmp_path):
+def test_a_page_whose_every_labeled_frame_fails_to_read_raises_naming_the_page_and_frame(tmp_path):
     """SIFERRIT N72 p3: a frame with one readable x label read as no plot and raised nothing."""
     spec = PlotSpec(Axis([0, 50, 100], labels=['', '50', '']), Axis([0, 50, 100]), [(lambda x: x, XS, RED)])
     doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec), tables=False)
@@ -640,7 +640,7 @@ def test_an_unreadable_outlined_word_in_the_label_column_still_refuses(tmp_path)
     page = read_pdf(
         plot_pdf(tmp_path / 'plot.pdf', _log_grid(stray=[('Il', 85.0, 143.0, 8.0)]), outlined=True), tables=False
     ).page(1)
-    with pytest.raises(UnrecognisedFrame, match='unrecognised frame'):
+    with pytest.raises(UnrecognizedFrame, match='unrecognized frame'):
         plots(page)
 
 
@@ -674,7 +674,7 @@ def _stroked_lettered(tmp_path, where):
 
 def test_tick_labels_drawn_as_stroked_lettering_refuse_the_frame_by_name(tmp_path):
     """Stroke-font labels of characters the font lacks read as nothing: the frame is refused by name, not empty."""
-    with pytest.raises(UnrecognisedFrame, match=r'stroked lines .*: \(100\.0, 100\.0, 400\.0, 300\.0\)'):
+    with pytest.raises(UnrecognizedFrame, match=r'stroked lines .*: \(100\.0, 100\.0, 400\.0, 300\.0\)'):
         plots(_stroked_lettered(tmp_path, 'labels'))
 
 
@@ -756,7 +756,7 @@ def test_an_unreadable_stroked_tick_label_among_read_ones_refuses_the_frame(tmp_
     """The control: a label-sized stroked glyph of no character on a tick, among read labels, refuses the frame."""
     spec = _stroke_plot(x_labels=['-60', '0', '', '200'])
     x, _ = to_page(spec, 100, 1)
-    with pytest.raises(UnrecognisedFrame, match='read as no number or word'):
+    with pytest.raises(UnrecognizedFrame, match='read as no number or word'):
         plots(_stroke_page(tmp_path, spec, lambda page: _spiral(page, x, spec.frame.y1 + 10)))
 
 
@@ -802,7 +802,7 @@ def test_a_stroked_glyph_of_no_character_beside_a_stroked_label_still_refuses(tm
     """The control: where the arrowhead sat, a glyph that is no wedge and reads as nothing keeps the word unread."""
     spec = _stroke_plot()
     left, y = _left_of_power(spec, 100)
-    with pytest.raises(UnrecognisedFrame, match='read as no number or word'):
+    with pytest.raises(UnrecognizedFrame, match='read as no number or word'):
         plots(_stroke_page(tmp_path, spec, lambda page: _spiral(page, left - 1.2 - 2.0, y)))
 
 

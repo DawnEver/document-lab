@@ -1,7 +1,7 @@
 """Synthetic PDFs drawn with PyMuPDF so every expected value is known exactly -- the planted controls.
 
 A plot is drawn on a frame from `FRAME`; its tick labels sit beside tick marks at known data values, and its curve
-is a known function sampled at known points, so a digitiser that is wrong cannot pass by agreeing with itself.
+is a known function sampled at known points, so a digitizer that is wrong cannot pass by agreeing with itself.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ class Axis:
 class PlotSpec:
     x: Axis
     y: Axis
-    #: (function, sample xs, colour), optionally with a PDF dash string such as '[3 2] 0'.
+    #: (function, sample xs, color), optionally with a PDF dash string such as '[3 2] 0'.
     curves: list[tuple[Callable[[float], float], Sequence[float], tuple[float, float, float], *tuple[str, ...]]] = (
         field(default_factory=list)
     )
@@ -77,7 +77,7 @@ class PlotSpec:
     #: A y-axis title set ROTATED 90 degrees (reading upward) with its baseline at x, starting at y: (text, x, y, size).
     y_title: tuple[str, float, float, float] | None = None
     fragments: int = 1  # each curve drawn as this many polylines meeting end to end, every other one reversed
-    #: Legend entries inside the frame's top right: (label, colour, PDF dash string or None), a sample line each.
+    #: Legend entries inside the frame's top right: (label, color, PDF dash string or None), a sample line each.
     legend: Sequence[tuple[str, tuple[float, float, float], str | None]] = ()
     #: Tick labels drawn in the stroke font (:func:`stroke_text`): polylines only, no text, as TDK SIFERRIT N72 does.
     stroke_font: bool = False
@@ -137,7 +137,7 @@ def _power_label(
 
 
 def _glyphs(page: pymupdf.Page, text: str, cx: float, cy: float) -> None:
-    """``text`` centred on ``cx``, one span per glyph: neighbours alternate font, so no reader merges them."""
+    """``text`` centered on ``cx``, one span per glyph: neighbors alternate font, so no reader merges them."""
     fonts = ('helv', 'cour')
     widths = [pymupdf.get_text_length(ch, fontname=fonts[i % 2], fontsize=FONT_SIZE) for i, ch in enumerate(text)]
     x = cx - sum(widths) / 2
@@ -247,7 +247,7 @@ def _draw_frame(page: pymupdf.Page, spec: PlotSpec) -> None:
 
 
 def _minus_span(page: pymupdf.Page, text: str, cx: float, cy: float, glyph: str = '-') -> None:
-    """``text`` centred on ``cx`` with its minus (``glyph``) set in another font, so it is a span of its own."""
+    """``text`` centered on ``cx`` with its minus (``glyph``) set in another font, so it is a span of its own."""
     digits = text[1:]
     minus_w = pymupdf.get_text_length(glyph, fontname='tiro', fontsize=FONT_SIZE)
     width = pymupdf.get_text_length(digits, fontname='helv', fontsize=FONT_SIZE)
@@ -257,7 +257,7 @@ def _minus_span(page: pymupdf.Page, text: str, cx: float, cy: float, glyph: str 
 
 
 def _x_label(page: pymupdf.Page, spec: PlotSpec, text: str, px: float) -> None:
-    """A label centred on its tick; a drawn minus is part of the centred whole, as typeset labels are."""
+    """A label centered on its tick; a drawn minus is part of the centered whole, as typeset labels are."""
     y = spec.frame.y1 + 10
     if spec.stroke_font:
         stroke_text(page, text, px - stroke_width(text) / 2, y + STROKE_HEIGHT / 2)
@@ -330,18 +330,16 @@ def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
     if spec.y_title is not None:
         text, x, y, size = spec.y_title
         page.insert_text((x, y), text, fontname='helv', fontsize=size, rotate=90)
-    for fn, xs, colour, *dashes in spec.curves:
+    for fn, xs, color, *dashes in spec.curves:
         points = [to_page(spec, x, fn(x)) for x in xs]
         step = math.ceil((len(points) - 1) / spec.fragments)
         for k, start in enumerate(range(0, len(points) - 1, step)):
             piece = points[start : start + step + 1]
-            page.draw_polyline(
-                piece[::-1] if k % 2 else piece, color=colour, width=1.0, dashes=next(iter(dashes), None)
-            )
-    for k, (text, colour, dashes) in enumerate(spec.legend):
+            page.draw_polyline(piece[::-1] if k % 2 else piece, color=color, width=1.0, dashes=next(iter(dashes), None))
+    for k, (text, color, dashes) in enumerate(spec.legend):
         y = spec.frame.y0 + 12 + 12 * k
         x = spec.frame.x1 - 80
-        page.draw_line((x, y), (x + 20, y), color=colour, width=1.0, dashes=dashes)
+        page.draw_line((x, y), (x + 20, y), color=color, width=1.0, dashes=dashes)
         page.insert_text((x + 24, y + FONT_SIZE * 0.35), text, fontname='helv', fontsize=FONT_SIZE)
 
 

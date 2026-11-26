@@ -10,7 +10,8 @@ opens no access), :class:`Unsupported`, :class:`Malformed` -- each a ``ValueErro
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from functools import partial
 from pathlib import Path
 from typing import Final, overload
 
@@ -123,23 +124,24 @@ class _Pages(Sequence[Page]):
 
 def _page(reader: _pdf.Reader, number: int, size: tuple[float, float], here: Provenance, samples: int) -> Page:
     spans, paths, images, warnings = reader.page(number, samples)
+    cite = partial(Provenance, here.sha256, here.uri, number)  # a box on this page: a Provenance made directly
     return Page(
         number=number,
         width=size[0],
         height=size[1],
-        spans=tuple(_span(row, here) for row in spans),
-        paths=_paths(paths, here),
-        figures=tuple(Figure(here.at(bbox=BBox(*box)), w, h, image) for box, w, h, image in images),
+        spans=tuple(_span(row, cite) for row in spans),
+        paths=_paths(paths, cite),
+        figures=tuple(Figure(cite(bbox=box), w, h, image) for box, w, h, image in images),
         warnings=tuple(warnings),
     )
 
 
-def _span(row: tuple, here: Provenance) -> TextSpan:
+def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
     text, font, size, bold, box, _mode, unspaced = row
-    return TextSpan(text, size, font, here.at(bbox=BBox(*box)), bold, unspaced)
+    return TextSpan(text, size, font, cite(bbox=box), bold, unspaced)
 
 
-def _paths(columns: tuple, here: Provenance) -> tuple[VectorPath, ...]:
+def _paths(columns: tuple, cite: Callable[..., Provenance]) -> tuple[VectorPath, ...]:
     """A page's subpaths off the reader's columns (``PathColumns`` in ``crates/pybind``): no Python object per point.
 
     Every subpath's points are a read-only view of one array holding the page's points; its painted path's style
@@ -164,7 +166,7 @@ def _paths(columns: tuple, here: Provenance) -> tuple[VectorPath, ...]:
         starts[:-1],
         starts[1:],
         np.frombuffer(boxes, dtype=np.float64).reshape(-1, 4).tolist(),
-        np.frombuffer(closed, dtype=np.uint8).tolist(),
+        np.frombuffer(closed, dtype=np.uint8).astype(bool).tolist(),
         np.frombuffer(groups, dtype=np.int64).tolist(),
         strict=True,
     ):
@@ -175,8 +177,8 @@ def _paths(columns: tuple, here: Provenance) -> tuple[VectorPath, ...]:
                 stroke=stroke,
                 width=width,
                 dashes=dashes,
-                closed=bool(shut),
-                provenance=here.at(bbox=BBox(*box)),
+                closed=shut,
+                provenance=cite(bbox=box),
                 dash_phase=phase,
                 fill=fill,
                 even_odd=even_odd,

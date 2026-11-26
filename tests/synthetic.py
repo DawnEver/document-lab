@@ -360,7 +360,7 @@ def plot_pdf(path: Path, *specs: PlotSpec, outlined: bool = False) -> Path:
     return path
 
 
-#: Points around the frame a rasterised plot keeps, so its tick labels are inside the image.
+#: Points around the frame a rasterized plot keeps, so its tick labels are inside the image.
 RASTER_MARGIN = 40.0
 
 

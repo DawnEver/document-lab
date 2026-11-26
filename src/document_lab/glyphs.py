@@ -46,7 +46,7 @@ __all__ = [
     'Glyph',
     'UnreadableGlyph',
     'has_letter',
-    'rasterise',
+    'rasterize',
     'read_glyph',
     'read_number',
     'read_word',
@@ -78,7 +78,7 @@ ACCEPT: Final = 2.5
 MARGIN: Final = 0.75
 #: A glyph at most this fraction of the word's tallest glyph is a sign or a point, not a digit.
 MARK_HEIGHT: Final = 0.45
-#: Rows a vector outline is rasterised to.
+#: Rows a vector outline is rasterized to.
 RASTER_ROWS: Final = 32
 #: The darkness (0 white .. 1 black) above which a pixel counts as ink when a glyph is cropped.
 INK: Final = 0.25
@@ -106,11 +106,11 @@ class Glyph:
     box: tuple[float, float, float, float]
 
 
-def rasterise(polygons: Sequence[Sequence[tuple[float, float]]], box: tuple[float, float, float, float]) -> np.ndarray:
+def rasterize(polygons: Sequence[Sequence[tuple[float, float]]], box: tuple[float, float, float, float]) -> np.ndarray:
     """The even-odd fill of ``polygons`` (a glyph's subpaths, holes too) over ``box``, ``RASTER_ROWS`` high.
 
     A box wider than it is high (a rule or a minus drawn as a fill) is scaled by its width instead, so a zero-height
-    fill rasterises to a blank of at most ``RASTER_ROWS`` columns rather than one per nanopoint; a digit is taller
+    fill rasterizes to a blank of at most ``RASTER_ROWS`` columns rather than one per nanopoint; a digit is taller
     than wide and keeps its scale.
     """
     x0, y0, x1, y1 = box

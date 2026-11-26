@@ -51,7 +51,7 @@ from document_lab.glyphs import (
     Glyph,
     UnreadableGlyph,
     has_letter,
-    rasterise,
+    rasterize,
     read_number,
     read_word,
     stroke,
@@ -664,7 +664,7 @@ def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, str 
         else:
             host[1].append(shape.points)
     glyphs = _dotted([g for g in glyphs if not (len(g[1]) == 1 and _arrowhead(g[1][0], g[0]))])
-    return _read_words([Glyph(rasterise(polys, tuple(box)), tuple(box)) for box, polys in glyphs], HELVETICA)
+    return _read_words([Glyph(rasterize(polys, tuple(box)), tuple(box)) for box, polys in glyphs], HELVETICA)
 
 
 def _stroke_words(paths: Sequence[VectorPath]) -> tuple[list[tuple[float | None, str | None, BBox]], set[int]]:

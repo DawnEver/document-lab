@@ -10,7 +10,7 @@ from document_lab.glyphs import (
     Font,
     Glyph,
     UnreadableGlyph,
-    rasterise,
+    rasterize,
     read_glyph,
     read_number,
     read_word,
@@ -150,13 +150,13 @@ def test_a_character_the_font_draws_as_another_is_refused_as_a_twin():
     assert read_word(zero, STROKE) == '0'  # the control: without the twin, a 0
 
 
-def test_a_flat_fill_rasterises_to_a_bounded_blank_not_a_column_per_nanopoint():
+def test_a_flat_fill_rasterizes_to_a_bounded_blank_not_a_column_per_nanopoint():
     """A filled path with no height (a rule or a minus drawn as a fill) once sized its raster from 1e-9 pt: 888 GiB.
 
     Seen 2026-11-09 on the Magnetics 2026 powder catalogue. Its ink holds no area, so it is blank, and its column count
     is bounded by the rows -- the box, not the ink, still tells a minus from a point in ``read_number``.
     """
-    ink = rasterise([[(0.0, 5.0), (8.0, 5.0), (4.0, 5.0)]], (0.0, 5.0, 8.0, 5.0))
+    ink = rasterize([[(0.0, 5.0), (8.0, 5.0), (4.0, 5.0)]], (0.0, 5.0, 8.0, 5.0))
     assert ink.shape[0] == RASTER_ROWS
     assert ink.shape[1] <= RASTER_ROWS
     assert not ink.any()

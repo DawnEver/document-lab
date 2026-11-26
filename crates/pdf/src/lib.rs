@@ -13,6 +13,7 @@
 mod base14;
 mod cid2unicode;
 pub mod cmap;
+mod cmaps;
 pub mod color;
 pub mod content;
 pub mod crypt;

@@ -6,9 +6,9 @@ build-backend = "maturin"
 name = "document_lab"
 # The version is the Cargo workspace's (`Cargo.toml`), read by maturin; a release tag must match it.
 dynamic = ["version"]
-# MIT, and BSD-3-Clause for Adobe's CID-to-Unicode tables the reader embeds (`crates/pdf/src/cid2unicode`).
+# MIT, and BSD-3-Clause for Adobe's tables the reader embeds: CID-to-Unicode and the predefined CMaps (crates/pdf/src).
 license = "MIT AND BSD-3-Clause"
-license-files = ["LICENSE", "crates/pdf/src/cid2unicode/LICENSE.txt"]
+license-files = ["LICENSE", "crates/pdf/src/cid2unicode/LICENSE.txt", "crates/pdf/src/cmaps/LICENSE.txt"]
 description = "Documents (PDF, HTML tables) to typed data that carries its provenance"
 readme = "README.md"
 requires-python = ">=3.12"

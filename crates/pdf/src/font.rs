@@ -4,7 +4,7 @@
 
 use crate::base14::{FONTS, Metrics};
 use crate::cid2unicode::Collection;
-use crate::cmap::CMap;
+use crate::cmap::{CMap, legacy_encoding};
 use crate::error::Result;
 use crate::file::File;
 use crate::fontfile::{self, GlyphText};
@@ -220,9 +220,9 @@ enum Kind {
         widths: Vec<(u32, u32, f64)>,
         default: f64,
         code_text: CodeText,
-        /// Adobe's text of the `CID`s, when the `CIDFont`'s `/CIDSystemInfo` names a collection Adobe's tables cover
-        /// and the `CMap` is one whose `CID`s this reader knows (Identity, or embedded). The ordering decides, not
-        /// the font's kind: a `CIDFontType2` declaring `Adobe-Identity` has `CID`s that are only glyph ids, and
+        /// Adobe's text of the `CID`s, of the collection a predefined `CMap` is of, or for Identity and an embedded
+        /// `CMap` the one the `CIDFont`'s `/CIDSystemInfo` names, when Adobe's tables cover it. The ordering decides,
+        /// not the font's kind: a `CIDFontType2` declaring `Adobe-Identity` has `CID`s that are only glyph ids, and
         /// none; one declaring `Adobe-Japan1` has that collection's `CID`s (its `/CIDToGIDMap` turns them into
         /// glyphs).
         collection: Option<&'static Collection>,
@@ -328,14 +328,15 @@ impl Font {
                 .into_iter()
                 .map(|(code, len)| {
                     let cid = cmap.cid(code);
-                    // The text: `ToUnicode`'s, else what the codes are, else the embedded program's glyph's (the
-                    // very glyph drawn), else the collection's for the `CID`, else none.
+                    // The text: `ToUnicode`'s, else the code's when codes are Unicode, else the embedded program's
+                    // glyph's (the very glyph drawn), else the collection's for the `CID`, else the code's in its
+                    // legacy encoding, else none.
                     let text = self
                         .to_unicode
                         .as_ref()
                         .and_then(|c| c.text(code))
                         .map(str::to_string)
-                        .or_else(|| code_as_text(*code_text, code, len))
+                        .or_else(|| unicode_text(*code_text, code, len))
                         .or_else(|| {
                             let gid = match &self.cid_to_gid {
                                 Some(map) => *map.get(usize::try_from(cid).ok()?)?,
@@ -343,7 +344,8 @@ impl Font {
                             };
                             self.program.as_ref()?.text(gid)
                         })
-                        .or_else(|| collection.and_then(|c| c.text(cid)));
+                        .or_else(|| collection.and_then(|c| c.text(cid)))
+                        .or_else(|| legacy_text(*code_text, code, len));
                     let width = widths
                         .iter()
                         .find(|(lo, hi, _)| (*lo..=*hi).contains(&cid))
@@ -360,17 +362,32 @@ impl Font {
     }
 }
 
-/// A composite font's code as text, by what its codes are.
-fn code_as_text(kind: CodeText, code: u32, len: usize) -> Option<String> {
-    match kind {
-        CodeText::Unknown => None,
-        CodeText::Utf16 => char::from_u32(code).map(String::from),
-        CodeText::Legacy(encoding) => {
-            let bytes = &code.to_be_bytes()[4 - len.min(4)..];
-            let (text, _, failed) = encoding.decode(bytes);
-            (!failed).then(|| text.into_owned())
-        }
+/// A code as text when the codes are Unicode: one UTF-16 code unit, or two (a surrogate pair, four bytes).
+fn unicode_text(kind: CodeText, code: u32, len: usize) -> Option<String> {
+    if !matches!(kind, CodeText::Utf16) {
+        return None;
     }
+    let units = if len == 4 {
+        vec![
+            u16::try_from(code >> 16).ok()?,
+            u16::try_from(code & 0xFFFF).ok()?,
+        ]
+    } else {
+        vec![u16::try_from(code).ok()?]
+    };
+    char::decode_utf16(units)
+        .collect::<std::result::Result<String, _>>()
+        .ok()
+}
+
+/// A code as text when its bytes are a legacy encoding's.
+fn legacy_text(kind: CodeText, code: u32, len: usize) -> Option<String> {
+    let CodeText::Legacy(encoding) = kind else {
+        return None;
+    };
+    let bytes = &code.to_be_bytes()[4 - len.min(4)..];
+    let (text, _, failed) = encoding.decode(bytes);
+    (!failed).then(|| text.into_owned())
 }
 
 /// A standard font's width of the character `text`.
@@ -692,23 +709,31 @@ impl File {
     }
 
     fn composite(&self, dict: &Dict, cid_font: &Dict) -> Result<(Kind, bool)> {
-        // The `CMap`, and whether the `CID`s it selects are known (Identity's and an embedded one's are).
-        let (cmap, vertical, code_text, cids_known) = match self.get(dict, b"Encoding")? {
+        // The `CMap`, and the collection whose text its `CID`s stand for: a predefined `CMap`'s own (ISO 32000-2
+        // section 9.10.2), Identity's and an embedded one's the `CIDFont`'s; none for a name no table defines, whose
+        // codes' `CID`s are not known (they are read as Identity's).
+        let (cmap, vertical, code_text, collection) = match self.get(dict, b"Encoding")? {
             Some(Object::Name(n)) => {
                 let name = String::from_utf8_lossy(&n).into_owned();
-                // A predefined `CMap`: Identity is read; a Unicode one (`Uni...-UCS2-` / `-UTF16-`) has the text as
-                // its codes; a legacy CJK one has its codes as bytes of that encoding; any other selects CIDs from a
-                // registry's table this reader does not carry.
-                let vertical = name.ends_with("-V");
-                if let Some((cmap, encoding)) = CMap::legacy(&name) {
-                    (cmap, vertical, CodeText::Legacy(encoding), false)
-                } else if name.starts_with("Uni")
-                    && (name.contains("UCS2") || name.contains("UTF16"))
-                {
-                    (CMap::identity(), vertical, CodeText::Utf16, false)
+                if let Some((cmap, vertical, collection)) = CMap::predefined(&name) {
+                    // A Unicode `CMap`'s codes are the text; a legacy CJK one's are bytes of its encoding.
+                    let code_text = if name.starts_with("Uni")
+                        && (name.contains("UCS2") || name.contains("UTF16"))
+                    {
+                        CodeText::Utf16
+                    } else {
+                        legacy_encoding(&name).map_or(CodeText::Unknown, CodeText::Legacy)
+                    };
+                    (cmap, vertical, code_text, collection)
                 } else {
                     let identity = matches!(name.as_str(), "Identity-H" | "Identity-V");
-                    (CMap::identity(), vertical, CodeText::Unknown, identity)
+                    let collection = if identity {
+                        self.collection(cid_font)?
+                    } else {
+                        None
+                    };
+                    let vertical = name.ends_with("-V");
+                    (CMap::identity(), vertical, CodeText::Unknown, collection)
                 }
             }
             Some(Object::Stream(s)) => {
@@ -717,10 +742,10 @@ impl File {
                     CMap::parse(&self.decode(&s)?.into_bytes()?),
                     vertical,
                     CodeText::Unknown,
-                    true,
+                    self.collection(cid_font)?,
                 )
             }
-            _ => (CMap::identity(), false, CodeText::Unknown, false),
+            _ => (CMap::identity(), false, CodeText::Unknown, None),
         };
         let default = self
             .get(cid_font, b"DW")?
@@ -761,11 +786,6 @@ impl File {
                 }
             }
         }
-        let collection = if cids_known {
-            self.collection(cid_font)?
-        } else {
-            None
-        };
         Ok((
             Kind::Composite {
                 cmap,
@@ -962,19 +982,27 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_code_decodes_as_its_encoding() {
+    fn a_code_reads_as_unicode_or_as_its_legacy_encoding() {
         assert_eq!(
-            code_as_text(CodeText::Legacy(encoding_rs::GBK), 0xC4E3, 2).as_deref(),
+            legacy_text(CodeText::Legacy(encoding_rs::GBK), 0xC4E3, 2).as_deref(),
             Some("\u{4F60}")
         );
         assert_eq!(
-            code_as_text(CodeText::Legacy(encoding_rs::SHIFT_JIS), 0x82A0, 2).as_deref(),
+            legacy_text(CodeText::Legacy(encoding_rs::SHIFT_JIS), 0x82A0, 2).as_deref(),
             Some("\u{3042}")
         );
         assert_eq!(
-            code_as_text(CodeText::Utf16, 0x3B1, 2).as_deref(),
+            unicode_text(CodeText::Utf16, 0x3B1, 2).as_deref(),
             Some("\u{3B1}")
         );
-        assert_eq!(code_as_text(CodeText::Unknown, 0x41, 2), None);
+        assert_eq!(
+            unicode_text(CodeText::Utf16, 0xD840_DC0B, 4).as_deref(),
+            Some("\u{2000B}")
+        );
+        assert_eq!(
+            unicode_text(CodeText::Legacy(encoding_rs::GBK), 0x41, 1),
+            None
+        );
+        assert_eq!(legacy_text(CodeText::Unknown, 0x41, 2), None);
     }
 }

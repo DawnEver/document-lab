@@ -151,3 +151,9 @@ Everything runs in one thread, in order -- grab, scroll, stitch, write -- so not
 
 `pip install "document_lab @ git+https://github.com/DawnEver/document-lab.git"`; extras: `gpu` (marker-pdf),
 `ai` (ai-lab), `capture` (no packages beyond the base). Domain schemas live in the consumers.
+
+## Tests
+
+No real PDF is committed. The `corpus` part reads real public PDFs -- CC BY 4.0 papers and US Government works only --
+fetched from their original URLs and pinned by sha256; `tests/corpus/sources.py` lists each one's license and
+attribution.

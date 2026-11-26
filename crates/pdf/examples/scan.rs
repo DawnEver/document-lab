@@ -1,4 +1,5 @@
-//! Open every PDF under the paths given and resolve each of its objects; one line per file, then a summary.
+//! Open every PDF under the paths given, resolve and decode each object, and interpret each page; one line per
+//! file that needed a repair or failed somewhere, then a summary.
 //!
 //! `cargo run --release --example scan -- <file-or-directory>...` -- a check against real documents kept outside
 //! the repository; nothing is written.
@@ -21,59 +22,100 @@ fn pdfs(path: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn main() {
-    let mut files = Vec::new();
-    for arg in std::env::args_os().skip(1) {
-        pdfs(Path::new(&arg), &mut files);
-    }
-    let (mut sound, mut repaired, mut refused, mut bad_objects) = (0, 0, 0, 0);
-    for path in &files {
-        let data = match std::fs::read(path) {
-            Ok(d) => d,
-            Err(e) => {
-                println!("UNREADABLE {}: {e}", path.display());
-                refused += 1;
-                continue;
-            }
+#[derive(Default)]
+struct Totals {
+    files: usize,
+    sound: usize,
+    refused: usize,
+    bad_objects: usize,
+    pages: usize,
+    bad_pages: usize,
+    warnings: usize,
+    paths: usize,
+    images: usize,
+}
+
+fn scan(path: &Path, t: &mut Totals) {
+    t.files += 1;
+    let opened = std::fs::read(path)
+        .map_err(|e| e.to_string())
+        .and_then(|d| pdf::File::open(d, b"").map_err(|e| e.to_string()));
+    let file = match opened {
+        Ok(f) => f,
+        Err(e) => {
+            println!("REFUSED {}: {e}", path.display());
+            t.refused += 1;
+            return;
+        }
+    };
+    let mut problems = Vec::new();
+    for n in file.numbers() {
+        let failed = match file.object(n) {
+            Err(e) => Some(e),
+            Ok(pdf::Object::Stream(s)) => file.decode(&s).err(),
+            Ok(_) => None,
         };
-        match pdf::File::open(data, b"") {
-            Err(e) => {
-                println!("REFUSED {}: {e}", path.display());
-                refused += 1;
-            }
-            Ok(file) => {
-                let numbers = file.numbers();
-                // An object fails when it does not parse, or is a stream whose filters do not decode.
-                let failed: Vec<_> = numbers
-                    .iter()
-                    .filter_map(|&n| match file.object(n) {
-                        Err(e) => Some((n, e)),
-                        Ok(pdf::Object::Stream(s)) => file.decode(&s).err().map(|e| (n, e)),
-                        Ok(_) => None,
-                    })
-                    .collect();
-                bad_objects += failed.len();
-                let repairs = file.repairs();
-                if repairs.is_empty() && failed.is_empty() {
-                    sound += 1;
-                } else {
-                    repaired += 1;
-                    println!(
-                        "REPAIRED {}: {} repair(s), {} of {} objects unreadable",
-                        path.display(),
-                        repairs.len(),
-                        failed.len(),
-                        numbers.len()
-                    );
-                    for (n, e) in failed.iter().take(3) {
-                        println!("    object {n}: {e}");
+        if let Some(e) = failed {
+            t.bad_objects += 1;
+            problems.push(format!("object {n}: {e}"));
+        }
+    }
+    match file.pages() {
+        Err(e) => problems.push(format!("pages: {e}")),
+        Ok(pages) => {
+            for page in &pages {
+                t.pages += 1;
+                match file.interpret(page) {
+                    Err(e) => {
+                        t.bad_pages += 1;
+                        problems.push(format!("page {}: {e}", page.number));
+                    }
+                    Ok(content) => {
+                        t.warnings += content.warnings.len();
+                        for w in content.warnings.iter().take(2) {
+                            problems.push(format!("page {} warning: {w}", page.number));
+                        }
+                        for e in &content.events {
+                            match e {
+                                pdf::Event::Path(_) => t.paths += 1,
+                                pdf::Event::Image(_) => t.images += 1,
+                            }
+                        }
                     }
                 }
             }
         }
     }
+    problems.extend(file.repairs());
+    if problems.is_empty() {
+        t.sound += 1;
+    } else {
+        println!("{}: {} problem(s)", path.display(), problems.len());
+        for p in problems.iter().take(4) {
+            println!("    {p}");
+        }
+    }
+}
+
+fn main() {
+    let mut files = Vec::new();
+    for arg in std::env::args_os().skip(1) {
+        pdfs(Path::new(&arg), &mut files);
+    }
+    let mut t = Totals::default();
+    for path in &files {
+        scan(path, &mut t);
+    }
     println!(
-        "{} files: {sound} sound, {repaired} repaired, {refused} refused; {bad_objects} objects unreadable",
-        files.len()
+        "{} files: {} sound, {} refused, {} unreadable objects; {} pages, {} failed, {} warnings; {} paths, {} images",
+        t.files,
+        t.sound,
+        t.refused,
+        t.bad_objects,
+        t.pages,
+        t.bad_pages,
+        t.warnings,
+        t.paths,
+        t.images
     );
 }

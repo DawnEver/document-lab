@@ -91,6 +91,11 @@ impl File {
         Ok(file)
     }
 
+    /// Note a repair made to read this file.
+    pub(crate) fn repaired(&self, what: String) {
+        self.repairs.borrow_mut().push(what);
+    }
+
     /// The trailer dictionary.
     pub fn trailer(&self) -> &Dict {
         &self.xref.trailer

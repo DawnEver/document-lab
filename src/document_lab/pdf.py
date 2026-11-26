@@ -45,10 +45,10 @@ INVISIBLE_TEXT: Final = 3
 _SQUARE: Final = 1e-6
 #: Gray depths whose levels spread over 0..255 exactly (255 is a multiple of each level count less one).
 _GRAY_BITS: Final = frozenset({1, 2, 4, 8})
-#: Families whose samples are gray or RGB as they stand (an ``ICCBased`` one by its component count).
+#: Families whose samples are gray or RGB as they stand. An ``ICCBased`` one is the gray or RGB of its component
+#: count, its profile not applied: the crate's color model (``pdf::color::Space::Icc``) reads it so, and this follows.
+#: Exact for an sRGB profile (the IEC scans measured); a wider-gamut profile would show otherwise once rendered.
 _GRAY_OR_RGB: Final = frozenset({'DeviceGray', 'DeviceRGB', 'ICCBased'})
-#: Image dictionary keys that make what shows more than the samples: a remapping, a soft or a color-key mask.
-_UNSEEN: Final = frozenset({'Decode', 'SMask', 'Mask'})
 
 
 def read_pdf(path: Path | str, *, password: str = '', curve_samples: int = CURVE_SAMPLES) -> Document:
@@ -187,12 +187,13 @@ def _samples(reader: _pdf.Reader, under: list, bbox: BBox, dpi: float) -> np.nda
 def _rgb(samples: tuple) -> np.ndarray | None:
     """An image's samples as RGB rows; None unless the reader holds them as they show.
 
-    It does for lossless gray of 1, 2, 4 or 8 bits (its levels spread over 0..255) and 8-bit RGB -- an ``ICCBased``
-    space read as the gray or RGB of its components, as the reader reads its colors -- stating no ``/Decode`` or mask
-    and holding every row. A codec, Indexed, CMYK, 16 bits, a ``/Decode`` or a mask is the renderer's.
+    It does for lossless gray of 1, 2, 4 or 8 bits (its levels spread over 0..255) and 8-bit RGB (:data:`_GRAY_OR_RGB`),
+    unmasked, mapped as stated by default (no ``/Decode``, or ``[0 1]`` for each component), holding every row. A
+    codec, Indexed, CMYK, 16 bits, another ``/Decode`` or a mask is the renderer's.
     """
-    width, height, space, components, bits, data, codec, keys = samples
-    if codec is not None or _UNSEEN.intersection(keys) or space not in _GRAY_OR_RGB:
+    width, height, space, components, bits, data, codec, decode, masked = samples
+    remapped = decode is not None and decode != [0.0, 1.0] * components
+    if codec is not None or masked or remapped or space not in _GRAY_OR_RGB:
         return None
     if not ((components == 1 and bits in _GRAY_BITS) or (components == 3 and bits == 8)):  # noqa: PLR2004 -- RGB
         return None

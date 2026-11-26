@@ -74,8 +74,8 @@ type ImageRow = (Box4, i64, i64, Option<u32>, [f64; 6]);
 /// What a page draws: spans, paths, images, warnings.
 type PageRows = (Vec<SpanRow>, Vec<PathRow>, Vec<ImageRow>, Vec<String>);
 /// An image's samples: width, height, color space family (None: a stencil mask), components, bits per component,
-/// the data after every lossless filter, the image codec it is still in (None: raw samples), and the keys its
-/// dictionary states (`Decode`, `SMask`, ...).
+/// the data after every lossless filter, the image codec it is still in (None: raw samples), its `/Decode` array
+/// (None: not stated) and whether it states a mask.
 type SamplesRow = (
     i64,
     i64,
@@ -84,7 +84,8 @@ type SamplesRow = (
     i64,
     Vec<u8>,
     Option<String>,
-    Vec<String>,
+    Option<Vec<f64>>,
+    bool,
 );
 
 /// A PDF opened.
@@ -167,10 +168,6 @@ impl Reader {
     fn image(&self, object: u32) -> PyResult<SamplesRow> {
         let samples = self.file.image(object).map_err(|e| refused(&e))?;
         let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
-        let keys = match self.file.object(object).map_err(|e| refused(&e))? {
-            pdf::Object::Stream(stream) => stream.dict.iter().map(|(k, _)| text(k)).collect(),
-            _ => Vec::new(),
-        };
         Ok((
             samples.width,
             samples.height,
@@ -182,7 +179,8 @@ impl Reader {
             samples.bits,
             samples.data,
             samples.codec.map(|c| text(&c.name)),
-            keys,
+            samples.decode,
+            samples.masked,
         ))
     }
 }

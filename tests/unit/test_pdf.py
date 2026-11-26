@@ -193,6 +193,13 @@ def test_a_gray_image_of_any_depth_is_its_levels_spread_over_0_to_255(bits, tmp_
     assert np.array_equal(shown[..., 0], levels * (255 // (2**bits - 1)))
 
 
+def test_a_decode_stating_the_default_mapping_keeps_the_samples(tmp_path, monkeypatch):
+    path = image_pdf(tmp_path / 'stated.pdf', SAMPLES.tobytes(), f'{RGB} /Decode [0 1 0 1 0 1]', size=(60, 40))
+    assert np.array_equal(_shown(path), SAMPLES)
+    _refuse_rendering(monkeypatch)
+    assert np.array_equal(_whole_page(path), SAMPLES)
+
+
 def test_an_ocr_layer_over_the_image_does_not_hide_its_samples(tmp_path, monkeypatch):
     def ocr_layer(page):
         page.insert_text((2, 20), 'invisible words', fontsize=8, render_mode=3)

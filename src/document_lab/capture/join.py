@@ -91,7 +91,7 @@ class _Capture:
 
     def rows(self, index: int) -> np.ndarray:
         """Page ``index``'s pixels, ``(h, w, 3)`` uint8."""
-        width, height, space, components, bits, data, codec, _ = self.reader.image(self.image(index).object)
+        width, height, space, components, bits, data, codec, _, _ = self.reader.image(self.image(index).object)
         if codec is not None or bits != 8 or components not in {1, 3}:  # noqa: PLR2004 -- 8-bit samples
             msg = (
                 f'page {index + 1} of {self.path.name} is a {space} image of {components} x {bits}-bit samples'

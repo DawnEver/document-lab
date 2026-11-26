@@ -133,8 +133,9 @@ impl Reader {
         curve_samples: usize,
     ) -> PyResult<PageRows<'py>> {
         let page = self.at(number)?;
-        let content = self.file.interpret(page).map_err(|e| refused(&e))?;
-        let spans = pdf::spans::spans(&content.events)
+        let pdf::Content { events, warnings } =
+            self.file.interpret(page).map_err(|e| refused(&e))?;
+        let spans = pdf::spans::spans(&events)
             .into_iter()
             .map(|s| {
                 let (font, bold) = (s.font.name_without_subset().to_string(), s.font.bold());
@@ -152,12 +153,13 @@ impl Reader {
         let mut lines = Polylines::new();
         let (mut groups, mut styles) = (Vec::new(), Vec::new());
         let mut images = Vec::new();
-        for event in &content.events {
+        // Each event is let go once read: a page's drawing is held as segments or as points, never both at once.
+        for event in events {
             match event {
                 Event::Path(path) => {
                     lines.add(&path.segments, curve_samples);
                     groups.resize(lines.len(), styles.len());
-                    styles.push(style(path));
+                    styles.push(style(&path));
                 }
                 Event::Image(image) => {
                     images.push((box4(image.bbox), image.width, image.height, image.object));
@@ -166,7 +168,7 @@ impl Reader {
             }
         }
         let paths = columns(py, &lines, &groups, styles);
-        Ok((spans, paths, images, content.warnings))
+        Ok((spans, paths, images, warnings))
     }
 
     /// The samples of the image `XObject` `object`.
@@ -339,11 +341,15 @@ fn columns<'py>(
     )]
     let index = |i: &usize| *i as i64;
     (
-        packed(py, lines.points.iter().flat_map(|p| [p.x, p.y])),
-        packed(py, lines.bounds.iter().map(index)),
-        packed(py, boxes),
-        packed(py, lines.closed.iter().map(|c| u8::from(*c))),
-        packed(py, groups.iter().map(index)),
+        packed(
+            py,
+            2 * lines.points.len(),
+            lines.points.iter().flat_map(|p| [p.x, p.y]),
+        ),
+        packed(py, lines.bounds.len(), lines.bounds.iter().map(index)),
+        packed(py, 4 * lines.len(), boxes),
+        packed(py, lines.len(), lines.closed.iter().map(|c| u8::from(*c))),
+        packed(py, groups.len(), groups.iter().map(index)),
         styles,
     )
 }
@@ -382,13 +388,19 @@ impl Packed for u8 {
     }
 }
 
-/// `values` as one `bytes`, each native-endian: a column `numpy.frombuffer` takes without a copy.
-fn packed<T: Packed>(py: Python<'_>, values: impl Iterator<Item = T>) -> Bound<'_, PyBytes> {
-    let values: Vec<T> = values.collect();
-    PyBytes::new_with(py, values.len() * T::SIZE, |out| {
-        for (chunk, value) in out.chunks_exact_mut(T::SIZE).zip(values) {
+/// The `count` `values` as one `bytes`, each native-endian -- a column `numpy.frombuffer` takes without a copy --
+/// written straight into it.
+fn packed<T: Packed>(
+    py: Python<'_>,
+    count: usize,
+    values: impl Iterator<Item = T>,
+) -> Bound<'_, PyBytes> {
+    PyBytes::new_with(py, count * T::SIZE, |out| {
+        let mut chunks = out.chunks_exact_mut(T::SIZE);
+        for (chunk, value) in chunks.by_ref().zip(values) {
             chunk.copy_from_slice(value.bytes().as_ref());
         }
+        assert!(chunks.next().is_none(), "fewer values than counted");
         Ok(())
     })
     .expect("filling a new bytes object cannot fail")

@@ -76,7 +76,7 @@ class _Capture:
             if len(placed) != 1 or placed[0][3] is None:
                 msg = f'page {number} of {self.path.name} holds {len(placed)} image(s), not one: it is no capture'
                 raise ValueError(msg)
-            _, width, height, obj, _ = placed[0]
+            _, width, height, obj, *_ = placed[0]
             self._images[index] = _Image(obj, width, height, page_width)
         return self._images[index]
 

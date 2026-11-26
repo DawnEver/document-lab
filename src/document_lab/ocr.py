@@ -46,14 +46,8 @@ _CODEC_FILES: Final = {'DCTDecode': '.jpg', 'JPXDecode': '.jp2'}
 _J2K_CODESTREAM: Final = b'\xff\x4f\xff\x51'  # a JPEG 2000 codestream without the JP2 box around it
 _WORD_LEVEL: Final = '5'  # a TSV row's level for one word
 _CURVE_SAMPLES: Final = 1  # a page's paths are not looked at
-#: A placement matrix entry at most this (points) is zero: the image is placed square to the page.
-_SQUARE: Final = 1e-6
-#: TIFF orientations (tag 274) whose stored rows run down the page as its columns: the image is turned a quarter.
-_TURNED: Final = frozenset({5, 6, 7, 8})
-#: TIFF orientations whose upright rows are the stored rows (turned: columns) last to first ...
-_ROWS_REVERSED: Final = frozenset({3, 4, 7, 8})
-#: ... and whose upright columns are.
-_COLUMNS_REVERSED: Final = frozenset({2, 3, 6, 7})
+#: An image's placement (the reader's: turned, rows reversed, columns reversed) when it shows its samples as stored.
+_UPRIGHT: Final = (False, False, False)
 _TIFF_SHORT: Final = 3
 _TIFF_LONG: Final = 4
 _TIFF_HEADER: Final = 8  # bytes before the one image directory
@@ -64,6 +58,7 @@ _T4_2D: Final = 1  # T4Options: rows coded two-dimensionally too
 _T4_FILL: Final = 4  # T4Options: fill bits end each end-of-line code on a byte boundary
 
 type Box = tuple[float, float, float, float]
+type Placement = tuple[bool, bool, bool]
 type Words = list[tuple[str, Box]]
 
 
@@ -126,31 +121,19 @@ def check(languages: str, places: TesseractPlaces) -> Path:
     return executable
 
 
-def _orientation(matrix: tuple[float, ...], name: str) -> int:
-    """How the image the placement ``matrix`` (unit square to page space, y down) draws lies on the page.
-
-    The TIFF orientation (1-8) of its samples as stored -- 1 upright, 6 turned a quarter clockwise, ... -- refused,
-    by name, when no quarter turn or mirror puts it square to the page.
-    """
-    a, b, c, d, _, _ = matrix
-    # A sample (row i, column j) sits at u = (j + 1/2) / width, v = 1 - (i + 1/2) / height of the unit square,
-    # mapped to x = a u + c v + e, y = b u + d v + f.
-    if abs(b) <= _SQUARE and abs(c) <= _SQUARE:  # rows across the page
-        turned, rows_reversed, columns_reversed = False, d > 0, a < 0
-    elif abs(a) <= _SQUARE and abs(d) <= _SQUARE:  # rows down the page
-        turned, rows_reversed, columns_reversed = True, b < 0, c > 0
-    else:
-        msg = f'{name} is placed at an angle no quarter turn makes ({matrix}): Tesseract reads it upright only'
-        raise ValueError(msg)
+def _tiff_orientation(placement: Placement) -> int:
+    """The TIFF Orientation (tag 274) of samples shown as ``placement`` says: 1 upright, 6 a quarter clockwise, ..."""
+    turned, rows_reversed, columns_reversed = placement
     flips = {(False, False): 1, (False, True): 2, (True, True): 3, (True, False): 4}
     return flips[rows_reversed, columns_reversed] + (4 if turned else 0)
 
 
-def _upright(rows: np.ndarray, orientation: int) -> np.ndarray:
-    """``rows`` (height, width, components) as stored, as the page shows them under TIFF ``orientation``."""
-    if orientation in _TURNED:
+def _upright(rows: np.ndarray, placement: Placement) -> np.ndarray:
+    """``rows`` (height, width, components) as stored, as the page shows them under ``placement``."""
+    turned, rows_reversed, columns_reversed = placement
+    if turned:
         rows = rows.transpose(1, 0, 2)
-    return rows[:: -1 if orientation in _ROWS_REVERSED else 1, :: -1 if orientation in _COLUMNS_REVERSED else 1]
+    return rows[:: -1 if rows_reversed else 1, :: -1 if columns_reversed else 1]
 
 
 def _inverted(decode: list[float] | None, components: int, name: str) -> bool:
@@ -217,8 +200,8 @@ def _fax_tiff(
     return struct.pack('<2sHI', b'II', 42, _TIFF_HEADER) + directory + data
 
 
-def _image_file(samples: tuple, orientation: int, folder: Path, name: str) -> Path:
-    """The image ``samples`` (``Reader.image``), placed at TIFF ``orientation``, as a file Tesseract reads upright.
+def _image_file(samples: tuple, placement: Placement, folder: Path, name: str) -> Path:
+    """The image ``samples`` (``Reader.image``), shown as ``placement`` says, as a file Tesseract reads upright.
 
     Written in ``folder``: lossless samples as an 8-bit PGM/PPM, turned upright and inverted as their ``/Decode``
     says; a codec's data as stored, CCITT fax's inside a TIFF. Refused, by name, when Tesseract could not read it,
@@ -231,13 +214,14 @@ def _image_file(samples: tuple, orientation: int, folder: Path, name: str) -> Pa
     inverted = _inverted(decode, components, name)
     if codec == 'CCITTFaxDecode':
         path = folder / 'page.tif'
+        orientation = _tiff_orientation(placement)
         path.write_bytes(_fax_tiff(width, height, data, fax, inverted=inverted, orientation=orientation, name=name))
         return path
     if codec is not None:
         if codec not in _CODEC_FILES:
             msg = f'{name} is in {codec}, which Tesseract does not read'
             raise ValueError(msg)
-        for wrong, how in ((orientation != 1, 'placed turned or mirrored'), (inverted, 'inverted by its /Decode')):
+        for wrong, how in ((placement != _UPRIGHT, 'placed turned or mirrored'), (inverted, 'inverted by its /Decode')):
             if wrong:
                 msg = f'{name} is in {codec}, {how}: showing it so needs its pixels decoded, which is not done here'
                 raise ValueError(msg)
@@ -257,7 +241,7 @@ def _image_file(samples: tuple, orientation: int, folder: Path, name: str) -> Pa
         values = (levels * 255 // (2**bits - 1)).astype(np.uint8)
     if inverted:  # exact: each depth's levels spread over 0-255 evenly, so a level's inverse is 255 less it
         values = 255 - values
-    rows = _upright(values[:, : width * components].reshape(height, width, components), orientation)
+    rows = _upright(values[:, : width * components].reshape(height, width, components), placement)
     kind, suffix = ('P5', '.pgm') if components == 1 else ('P6', '.ppm')
     path = folder / f'page{suffix}'
     header = f'{kind}\n{rows.shape[1]} {rows.shape[0]}\n255\n'.encode()
@@ -280,7 +264,7 @@ def _words(tsv: str, box: Box, width: int, height: int) -> Words:
 
 
 def _image(reader: _pdf.Reader, number: int) -> tuple | None:
-    """Page ``number``'s one image -- box, samples across and down, object, placement -- or None: text, or not one."""
+    """Page ``number``'s one image row (``Reader.page``) or None: text, or not one image."""
     spans, _, images, _ = reader.page(number, _CURVE_SAMPLES)
     if len(images) != 1 or images[0][3] is None or any(span[0].strip() for span in spans):
         return None
@@ -292,12 +276,14 @@ def _recognize(reader: _pdf.Reader, image: tuple, tesseract: list[str], name: st
 
     The upright image fills its box, so each word's pixel box maps onto the box.
     """
-    box, width, height, obj, matrix = image
-    orientation = _orientation(matrix, name)
-    across, down = (height, width) if orientation in _TURNED else (width, height)
+    box, width, height, obj, matrix, placement = image
+    if placement is None:
+        msg = f'{name} is placed at an angle no quarter turn makes ({matrix}): Tesseract reads it upright only'
+        raise ValueError(msg)
+    across, down = (height, width) if placement[0] else (width, height)
     dpi = round(across * 72 / (box[2] - box[0]))
     with tempfile.TemporaryDirectory(prefix=TEMP_PREFIX) as folder:
-        path = _image_file(reader.image(obj), orientation, Path(folder), name)
+        path = _image_file(reader.image(obj), placement, Path(folder), name)
         tsv = _run([tesseract[0], str(path), *tesseract[1:], '--dpi', str(dpi), 'tsv'])
     return _words(tsv, box, across, down)
 

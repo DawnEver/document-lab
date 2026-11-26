@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use pdf::error::Kind;
 use pdf::geometry::Rect;
+use pdf::image::Placement;
 use pdf::interpret::{Event, PathEvent};
 use pdf::writer::Image;
 use pyo3::create_exception;
@@ -69,9 +70,12 @@ type PathRow = (
     bool,
     usize,
 );
-/// An image: box, sample width and height, object number (None inline), and the matrix `(a, b, c, d, e, f)` from
-/// its unit square to page space.
-type ImageRow = (Box4, i64, i64, Option<u32>, [f64; 6]);
+/// An image: box, sample width and height, object number (None inline), the matrix `(a, b, c, d, e, f)` from its
+/// unit square to page space, and how it shows its samples (`pdf::image::Placement`: turned, rows reversed, columns
+/// reversed; None when it is skewed).
+type ImageRow = (Box4, i64, i64, Option<u32>, [f64; 6], Option<PlacementRow>);
+/// An image placed square to the page: whether its rows run down the page, and its rows and columns shown reversed.
+type PlacementRow = (bool, bool, bool);
 /// What a page draws: spans, paths, images, warnings.
 type PageRows = (Vec<SpanRow>, Vec<PathRow>, Vec<ImageRow>, Vec<String>);
 /// An image's samples: width, height, color space family (None: a stencil mask), components, bits per component,
@@ -160,6 +164,8 @@ impl Reader {
                         image.height,
                         image.object,
                         image.matrix.0,
+                        Placement::of(&image.matrix)
+                            .map(|p| (p.turned, p.rows_reversed, p.columns_reversed)),
                     ));
                 }
                 Event::Text(_) => {}

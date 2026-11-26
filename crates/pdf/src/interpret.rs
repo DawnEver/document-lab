@@ -23,6 +23,10 @@ use crate::page::Page;
 /// How deep Form `XObject`s may nest before one is refused as a loop.
 const MAX_FORM_DEPTH: usize = 32;
 
+/// Half an em in text space units of one font size (500 units of a composite font's 1000-unit glyph space): half a
+/// vertical column's width across.
+const HALF_EM: f64 = 0.5;
+
 /// One piece of a path, in page space.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Segment {
@@ -97,11 +101,13 @@ pub struct Glyph {
     pub code: u32,
     /// Its text, when the font says what it is.
     pub text: Option<String>,
-    /// Where its baseline starts, in page space.
+    /// Where it starts along its line, in page space: its origin on the baseline, or its vertical origin (the top
+    /// of its place in a column) when its font writes vertically.
     pub origin: Point,
-    /// Where its baseline ends (its origin plus its width, before spacing), in page space.
+    /// Where it ends along its line (its origin plus its advance, before spacing), in page space.
     pub end: Point,
-    /// The box from the font's descent to its ascent across the glyph's advance, in page space.
+    /// Its box in page space: across its advance from the font's descent to its ascent, or when its font writes
+    /// vertically, down its advance and an em across, centered on its origin.
     pub bbox: Rect,
 }
 
@@ -118,7 +124,7 @@ pub struct TextEvent {
     pub fill: Color,
     /// The stroke color.
     pub stroke: Color,
-    /// Whether the font writes vertically (its glyphs are still placed along the baseline).
+    /// Whether the font writes vertically: its glyphs step down a column, each from its vertical origin.
     pub vertical: bool,
     /// The glyphs, in showing order.
     pub glyphs: Vec<Glyph>,
@@ -545,9 +551,15 @@ impl Interpreter<'_> {
                     match item {
                         Object::String(s) => glyphs.extend(self.glyphs(s)),
                         other => {
-                            let adjust = other.as_number().unwrap_or(0.0);
+                            // A number is taken off the coordinate along the writing mode (9.4.3): a
+                            // positive one moves the next glyph left, or down a column.
+                            let adjust = other.as_number().unwrap_or(0.0) / 1000.0;
                             let text = &self.state.text;
-                            self.advance(-adjust / 1000.0 * text.size * text.scale);
+                            if text.font.as_ref().is_some_and(|f| f.vertical()) {
+                                self.advance(0.0, -adjust * text.size);
+                            } else {
+                                self.advance(-adjust * text.size * text.scale, 0.0);
+                            }
                         }
                     }
                 }
@@ -563,8 +575,8 @@ impl Interpreter<'_> {
         self.text_matrix = self.line_matrix;
     }
 
-    fn advance(&mut self, tx: f64) {
-        self.text_matrix = Matrix([1.0, 0.0, 0.0, 1.0, tx, 0.0]).then(self.text_matrix);
+    fn advance(&mut self, tx: f64, ty: f64) {
+        self.text_matrix = Matrix([1.0, 0.0, 0.0, 1.0, tx, ty]).then(self.text_matrix);
     }
 
     fn load_font(&mut self, name: &[u8], resources: &Dict) -> Result<Rc<Font>> {
@@ -610,39 +622,49 @@ impl Interpreter<'_> {
             let render = Matrix([text.size * text.scale, 0.0, 0.0, text.size, 0.0, text.rise])
                 .then(self.text_matrix)
                 .then(self.state.ctm);
-            let (ascent, descent) = (
-                font.ascent * font.matrix.0[3],
-                font.descent * font.matrix.0[3],
-            );
-            let corners = [
-                render.apply(Point { x: 0.0, y: descent }),
-                render.apply(Point {
-                    x: code.width,
-                    y: descent,
-                }),
-                render.apply(Point {
-                    x: code.width,
-                    y: ascent,
-                }),
-                render.apply(Point { x: 0.0, y: ascent }),
-            ];
             let space = if code.bytes == 1 && code.code == 32 {
                 text.word_spacing
             } else {
                 0.0
             };
-            let advance = (code.width * text.size + text.char_spacing + space) * text.scale;
+            // Horizontally: the box spans the advance w0 along the baseline, from the font's descent to its ascent
+            // across it. Vertically (9.7.4.3, 9.4.4): the origin is the vertical one; the box spans the advance w1y
+            // down the column and an em across it, centered on the origin; Tc and Tw step down unscaled by Tz.
+            let (end, corners, step) = match code.vertical_advance {
+                None => {
+                    let (ascent, descent) = (
+                        font.ascent * font.matrix.0[3],
+                        font.descent * font.matrix.0[3],
+                    );
+                    let corners = [
+                        (0.0, descent),
+                        (code.width, descent),
+                        (code.width, ascent),
+                        (0.0, ascent),
+                    ];
+                    let advance = (code.width * text.size + text.char_spacing + space) * text.scale;
+                    ((code.width, 0.0), corners, (advance, 0.0))
+                }
+                Some(down) => {
+                    let corners = [
+                        (-HALF_EM, 0.0),
+                        (HALF_EM, 0.0),
+                        (HALF_EM, down),
+                        (-HALF_EM, down),
+                    ];
+                    let advance = down * text.size + text.char_spacing + space;
+                    ((0.0, down), corners, (0.0, advance))
+                }
+            };
+            let at = |(x, y): (f64, f64)| render.apply(Point { x, y });
             out.push(Glyph {
                 code: code.code,
                 text: code.text,
-                origin: render.apply(Point { x: 0.0, y: 0.0 }),
-                end: render.apply(Point {
-                    x: code.width,
-                    y: 0.0,
-                }),
-                bbox: Rect::around(&corners).expect("four corners"),
+                origin: at((0.0, 0.0)),
+                end: at(end),
+                bbox: Rect::around(&corners.map(at)).expect("four corners"),
             });
-            self.advance(advance);
+            self.advance(step.0, step.1);
         }
         out
     }
@@ -664,7 +686,7 @@ impl Interpreter<'_> {
             render_mode: text.render_mode,
             fill: self.state.fill_color.clone(),
             stroke: self.state.stroke_color.clone(),
-            vertical: font.vertical,
+            vertical: font.vertical(),
             glyphs,
         };
         self.out.events.push(Event::Text(event));

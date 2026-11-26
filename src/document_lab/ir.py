@@ -89,7 +89,7 @@ class Provenance:
 
 @dataclass(frozen=True, slots=True)
 class TextSpan:
-    """A run of text in one font and size."""
+    """A run of text in one font and size: along a baseline, or down a column when written vertically."""
 
     text: str
     size: float
@@ -100,6 +100,10 @@ class TextSpan:
     #: change of font, size or baseline inside a word (the ``2`` of ``H2O``). None: it continues none and none
     #: continues it. Its source decides where a word gap is; a reader setting spans into lines spaces them by it.
     unspaced: int | None = None
+    #: Written vertically (its font's writing mode, WMode 1): its glyphs stand upright and advance down a column, its
+    #: text reads top to bottom, its box is the column's. Text turned sideways is not this: it is written
+    #: horizontally along a turned baseline.
+    vertical: bool = False
 
     @property
     def center(self) -> tuple[float, float]:

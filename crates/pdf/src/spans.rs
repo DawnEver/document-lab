@@ -1,9 +1,10 @@
-//! Glyphs to spans: runs of text in one font and size along one baseline, the unit a page's text is read in.
+//! Glyphs to spans: runs of text in one font and size along one baseline -- or down one column, when the font writes
+//! vertically -- the unit a page's text is read in.
 //!
-//! Consecutive glyphs join while their font, size and writing direction hold and each starts where the last
+//! Consecutive glyphs join while their font, size, writing mode and direction hold and each starts where the last
 //! ended: on its baseline (within [`BASELINE`] sizes) and no further on than [`BREAK`] sizes. A gap wider than
 //! [`SPACE`] sizes with no space glyph in it reads as a space, as the eye reads it. Text events are taken in
-//! drawing order, so a span never joins glyphs drawn apart.
+//! drawing order, so a span never joins glyphs drawn apart, and a vertical span's text reads top to bottom.
 //!
 //! Where a word gap is, is this module's alone. A span continues the word of another that ends at most [`SPACE`]
 //! sizes before its start, raised or lowered by no more than [`RISE`] sizes, no space glyph between -- a change
@@ -44,6 +45,8 @@ pub struct Span {
     /// a change of font, size or baseline inside a word (`Head` set bold in `Headline`; the `2` of `H2O`). None
     /// when it continues no span and none continues it.
     pub unspaced: Option<usize>,
+    /// Whether it is written vertically (its font's writing mode): its text reads down its column.
+    pub vertical: bool,
 }
 
 struct Open {
@@ -71,7 +74,12 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
                     (glyph.end.y - glyph.origin.y) / length,
                 )
             } else {
-                open.as_ref().map_or((1.0, 0.0), |o| o.direction)
+                let along = if text.vertical {
+                    (0.0, 1.0)
+                } else {
+                    (1.0, 0.0)
+                };
+                open.as_ref().map_or(along, |o| o.direction)
             };
             let piece = glyph.text.as_deref().unwrap_or("\u{FFFD}");
             let joined = open
@@ -103,6 +111,7 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
                     bbox: glyph.bbox,
                     render_mode: text.render_mode,
                     unspaced: None,
+                    vertical: text.vertical,
                 },
                 origin: glyph.origin,
                 end: glyph.end,
@@ -159,6 +168,7 @@ fn join(open: &Open, text: &TextEvent, origin: Point, direction: (f64, f64)) -> 
     if open.span.font != text.font
         || (open.span.size - text.size).abs() > 0.01 * size
         || open.span.render_mode != text.render_mode
+        || open.span.vertical != text.vertical
         || (open.direction.0 - direction.0).abs() + (open.direction.1 - direction.1).abs() > 0.01
     {
         return None;
@@ -185,7 +195,8 @@ fn continues_word(before: &Open, next: &Open) -> bool {
     let (dx, dy) = (before.direction.0, before.direction.1);
     let along = |from: Point| (next.origin.x - from.x) * dx + (next.origin.y - from.y) * dy;
     let across = -(next.origin.x - before.end.x) * dy + (next.origin.y - before.end.y) * dx;
-    (dx - next.direction.0).abs() + (dy - next.direction.1).abs() <= 0.01
+    before.span.vertical == next.span.vertical
+        && (dx - next.direction.0).abs() + (dy - next.direction.1).abs() <= 0.01
         && (-0.5 * size..=SPACE * size).contains(&along(before.end))
         && across.abs() <= RISE * size
 }

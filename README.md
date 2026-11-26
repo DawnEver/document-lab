@@ -8,7 +8,7 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 | `ir` | frozen IR: `Provenance`, `TextSpan`, `VectorPath`, `Table`/`Cell`, `Figure`, `Raster`, `Page`, `Document` |
 | `pdf` | `read_pdf(path, password=)`: spans, vector paths and image figures, each with its page and box, read by the package's own reader (`document_lab._pdf`, the Rust crate `crates/pdf`); `read_raster(path, page, bbox)`: a region's pixels at its images' native resolution (rendered by PyMuPDF) |
 | `html` | `read_html(path)`: every `<table>` as a `Table` (standard-library parser) |
-| `plot` | `plots(page)`: curves digitized from VECTOR plots (axes linear, log10, or piecewise between labeled ticks; labels as text, glyph outlines or stroke-font polylines; fragments joined; legend samples apart); a raster plot raises `RasterPlot`. `raster_plot(raster)`: one plot traced from pixels, each point with its pixel uncertainty; unreadable labels raise `UnreadableTickLabels` unless stated (`x_values=`, `y_values=`) |
+| `plot` | `plots(page)`: curves digitized from VECTOR plots (axes linear, log10, or piecewise between labeled ticks; labels as text, glyph outlines or stroke-font polylines; fragments joined; legend samples apart; data points set as marker glyphs, and frames drawn as filled rectangles); a raster plot raises `RasterPlot`. `raster_plot(raster)`: one plot traced from pixels, each point with its pixel uncertainty; unreadable labels raise `UnreadableTickLabels` unless stated (`x_values=`, `y_values=`) |
 | `strokes` | thick strokes in a `Raster`: `fragments` (a morphological opening drops hairlines), `link` (dashes joined end to start along their own direction; crossing curves stay apart), `bands` (fragments to the nearest solid curve), `dots` + `split_by_dots` (a smaller opening keeps dash-dot dots; they trace the dash-dot curve, telling it from a dashed one two strokes away) |
 | `glyphs` | digits and words read from glyph shapes (outlines, pixels or stroked polylines) against a `Font`: `HELVETICA`, or `STROKE` (the SIFERRIT stroke font, templates in `strokefont`); a near tie, a twin, a letter nearer than any digit or a glyph under 14 px raises `UnreadableGlyph` |
 | `numbers` | the one number grammar: `parse_number` (whole text) and `first_number` (a cell's leading value) |
@@ -36,6 +36,8 @@ for page in doc.pages:
             print(curve.axis_scales, curve.x, curve.y, curve.dashes, curve.provenance.page, curve.provenance.bbox)
         for sample in plot.legend:  # a legend's sample line: its label and the style of the curve it names
             print(sample.label, sample.stroke, sample.dashes)
+        for series in plot.markers:  # data points set as text glyphs, one series per glyph, fill and joining curve
+            print(series.glyph, series.fill, series.x, series.y, series.size, series.label)
 
 # A raster plot: its pixels, read at the images' native resolution; labels too coarse to read are stated.
 raster = read_raster('sheet.pdf', 2, figure_bbox)  # from document_lab.pdf

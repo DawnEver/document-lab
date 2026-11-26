@@ -18,7 +18,16 @@ use pyo3::prelude::*;
 /// A box as `(x0, y0, x1, y1)`.
 type Box4 = (f64, f64, f64, f64);
 /// A span: text, font name, size, descriptor flags, font weight, box, render mode, fill color (None: not filled).
-type SpanRow = (String, String, f64, i64, Option<f64>, Box4, i64, Option<Vec<f64>>);
+type SpanRow = (
+    String,
+    String,
+    f64,
+    i64,
+    Option<f64>,
+    Box4,
+    i64,
+    Option<Vec<f64>>,
+);
 /// A path (one subpath): points, closed, stroke color, line width, dashes, dash phase, fill color, even-odd, and
 /// the index of the painted path it belongs to on its page.
 type PathRow = (

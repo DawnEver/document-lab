@@ -15,7 +15,7 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 | `extract` | typed values against the caller's `Schema` from key-value (`from_rows`) or column (`from_columns`) tables |
 | `ai` | `ask(responder, schema, page_or_table)`: the same values read by a model through ai-lab (`[ai]` extra) |
 | `ocr` | `document-lab ocr <pdf> [-o out] [--lang eng]`: a Tesseract text layer over every page that is one image and has no text; the pixels kept exactly, a page never laid twice |
-| `layout` | `lines(page)` / `ordered(lines)`: a page's spans as lines in reading order (columns, a clause number with its title); `wordy(text)` tells words from OCR noise |
+| `layout` | `lines(page)` / `ordered(lines)`: a page's spans as lines in reading order (columns, a clause number with its title); `furniture(page)`: text turned sideways outside the page's text (a margin's stamp), left out of its lines; `wordy(text)` tells words from OCR noise |
 | `markdown` | `to_markdown(doc)` / `page_markdowns(doc)`: the IR as markdown -- headings, paragraphs -- whole, or each page standing alone |
 | `regions` | `regions(page, body, drawings=())`: a page's figures, tables and equations from its text -- a caption and the prose around it, an equation number and the noise beside it, rows of cells -- so an OCR'd capture has them too; with the page's drawings (`ink`), a ruled table, a figure without a caption and an equation without a number as well |
 | `ink` | `drawings(pixels, scale, text, reach)`: the drawn ink of a page's picture, its text left out -- each drawing's box, its rules, the ink off them and its longest stroke |

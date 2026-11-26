@@ -145,3 +145,103 @@ def test_a_table_row_led_by_a_year_heads_nothing(tmp_path):
     doc.save(tmp_path / 's.pdf')
     heads = [line for line in to_markdown(read_pdf(tmp_path / 's.pdf')).splitlines() if line[:1] == '#']
     assert heads == ['### 4.2 Duty types', '## 12 Tests']
+
+
+def _heads(md: str) -> list[str]:
+    return [line for line in md.splitlines() if line[:1] == '#']
+
+
+def test_a_stamp_set_sideways_in_the_margin_is_neither_title_nor_text(tmp_path):
+    """arXiv 2204.08094: the margin's sideways stamp, the largest text on page 1, was the title and joined the
+    abstract's line beside it. Text turned sideways outside the page's text frame is furniture; text turned sideways
+    inside it (a figure's axis label) stays.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    _write(page, 70, 70, 'A Title Set Larger Than Its Body', size=14)
+    for i in range(10):
+        _write(page, 55, 200 + 12 * i, f'the abstract runs on over line {i} of its column and', size=10)
+    for i in range(3):
+        _write(page, 55, 600 + 12 * i, f'the text after the figure runs on over line {i} and', size=10)
+    page.insert_text((40, 520), 'arXiv:0000.00000v1 [cs.XX] 1 Jan 2000', fontname='tiro', fontsize=20, rotate=90)
+    page.insert_text((150, 540), 'Amplitude', fontname='tiro', fontsize=8, rotate=90)  # inside the frame
+    doc.save(tmp_path / 's.pdf')
+    md = to_markdown(read_pdf(tmp_path / 's.pdf'))
+    assert _heads(md) == ['# A Title Set Larger Than Its Body']
+    assert 'arXiv' not in md
+    assert 'line 4 of its column and the abstract runs on over line 5' in md
+    assert 'Amplitude' in md
+
+
+def test_only_the_largest_text_of_page_one_is_a_title_below_the_title_scale(tmp_path):
+    doc = pymupdf.open()
+    first = doc.new_page(width=595, height=842)
+    _write(first, 70, 70, 'A Title Set Larger Than Its Body', size=14)
+    _write(first, 70, 100, 'A Subtitle Set Smaller Than The Title', size=12)
+    _write(first, 70, 140, 'The body text of the first page runs on here.', size=10)
+    later = doc.new_page(width=595, height=842)
+    _write(later, 70, 70, 'A Large Line On A Later Page', size=14)
+    _write(later, 70, 100, 'The body text of the later page runs on here.', size=10)
+    doc.save(tmp_path / 's.pdf')
+    assert _heads(to_markdown(read_pdf(tmp_path / 's.pdf'))) == ['# A Title Set Larger Than Its Body']
+
+
+def test_a_bold_number_set_apart_from_its_title_heads_with_it(tmp_path):
+    """arXiv 2608.20674 sets a section's number and its name an em apart, in bold larger than the body; an appendix
+    section is lettered so. A back-matter word heads in title case too, and in title size it is a section, no title.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    _write(page, 150, 60, 'A Preprint Title', size=17)
+    _write(page, 72, 90, 'Hitoshi KOSHIBA', font='tibo')  # a bold author: no number, no heading
+    _write(page, 72, 120, '1', size=12, font='tibo')
+    _write(page, 92, 120, 'Introduction', size=12, font='tibo')  # 1.2 em after its number
+    _write(page, 72, 140, 'The body of the introduction is set in the body size here.')
+    _write(page, 72, 170, '1.1 Premises and Hypotheses', font='tibo')
+    _write(page, 72, 190, 'The body of the subsection is set in the body size here.')
+    _write(page, 72, 210, '1')  # not bold: a list's number set apart stays text
+    _write(page, 92, 210, 'The motor shall be rated for its duty')
+    _write(page, 72, 240, 'References', size=12, font='tibo')
+    _write(page, 72, 260, '[1] A. Author. A paper on the subject. 2025.')
+    appendix = doc.new_page(width=612, height=792)
+    _write(appendix, 72, 80, 'Appendix', size=17, font='tibo')
+    _write(appendix, 72, 110, 'A', size=12, font='tibo')
+    _write(appendix, 93, 110, 'Sentence-Level Estimation', size=12, font='tibo')
+    _write(appendix, 72, 130, 'The body of the appendix is set in the body size here.')
+    _write(appendix, 72, 160, 'Fiscal Year', font='tibo')  # a table's bold head heads nothing
+    _write(appendix, 200, 160, 'Total', font='tibo')
+    doc.save(tmp_path / 's.pdf')
+    md = to_markdown(read_pdf(tmp_path / 's.pdf'))
+    assert _heads(md) == [
+        '# A Preprint Title',
+        '## 1 Introduction',
+        '### 1.1 Premises and Hypotheses',
+        '## References',
+        '## Appendix',
+        '## A Sentence-Level Estimation',
+    ]
+    assert 'The motor shall be rated for its duty' in md  # text, under no heading of its own
+
+
+def test_an_unweighted_paper_heads_its_capitalized_sections_and_no_footnote(tmp_path):
+    """arXiv 2204.08094 as this reader weighs it: no span bold, sections numbered in capitals, a footnote numbered
+    in a smaller size. A heading is never set smaller than the body.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    _write(page, 70, 70, 'A TITLE SET LARGER THAN ITS BODY', size=14)
+    _write(page, 120, 120, '1. INTRODUCTION')
+    _write(page, 55, 140, 'The body of the introduction is set in the body size here.')
+    _write(page, 55, 170, '2.1 Baseline Model')
+    _write(page, 55, 190, 'The body of the subsection is set in the body size here.')
+    _write(page, 55, 220, 'Acknowledgments')
+    _write(page, 55, 240, 'The body of the acknowledgments is set in the body size here.')
+    _write(page, 55, 700, '3 All code is available at https://example.org/code', size=8)
+    doc.save(tmp_path / 's.pdf')
+    md = to_markdown(read_pdf(tmp_path / 's.pdf'))
+    assert _heads(md) == [
+        '# A TITLE SET LARGER THAN ITS BODY',
+        '## 1. INTRODUCTION',
+        '### 2.1 Baseline Model',
+        '## Acknowledgments',
+    ]

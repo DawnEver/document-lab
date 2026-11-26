@@ -1,9 +1,14 @@
 """A page's spans as lines in reading order: what every layout of a page -- its markdown, its regions -- starts from.
 
-- Lines: spans on one baseline, each starting within :data:`LINE_GAP` font sizes of the line's right end; a column
-  gutter is wider, so two columns' lines at one height stay two lines. In an unweighted document (no bold span:
-  OCR'd text carries no weight) a bare clause number or bullet takes the text set apart beside it, within
-  :data:`CLAUSE_GAP` font sizes, as a standard sets ``4.1    General``.
+- Furniture: text turned sideways (not :func:`upright`) wholly outside the box of the page's upright text -- an
+  arXiv stamp up the margin -- is :func:`furniture` and makes no line; turned text inside that box (a figure's axis
+  label) stays. A page without upright text has no furniture.
+- Lines: spans on one baseline running one way, each starting within :data:`LINE_GAP` font sizes of the line's
+  right end; a column gutter is wider, so two columns' lines at one height stay two lines. A bare clause number
+  takes the text set apart beside it, within :data:`CLAUSE_GAP` font sizes, as a standard sets ``4.1    General``
+  and a paper ``1    Introduction``: in an unweighted document (no bold span: OCR'd text carries no weight) any
+  clause number or bullet; in a weighted one a bold number or appendix letter (``A``), and only bold text of its
+  size.
 - Columns: a line is FULL width (crossing the page middle) or in the LEFT or RIGHT column; :func:`ordered` reads the
   bands between full-width lines, each its left column, then its right.
 - Blocks: :func:`blocks` sets lines into paragraphs -- each next line within :data:`BLOCK_GAP` font sizes below
@@ -30,13 +35,17 @@ __all__ = [
     'CLAUSE_GAP',
     'GUTTER',
     'LINE_GAP',
+    'SAME_WAY',
+    'UPRIGHT',
     'WORD_GAP',
     'Block',
     'Line',
     'blocks',
     'body_size',
+    'furniture',
     'lines',
     'ordered',
+    'upright',
     'wordy',
 ]
 
@@ -44,16 +53,21 @@ __all__ = [
 WORD_GAP: Final = 0.15
 #: A span further right of a line than this many font sizes starts another line (a column gutter).
 LINE_GAP: Final = 1.0
-#: Unweighted: a bare clause number (``4.1``) or bullet takes the text beside it within this many font sizes.
+#: A bare clause number (``4.1``) takes the text beside it within this many font sizes.
 CLAUSE_GAP: Final = 8.0
 #: A line this many font sizes or less below a block's last line, overlapping it across, continues the block.
 BLOCK_GAP: Final = 0.6
 #: Points a column line may cross the page middle.
 GUTTER: Final = 5.0
+#: A span runs left to right when its baseline's direction has at least this x component (within ~8 degrees).
+UPRIGHT: Final = 0.99
+#: Spans run one way when their directions differ by at most this much (x and y differences summed).
+SAME_WAY: Final = 0.02
 #: Words: a word of at least this many letters, and letters (and spaces) this share of the text.
 WORD_LETTERS: Final = 4
 LETTER_SHARE: Final = 0.6
 _CLAUSE: Final = re.compile(r'^(?:\d+(?:\.\d+)*\.?|[-\N{EN DASH}\N{EM DASH}\N{BULLET}])$')  # a clause number, a bullet
+_NUMBER: Final = re.compile(r'^(?:\d+|[A-Z])(?:\.\d+)*\.?$')  # a heading's number: 2, 2.1, an appendix's A, A.1
 
 
 @dataclass
@@ -107,15 +121,55 @@ class Line:
         return all(s.bold for s in self.spans if s.text.strip())
 
 
+def upright(span: TextSpan) -> bool:
+    """Does ``span`` run left to right, as a page's text does (neither turned sideways nor upside down)?"""
+    return span.direction[0] >= UPRIGHT
+
+
+def furniture(page: Page) -> list[TextSpan]:
+    """The page's text turned sideways wholly outside the box of its upright text: a margin's stamp or note."""
+    frame = [s.provenance.bbox for s in page.spans if upright(s)]
+    if not frame:
+        return []
+    x0, y0 = min(b.x0 for b in frame), min(b.y0 for b in frame)
+    x1, y1 = max(b.x1 for b in frame), max(b.y1 for b in frame)
+
+    def outside(box: BBox) -> bool:
+        return box.x1 <= x0 or box.x0 >= x1 or box.y1 <= y0 or box.y0 >= y1
+
+    return [s for s in page.spans if not upright(s) and outside(s.provenance.bbox)]
+
+
+def _same_way(a: TextSpan, b: TextSpan) -> bool:
+    return abs(a.direction[0] - b.direction[0]) + abs(a.direction[1] - b.direction[1]) <= SAME_WAY
+
+
+def _reach(line: Line, span: TextSpan, *, weighted: bool) -> float:
+    """How many font sizes right of ``line`` the ``span`` may start and still join it."""
+    if not weighted:
+        return CLAUSE_GAP if _CLAUSE.match(line.text) else LINE_GAP
+    heading = line.bold and span.bold and abs(span.size - line.size) <= 0.01 * line.size
+    return CLAUSE_GAP if heading and _NUMBER.match(line.text) else LINE_GAP
+
+
 def lines(page: Page, *, weighted: bool) -> list[Line]:
-    """The page's lines (unordered); ``weighted`` False lets a bare clause number or bullet take its text."""
+    """The page's lines (unordered), its :func:`furniture` left out; a bare clause number takes the text beside it.
+
+    ``weighted`` False (no bold in the document): any clause number or bullet takes its text; True: a bold number or
+    appendix letter, and only bold text of its size.
+    """
     mid = page.width / 2
+    margin = {id(s) for s in furniture(page)}
     found: list[Line] = []
     for span in sorted(page.spans, key=lambda s: (s.provenance.bbox.x0, s.provenance.bbox.y0)):
+        if id(span) in margin:
+            continue
         box = span.provenance.bbox
         center = (box.y0 + box.y1) / 2
         for line in found:
-            reach = CLAUSE_GAP if not weighted and _CLAUSE.match(line.text) else LINE_GAP
+            if not _same_way(line.spans[0], span):
+                continue
+            reach = _reach(line, span, weighted=weighted)
             near = -GUTTER <= box.x0 - line.x1 <= reach * max(span.size, line.size)
             if near and abs((line.y0 + line.y1) / 2 - center) <= 0.4 * max(span.size, line.size):
                 line.spans.append(span)

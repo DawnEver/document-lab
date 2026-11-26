@@ -3,13 +3,13 @@
 //! Consecutive glyphs join while their font, size and writing direction hold and each starts where the last
 //! ended: on its baseline (within [`BASELINE`] sizes) and no further on than [`BREAK`] sizes. A gap wider than
 //! [`SPACE`] sizes with no space glyph in it reads as a space, as the eye reads it. Text events are taken in
-//! drawing order, so a span never joins glyphs drawn apart.
+//! drawing order, so a span never joins glyphs drawn apart, nor glyphs of two layers (hidden, an annotation's).
 
 use std::rc::Rc;
 
 use crate::font::FontInfo;
 use crate::geometry::{Point, Rect};
-use crate::interpret::{Event, TextEvent};
+use crate::interpret::{Event, Layer, TextEvent};
 
 /// A gap wider than this many font sizes between two glyphs is a space.
 pub const SPACE: f64 = 0.15;
@@ -31,6 +31,8 @@ pub struct Span {
     pub bbox: Rect,
     /// The text rendering mode it was shown in (3: invisible, as an OCR text layer is).
     pub render_mode: i64,
+    /// The layer its glyphs are drawn in: a span never joins glyphs of two.
+    pub layer: Layer,
 }
 
 struct Open {
@@ -89,6 +91,7 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
                     size: text.size,
                     bbox: glyph.bbox,
                     render_mode: text.render_mode,
+                    layer: text.layer.clone(),
                 },
                 end: glyph.end,
                 direction,
@@ -112,6 +115,7 @@ fn join(open: &Open, text: &TextEvent, origin: Point, direction: (f64, f64)) -> 
     if open.span.font != text.font
         || (open.span.size - text.size).abs() > 0.01 * size
         || open.span.render_mode != text.render_mode
+        || open.span.layer != text.layer
         || (open.direction.0 - direction.0).abs() + (open.direction.1 - direction.1).abs() > 0.01
     {
         return None;

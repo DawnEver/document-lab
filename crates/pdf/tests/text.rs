@@ -17,7 +17,7 @@ fn texts(content: &str, font: &str, extra: &[&str]) -> (Vec<TextEvent>, Vec<Stri
     )
     .unwrap();
     let page = file.pages().unwrap().remove(0);
-    let content = file.interpret(&page).unwrap();
+    let content = file.interpret(&page, false).unwrap();
     let texts = content
         .events
         .into_iter()

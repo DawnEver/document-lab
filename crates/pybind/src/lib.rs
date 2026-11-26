@@ -1,8 +1,8 @@
 //! `document_lab._pdf`: the `pdf` crate, exposed to Python as plain values -- no PDF logic of its own.
 //!
-//! `open(data, password)` reads a file; its `page(number, curve_samples)` returns what the page draws as tuples,
-//! which `document_lab.pdf` turns into the IR, and its `image(object)` an image's samples. `create(path)` writes a
-//! PDF of image pages, or of pages copied from a `Reader` (`document_lab.capture`).
+//! `open(data, password)` reads a file; its `page(number, curve_samples, annotations)` returns what the page draws
+//! as tuples, which `document_lab.pdf` turns into the IR, and its `image(object)` an image's samples. `create(path)`
+//! writes a PDF of image pages, or of pages copied from a `Reader` (`document_lab.capture`).
 
 use std::fs;
 use std::io::BufWriter;
@@ -10,18 +10,20 @@ use std::path::PathBuf;
 
 use pdf::color::{Color, Pattern};
 use pdf::geometry::{Point, Rect};
-use pdf::interpret::{Event, PathEvent, Segment};
+use pdf::interpret::{Event, Layer, PathEvent, Segment};
 use pdf::writer::Image;
 use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
 
 /// A box as `(x0, y0, x1, y1)`.
 type Box4 = (f64, f64, f64, f64);
-/// A span: text, font name, size, descriptor flags, font weight, box, render mode.
-type SpanRow = (String, String, f64, i64, Option<f64>, Box4, i64);
+/// The layer an event is drawn in: hidden by optional content, and the subtype of the annotation drawing it.
+type LayerRow = (bool, Option<String>);
+/// A span: text, font name, size, descriptor flags, font weight, box, render mode, layer.
+type SpanRow = (String, String, f64, i64, Option<f64>, Box4, i64, LayerRow);
 /// A path (one subpath): points, closed, stroke color, line width, dashes, dash phase, fill color, even-odd, the
-/// fill's pattern (`tiling`, `shading`; None: one color), and the index of the painted path it belongs to on its
-/// page. A shading painted with `sh` is the closed rectangle of its box, filled with a `shading`.
+/// fill's pattern (`tiling`, `shading`; None: one color), the index of the painted path it belongs to on its
+/// page, and its layer. A shading painted with `sh` is the closed rectangle of its box, filled with a `shading`.
 type PathRow = (
     Vec<(f64, f64)>,
     bool,
@@ -33,9 +35,10 @@ type PathRow = (
     bool,
     Option<&'static str>,
     usize,
+    LayerRow,
 );
-/// An image: box, sample width and height, object number (None inline).
-type ImageRow = (Box4, i64, i64, Option<u32>);
+/// An image: box, sample width and height, object number (None inline), layer.
+type ImageRow = (Box4, i64, i64, Option<u32>, LayerRow);
 /// What a page draws: spans, paths, images, warnings.
 type PageRows = (Vec<SpanRow>, Vec<PathRow>, Vec<ImageRow>, Vec<String>);
 /// An image's samples: width, height, color space family (None: a stencil mask), components, bits per component,
@@ -82,11 +85,14 @@ impl Reader {
             .collect()
     }
 
-    /// What page `number` (1-based) draws: (spans, paths, images, warnings); each curve flattened to
-    /// `curve_samples` points.
-    fn page(&self, number: usize, curve_samples: usize) -> PyResult<PageRows> {
+    /// What page `number` (1-based) draws, its annotations' appearances too when `annotations`: (spans, paths,
+    /// images, warnings); each curve flattened to `curve_samples` points.
+    fn page(&self, number: usize, curve_samples: usize, annotations: bool) -> PyResult<PageRows> {
         let page = self.at(number)?;
-        let content = self.file.interpret(page).map_err(|e| refused(&e))?;
+        let content = self
+            .file
+            .interpret(page, annotations)
+            .map_err(|e| refused(&e))?;
         let spans = pdf::spans::spans(&content.events)
             .into_iter()
             .map(|s| {
@@ -99,6 +105,7 @@ impl Reader {
                     font.weight,
                     box4(s.bbox),
                     s.render_mode,
+                    layer(&s.layer),
                 )
             })
             .collect();
@@ -112,7 +119,13 @@ impl Reader {
                     painted += 1;
                 }
                 Event::Image(image) => {
-                    images.push((box4(image.bbox), image.width, image.height, image.object));
+                    images.push((
+                        box4(image.bbox),
+                        image.width,
+                        image.height,
+                        image.object,
+                        layer(&image.layer),
+                    ));
                 }
                 Event::Shading(shading) => {
                     let r = shading.bbox;
@@ -129,6 +142,7 @@ impl Reader {
                         false,
                         shaded,
                         painted,
+                        layer(&shading.layer),
                     ));
                     painted += 1;
                 }
@@ -269,6 +283,11 @@ fn color(c: &Color) -> Vec<f64> {
         .map_or_else(|| c.components.clone(), |rgb| rgb.to_vec())
 }
 
+/// A layer as its row.
+fn layer(l: &Layer) -> LayerRow {
+    (l.hidden, l.annotation.clone())
+}
+
 /// A pattern's kind, by name.
 fn pattern(p: Pattern) -> &'static str {
     match p {
@@ -295,6 +314,7 @@ fn subpaths(path: &PathEvent, samples: usize, group: usize) -> Vec<PathRow> {
                 .and_then(|f| f.color.pattern)
                 .map(pattern),
             group,
+            layer(&path.layer),
         )
     };
     let mut out = Vec::new();

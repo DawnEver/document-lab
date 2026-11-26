@@ -10,7 +10,7 @@ use pdf::{Event, File};
 fn events(page_extra: &str, content: &str, extra: &[&str]) -> (pdf::Content, pdf::Page) {
     let file = File::open(common::one_page(page_extra, content, extra), b"").unwrap();
     let page = file.pages().unwrap().remove(0);
-    (file.interpret(&page).unwrap(), page)
+    (file.interpret(&page, false).unwrap(), page)
 }
 
 fn paths(content: &pdf::Content) -> Vec<&PathEvent> {

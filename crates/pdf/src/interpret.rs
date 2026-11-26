@@ -13,16 +13,21 @@
 //! paint: the clip's, within the shading's own `/BBox`, not the narrower area a non-extended gradient covers.
 //!
 //! Marked content (14.6) is tracked as a stack apart from the graphics state: `q`/`Q` neither saves nor ends it,
-//! and a Form's sequences end with the Form (one left open is closed there, with a warning). Content a sequence
-//! marks as optional (`/OC`) and the default view hides ([`crate::optional`]) gives no event, nor does a Form or
-//! image `XObject` whose own `/OC` is hidden; its operations still set the graphics state, the clip and the text
-//! position, as a viewer applies them. An `/ActualText` (14.9.4) replaces the text of the glyphs its sequence
-//! shows: the first glyph seen in it carries the replacement, every later one the empty text, each keeping its
-//! own box; the outermost replacement governs a nested one, and one whose glyphs are all unseen is lost with them.
+//! and a Form's sequences end with the Form (one left open is closed there, with a warning). What optional
+//! content the default view hides ([`crate::optional`]) draws -- in a sequence marked `/OC`, or in a Form, image
+//! or annotation whose own `/OC` is hidden -- is still an event, its [`Layer::hidden`] set: the reader reports
+//! what the page holds and its caller chooses what to keep. An `/ActualText` (14.9.4) replaces the text of the
+//! glyphs its sequence shows: the first glyph seen in it carries the replacement, every later one the empty text,
+//! each keeping its own box; the outermost replacement governs a nested one, and one whose glyphs are all unseen is
+//! lost with them.
 //!
-//! Not interpreted: annotations and their appearance streams (only the page's content stream and what it calls),
-//! a pattern's content, and optional content usage ([`crate::optional`] says which). An operation that cannot be
-//! read is skipped and named in [`Content::warnings`], never silently.
+//! Annotations are drawn when asked, after the page's content: each one's normal appearance (`/AP /N`, its `/AS`
+//! state's when it has states) mapped onto its `/Rect` (12.5.5), from the page's initial state, its events in the
+//! annotation's [`Layer::annotation`]. A popup, an annotation flagged Hidden or `NoView`, and one with no
+//! appearance draw nothing: no appearance is made up from an annotation's other entries.
+//!
+//! Not interpreted: a pattern's content and optional content usage ([`crate::optional`] says which). An operation
+//! that cannot be read is skipped and named in [`Content::warnings`], never silently.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -33,7 +38,7 @@ use crate::error::{Error, Result};
 use crate::file::File;
 use crate::font::{Font, FontInfo};
 use crate::geometry::{Matrix, Point, Rect};
-use crate::object::{Dict, Object, text_string};
+use crate::object::{Dict, Object, Stream, text_string};
 use crate::optional::OptionalContent;
 use crate::page::Page;
 
@@ -88,6 +93,19 @@ pub struct PathEvent {
     pub stroke: Option<Stroke>,
     /// The fill, when filled.
     pub fill: Option<Fill>,
+    /// The layer it is drawn in.
+    pub layer: Layer,
+}
+
+/// Where an event is drawn beyond the page's own visible content: in optional content the default view hides, in
+/// an annotation's appearance. The default is the page's content, shown.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Layer {
+    /// Optional content the default view hides draws it (see [`crate::optional`]).
+    pub hidden: bool,
+    /// The `/Subtype` of the annotation whose appearance draws it (`Widget`, `FreeText`, `Stamp`, ...); None for
+    /// the page's content.
+    pub annotation: Option<String>,
 }
 
 /// An image placed on the page.
@@ -105,6 +123,8 @@ pub struct ImageEvent {
     pub object: Option<u32>,
     /// An inline image's dictionary and data (still encoded); None for an image `XObject`.
     pub inline: Option<(Dict, Vec<u8>)>,
+    /// The layer it is drawn in.
+    pub layer: Layer,
 }
 
 /// One glyph of a text event.
@@ -141,6 +161,8 @@ pub struct TextEvent {
     pub vertical: bool,
     /// The glyphs, in showing order.
     pub glyphs: Vec<Glyph>,
+    /// The layer it is drawn in.
+    pub layer: Layer,
 }
 
 /// An event of a page, in drawing order.
@@ -161,6 +183,8 @@ pub enum Event {
 pub struct ShadingEvent {
     /// The box it may paint, in page space: the clip's, within the shading's `/BBox` when it has one.
     pub bbox: Rect,
+    /// The layer it is drawn in.
+    pub layer: Layer,
 }
 
 /// An open marked-content sequence (`BMC`/`BDC` ... `EMC`).
@@ -270,16 +294,21 @@ struct Interpreter<'a> {
     marked_floor: usize,
     /// The outermost open `/ActualText`.
     actual: Option<ActualText>,
+    /// How many of the `XObject`s and the annotation being drawn have an `/OC` entry that hides them.
+    hiding_entries: usize,
+    /// The `/Subtype` of the annotation whose appearance is being drawn.
+    annotation: Option<String>,
     out: Content,
 }
 
 impl File {
-    /// What `page` draws.
+    /// What `page` draws: its content and, when `annotations` is asked, then its annotations' appearances.
     ///
     /// # Errors
     ///
-    /// Refuses page contents that are not streams; an operation that cannot be read is a warning instead.
-    pub fn interpret(&self, page: &Page) -> Result<Content> {
+    /// Refuses page contents that are not streams; an operation that cannot be read, or an annotation, is a warning
+    /// instead.
+    pub fn interpret(&self, page: &Page, annotations: bool) -> Result<Content> {
         let mut data = Vec::new();
         match self.get(&page.dict, b"Contents")? {
             None => {}
@@ -307,9 +336,10 @@ impl File {
             x1: width,
             y1: height,
         };
+        let initial = State::new(page.to_page_space(), shown);
         let mut interpreter = Interpreter {
             file: self,
-            state: State::new(page.to_page_space(), shown),
+            state: initial.clone(),
             stack: Vec::new(),
             path: Vec::new(),
             current: None,
@@ -323,10 +353,15 @@ impl File {
             marked: Vec::new(),
             marked_floor: 0,
             actual: None,
+            hiding_entries: 0,
+            annotation: None,
             out: Content::default(),
         };
         interpreter.run(&data, &page.resources, 0);
         interpreter.close_marked("the page");
+        if annotations {
+            interpreter.annotations(page, &initial);
+        }
         Ok(interpreter.out)
     }
 }
@@ -495,9 +530,12 @@ impl Interpreter<'_> {
         }
     }
 
-    /// Whether optional content hides what is painted now.
-    fn hidden(&self) -> bool {
-        self.marked.iter().any(|m| m.hides)
+    /// The layer what is painted now is drawn in.
+    fn layer(&self) -> Layer {
+        Layer {
+            hidden: self.hiding_entries > 0 || self.marked.iter().any(|m| m.hides),
+            annotation: self.annotation.clone(),
+        }
     }
 
     /// Whether an `XObject` whose dictionary is `dict` shows by its `/OC`; one that cannot be read shows, with a
@@ -539,19 +577,18 @@ impl Interpreter<'_> {
         if let Some(own) = self.user_box(dict)? {
             bbox = bbox.intersect(own);
         }
-        if bbox.x0 <= bbox.x1 && bbox.y0 <= bbox.y1 && !self.hidden() {
-            self.out.events.push(Event::Shading(ShadingEvent { bbox }));
+        if bbox.x0 <= bbox.x1 && bbox.y0 <= bbox.y1 {
+            let layer = self.layer();
+            self.out
+                .events
+                .push(Event::Shading(ShadingEvent { bbox, layer }));
         }
         Ok(())
     }
 
     /// The box in page space of `dict`'s `/BBox` (a rectangle in user space), when it has one.
     fn user_box(&self, dict: &Dict) -> Result<Option<Rect>> {
-        let Some(Object::Array(b)) = self.file.get(dict, b"BBox")? else {
-            return Ok(None);
-        };
-        let [x0, y0, x1, y1] = b.iter().filter_map(Object::as_number).collect::<Vec<_>>()[..]
-        else {
+        let Some([x0, y0, x1, y1]) = four(self.file.get(dict, b"BBox")?) else {
             return Ok(None);
         };
         let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| self.point(x, y));
@@ -866,7 +903,7 @@ impl Interpreter<'_> {
         };
         let clip = self.state.clip;
         glyphs.retain(|g| g.bbox.meets(clip));
-        if glyphs.is_empty() || self.hidden() {
+        if glyphs.is_empty() {
             return;
         }
         if let Some(actual) = &mut self.actual {
@@ -889,6 +926,7 @@ impl Interpreter<'_> {
             stroke: self.state.stroke_color.clone(),
             vertical: font.vertical,
             glyphs,
+            layer: self.layer(),
         };
         self.out.events.push(Event::Text(event));
     }
@@ -980,7 +1018,8 @@ impl Interpreter<'_> {
 
     fn paint(&mut self, stroke: bool, fill: Option<bool>) {
         let bounds = bounds(&self.path);
-        if bounds.is_some_and(|b| b.meets(self.state.clip)) && !self.hidden() {
+        if bounds.is_some_and(|b| b.meets(self.state.clip)) {
+            let layer = self.layer();
             let state = &self.state;
             let scale = state.ctm.scale();
             let event = PathEvent {
@@ -997,6 +1036,7 @@ impl Interpreter<'_> {
                     color: state.fill_color.clone(),
                     even_odd,
                 }),
+                layer,
             };
             self.out.events.push(Event::Path(event));
         }
@@ -1062,10 +1102,9 @@ impl Interpreter<'_> {
             .get(b"Subtype")
             .and_then(Object::as_name)
             .unwrap_or(b"");
-        if !self.x_object_shows(&stream.dict) {
-            return Ok(());
-        }
-        match subtype {
+        let hides = usize::from(!self.x_object_shows(&stream.dict));
+        self.hiding_entries += hides;
+        let drawn = match subtype {
             b"Image" => {
                 let int = |k: &[u8]| stream.dict.get(k).and_then(Object::as_integer).unwrap_or(0);
                 self.image(
@@ -1074,45 +1113,160 @@ impl Interpreter<'_> {
                     reference.as_reference().map(|r| r.num),
                     None,
                 );
+                Ok(())
             }
-            b"Form" => {
-                if depth >= MAX_FORM_DEPTH {
-                    return Err(Error::new("Form XObjects nest too deep"));
-                }
-                let matrix = match self.file.get(&stream.dict, b"Matrix")? {
-                    Some(Object::Array(m)) => Matrix::from_numbers(
-                        &m.iter().filter_map(Object::as_number).collect::<Vec<_>>(),
-                    )
-                    .unwrap_or(Matrix::IDENTITY),
-                    _ => Matrix::IDENTITY,
-                };
-                let own = match self.file.get(&stream.dict, b"Resources")? {
-                    Some(Object::Dict(r)) => r,
-                    _ => resources.clone(),
-                };
-                let data = self.file.decode(&stream)?.into_bytes()?;
-                let saved = (
-                    self.state.clone(),
-                    self.stack.len(),
-                    std::mem::take(&mut self.path),
-                    self.current,
-                    self.start,
-                );
-                self.state.ctm = matrix.then(self.state.ctm);
-                if let Some(shown) = self.user_box(&stream.dict)? {
-                    self.state.clip = self.state.clip.intersect(shown);
-                }
-                let floor = std::mem::replace(&mut self.marked_floor, self.marked.len());
-                self.run(&data, &own, depth + 1);
-                self.close_marked("a Form XObject");
-                self.marked_floor = floor;
-                self.state = saved.0;
-                self.stack.truncate(saved.1);
-                (self.path, self.current, self.start) = (saved.2, saved.3, saved.4);
-            }
-            _ => {} // PostScript XObjects draw nothing a reader sees
+            b"Form" => self.form(&stream, resources, depth),
+            _ => Ok(()), // PostScript XObjects draw nothing a reader sees
+        };
+        self.hiding_entries -= hides;
+        drawn
+    }
+
+    /// The Form `stream` drawn in the current state (8.10): through its `/Matrix`, clipped to its `/BBox`, with its
+    /// own resources (else `resources`, its caller's); the state, the path and its marked content end with it.
+    fn form(&mut self, stream: &Stream, resources: &Dict, depth: usize) -> Result<()> {
+        if depth >= MAX_FORM_DEPTH {
+            return Err(Error::new("Form XObjects nest too deep"));
         }
+        let matrix = self.form_matrix(&stream.dict)?;
+        let own = match self.file.get(&stream.dict, b"Resources")? {
+            Some(Object::Dict(r)) => r,
+            _ => resources.clone(),
+        };
+        let data = self.file.decode(stream)?.into_bytes()?;
+        let saved = (
+            self.state.clone(),
+            self.stack.len(),
+            std::mem::take(&mut self.path),
+            self.current,
+            self.start,
+        );
+        self.state.ctm = matrix.then(self.state.ctm);
+        if let Some(shown) = self.user_box(&stream.dict)? {
+            self.state.clip = self.state.clip.intersect(shown);
+        }
+        let floor = std::mem::replace(&mut self.marked_floor, self.marked.len());
+        self.run(&data, &own, depth + 1);
+        self.close_marked("a Form XObject");
+        self.marked_floor = floor;
+        self.state = saved.0;
+        self.stack.truncate(saved.1);
+        (self.path, self.current, self.start) = (saved.2, saved.3, saved.4);
         Ok(())
+    }
+
+    /// A Form's `/Matrix` (the identity when it has none).
+    fn form_matrix(&self, dict: &Dict) -> Result<Matrix> {
+        Ok(match self.file.get(dict, b"Matrix")? {
+            Some(Object::Array(m)) => {
+                Matrix::from_numbers(&m.iter().filter_map(Object::as_number).collect::<Vec<_>>())
+                    .unwrap_or(Matrix::IDENTITY)
+            }
+            _ => Matrix::IDENTITY,
+        })
+    }
+
+    /// Each annotation's appearance on `page`, drawn from the page's `initial` state; one that cannot be drawn is a
+    /// warning.
+    fn annotations(&mut self, page: &Page, initial: &State) {
+        let annotations = match self.file.get(&page.dict, b"Annots") {
+            Ok(Some(Object::Array(a))) => a,
+            Ok(_) => return,
+            Err(e) => {
+                self.out.warnings.push(format!("/Annots unreadable: {e}"));
+                return;
+            }
+        };
+        for (i, annotation) in annotations.iter().enumerate() {
+            if let Err(e) = self.annotation(annotation, initial) {
+                self.out
+                    .warnings
+                    .push(format!("annotation {i} not drawn: {e}"));
+            }
+        }
+        self.annotation = None;
+    }
+
+    /// The annotation `value`'s normal appearance (12.5.5), unless it is a popup or flagged hidden or not to view:
+    /// its `/AP /N` -- the `/AS` state's, when it has states -- mapped from its `/BBox` (through its `/Matrix`) onto
+    /// the annotation's `/Rect`, from the page's `initial` state.
+    fn annotation(&mut self, value: &Object, initial: &State) -> Result<()> {
+        /// `/F` bits: Hidden (2) and `NoView` (6).
+        const NOT_SHOWN: i64 = 1 << 1 | 1 << 5;
+        let Object::Dict(annotation) = self.file.resolve(value)? else {
+            return Err(Error::new("not a dictionary"));
+        };
+        let subtype = self.file.get(&annotation, b"Subtype")?;
+        let subtype = subtype.as_ref().and_then(Object::as_name).unwrap_or(b"");
+        let flags = self
+            .file
+            .get(&annotation, b"F")?
+            .and_then(|f| f.as_integer())
+            .unwrap_or(0);
+        if subtype == b"Popup" || flags & NOT_SHOWN != 0 {
+            return Ok(());
+        }
+        let Some(Object::Dict(appearances)) = self.file.get(&annotation, b"AP")? else {
+            return Ok(()); // no appearance: nothing drawn
+        };
+        let stream = match self.file.get(&appearances, b"N")? {
+            Some(Object::Stream(s)) => s,
+            Some(Object::Dict(states)) => {
+                let state = self.file.get(&annotation, b"AS")?;
+                let state = state.as_ref().and_then(Object::as_name);
+                match state
+                    .and_then(|s| states.get(s))
+                    .map(|s| self.file.resolve(s))
+                {
+                    Some(Ok(Object::Stream(s))) => s,
+                    Some(Err(e)) => return Err(e),
+                    _ => return Ok(()), // no appearance for its state
+                }
+            }
+            _ => return Ok(()),
+        };
+        let rect = four(self.file.get(&annotation, b"Rect")?)
+            .ok_or_else(|| Error::new("its /Rect is not four numbers"))?;
+        let rect = Rect::spanning(
+            Point {
+                x: rect[0],
+                y: rect[1],
+            },
+            Point {
+                x: rect[2],
+                y: rect[3],
+            },
+        );
+        let matrix = self.form_matrix(&stream.dict)?;
+        let [b0, b1, b2, b3] = four(self.file.get(&stream.dict, b"BBox")?)
+            .ok_or_else(|| Error::new("its appearance's /BBox is not four numbers"))?;
+        let corners =
+            [(b0, b1), (b2, b1), (b2, b3), (b0, b3)].map(|(x, y)| matrix.apply(Point { x, y }));
+        let shown = Rect::around(&corners).expect("four corners");
+        if shown.width() <= 0.0 || shown.height() <= 0.0 {
+            return Err(Error::new("its appearance's /BBox is empty"));
+        }
+        let (sx, sy) = (rect.width() / shown.width(), rect.height() / shown.height());
+        let onto = Matrix([
+            sx,
+            0.0,
+            0.0,
+            sy,
+            rect.x0 - shown.x0 * sx,
+            rect.y0 - shown.y0 * sy,
+        ]);
+        let hides = match annotation.get(b"OC") {
+            Some(oc) => usize::from(!self.optional.shows(self.file, oc)?),
+            None => 0,
+        } + usize::from(!self.x_object_shows(&stream.dict));
+        self.state = initial.clone();
+        self.state.ctm = onto.then(initial.ctm);
+        self.stack.clear();
+        self.annotation = Some(String::from_utf8_lossy(subtype).into_owned());
+        self.hiding_entries += hides;
+        let drawn = self.form(&stream, &Dict::new(), 0);
+        self.hiding_entries -= hides;
+        drawn
     }
 
     fn image(
@@ -1130,7 +1284,7 @@ impl Interpreter<'_> {
             m.apply(Point { x: 0.0, y: 1.0 }),
         ];
         let bbox = Rect::around(&corners).expect("four corners");
-        if !bbox.meets(self.state.clip) || self.hidden() {
+        if !bbox.meets(self.state.clip) {
             return;
         }
         self.out.events.push(Event::Image(ImageEvent {
@@ -1140,6 +1294,7 @@ impl Interpreter<'_> {
             height,
             object,
             inline,
+            layer: self.layer(),
         }));
     }
 }
@@ -1159,4 +1314,14 @@ fn bounds(path: &[Segment]) -> Option<Rect> {
 
 fn numbers_in(operands: &[Object]) -> Vec<f64> {
     operands.iter().filter_map(Object::as_number).collect()
+}
+
+/// The four numbers `value` is an array of (a rectangle), if it is one.
+fn four(value: Option<Object>) -> Option<[f64; 4]> {
+    let numbers: Vec<f64> = value?
+        .as_array()?
+        .iter()
+        .filter_map(Object::as_number)
+        .collect();
+    numbers.try_into().ok()
 }

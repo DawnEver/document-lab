@@ -3,6 +3,11 @@
 Coordinates are PDF points in page space: origin at the top-left of the page as displayed, y grows DOWN; pages
 are 1-based.
 A value from a format without geometry (an HTML table) cites a ``locator`` instead of a box.
+
+A value read off a page is drawn by its content, or by an annotation's appearance (``annotation``: its subtype, when
+the reader is asked for annotations). Optional content the file's default view hides (a layer turned off) is read
+too and flagged ``hidden`` for the caller to keep or drop; ``hidden`` is False by default because content no hidden
+layer draws is seen.
 """
 
 from __future__ import annotations
@@ -96,6 +101,10 @@ class TextSpan:
     font: str
     provenance: Provenance
     bold: bool = False
+    #: Drawn by optional content the default view hides (see the module).
+    hidden: bool = False
+    #: The subtype of the annotation whose appearance draws it; None for the page's content.
+    annotation: str | None = None
 
     @property
     def center(self) -> tuple[float, float]:
@@ -137,6 +146,10 @@ class VectorPath:
     pattern: str | None = None
     #: The painted path it is a subpath of, numbered on its page: one drawing's subpaths share it.
     group: int = 0
+    #: Drawn by optional content the default view hides (see the module).
+    hidden: bool = False
+    #: The subtype of the annotation whose appearance draws it; None for the page's content.
+    annotation: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +195,10 @@ class Figure:
     height: int
     #: The image's object number in the file; None for an inline image.
     image: int | None = None
+    #: Drawn by optional content the default view hides (see the module).
+    hidden: bool = False
+    #: The subtype of the annotation whose appearance draws it; None for the page's content.
+    annotation: str | None = None
 
 
 @dataclass(frozen=True, slots=True, eq=False)

@@ -72,11 +72,11 @@ class _Capture:
         """Page ``index``'s (0-based) image; refused unless the page holds exactly one."""
         if index not in self._images:
             number, page_width, _ = self.reader.pages[index]
-            _, _, placed, _ = self.reader.page(number, _CURVE_SAMPLES)
+            _, _, placed, _ = self.reader.page(number, _CURVE_SAMPLES, annotations=False)
             if len(placed) != 1 or placed[0][3] is None:
                 msg = f'page {number} of {self.path.name} holds {len(placed)} image(s), not one: it is no capture'
                 raise ValueError(msg)
-            _, width, height, obj = placed[0]
+            _, width, height, obj, _ = placed[0]
             self._images[index] = _Image(obj, width, height, page_width)
         return self._images[index]
 

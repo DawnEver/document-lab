@@ -1,5 +1,5 @@
-//! Open every PDF under the paths given, resolve and decode each object, and interpret each page; one line per
-//! file that needed a repair or failed somewhere, then a summary.
+//! Open every PDF under the paths given, resolve and decode each object, and interpret each page with its
+//! annotations; one line per file that needed a repair or failed somewhere, then a summary.
 //!
 //! `cargo run --release --example scan -- <file-or-directory>...` -- a check against real documents kept outside
 //! the repository; nothing is written.
@@ -68,7 +68,7 @@ fn scan(path: &Path, t: &mut Totals) {
         Ok(pages) => {
             for page in &pages {
                 t.pages += 1;
-                match file.interpret(page) {
+                match file.interpret(page, true) {
                     Err(e) => {
                         t.bad_pages += 1;
                         problems.push(format!("page {}: {e}", page.number));

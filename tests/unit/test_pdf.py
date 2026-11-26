@@ -150,3 +150,27 @@ def test_a_fill_with_a_pattern_names_it(tmp_path):
         {'PATTERN': f'<< /PatternType 2 /Shading {_AXIAL} >>'},
     )
     assert [(p.fill, p.pattern) for p in page.paths] == [((0, 0, 1), None), ((), 'shading')]
+
+
+def test_text_of_a_layer_turned_off_is_read_flagged_hidden(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page()
+    off = doc.add_ocg('Off', on=False)
+    page.insert_text((72, 72), 'shown', fontname='helv', fontsize=10)
+    page.insert_text((72, 100), 'layered', fontname='helv', fontsize=10, oc=off)
+    doc.save(tmp_path / 'oc.pdf')
+    spans = {s.text: s.hidden for s in read_pdf(tmp_path / 'oc.pdf').spans()}
+    assert spans == {'shown': False, 'layered': True}
+
+
+def test_annotations_are_read_only_when_asked_and_cite_their_subtype(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), 'body', fontname='helv', fontsize=10)
+    page.add_freetext_annot(pymupdf.Rect(72, 200, 272, 230), 'note', fontsize=10)
+    doc.save(tmp_path / 'a.pdf')
+    assert [s.text for s in read_pdf(tmp_path / 'a.pdf').spans()] == ['body']
+    spans = {s.text: s.annotation for s in read_pdf(tmp_path / 'a.pdf', annotations=True).spans()}
+    assert spans == {'body': None, 'note': 'FreeText'}
+    (note,) = [s for s in read_pdf(tmp_path / 'a.pdf', annotations=True).spans() if s.text == 'note']
+    assert 72 <= note.provenance.bbox.x0 < note.provenance.bbox.x1 <= 272  # inside the annotation's rectangle

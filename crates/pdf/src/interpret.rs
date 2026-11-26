@@ -24,7 +24,10 @@
 //! Annotations are drawn when asked, after the page's content: each one's normal appearance (`/AP /N`, its `/AS`
 //! state's when it has states) mapped onto its `/Rect` (12.5.5), from the page's initial state, its events in the
 //! annotation's [`Layer::annotation`]. A popup, an annotation flagged Hidden or `NoView`, and one with no
-//! appearance draw nothing: no appearance is made up from an annotation's other entries.
+//! appearance draw nothing: no appearance is made up from an annotation's other entries. The interactive form's
+//! default resources (`/AcroForm /DR`, 12.7.4.3: the resources form field appearance streams use) are an
+//! appearance's resources when it has none, and give a font it names that its own resources lack. Its default
+//! appearance string (`/DA`) is not applied: it is the recipe for making an appearance, not part of drawing one.
 //!
 //! Not interpreted: a pattern's content and optional content usage ([`crate::optional`] says which). An operation
 //! that cannot be read is skipped and named in [`Content::warnings`], never silently.
@@ -298,6 +301,9 @@ struct Interpreter<'a> {
     hiding_entries: usize,
     /// The `/Subtype` of the annotation whose appearance is being drawn.
     annotation: Option<String>,
+    /// The interactive form's default resources (`/AcroForm /DR`), read when annotations are drawn; empty when it
+    /// has none.
+    form_resources: Dict,
     out: Content,
 }
 
@@ -355,6 +361,7 @@ impl File {
             actual: None,
             hiding_entries: 0,
             annotation: None,
+            form_resources: Dict::new(),
             out: Content::default(),
         };
         interpreter.run(&data, &page.resources, 0);
@@ -814,18 +821,21 @@ impl Interpreter<'_> {
         self.text_matrix = Matrix([1.0, 0.0, 0.0, 1.0, tx, 0.0]).then(self.text_matrix);
     }
 
+    /// The font `resources` name `name` -- in an annotation's appearance, the form's default resources' when
+    /// `resources` lack it.
     fn load_font(&mut self, name: &[u8], resources: &Dict) -> Result<Rc<Font>> {
-        let Some(Object::Dict(fonts)) = self.file.get(resources, b"Font")? else {
-            return Err(Error::malformed("no /Font resources"));
-        };
-        let reference = fonts.get(name).ok_or_else(|| {
+        let mut reference = self.font_entry(resources, name)?;
+        if reference.is_none() && self.annotation.is_some() {
+            reference = self.font_entry(&self.form_resources, name)?;
+        }
+        let reference = reference.ok_or_else(|| {
             Error::malformed(format!("no font /{}", String::from_utf8_lossy(name)))
         })?;
         let number = reference.as_reference().map(|r| r.num);
         if let Some(font) = number.and_then(|n| self.fonts.get(&n)) {
             return Ok(Rc::clone(font));
         }
-        let Object::Dict(dict) = self.file.resolve(reference)? else {
+        let Object::Dict(dict) = self.file.resolve(&reference)? else {
             return Err(Error::malformed(format!(
                 "font /{} is not a dictionary",
                 String::from_utf8_lossy(name)
@@ -836,6 +846,14 @@ impl Interpreter<'_> {
             self.fonts.insert(n, Rc::clone(&font));
         }
         Ok(font)
+    }
+
+    /// The entry `name` in the fonts of `resources`; None when they have no such font.
+    fn font_entry(&self, resources: &Dict, name: &[u8]) -> Result<Option<Object>> {
+        Ok(match self.file.get(resources, b"Font")? {
+            Some(Object::Dict(fonts)) => fonts.get(name).cloned(),
+            _ => None,
+        })
     }
 
     fn show(&mut self, bytes: &[u8]) {
@@ -1181,6 +1199,12 @@ impl Interpreter<'_> {
                 return;
             }
         };
+        match self.form_resources() {
+            Ok(resources) => self.form_resources = resources,
+            Err(e) => self.out.warnings.push(format!(
+                "the form's default resources (/AcroForm /DR) unreadable: {e}"
+            )),
+        }
         for (i, annotation) in annotations.iter().enumerate() {
             if let Err(e) = self.annotation(annotation, initial) {
                 self.out
@@ -1189,6 +1213,17 @@ impl Interpreter<'_> {
             }
         }
         self.annotation = None;
+    }
+
+    /// The interactive form's default resources (`/AcroForm /DR`); empty when the file has none.
+    fn form_resources(&self) -> Result<Dict> {
+        let Some(Object::Dict(form)) = self.file.get(&self.file.catalog()?, b"AcroForm")? else {
+            return Ok(Dict::new());
+        };
+        Ok(match self.file.get(&form, b"DR")? {
+            Some(Object::Dict(resources)) => resources,
+            _ => Dict::new(),
+        })
     }
 
     /// The annotation `value`'s normal appearance (12.5.5), unless it is a popup or flagged hidden or not to view:
@@ -1268,7 +1303,8 @@ impl Interpreter<'_> {
         self.stack.clear();
         self.annotation = Some(String::from_utf8_lossy(subtype).into_owned());
         self.hiding_entries += hides;
-        let drawn = self.form(&stream, &Dict::new(), 0);
+        let defaults = self.form_resources.clone();
+        let drawn = self.form(&stream, &defaults, 0);
         self.hiding_entries -= hides;
         drawn
     }

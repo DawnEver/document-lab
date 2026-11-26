@@ -1,8 +1,8 @@
 """document-lab's delta against each family config base -- data, computed by nothing.
 
 The bases live in ``dev_lab.dev._famconfig_rows`` and :func:`dev_lab.dev.famconfig.render`
-turns base plus delta into the file. document-lab adds nothing to any base: everything it ignores, hooks and
-verifies is the family's, so every delta is empty and a fix upstream lands here by re-rendering.
+turns base plus delta into the file. document-lab adds only what its Rust extension needs; a fix upstream
+lands here by re-rendering.
 """
 
 from __future__ import annotations
@@ -16,5 +16,7 @@ __all__ = ['DELTAS', 'REPO']
 REPO: Final = 'document-lab'
 
 DELTAS: Final[dict[str, Delta]] = {
-    artifact: Delta(repo=REPO, added=(), dropped={}, ceiling=0) for artifact in ('.gitattributes', '.gitignore')
+    '.gitattributes': Delta(repo=REPO, added=(), dropped={}, ceiling=0),
+    # The built extension (`document_lab._pdf`) lands beside the Python sources: a build output, never source.
+    '.gitignore': Delta(repo=REPO, added=('*.pyd', '*.so'), dropped={}, ceiling=2),
 }

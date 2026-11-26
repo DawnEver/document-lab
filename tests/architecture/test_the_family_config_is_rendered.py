@@ -14,7 +14,10 @@ _ROOT: Final = Path(__file__).resolve().parents[2]
 _HINT: Final = 're-render it from tests/architecture/_famconfig.py through dev_lab.dev.famconfig.render'
 
 #: The project-level files whose content is document-lab's own -- none: every one has a family row.
-_OWNED_HERE: Final[dict[str, str]] = {}
+_OWNED_HERE: Final[dict[str, str]] = {
+    'Cargo.toml': 'the Rust workspace: its members and THE version of document-lab (maturin reads it)',
+    'Cargo.lock': 'the Rust resolution, committed: the crates ship in the wheel',
+}
 
 
 def test_every_family_base_is_declared() -> None:

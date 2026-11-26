@@ -1,9 +1,10 @@
 [build-system]
-requires = ["setuptools>=77.0.3", "setuptools-scm"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.7"]
+build-backend = "maturin"
 
 [project]
 name = "document_lab"
+# The version is the Cargo workspace's (`Cargo.toml`), read by maturin; a release tag must match it.
 dynamic = ["version"]
 license = "MIT"
 license-files = ["LICENSE"]
@@ -32,6 +33,8 @@ ai = ["ai_lab @ git+https://github.com/DawnEver/ai-lab.git"]
 capture = []
 # The family's development kit: rules registry, rendered configs, shared test bodies, verify entry.
 dev = [
+    # The build backend: this repo's own tool, not the test kit's.
+    "maturin>=1.7",
     "dev-lab[test] @ git+https://github.com/DawnEver/dev-lab.git",
     "document_lab[ai]",
     "pytest",
@@ -46,20 +49,21 @@ document-lab = "document_lab.__main__:main"
 # (`filelock<4`, `pillow<11`) declare -- both reached only through the `gpu` extra -- to clear 95 OSV advisories
 # (pillow 10.4.0: 82, fixed in 13.0.0; filelock 3.32.7: 13, fixed in 4.2.1). If the gpu tests break, accept instead.
 override-dependencies = ["pillow>=13", "filelock>=4.2.1"]
+# uv keys a path build on pyproject.toml's mtime alone; the mixed wheel must rebuild for a Rust OR a Python edit.
+cache-keys = [{ file = "pyproject.toml" }, { file = "Cargo.toml" }, { file = "crates/**/*.rs" }, { file = "src/**/*.py" }]
 
-[tool.setuptools_scm]
-version_file = "src/document_lab/__version__.py"
-fallback_version = "0.0.0"
-
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["document_lab*"]
+[tool.maturin]
+python-source = "src"
+module-name = "document_lab._pdf"
+manifest-path = "crates/pybind/Cargo.toml"
+features = ["pyo3/extension-module"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
     "gpu: converts with marker-pdf on a CUDA GPU: its own part (tests/gpu), never tests/base",
     "vendor: reads the real document DOCUMENT_LAB_VENDOR_PDF names: its own part (tests/vendor), never tests/base",
+    "papers: ingests the real papers in the directory DOCUMENT_LAB_PAPERS names: its own part (tests/paper/e2e), never tests/base",
     "windows: drives a real window on the Windows desktop: its own part (tests/windows), never tests/base",
     "ocr: lays a Tesseract text layer over a capture: its own part (tests/ocr), never tests/base",
 ]
@@ -97,10 +101,10 @@ max_idle = "24 h"  # a branch idle 24 h is pruned when merged, alarmed when not
 
 [tool.dev_lab.parts]
 output = "output/logs"
-# No resource exists on a hosted runner: `gpu` needs a CUDA GPU and the gpu extra, `vendor` a vendor PDF that may
-# never be committed, `ocr` Tesseract with English data. This repo's tests run on GitHub Actions alone (user ruling
+# No resource exists on a hosted runner: `gpu` needs a CUDA GPU and the gpu extra, `vendor` a vendor PDF and
+# `papers` the real papers, neither of which may be committed (the repo is public), `ocr` Tesseract with English data. This repo's tests run on GitHub Actions alone (user ruling
 # 2026-11-11), so no part here produces them: they stay marked, and a consumer's unified run selects them by marker.
-unproduced = ["gpu", "vendor", "ocr"]
+unproduced = ["gpu", "vendor", "papers", "ocr"]
 
 # The extras every environment carries: `dev` (the kit, pytest, ruff; it carries `ai`). `gpu` (marker-pdf -> torch)
 # is installed only for an environment whose need-set holds the `gpu` resource marker; `capture` is empty.
@@ -110,7 +114,7 @@ needs = { gpu = "gpu" }
 
 [tool.lab_commons.tests]
 produce = ["-m", "dev_lab.dev.verify", "--part", "{part}"]
-resources = ["gpu", "vendor", "ocr", "windows"]
+resources = ["gpu", "vendor", "papers", "ocr", "windows"]
 
 # The family branch flow: integrate/main coordinates; main moves only by `integrate promote` (fast-forward).
 [tool.dev_lab.integrator]
@@ -140,11 +144,10 @@ pending = []
 
 [[tool.dev_lab.hooks.pre-commit]]
 id = "filechecks"
-# The base row restated with one narrowing: large-files also passes the three papers the paper e2e goldens were
-# measured on (paper_pdf_ingest's own test data, up to 1.6 MB).
+# The base row restated with one narrowing: large-files passes the lock file.
 run = [
     "python", "-m", "dev_lab.dev.filechecks", "all",
-    "--exclude", 'large-files=^(uv\.lock|tests/paper/data/[^/]+\.pdf)$',
+    "--exclude", 'large-files=^uv\.lock$',
 ]
 
 [tool.dev_lab.doors]

@@ -89,6 +89,17 @@ def test_a_bold_span_says_so(tmp_path):
     assert spans == {'Strong': True, 'plain': False}
 
 
+def test_a_span_carries_its_fill_and_text_not_filled_has_none(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), 'red', fontname='helv', fontsize=10, color=RED)
+    page.insert_text((72, 100), 'plain', fontname='helv', fontsize=10)
+    page.insert_text((72, 128), 'hidden', fontname='helv', fontsize=10, render_mode=3)  # an OCR layer's mode
+    doc.save(tmp_path / 'c.pdf')
+    fills = {s.text: s.fill for s in read_pdf(tmp_path / 'c.pdf').spans()}
+    assert fills == {'red': (1.0, 0.0, 0.0), 'plain': (0.0, 0.0, 0.0), 'hidden': None}
+
+
 def test_an_encrypted_file_opens_with_its_password_and_refuses_without(tmp_path):
     doc = pymupdf.open()
     doc.new_page().insert_text((72, 72), 'secret', fontname='helv', fontsize=10)

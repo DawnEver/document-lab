@@ -89,13 +89,16 @@ class Provenance:
 
 @dataclass(frozen=True, slots=True)
 class TextSpan:
-    """A run of text in one font and size."""
+    """A run of text in one font, size and fill; a color as in :class:`VectorPath`."""
 
     text: str
     size: float
     font: str
     provenance: Provenance
     bold: bool = False
+    #: The color its glyphs are filled with; None when they are not filled (stroked or invisible text) or the source
+    #: states no fill.
+    fill: tuple[float, ...] | None = None
 
     @property
     def center(self) -> tuple[float, float]:

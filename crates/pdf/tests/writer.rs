@@ -5,7 +5,7 @@ mod common;
 
 use pdf::color::Space;
 use pdf::geometry::Rect;
-use pdf::writer::{Image, Word, Writer};
+use pdf::writer::{Image, LEVEL, Word, Writer};
 use pdf::{Event, File, Object};
 
 /// Every text glyph a page draws, as its text.
@@ -37,7 +37,7 @@ fn image_pages_read_back_as_written() {
         filter: None,
         data: &samples,
     };
-    let mut writer = Writer::new(Vec::new()).unwrap();
+    let mut writer = Writer::new(Vec::new(), LEVEL).unwrap();
     writer.image_page(&image, (30.0, 15.5)).unwrap();
     writer.image_page(&image, (60.0, 31.0)).unwrap();
     assert_eq!(writer.pages(), 2);
@@ -77,7 +77,7 @@ fn encoded_samples_are_written_as_given_with_their_filter() {
         filter: Some(b"ASCIIHexDecode"),
         data: b"7f>",
     };
-    let mut writer = Writer::new(Vec::new()).unwrap();
+    let mut writer = Writer::new(Vec::new(), LEVEL).unwrap();
     writer.image_page(&image, (10.0, 10.0)).unwrap();
     let file = File::open(writer.finish().unwrap(), b"").unwrap();
     let page = &file.pages().unwrap()[0];
@@ -91,7 +91,7 @@ fn encoded_samples_are_written_as_given_with_their_filter() {
 
 #[test]
 fn a_space_or_depth_no_image_page_has_is_refused() {
-    let mut writer = Writer::new(Vec::new()).unwrap();
+    let mut writer = Writer::new(Vec::new(), LEVEL).unwrap();
     let mut image = Image {
         width: 1,
         height: 1,
@@ -121,7 +121,7 @@ fn a_copied_page_draws_what_its_source_drew_with_what_it_inherits() {
     );
     let source = File::open(source, b"").unwrap();
     let page = &source.pages().unwrap()[0];
-    let mut writer = Writer::new(Vec::new()).unwrap();
+    let mut writer = Writer::new(Vec::new(), LEVEL).unwrap();
     writer.copy_page(&source, page).unwrap();
     writer.copy_page(&source, page).unwrap();
     let copy = File::open(writer.finish().unwrap(), b"").unwrap();
@@ -142,7 +142,7 @@ fn a_page_of_an_encrypted_file_is_copied_decrypted() {
     .unwrap();
     let source = File::open(data, b"user").unwrap();
     let page = &source.pages().unwrap()[0];
-    let mut writer = Writer::new(Vec::new()).unwrap();
+    let mut writer = Writer::new(Vec::new(), LEVEL).unwrap();
     writer.copy_page(&source, page).unwrap();
     let copy = File::open(writer.finish().unwrap(), b"").unwrap();
     let copied = &copy.pages().unwrap()[0];
@@ -155,7 +155,7 @@ fn a_link_to_another_page_is_not_followed_into_the_whole_tree() {
     let annotation = "<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /Dest [3 0 R /Fit] >>";
     let source = common::one_page("/Annots [5 0 R]", "", &[annotation]);
     let source = File::open(source, b"").unwrap();
-    let mut writer = Writer::new(Vec::new()).unwrap();
+    let mut writer = Writer::new(Vec::new(), LEVEL).unwrap();
     writer
         .copy_page(&source, &source.pages().unwrap()[0])
         .unwrap();
@@ -193,7 +193,7 @@ fn near(actual: [f64; 4], expected: [f64; 4]) -> bool {
 /// `source`'s first page copied with `words` laid over it, read back.
 fn laid(source: &[u8], words: &[Word]) -> (File, Vec<pdf::Page>) {
     let source = File::open(source.to_vec(), b"").unwrap();
-    let mut writer = Writer::new(Vec::new()).unwrap();
+    let mut writer = Writer::new(Vec::new(), LEVEL).unwrap();
     writer
         .copy_page_with_text(&source, &source.pages().unwrap()[0], words)
         .unwrap();
@@ -268,7 +268,7 @@ fn pages_laid_in_one_document_share_one_font_that_names_every_character() {
     let source = common::one_page("", "", &[]);
     let source = File::open(source, b"").unwrap();
     let page = &source.pages().unwrap()[0];
-    let mut writer = Writer::new(Vec::new()).unwrap();
+    let mut writer = Writer::new(Vec::new(), LEVEL).unwrap();
     writer
         .copy_page_with_text(&source, page, &[word("ab", [0.0, 0.0, 20.0, 10.0])])
         .unwrap();
@@ -300,7 +300,7 @@ fn pages_laid_in_one_document_share_one_font_that_names_every_character() {
 fn a_word_without_text_or_a_box_is_refused() {
     let source = File::open(common::one_page("", "", &[]), b"").unwrap();
     let page = &source.pages().unwrap()[0];
-    let mut writer = Writer::new(Vec::new()).unwrap();
+    let mut writer = Writer::new(Vec::new(), LEVEL).unwrap();
     for bad in [
         word("", [0.0, 0.0, 10.0, 10.0]),
         word("flat", [0.0, 5.0, 10.0, 5.0]),
@@ -314,3 +314,94 @@ fn a_word_without_text_or_a_box_is_refused() {
     }
     assert_eq!(writer.pages(), 0);
 }
+
+/// A stream read back: the filter it names, the bytes it stores and its data decoded.
+type Read = (Option<Vec<u8>>, Vec<u8>, Vec<u8>);
+
+/// Each stream of `pdf`, by object number.
+fn streams(pdf: Vec<u8>) -> Vec<Read> {
+    let file = File::open(pdf, b"").unwrap();
+    assert!(file.repairs().is_empty(), "{:?}", file.repairs());
+    file.numbers()
+        .into_iter()
+        .filter_map(|n| match file.object(n).unwrap() {
+            Object::Stream(s) => {
+                let filter = s
+                    .dict
+                    .get(b"Filter")
+                    .and_then(Object::as_name)
+                    .map(<[u8]>::to_vec);
+                let data = file.decode(&s).unwrap().into_bytes().unwrap();
+                Some((filter, s.raw, data))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A document of every kind of stream: an image page (its image hex-encoded by the caller) and a page copied with
+/// a text layer (its drawing stored unfiltered), written at `level`.
+fn every_stream(level: u8) -> Vec<u8> {
+    let image = Image {
+        width: 1,
+        height: 1,
+        space: b"DeviceGray",
+        bits: 8,
+        filter: Some(b"ASCIIHexDecode"),
+        data: b"7f>",
+    };
+    let source = File::open(common::one_page("", "0 0 1 rg 0 0 200 100 re f", &[]), b"").unwrap();
+    let mut writer = Writer::new(Vec::new(), level).unwrap();
+    writer.image_page(&image, (10.0, 10.0)).unwrap();
+    let words = [
+        word("stator", [10.0, 20.0, 70.0, 35.0]),
+        word("\u{5b9a}\u{5b50}", [80.0, 20.0, 120.0, 35.0]),
+    ];
+    writer
+        .copy_page_with_text(&source, &source.pages().unwrap()[0], &words)
+        .unwrap();
+    writer.finish().unwrap()
+}
+
+#[test]
+fn the_streams_the_writer_builds_are_deflated_and_read_back_identically() {
+    let stored = streams(every_stream(0));
+    let deflated = DEFLATE_FILTER.to_vec();
+    // the image as the caller encoded it, the copied drawing as its source stored it, every other one built here
+    let kinds: Vec<Option<&[u8]>> = stored.iter().map(|(f, ..)| f.as_deref()).collect();
+    assert_eq!(
+        kinds,
+        [
+            Some(&b"ASCIIHexDecode"[..]),
+            Some(DEFLATE_FILTER), // the image page's drawing
+            None,                 // the copied page's own drawing
+            Some(DEFLATE_FILTER), // the saved state before it
+            Some(DEFLATE_FILTER), // the text layer
+            Some(DEFLATE_FILTER), // the font's ToUnicode
+        ]
+    );
+    assert_eq!(stored[0].1, b"7f>");
+    for level in [1, LEVEL, 10] {
+        let written = streams(every_stream(level));
+        for (at, (a, b)) in stored.iter().zip(&written).enumerate() {
+            assert_eq!((&a.0, &a.2), (&b.0, &b.2), "stream {at} at level {level}");
+            if a.0.as_ref() == Some(&deflated) && a.2.len() > 100 {
+                assert!(
+                    b.1.len() < a.1.len(),
+                    "stream {at} not smaller at level {level}"
+                );
+            }
+        }
+    }
+    assert!(String::from_utf8_lossy(&stored[4].2).contains("3 Tr"));
+}
+
+#[test]
+fn a_compression_level_beyond_10_is_refused() {
+    let error = Writer::new(Vec::new(), 11).err().unwrap();
+    assert_eq!(error.kind, pdf::error::Kind::Invalid, "{error}");
+    assert!(error.message.contains("0 to 10, not 11"), "{error}");
+}
+
+/// The filter the writer compresses its own streams with.
+const DEFLATE_FILTER: &[u8] = b"FlateDecode"; // spelling-ignore-line: the PDF name

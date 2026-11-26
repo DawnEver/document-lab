@@ -1,5 +1,6 @@
 import hashlib
 
+import numpy as np
 import pymupdf
 import pytest
 
@@ -37,7 +38,7 @@ def test_a_span_carries_its_page_and_box(doc):
 
 def test_a_drawn_polyline_is_one_vector_path_with_its_points_and_color(doc):
     (path,) = [p for p in doc.page(2).paths if p.stroke == RED]
-    assert [c for p in path.points for c in p] == pytest.approx([100, 100, 200, 150, 300, 120], abs=1e-3)
+    np.testing.assert_allclose(path.points, [(100, 100), (200, 150), (300, 120)], atol=1e-3)
     assert path.width == pytest.approx(1.5, abs=1e-6)
     assert not path.closed
     assert path.fill is None
@@ -76,7 +77,23 @@ def test_a_curve_is_flattened_to_the_samples_asked(tmp_path):
     (coarse,) = read_pdf(tmp_path / 'c.pdf', curve_samples=2).page(1).paths
     (fine,) = read_pdf(tmp_path / 'c.pdf', curve_samples=16).page(1).paths
     assert (len(coarse.points), len(fine.points)) == (3, 17)
-    assert fine.points[-1] == pytest.approx((40, 10), abs=1e-6)
+    np.testing.assert_allclose(fine.points[-1], (40, 10), atol=1e-6)
+
+
+def test_points_are_a_read_only_array_of_rows(doc):
+    paths = doc.page(1).paths
+    for path in paths:
+        assert (path.points.dtype, path.points.ndim, path.points.shape[1]) == (np.float64, 2, 2)
+        assert not path.points.flags.writeable
+    box = paths[0].provenance.bbox
+    assert tuple(box) == (*paths[0].points.min(axis=0), *paths[0].points.max(axis=0))
+
+
+def test_a_path_is_itself_and_no_other(doc):
+    a, b = doc.page(1).paths[:2]
+    assert a == a  # noqa: PLR0124 -- identity is the comparison
+    assert a != b
+    assert len({a, b}) == 2
 
 
 def test_a_bold_span_says_so(tmp_path):

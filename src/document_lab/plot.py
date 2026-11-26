@@ -344,8 +344,8 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
                 legend.append(LegendSample(label, path.stroke, path.width, path.dashes, path.provenance))
         curves = tuple(
             Curve(
-                x_axis.to_data(np.array([p[0] for p in path.points])),
-                y_axis.to_data(np.array([p[1] for p in path.points])),
+                x_axis.to_data(path.points[:, 0]),
+                y_axis.to_data(path.points[:, 1]),
                 path.provenance,
                 (x_axis.scale, y_axis.scale),
                 path.stroke,
@@ -516,8 +516,8 @@ def _edges(paths: Sequence[VectorPath]) -> list[_Edge]:
                 else:
                     out.append(_Edge(vertical=False, at=(box.y0 + box.y1) / 2, lo=box.x0, hi=box.x1))
             continue
-        points = (*path.points, path.points[0]) if path.closed else path.points
-        for (x0, y0), (x1, y1) in itertools.pairwise(points):
+        points = _closed(path) if path.closed else path.points
+        for (x0, y0), (x1, y1) in itertools.pairwise(points.tolist()):
             if abs(x0 - x1) <= AXIS_TOL < abs(y0 - y1):
                 out.append(_Edge(vertical=True, at=(x0 + x1) / 2, lo=min(y0, y1), hi=max(y0, y1)))
             elif abs(y0 - y1) <= AXIS_TOL < abs(x0 - x1):
@@ -654,7 +654,7 @@ def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, str 
         and min(p.provenance.bbox.width, p.provenance.bbox.height) >= SLIVER
     ]
     shapes.sort(key=lambda p: -p.provenance.bbox.width * p.provenance.bbox.height)
-    glyphs: list[tuple[BBox, list[tuple[tuple[float, float], ...]]]] = []
+    glyphs: list[tuple[BBox, list[np.ndarray]]] = []
     for shape in shapes:
         box = shape.provenance.bbox
         cx, cy = (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2
@@ -682,7 +682,7 @@ def _stroke_words(paths: Sequence[VectorPath]) -> tuple[list[tuple[float | None,
     for group in _stroke_groups(paths):
         box = union([p.provenance.bbox for p in group])
         if max(box.width, box.height) <= GLYPH_MAX:
-            drawn = [(p.points + p.points[:1]) if p.closed else p.points for p in group]
+            drawn = [_closed(p) if p.closed else p.points for p in group]
             glyph = Glyph(stroke(drawn, max(p.width or 0.0 for p in group)), tuple(box))
             if not (_solid_triangle(glyph.ink) and not _reads(glyph)):
                 glyphs.append(glyph)
@@ -847,7 +847,7 @@ def _turned(glyph: Glyph) -> Glyph:
     return Glyph(np.rot90(glyph.ink, k=-1), (-y1, x0, -y0, x1))
 
 
-def _arrowhead(points: Sequence[tuple[float, float]], box: BBox) -> bool:
+def _arrowhead(points: np.ndarray, box: BBox) -> bool:
     """Whether a glyph's one fill is a triangle: an arrowhead (SIFERRIT N48 p4 heads its axis-title arrow so).
 
     Only a fill with no hole: a ``4``'s counter is a triangle too. Corners closer than ``CORNER_MERGE`` of the
@@ -855,15 +855,15 @@ def _arrowhead(points: Sequence[tuple[float, float]], box: BBox) -> bool:
     """
     reach = CORNER_MERGE * max(box.width, box.height)
     corners: list[tuple[float, float]] = []
-    for x, y in points:
+    for x, y in points.tolist():
         if all(math.hypot(x - cx, y - cy) > reach for cx, cy in corners):
             corners.append((x, y))
     return len(corners) == 3  # noqa: PLR2004 -- a triangle
 
 
 def _dotted(
-    glyphs: list[tuple[BBox, list[tuple[tuple[float, float], ...]]]],
-) -> list[tuple[BBox, list[tuple[tuple[float, float], ...]]]]:
+    glyphs: list[tuple[BBox, list[np.ndarray]]],
+) -> list[tuple[BBox, list[np.ndarray]]]:
     """Each small mark just above a taller glyph whose extent across holds its center, joined to it (an ``i``'s dot).
 
     Just above is a gap of at most ``DOT_GAP`` of the glyph's height; the joined glyph is read as one shape.
@@ -1222,12 +1222,13 @@ def _clipped(path: VectorPath, frame: BBox) -> list[VectorPath]:
     A sheet draws a curve past its frame and clips it there (DMEGC): the part inside is the curve. A path wholly
     inside (to ``EDGE_TOL``) is returned as it is.
     """
-    if all(frame.contains(x, y, tol=EDGE_TOL) for x, y in path.points):
+    (x0, y0), (x1, y1) = path.points.min(axis=0), path.points.max(axis=0)
+    if frame.contains(x0, y0, tol=EDGE_TOL) and frame.contains(x1, y1, tol=EDGE_TOL):
         return [path]
     box = frame
     runs: list[list[tuple[float, float]]] = []
     current: list[tuple[float, float]] = []
-    for a, b in itertools.pairwise(path.points):
+    for a, b in itertools.pairwise(map(tuple, path.points.tolist())):
         cut = _clip_segment(a, b, box)
         if cut is None:
             if current:
@@ -1247,7 +1248,14 @@ def _clipped(path: VectorPath, frame: BBox) -> list[VectorPath]:
     if current:
         runs.append(current)
     return [
-        VectorPath(tuple(run), path.stroke, path.width, path.dashes, False, path.provenance.at(bbox=_points_box(run)))  # noqa: FBT003
+        VectorPath(
+            _polyline(run),
+            path.stroke,
+            path.width,
+            path.dashes,
+            closed=False,
+            provenance=path.provenance.at(bbox=_points_box(run)),
+        )
         for run in runs
         if len(run) >= 2 and run[0] != run[-1]  # noqa: PLR2004 -- a curve needs two points
     ]
@@ -1277,6 +1285,18 @@ def _clip_segment(
     return start, end
 
 
+def _polyline(points: Sequence[tuple[float, float]] | np.ndarray) -> np.ndarray:
+    """``points`` as a :class:`VectorPath` holds them: an ``(n, 2)`` float64 array, read-only."""
+    out = np.array(points, dtype=np.float64).reshape(-1, 2)
+    out.flags.writeable = False
+    return out
+
+
+def _closed(path: VectorPath) -> np.ndarray:
+    """A closed path's points with its start repeated at the end: the closing segment drawn."""
+    return np.vstack((path.points, path.points[:1]))
+
+
 def _points_box(points: Sequence[tuple[float, float]]) -> BBox:
     xs, ys = [p[0] for p in points], [p[1] for p in points]
     return BBox(min(xs), min(ys), max(xs), max(ys))
@@ -1289,7 +1309,7 @@ def _joined(paths: Sequence[VectorPath]) -> list[VectorPath]:
     """
     ends: dict[tuple, list[tuple[int, int]]] = defaultdict(list)
     for i, path in enumerate(paths):
-        for end, (x, y) in ((0, path.points[0]), (1, path.points[-1])):
+        for end, (x, y) in enumerate(path.points[[0, -1]].tolist()):
             ends[(path.stroke, path.width, path.dashes, round(x, JOIN_DIGITS), round(y, JOIN_DIGITS))].append((i, end))
     link = {}
     for meeting in ends.values():
@@ -1303,12 +1323,12 @@ def _joined(paths: Sequence[VectorPath]) -> list[VectorPath]:
             continue
         i = start
         enter = 1 if (i, 0) in link and (i, 1) not in link else 0
-        members, points = [], []
+        members, runs = [], []
         while i not in seen:
             seen.add(i)
             members.append(paths[i])
             run = paths[i].points if enter == 0 else paths[i].points[::-1]
-            points.extend(run if not points else run[1:])
+            runs.append(run if not runs else run[1:])
             nxt = link.get((i, 1 - enter))
             if nxt is None:
                 break
@@ -1319,7 +1339,14 @@ def _joined(paths: Sequence[VectorPath]) -> list[VectorPath]:
             continue
         box = union([m.provenance.bbox for m in members if m.provenance.bbox is not None])
         out.append(
-            VectorPath(tuple(points), first.stroke, first.width, first.dashes, False, first.provenance.at(bbox=box))  # noqa: FBT003
+            VectorPath(
+                _polyline(np.vstack(runs)),
+                first.stroke,
+                first.width,
+                first.dashes,
+                closed=False,
+                provenance=first.provenance.at(bbox=box),
+            )
         )
     return out
 

@@ -68,7 +68,7 @@ def _page(reader: _pdf.Reader, number: int, size: tuple[float, float], here: Pro
         width=size[0],
         height=size[1],
         spans=tuple(_span(row, here) for row in spans),
-        paths=tuple(_path(row, here) for row in paths),
+        paths=_paths(paths, here),
         figures=tuple(Figure(here.at(bbox=BBox(*box)), w, h, image) for box, w, h, image in images),
         warnings=tuple(warnings),
     )
@@ -79,21 +79,51 @@ def _span(row: tuple, here: Provenance) -> TextSpan:
     return TextSpan(text, size, font, here.at(bbox=BBox(*box)), bold, unspaced)
 
 
-def _path(row: tuple, here: Provenance) -> VectorPath:
-    points, closed, stroke, width, dashes, phase, fill, even_odd, group = row
-    xs, ys = zip(*points, strict=True)
-    return VectorPath(
-        points=tuple(points),
-        stroke=None if stroke is None else tuple(stroke),
-        width=width,
-        dashes=tuple(dashes),
-        closed=closed,
-        provenance=here.at(bbox=BBox(min(xs), min(ys), max(xs), max(ys))),
-        dash_phase=phase,
-        fill=None if fill is None else tuple(fill),
-        even_odd=even_odd,
-        group=group,
-    )
+def _paths(columns: tuple, here: Provenance) -> tuple[VectorPath, ...]:
+    """A page's subpaths off the reader's columns (``PathColumns`` in ``crates/pybind``): no Python object per point.
+
+    Every subpath's points are a read-only view of one array holding the page's points; its painted path's style
+    is shared by its subpaths.
+    """
+    points, bounds, boxes, closed, groups, styles = columns
+    xy = np.frombuffer(points, dtype=np.float64).reshape(-1, 2)
+    starts = np.frombuffer(bounds, dtype=np.int64).tolist()
+    painted = [
+        (
+            None if stroke is None else tuple(stroke),
+            width,
+            tuple(dashes),
+            phase,
+            None if fill is None else tuple(fill),
+            rule,
+        )
+        for stroke, width, dashes, phase, fill, rule in styles
+    ]
+    out = []
+    for start, end, box, shut, group in zip(
+        starts[:-1],
+        starts[1:],
+        np.frombuffer(boxes, dtype=np.float64).reshape(-1, 4).tolist(),
+        np.frombuffer(closed, dtype=np.uint8).tolist(),
+        np.frombuffer(groups, dtype=np.int64).tolist(),
+        strict=True,
+    ):
+        stroke, width, dashes, phase, fill, even_odd = painted[group]
+        out.append(
+            VectorPath(
+                points=xy[start:end],
+                stroke=stroke,
+                width=width,
+                dashes=dashes,
+                closed=bool(shut),
+                provenance=here.at(bbox=BBox(*box)),
+                dash_phase=phase,
+                fill=fill,
+                even_odd=even_odd,
+                group=group,
+            )
+        )
+    return tuple(out)
 
 
 def read_raster(path: Path | str, page: int, bbox: BBox, *, dpi: float | None = None, password: str = '') -> Raster:

@@ -111,14 +111,19 @@ class TextSpan:
         return ((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class VectorPath:
     """One subpath of a page's vector drawing, curves flattened to points (``read_pdf``'s ``curve_samples`` each).
 
     A color is RGB in 0..1 when its color space defines one, else its own components (a separation's tint).
+
+    A path is compared and hashed by identity (``eq=False``): it is one mark drawn on its page -- two drawn alike
+    are still two -- and its points, an array, have no single truth value to compare by.
     """
 
-    points: tuple[tuple[float, float], ...]
+    #: Its points in drawing order: an ``(n, 2)`` float64 array of ``(x, y)`` rows, n >= 2, read-only (the
+    #: reader's are views of one array per page).
+    points: np.ndarray
     #: The stroking color; None when the path is not stroked.
     stroke: tuple[float, ...] | None
     #: The stroke's line width (points); 0 when not stroked.

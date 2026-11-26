@@ -14,10 +14,12 @@ use std::path::PathBuf;
 use pdf::error::Kind;
 use pdf::geometry::Rect;
 use pdf::interpret::{Event, PathEvent};
+use pdf::paths::Polylines;
 use pdf::writer::Image;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
 create_exception!(
     document_lab._pdf,
@@ -55,23 +57,29 @@ type Box4 = (f64, f64, f64, f64);
 /// A span: text, font name (no subset tag), size, bold, box, render mode, and the number it shares with the spans
 /// its words run on into with no space between (None: none).
 type SpanRow = (String, String, f64, bool, Box4, i64, Option<usize>);
-/// A path (one subpath): points, closed, stroke color, line width, dashes, dash phase, fill color, even-odd, and
-/// the index of the painted path it belongs to on its page.
-type PathRow = (
-    Vec<(f64, f64)>,
-    bool,
-    Option<Vec<f64>>,
-    f64,
-    Vec<f64>,
-    f64,
-    Option<Vec<f64>>,
-    bool,
-    usize,
+/// What a page paints as paths, as columns -- `document_lab.pdf` takes each buffer whole with `numpy.frombuffer`,
+/// no Python object per point. Buffers are native-endian; an entry per subpath (`pdf::paths::Polylines`) unless
+/// said:
+/// - points: `float64` (x, y) pairs, every subpath's points one after another, curves flattened;
+/// - bounds: `int64`, the pair where each subpath starts, then where the last ends (one entry more);
+/// - boxes: `float64` (x0, y0, x1, y1), the bounds of its points;
+/// - closed: `uint8`, 1 when closed back to its start;
+/// - group: `int64`, the painted path it is a subpath of: its index in the styles;
+/// - styles: a [`StyleRow`] per painted path, in drawing order -- what its subpaths share.
+type PathColumns<'py> = (
+    Bound<'py, PyBytes>,
+    Bound<'py, PyBytes>,
+    Bound<'py, PyBytes>,
+    Bound<'py, PyBytes>,
+    Bound<'py, PyBytes>,
+    Vec<StyleRow>,
 );
+/// How a painted path is painted: stroke color, line width, dashes, dash phase, fill color, even-odd.
+type StyleRow = (Option<Vec<f64>>, f64, Vec<f64>, f64, Option<Vec<f64>>, bool);
 /// An image: box, sample width and height, object number (None inline).
 type ImageRow = (Box4, i64, i64, Option<u32>);
-/// What a page draws: spans, paths, images, warnings.
-type PageRows = (Vec<SpanRow>, Vec<PathRow>, Vec<ImageRow>, Vec<String>);
+/// What a page draws: spans, paths (as columns), images, warnings.
+type PageRows<'py> = (Vec<SpanRow>, PathColumns<'py>, Vec<ImageRow>, Vec<String>);
 /// An image's samples: width, height, color space family (None: a stencil mask), components, bits per component,
 /// the data after every lossless filter, and the image codec it is still in (None: raw samples).
 type SamplesRow = (
@@ -118,7 +126,12 @@ impl Reader {
 
     /// What page `number` (1-based) draws: (spans, paths, images, warnings); each curve flattened to
     /// `curve_samples` points.
-    fn page(&self, number: usize, curve_samples: usize) -> PyResult<PageRows> {
+    fn page<'py>(
+        &self,
+        py: Python<'py>,
+        number: usize,
+        curve_samples: usize,
+    ) -> PyResult<PageRows<'py>> {
         let page = self.at(number)?;
         let content = self.file.interpret(page).map_err(|e| refused(&e))?;
         let spans = pdf::spans::spans(&content.events)
@@ -136,14 +149,15 @@ impl Reader {
                 )
             })
             .collect();
-        let mut paths = Vec::new();
+        let mut lines = Polylines::new();
+        let (mut groups, mut styles) = (Vec::new(), Vec::new());
         let mut images = Vec::new();
-        let mut painted = 0;
         for event in &content.events {
             match event {
                 Event::Path(path) => {
-                    paths.extend(subpaths(path, curve_samples, painted));
-                    painted += 1;
+                    lines.add(&path.segments, curve_samples);
+                    groups.resize(lines.len(), styles.len());
+                    styles.push(style(path));
                 }
                 Event::Image(image) => {
                     images.push((box4(image.bbox), image.width, image.height, image.object));
@@ -151,6 +165,7 @@ impl Reader {
                 Event::Text(_) => {}
             }
         }
+        let paths = columns(py, &lines, &groups, styles);
         Ok((spans, paths, images, content.warnings))
     }
 
@@ -288,25 +303,95 @@ fn box4(r: Rect) -> Box4 {
     (r.x0, r.y0, r.x1, r.y1)
 }
 
-/// A painted path as one row per subpath, its curves flattened to `samples` points.
-fn subpaths(path: &PathEvent, samples: usize, group: usize) -> Vec<PathRow> {
+/// How `path` is painted.
+fn style(path: &PathEvent) -> StyleRow {
     let stroke = path.stroke.as_ref();
-    pdf::paths::subpaths(&path.segments, samples)
-        .into_iter()
-        .map(|sub| {
-            (
-                sub.points.iter().map(|p| (p.x, p.y)).collect(),
-                sub.closed,
-                stroke.map(|s| s.color.rgb_or_components()),
-                stroke.map_or(0.0, |s| s.width),
-                stroke.map_or_else(Vec::new, |s| s.dashes.clone()),
-                stroke.map_or(0.0, |s| s.dash_phase),
-                path.fill.as_ref().map(|f| f.color.rgb_or_components()),
-                path.fill.as_ref().is_some_and(|f| f.even_odd),
-                group,
-            )
-        })
-        .collect()
+    (
+        stroke.map(|s| s.color.rgb_or_components()),
+        stroke.map_or(0.0, |s| s.width),
+        stroke.map_or_else(Vec::new, |s| s.dashes.clone()),
+        stroke.map_or(0.0, |s| s.dash_phase),
+        path.fill.as_ref().map(|f| f.color.rgb_or_components()),
+        path.fill.as_ref().is_some_and(|f| f.even_odd),
+    )
+}
+
+/// `lines` as [`PathColumns`], subpath `i` of the painted path `groups[i]`.
+fn columns<'py>(
+    py: Python<'py>,
+    lines: &Polylines,
+    groups: &[usize],
+    styles: Vec<StyleRow>,
+) -> PathColumns<'py> {
+    let boxes = (0..lines.len()).flat_map(|i| {
+        let (first, rest) = lines
+            .subpath(i)
+            .split_first()
+            .expect("a subpath has two points or more");
+        rest.iter().fold(
+            [first.x, first.y, first.x, first.y],
+            |[x0, y0, x1, y1], p| [x0.min(p.x), y0.min(p.y), x1.max(p.x), y1.max(p.y)],
+        )
+    });
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "an index into a page's points fits an int64"
+    )]
+    let index = |i: &usize| *i as i64;
+    (
+        packed(py, lines.points.iter().flat_map(|p| [p.x, p.y])),
+        packed(py, lines.bounds.iter().map(index)),
+        packed(py, boxes),
+        packed(py, lines.closed.iter().map(|c| u8::from(*c))),
+        packed(py, groups.iter().map(index)),
+        styles,
+    )
+}
+
+/// A number a column holds.
+trait Packed: Copy {
+    /// Its native-endian bytes.
+    type Bytes: AsRef<[u8]>;
+    /// Its size in bytes.
+    const SIZE: usize;
+    /// Its native-endian bytes.
+    fn bytes(self) -> Self::Bytes;
+}
+
+impl Packed for f64 {
+    type Bytes = [u8; 8];
+    const SIZE: usize = 8;
+    fn bytes(self) -> [u8; 8] {
+        self.to_ne_bytes()
+    }
+}
+
+impl Packed for i64 {
+    type Bytes = [u8; 8];
+    const SIZE: usize = 8;
+    fn bytes(self) -> [u8; 8] {
+        self.to_ne_bytes()
+    }
+}
+
+impl Packed for u8 {
+    type Bytes = [u8; 1];
+    const SIZE: usize = 1;
+    fn bytes(self) -> [u8; 1] {
+        [self]
+    }
+}
+
+/// `values` as one `bytes`, each native-endian: a column `numpy.frombuffer` takes without a copy.
+fn packed<T: Packed>(py: Python<'_>, values: impl Iterator<Item = T>) -> Bound<'_, PyBytes> {
+    let values: Vec<T> = values.collect();
+    PyBytes::new_with(py, values.len() * T::SIZE, |out| {
+        for (chunk, value) in out.chunks_exact_mut(T::SIZE).zip(values) {
+            chunk.copy_from_slice(value.bytes().as_ref());
+        }
+        Ok(())
+    })
+    .expect("filling a new bytes object cannot fail")
 }
 
 #[pymodule]

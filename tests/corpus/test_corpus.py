@@ -149,6 +149,19 @@ class Feature:
     known: str = ''  # a known failure: what the reader states instead (the residual), until it is fixed
 
 
+# The documents' own words, escaped: no CJK character is written in tracked source (NO-CJK-IN-TRACKED-SOURCE).
+#: 2608.20674 p4: "As a first step, ... the following summary ... please."
+_JA_STEP = '\u6700\u521d\u306e\u30b9\u30c6\u30c3\u30d7\u3068\u3057\u3066\uff0c\u4ee5\u4e0b\u306e\u8981\u65e8\u3092'
+_JA_LIST = '\u4f53\u8a00\u6b62\u3081\uff0c\u7b87\u6761\u66f8\u304d\u306e\u30ea\u30b9\u30c8\u306b\u5909\u63db'
+_JA_PLEASE = '\u3057\u3066\u304f\u3060\u3055\u3044\u3002'
+#: The JST survey's title: "user satisfaction survey of information services".
+_JA_SURVEY = '\u60c5\u5831\u30b5\u30fc\u30d3\u30b9\u5229\u7528\u8005\u306e\u6e80\u8db3\u5ea6\u8abf\u67fb'
+#: 2105.10459's title, "research on regional and urban-cluster development based on {night}-light remote sensing".
+_ZH_TITLE = (
+    '\u57fa\u4e8e{}\u5149\u9065\u611f\u5bf9\u4e8e\u533a\u57df\u548c'
+    '\u57ce\u5e02\u7fa4\u7684\u53d1\u5c55\u7684\u7814\u7a76'
+)
+
 FEATURES = {
     'type3-glyphs-read': Feature(
         'latex-type3-arxiv-2204.08094v1',
@@ -181,20 +194,20 @@ FEATURES = {
     'japanese-in-an-embedded-cid-font': Feature(
         'cjk-ja-euc-h-arxiv-2608.20674v1',
         phrases_stated,
-        (4, ('最初のステップとして，以下の要旨を体言止め，箇条書きのリストに変換してください。',)),  # noqa: RUF001
-        (4, ('最初のステップとして，以下の要旨を要約してください。',)),  # noqa: RUF001
+        (4, (_JA_STEP + _JA_LIST + _JA_PLEASE,)),
+        (4, (_JA_STEP + '\u8981\u7d04' + _JA_PLEASE,)),
     ),
     'japanese-powerpoint-and-its-license': Feature(
         'cjk-ja-powerpoint-jst-survey2024',
         phrases_stated,
-        (1, ('情報サービス利用者の満足度調査', 'https://creativecommons.org/licenses/by/4.0/deed.ja')),
-        (1, ('情報サービス利用者の満足度調査', 'https://creativecommons.org/licenses/by-sa/4.0/deed.ja')),
+        (1, (_JA_SURVEY, 'https://creativecommons.org/licenses/by/4.0/deed.ja')),
+        (1, (_JA_SURVEY, 'https://creativecommons.org/licenses/by-sa/4.0/deed.ja')),
     ),
     'word-truetype-text': Feature(
         'word-truetype-arxiv-2105.10459v1',
         phrases_stated,
-        (1, ('基于夜光遥感对于区域和城市群的发展的研究', 'night-light remote sensing')),
-        (1, ('基于日光遥感对于区域和城市群的发展的研究', 'night-light remote sensing')),
+        (1, (_ZH_TITLE.format('\u591c'), 'night-light remote sensing')),
+        (1, (_ZH_TITLE.format('\u65e5'), 'night-light remote sensing')),
     ),
     'scan-under-an-invisible-ocr-layer': Feature(
         'scan-ocr-rotated-naca-tn670',

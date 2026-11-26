@@ -26,7 +26,6 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -133,9 +132,14 @@ SOURCES: Final = {
             1_261_129,
             'CC BY 4.0 (stated on its first page)',
             'https://creativecommons.org/licenses/by/4.0/deed.ja',
-            # The publisher's name and the document's title as it states them (its full-width parentheses kept).
-            '(c) 2025 Japan Science and Technology Agency (国立研究開発法人科学技術振興機構). '  # spelling-ignore-line
-            '"令和6年度JST情報サービス利用者の満足度調査（J-STAGE 利用機関）". CC BY 4.0.',  # noqa: RUF001  # spelling-ignore-line
+            # The publisher's name and the document's title as it states them (its full-width parentheses kept),
+            # escaped: no CJK character is written in tracked source (NO-CJK-IN-TRACKED-SOURCE).
+            '(c) 2025 Japan Science and Technology Agency ('
+            '\u56fd\u7acb\u7814\u7a76\u958b\u767a\u6cd5\u4eba'  # spelling-ignore-line
+            '\u79d1\u5b66\u6280\u8853\u632f\u8208\u6a5f\u69cb). '  # spelling-ignore-line
+            '"\u4ee4\u548c6\u5e74\u5ea6JST\u60c5\u5831\u30b5\u30fc\u30d3\u30b9'  # spelling-ignore-line
+            '\u5229\u7528\u8005\u306e\u6e80\u8db3\u5ea6\u8abf\u67fb'  # spelling-ignore-line
+            '\uff08J-STAGE \u5229\u7528\u6a5f\u95a2\uff09". CC BY 4.0.',  # spelling-ignore-line
             'Microsoft PowerPoint slides: Japanese in TrueType Type0 Identity-H (Meiryo), TrueType WinAnsi (Calibri), '
             'charts, SMask images',
         ),
@@ -274,9 +278,9 @@ def fetch_into(source: Source, cache: Path) -> Path:
             said.append(f'{url} served {len(data)} bytes, sha256 {_digest(data)}')
             continue
         cache.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=cache, prefix=f'{source.sha256}.', suffix='.pdf', delete=False) as part:
-            part.write(data)
-        Path(part.name).replace(path)
+        part = cache / f'{source.sha256}.{os.getpid()}.part'  # this process's own; renamed whole, never read half
+        part.write_bytes(data)
+        part.replace(path)
         return path
     msg = (
         f'FETCH FAILED, not a reader regression: {source.name} is pinned to {source.size} bytes, sha256 '

@@ -8,7 +8,6 @@
 //! Shadings are not painted marks and give no event. An operation that cannot be read is skipped and named in
 //! [`Content::warnings`], never silently.
 
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::color::{Color, Space};
@@ -214,8 +213,6 @@ struct Interpreter<'a> {
     /// The text matrix and the text line matrix (9.4.2), between `BT` and `ET`.
     text_matrix: Matrix,
     line_matrix: Matrix,
-    /// Fonts read, by the font dictionary's object number.
-    fonts: HashMap<u32, Rc<Font>>,
     out: Content,
 }
 
@@ -263,7 +260,6 @@ impl File {
             clipping: false,
             text_matrix: Matrix::IDENTITY,
             line_matrix: Matrix::IDENTITY,
-            fonts: HashMap::new(),
             out: Content::default(),
         };
         interpreter.run(&data, &page.resources, 0);
@@ -271,8 +267,20 @@ impl File {
     }
 }
 
-/// The last `count` operands, which must be numbers.
-fn last(operands: &[Object], count: usize) -> Result<Vec<f64>> {
+/// The last `N` operands, which must be numbers.
+fn last<const N: usize>(operands: &[Object]) -> Result<[f64; N]> {
+    let mut out = [0.0; N];
+    let from = operands.len().checked_sub(N);
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = from
+            .and_then(|from| operands[from + i].as_number())
+            .ok_or_else(|| Error::malformed(format!("needs {N} numbers")))?;
+    }
+    Ok(out)
+}
+
+/// The last `count` operands, which must be numbers: as many as a color space has components.
+fn numbers(operands: &[Object], count: usize) -> Result<Vec<f64>> {
     operands
         .len()
         .checked_sub(count)
@@ -303,15 +311,14 @@ fn integer(operands: &[Object]) -> Result<i64> {
 
 impl Interpreter<'_> {
     fn run(&mut self, data: &[u8], resources: &Dict, depth: usize) {
-        let (ops, err) = operations(data);
-        for op in &ops {
+        let err = operations(data, |op| {
             if let Err(e) = self.operation(op, resources, depth) {
                 self.out.warnings.push(format!(
                     "`{}` skipped: {e}",
-                    String::from_utf8_lossy(&op.operator)
+                    String::from_utf8_lossy(op.operator)
                 ));
             }
-        }
+        });
         if let Some(e) = err {
             self.out
                 .warnings
@@ -324,8 +331,7 @@ impl Interpreter<'_> {
     }
 
     fn operation(&mut self, op: &Operation, resources: &Dict, depth: usize) -> Result<()> {
-        let operator = op.operator.as_slice();
-        let operands = &op.operands;
+        let (operator, operands) = (op.operator, op.operands);
         if self.state_operation(operator, operands, resources)?
             || self.path_operation(operator, operands)?
             || self.paint_operation(operator)
@@ -347,7 +353,7 @@ impl Interpreter<'_> {
                         int(b"Width", b"W").unwrap_or(0),
                         int(b"Height", b"H").unwrap_or(0),
                         None,
-                        Some((dict.clone(), data.clone())),
+                        Some((dict.clone(), data.to_vec())),
                     );
                 }
             }
@@ -372,11 +378,11 @@ impl Interpreter<'_> {
                 }
             }
             b"cm" => {
-                let matrix = Matrix::from_numbers(&last(operands, 6)?)
+                let matrix = Matrix::from_numbers(&last::<6>(operands)?)
                     .ok_or_else(|| Error::malformed("needs 6 numbers"))?;
                 self.state.ctm = matrix.then(self.state.ctm);
             }
-            b"w" => self.state.line_width = last(operands, 1)?[0],
+            b"w" => self.state.line_width = last::<1>(operands)?[0],
             b"J" => self.state.cap = integer(operands)?,
             b"j" => self.state.join = integer(operands)?,
             b"d" => {
@@ -397,18 +403,18 @@ impl Interpreter<'_> {
     fn path_operation(&mut self, operator: &[u8], operands: &[Object]) -> Result<bool> {
         match operator {
             b"m" => {
-                let v = last(operands, 2)?;
+                let v = last::<2>(operands)?;
                 let to = self.point(v[0], v[1]);
                 self.path.push(Segment::MoveTo(to));
                 (self.current, self.start) = (Some(to), Some(to));
             }
             b"l" => {
-                let v = last(operands, 2)?;
+                let v = last::<2>(operands)?;
                 let to = self.point(v[0], v[1]);
                 self.extend(Segment::LineTo(to), to);
             }
             b"c" => {
-                let v = last(operands, 6)?;
+                let v = last::<6>(operands)?;
                 let (c1, c2, to) = (
                     self.point(v[0], v[1]),
                     self.point(v[2], v[3]),
@@ -417,7 +423,7 @@ impl Interpreter<'_> {
                 self.extend(Segment::CurveTo(c1, c2, to), to);
             }
             b"v" => {
-                let v = last(operands, 4)?;
+                let v = last::<4>(operands)?;
                 let c1 = self
                     .current
                     .ok_or_else(|| Error::malformed("no current point"))?;
@@ -425,7 +431,7 @@ impl Interpreter<'_> {
                 self.extend(Segment::CurveTo(c1, c2, to), to);
             }
             b"y" => {
-                let v = last(operands, 4)?;
+                let v = last::<4>(operands)?;
                 let (c1, to) = (self.point(v[0], v[1]), self.point(v[2], v[3]));
                 self.extend(Segment::CurveTo(c1, to, to), to);
             }
@@ -434,7 +440,7 @@ impl Interpreter<'_> {
                 self.current = self.start;
             }
             b"re" => {
-                let v = last(operands, 4)?;
+                let v = last::<4>(operands)?;
                 let (left, bottom, right, top) = (v[0], v[1], v[0] + v[2], v[1] + v[3]);
                 let corners = [
                     self.point(left, bottom),
@@ -489,14 +495,14 @@ impl Interpreter<'_> {
         match operator {
             b"BT" => (self.text_matrix, self.line_matrix) = (Matrix::IDENTITY, Matrix::IDENTITY),
             b"ET" => {}
-            b"Tc" => text.char_spacing = last(operands, 1)?[0],
-            b"Tw" => text.word_spacing = last(operands, 1)?[0],
-            b"Tz" => text.scale = last(operands, 1)?[0] / 100.0,
-            b"TL" => text.leading = last(operands, 1)?[0],
-            b"Ts" => text.rise = last(operands, 1)?[0],
+            b"Tc" => text.char_spacing = last::<1>(operands)?[0],
+            b"Tw" => text.word_spacing = last::<1>(operands)?[0],
+            b"Tz" => text.scale = last::<1>(operands)?[0] / 100.0,
+            b"TL" => text.leading = last::<1>(operands)?[0],
+            b"Ts" => text.rise = last::<1>(operands)?[0],
             b"Tr" => text.render_mode = integer(operands)?,
             b"Tf" => {
-                text.size = last(operands, 1)?[0];
+                text.size = last::<1>(operands)?[0];
                 let name = operands
                     .first()
                     .and_then(Object::as_name)
@@ -505,16 +511,16 @@ impl Interpreter<'_> {
                 self.state.text.font = Some(font);
             }
             b"Td" => {
-                let v = last(operands, 2)?;
+                let v = last::<2>(operands)?;
                 self.next_line(v[0], v[1]);
             }
             b"TD" => {
-                let v = last(operands, 2)?;
+                let v = last::<2>(operands)?;
                 text.leading = -v[1];
                 self.next_line(v[0], v[1]);
             }
             b"Tm" => {
-                let m = Matrix::from_numbers(&last(operands, 6)?)
+                let m = Matrix::from_numbers(&last::<6>(operands)?)
                     .ok_or_else(|| Error::malformed("needs 6 numbers"))?;
                 (self.text_matrix, self.line_matrix) = (m, m);
             }
@@ -529,7 +535,7 @@ impl Interpreter<'_> {
                 self.show(string(operands)?);
             }
             b"\"" => {
-                let v = last(&operands[..operands.len().saturating_sub(1)], 2)?;
+                let v = last::<2>(&operands[..operands.len().saturating_sub(1)])?;
                 (text.word_spacing, text.char_spacing) = (v[0], v[1]);
                 let leading = text.leading;
                 self.next_line(0.0, -leading);
@@ -575,8 +581,8 @@ impl Interpreter<'_> {
             Error::malformed(format!("no font /{}", String::from_utf8_lossy(name)))
         })?;
         let number = reference.as_reference().map(|r| r.num);
-        if let Some(font) = number.and_then(|n| self.fonts.get(&n)) {
-            return Ok(Rc::clone(font));
+        if let Some(font) = number.and_then(|n| self.file.fonts.borrow().get(&n).cloned()) {
+            return Ok(font);
         }
         let Object::Dict(dict) = self.file.resolve(reference)? else {
             return Err(Error::malformed(format!(
@@ -586,7 +592,7 @@ impl Interpreter<'_> {
         };
         let font = Rc::new(self.file.font(&dict)?);
         if let Some(n) = number {
-            self.fonts.insert(n, Rc::clone(&font));
+            self.file.fonts.borrow_mut().insert(n, Rc::clone(&font));
         }
         Ok(font)
     }
@@ -699,7 +705,7 @@ impl Interpreter<'_> {
                     b"RG" | b"rg" => Space::Rgb,
                     _ => Space::Cmyk,
                 };
-                let color = space.color(last(operands, space.components())?);
+                let color = space.color(numbers(operands, space.components())?);
                 (space, color)
             }
             _ => return Ok(false),

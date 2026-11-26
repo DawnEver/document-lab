@@ -1,6 +1,7 @@
 //! Where the crate's reading time goes: for every PDF under the paths given, the wall time of opening it, of
 //! interpreting its pages, of setting their text into spans and of flattening their paths; per file and in total,
-//! the slowest files first.
+//! the slowest files first. Of interpreting, the part spent decoding the pages' own content streams and lexing
+//! them into operations is timed apart as well (a Form's content is not in it): the rest is running them.
 //!
 //! `cargo run --release --example timing -- [--samples N] <file-or-directory>...` -- a measurement against real
 //! documents kept outside the repository; nothing is written.
@@ -33,6 +34,8 @@ struct Stages {
     interpret: Duration,
     spans: Duration,
     flatten: Duration,
+    decode: Duration,
+    lex: Duration,
     pages: usize,
     points: usize,
 }
@@ -47,6 +50,8 @@ impl Stages {
         self.interpret += other.interpret;
         self.spans += other.spans;
         self.flatten += other.flatten;
+        self.decode += other.decode;
+        self.lex += other.lex;
         self.pages += other.pages;
         self.points += other.points;
     }
@@ -54,10 +59,12 @@ impl Stages {
     fn line(&self, name: &str) -> String {
         let ms = |d: Duration| d.as_secs_f64() * 1e3;
         format!(
-            "{:9.1} ms  open {:8.1}  interpret {:8.1}  spans {:7.1}  flatten {:7.1}  {:5} pages {:9} points  {name}",
+            "{:9.1} ms  open {:7.1}  interpret {:8.1} (decode {:7.1} lex {:7.1})  spans {:7.1}  flatten {:7.1}  {:5} pages {:9} points  {name}",
             ms(self.total()),
             ms(self.open),
             ms(self.interpret),
+            ms(self.decode),
+            ms(self.lex),
             ms(self.spans),
             ms(self.flatten),
             self.pages,
@@ -80,6 +87,12 @@ fn time(path: &Path, samples: usize) -> Option<Stages> {
         };
         s.interpret += start.elapsed();
         let start = Instant::now();
+        let data = contents(&file, page);
+        s.decode += start.elapsed();
+        let start = Instant::now();
+        drop(pdf::content::operations(&data, |_| {}));
+        s.lex += start.elapsed();
+        let start = Instant::now();
         let spans = pdf::spans::spans(&content.events);
         s.spans += start.elapsed();
         let start = Instant::now();
@@ -95,6 +108,23 @@ fn time(path: &Path, samples: usize) -> Option<Stages> {
         drop(spans);
     }
     Some(s)
+}
+
+/// The page's own content streams, decoded and joined.
+fn contents(file: &pdf::File, page: &pdf::Page) -> Vec<u8> {
+    let decoded = |s: &pdf::Stream| file.decode(s).ok().and_then(|d| d.into_bytes().ok());
+    match file.get(&page.dict, b"Contents") {
+        Ok(Some(pdf::Object::Stream(s))) => decoded(&s).unwrap_or_default(),
+        Ok(Some(pdf::Object::Array(parts))) => parts
+            .iter()
+            .filter_map(|p| match file.resolve(p) {
+                Ok(pdf::Object::Stream(s)) => decoded(&s),
+                _ => None,
+            })
+            .flatten()
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn main() {

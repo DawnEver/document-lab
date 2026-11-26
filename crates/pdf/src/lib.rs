@@ -6,7 +6,7 @@
 //! Layers, each depending only on those above it: [`error`], [`object`] (the values), [`parser`] (bytes to
 //! values), [`filter`] (stream data decoded), [`crypt`] (strings and streams decrypted), [`xref`] (where each object is), [`file`] (a PDF opened: objects
 //! resolved by reference), [`page`] (the page tree), [`content`] (a content stream's operations), [`font`] and [`cmap`], [`color`] and
-//! [`geometry`], [`image`] (an image's samples), and [`interpret`] (what a page draws, as events in page space).
+//! [`geometry`], [`image`] (an image's samples), [`optional`] (which optional content shows), and [`interpret`] (what a page draws, as events in page space).
 //! [`writer`] writes a PDF of image pages, or of pages copied from a [`File`].
 
 mod base14;
@@ -24,6 +24,7 @@ pub mod image;
 mod inflate;
 pub mod interpret;
 pub mod object;
+pub mod optional;
 pub mod page;
 pub mod parser;
 pub mod spans;

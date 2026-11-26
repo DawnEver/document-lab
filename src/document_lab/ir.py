@@ -111,7 +111,9 @@ class TextSpan:
 class VectorPath:
     """One subpath of a page's vector drawing, curves flattened to points (``read_pdf``'s ``curve_samples`` each).
 
-    A color is RGB in 0..1 when its color space defines one, else its own components (a separation's tint).
+    A color is RGB in 0..1 when its color space defines one, else its own components (a separation's tint); a
+    pattern's has none but an uncolored tiling's tint. A shading painted over the clip (``sh``) is the closed
+    rectangle of the box it may cover, filled with a ``'shading'`` pattern.
     """
 
     points: tuple[tuple[float, float], ...]
@@ -130,6 +132,9 @@ class VectorPath:
     fill: tuple[float, ...] | None = None
     #: Filled by the even-odd rule rather than the nonzero winding rule.
     even_odd: bool = False
+    #: The pattern the fill paints instead of one color: ``'shading'`` (a gradient) or ``'tiling'`` (a repeated cell,
+    #: not read); None for one color or no fill.
+    pattern: str | None = None
     #: The painted path it is a subpath of, numbered on its page: one drawing's subpaths share it.
     group: int = 0
 

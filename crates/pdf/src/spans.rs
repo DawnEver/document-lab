@@ -67,10 +67,10 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
                     o.span.text.push(' ');
                 }
                 o.span.text.push_str(piece);
-                let ink = !piece.trim().is_empty();
+                let ink = inks(piece);
                 if ink {
                     o.span.bbox = if o.inked {
-                        union(o.span.bbox, glyph.bbox)
+                        o.span.bbox.union(glyph.bbox)
                     } else {
                         glyph.bbox
                     };
@@ -92,7 +92,7 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
                 },
                 end: glyph.end,
                 direction,
-                inked: !piece.trim().is_empty(),
+                inked: inks(piece),
             });
         }
     }
@@ -125,11 +125,8 @@ fn join(open: &Open, text: &TextEvent, origin: Point, direction: (f64, f64)) -> 
     Some(along > SPACE * size)
 }
 
-fn union(a: Rect, b: Rect) -> Rect {
-    Rect {
-        x0: a.x0.min(b.x0),
-        y0: a.y0.min(b.y0),
-        x1: a.x1.max(b.x1),
-        y1: a.y1.max(b.y1),
-    }
+/// Whether a glyph whose text is `piece` makes its span's box: it shows ink -- its text is not white-space, or is
+/// empty because an `/ActualText` before it in its sequence carries its text.
+fn inks(piece: &str) -> bool {
+    piece.is_empty() || !piece.trim().is_empty()
 }

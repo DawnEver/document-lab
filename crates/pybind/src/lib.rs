@@ -8,7 +8,7 @@ use std::fs;
 use std::io::BufWriter;
 use std::path::PathBuf;
 
-use pdf::color::Color;
+use pdf::color::{Color, Pattern};
 use pdf::geometry::{Point, Rect};
 use pdf::interpret::{Event, PathEvent, Segment};
 use pdf::writer::Image;
@@ -19,8 +19,9 @@ use pyo3::prelude::*;
 type Box4 = (f64, f64, f64, f64);
 /// A span: text, font name, size, descriptor flags, font weight, box, render mode.
 type SpanRow = (String, String, f64, i64, Option<f64>, Box4, i64);
-/// A path (one subpath): points, closed, stroke color, line width, dashes, dash phase, fill color, even-odd, and
-/// the index of the painted path it belongs to on its page.
+/// A path (one subpath): points, closed, stroke color, line width, dashes, dash phase, fill color, even-odd, the
+/// fill's pattern (`tiling`, `shading`; None: one color), and the index of the painted path it belongs to on its
+/// page. A shading painted with `sh` is the closed rectangle of its box, filled with a `shading`.
 type PathRow = (
     Vec<(f64, f64)>,
     bool,
@@ -30,6 +31,7 @@ type PathRow = (
     f64,
     Option<Vec<f64>>,
     bool,
+    Option<&'static str>,
     usize,
 );
 /// An image: box, sample width and height, object number (None inline).
@@ -111,6 +113,24 @@ impl Reader {
                 }
                 Event::Image(image) => {
                     images.push((box4(image.bbox), image.width, image.height, image.object));
+                }
+                Event::Shading(shading) => {
+                    let r = shading.bbox;
+                    let corners = vec![(r.x0, r.y0), (r.x1, r.y0), (r.x1, r.y1), (r.x0, r.y1)];
+                    let shaded = Some(pattern(Pattern::Shading));
+                    paths.push((
+                        corners,
+                        true,
+                        None,
+                        0.0,
+                        Vec::new(),
+                        0.0,
+                        Some(Vec::new()),
+                        false,
+                        shaded,
+                        painted,
+                    ));
+                    painted += 1;
                 }
                 Event::Text(_) => {}
             }
@@ -249,6 +269,14 @@ fn color(c: &Color) -> Vec<f64> {
         .map_or_else(|| c.components.clone(), |rgb| rgb.to_vec())
 }
 
+/// A pattern's kind, by name.
+fn pattern(p: Pattern) -> &'static str {
+    match p {
+        Pattern::Tiling => "tiling",
+        Pattern::Shading => "shading",
+    }
+}
+
 /// A painted path as one row per subpath, curves flattened.
 fn subpaths(path: &PathEvent, samples: usize, group: usize) -> Vec<PathRow> {
     let stroke = path.stroke.as_ref();
@@ -262,6 +290,10 @@ fn subpaths(path: &PathEvent, samples: usize, group: usize) -> Vec<PathRow> {
             stroke.map_or(0.0, |s| s.dash_phase),
             path.fill.as_ref().map(|f| color(&f.color)),
             path.fill.as_ref().is_some_and(|f| f.even_odd),
+            path.fill
+                .as_ref()
+                .and_then(|f| f.color.pattern)
+                .map(pattern),
             group,
         )
     };

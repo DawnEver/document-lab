@@ -2,6 +2,7 @@
 
 mod common;
 
+use pdf::color::Pattern;
 use pdf::geometry::{Point, Rect};
 use pdf::interpret::{ImageEvent, PathEvent, Segment};
 use pdf::{Event, File};
@@ -251,4 +252,94 @@ fn a_mark_off_the_page_is_not_seen() {
         &[HELVETICA],
     );
     assert_eq!(shown(&content), "on");
+}
+
+const AXIAL: &str = "<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 1 0] \
+                     /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >>";
+
+fn shadings(content: &pdf::Content) -> Vec<Rect> {
+    content
+        .events
+        .iter()
+        .filter_map(|e| {
+            if let Event::Shading(s) = e {
+                Some(s.bbox)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn a_shading_painted_with_sh_covers_the_clip_within_its_bbox() {
+    let boxed = AXIAL.replace(">> >>", ">> /BBox [0 0 20 20] >>");
+    let (content, _) = events(
+        "/Resources << /Shading << /S 5 0 R /B 6 0 R >> >>",
+        "/S sh q 10 10 50 50 re W n /S sh /B sh Q q 100 10 50 50 re W n /B sh Q",
+        &[AXIAL, &boxed],
+    );
+    let r = |x0, y0, x1, y1| Rect { x0, y0, x1, y1 };
+    assert_eq!(
+        shadings(&content),
+        [
+            r(0.0, 0.0, 200.0, 100.0),
+            r(10.0, 40.0, 60.0, 90.0),
+            r(10.0, 80.0, 20.0, 90.0)
+        ]
+    );
+    assert_eq!(content.warnings, Vec::<String>::new());
+}
+
+#[test]
+fn a_fill_with_a_pattern_says_which_pattern_it_is() {
+    let tiling = common::stream(
+        "/PatternType 1 /PaintType 2 /TilingType 1 /BBox [0 0 4 4] /XStep 4 /YStep 4 /Resources << >>",
+        "0 0 2 2 re f",
+    );
+    let (content, _) = events(
+        "/Resources << /Pattern << /G 7 0 R /T 6 0 R >> >>",
+        "/Pattern cs /G scn 10 10 30 30 re f [/Pattern /DeviceRGB] cs 1 0 0 /T scn 50 10 5 5 re f \
+         /Missing scn 0 0 1 1 re f",
+        &[AXIAL, &tiling, "<< /PatternType 2 /Shading 5 0 R >>"],
+    );
+    let fills: Vec<_> = paths(&content)
+        .iter()
+        .map(|p| {
+            let color = &p.fill.as_ref().unwrap().color;
+            (color.pattern, color.components.clone(), color.rgb)
+        })
+        .collect();
+    assert_eq!(
+        fills,
+        [
+            (Some(Pattern::Shading), vec![], None),
+            (Some(Pattern::Tiling), vec![1.0, 0.0, 0.0], None),
+            (Some(Pattern::Tiling), vec![1.0, 0.0, 0.0], None), // the unreadable `scn` is skipped
+        ]
+    );
+    assert_eq!(content.warnings.len(), 1, "{:?}", content.warnings);
+    assert!(content.warnings[0].contains("Missing"));
+}
+
+#[test]
+fn text_in_a_clipping_mode_narrows_the_clip_to_its_glyphs_at_et() {
+    let (content, _) = events(
+        FONT,
+        "q BT 7 Tr /F1 10 Tf 10 50 Td (AB) Tj 0 Tr 100 0 Td (far) Tj ET \
+         150 10 5 5 re f 12 50 2 2 re f Q 150 10 5 5 re f \
+         BT 0 Tr /F1 10 Tf 10 50 Td (AB) Tj ET 150 10 5 5 re f",
+        &[HELVETICA],
+    );
+    assert_eq!(shown(&content), "ABfarAB"); // a clip mode's glyphs are reported, its mode with them
+    let modes: Vec<i64> = content
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Text(t) => Some(t.render_mode),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(modes, [7, 0, 0]);
+    assert_eq!(paths(&content).len(), 3); // only the square off the glyphs is cut, and only until `Q`
 }

@@ -177,14 +177,17 @@ def listed(sources: Sequence[Path]) -> list[Path]:
 
 
 def page_shapes(pdf: Path) -> list[float] | None:
-    """Each page's height over its width, when ``pdf`` opens here; None when only its viewer may open it (secured)."""
-    import pymupdf  # noqa: PLC0415
+    """Each page's height over its width as shown, when ``pdf`` opens here; None when only its viewer may open it.
+
+    A secured PDF (a password to open), or one this reader refuses, is its viewer's alone.
+    """
+    from document_lab import _pdf  # noqa: PLC0415
 
     try:
-        with pymupdf.open(pdf) as doc:
-            return None if doc.needs_pass else [page.rect.height / page.rect.width for page in doc]
-    except (RuntimeError, ValueError):
+        reader = _pdf.open(pdf.read_bytes(), b'')
+    except ValueError:
         return None
+    return [height / width for _, width, height in reader.pages]
 
 
 def page_box(pixels: np.ndarray) -> tuple[int, int, int, int]:

@@ -6,7 +6,6 @@ import pytest
 
 from document_lab.capture.export import (
     MAX_PAGE_PT,
-    PAGES_PER_SAVE,
     PdfWriter,
     PngWriter,
     a4_page_height,
@@ -67,13 +66,14 @@ def no_tesseract():
     raise RuntimeError(msg)
 
 
-def test_rows_written_in_pieces_make_the_same_pdf_across_incremental_saves(tmp_path):
-    tall = image(100 * (PAGES_PER_SAVE * 2 + 3) + 37)
+def test_rows_written_in_pieces_make_the_same_pdf(tmp_path):
+    tall = image(100 * 35 + 37)
     with PdfWriter(tmp_path / 'g.pdf', 80, page_height=100) as pdf:
         for start in range(0, len(tall), 73):
             pdf.write(tall[start : start + 73])
-    with pymupdf.open(tmp_path / 'g.pdf') as doc:
-        assert doc.page_count == PAGES_PER_SAVE * 2 + 4
+    assert pdf.pages == 36  # still said once closed
+    with pymupdf.open(tmp_path / 'g.pdf') as doc:  # another reader reads it as written
+        assert doc.page_count == 36
         assert np.array_equal(np.concatenate([pixels(p) for p in doc]), tall)
     assert sorted(p.name for p in tmp_path.iterdir()) == ['g.pdf']  # no .part left
 

@@ -117,3 +117,44 @@ def test_the_seam_is_cut_mid_overlap_so_a_border_caught_at_either_edge_is_left_o
     b = to_pdf(second, tmp_path / 'b.pdf', page_height=200)
     rows, _ = pdf_pixels(join(a, b, tmp_path / 'c.pdf', Match(outliers=0.05)).path)
     assert np.array_equal(rows, image)
+
+
+def pymupdf_capture(image, path, page_height):
+    """A capture as an earlier writer laid it out: each page an RGB image in an ICC-based color space."""
+    with pymupdf.open() as doc:
+        for top in range(0, len(image), page_height):
+            part = np.ascontiguousarray(image[top : top + page_height])
+            pix = pymupdf.Pixmap(pymupdf.csRGB, part.shape[1], len(part), part.tobytes(), 0)
+            rect = pymupdf.Rect(0, 0, pix.width * 0.75, pix.height * 0.75)
+            doc.new_page(width=rect.width, height=rect.height).insert_image(rect, pixmap=pix)
+        doc.save(path, deflate=True)
+    return path
+
+
+def test_a_capture_an_earlier_writer_laid_out_joins(tmp_path):
+    image = tall(1600)
+    a = pymupdf_capture(image[:900], tmp_path / 'a.pdf', 150)
+    b = to_pdf(image[700:], tmp_path / 'b.pdf', page_height=150)
+    rows, _ = pdf_pixels(join(a, b, tmp_path / 'c.pdf').path)
+    assert np.array_equal(rows, image)
+
+
+def test_a_copied_page_keeps_its_text_layer(tmp_path):
+    image = tall(2000)
+    a, b = two(tmp_path, image, 1200, 1000)
+    with pymupdf.open(a) as doc:
+        doc[0].insert_text((10, 20), 'layered', fontsize=8, render_mode=3)  # invisible, as an OCR layer lies
+        doc.save(tmp_path / 'ocr.pdf')
+    joined = join(tmp_path / 'ocr.pdf', b, tmp_path / 'c.pdf', head=200)
+    with pymupdf.open(joined.path) as out:
+        assert out[0].get_text().strip() == 'layered'
+    assert np.array_equal(pdf_pixels(joined.path)[0], image)
+
+
+def test_a_pdf_that_is_no_capture_is_refused_naming_its_page(tmp_path):
+    a = to_pdf(tall(400), tmp_path / 'a.pdf')
+    with pymupdf.open() as doc:
+        doc.new_page().insert_text((72, 72), 'words, no image')
+        doc.save(tmp_path / 'b.pdf')
+    with pytest.raises(ValueError, match=r'page 1 of b\.pdf holds 0 image\(s\)'):
+        join(a, tmp_path / 'b.pdf', tmp_path / 'c.pdf')

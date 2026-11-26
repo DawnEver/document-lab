@@ -4,8 +4,9 @@
 mod common;
 
 use pdf::color::Space;
-use pdf::writer::{Image, Writer};
-use pdf::{Event, File};
+use pdf::geometry::Rect;
+use pdf::writer::{Image, Word, Writer};
+use pdf::{Event, File, Object};
 
 /// Every text glyph a page draws, as its text.
 fn text(file: &File, page: &pdf::Page) -> String {
@@ -160,4 +161,154 @@ fn a_link_to_another_page_is_not_followed_into_the_whole_tree() {
     let copy = File::open(writer.finish().unwrap(), b"").unwrap();
     // catalog, page tree, the page, its content, the annotation: the link's target page is not copied again
     assert_eq!(copy.numbers().len(), 5);
+}
+
+/// Each span a page draws: its text, its box in page space, and its render mode.
+fn spans(file: &File, page: &pdf::Page) -> Vec<(String, [f64; 4], i64)> {
+    pdf::spans::spans(&file.interpret(page).unwrap().events)
+        .into_iter()
+        .map(|s| {
+            let b = s.bbox;
+            (s.text, [b.x0, b.y0, b.x1, b.y1], s.render_mode)
+        })
+        .collect()
+}
+
+fn word(text: &str, [x0, y0, x1, y1]: [f64; 4]) -> Word<'_> {
+    Word {
+        text,
+        bbox: Rect { x0, y0, x1, y1 },
+    }
+}
+
+/// `actual` is `expected` within a hundredth of a point at each edge.
+fn near(actual: [f64; 4], expected: [f64; 4]) -> bool {
+    actual
+        .iter()
+        .zip(expected)
+        .all(|(a, e)| (a - e).abs() < 0.01)
+}
+
+/// `source`'s first page copied with `words` laid over it, read back.
+fn laid(source: &[u8], words: &[Word]) -> (File, Vec<pdf::Page>) {
+    let source = File::open(source.to_vec(), b"").unwrap();
+    let mut writer = Writer::new(Vec::new()).unwrap();
+    writer
+        .copy_page_with_text(&source, &source.pages().unwrap()[0], words)
+        .unwrap();
+    let copy = File::open(writer.finish().unwrap(), b"").unwrap();
+    assert!(copy.repairs().is_empty(), "{:?}", copy.repairs());
+    let pages = copy.pages().unwrap();
+    (copy, pages)
+}
+
+#[test]
+fn a_text_layer_reads_back_invisible_over_its_words() {
+    let source = common::one_page("", "0 0 1 rg 0 0 200 100 re f", &[]);
+    let words = [
+        word("stator", [10.0, 20.0, 70.0, 35.0]),
+        word(
+            "\u{5b9a}\u{5b50}\u{7ed5}\u{7ec4}",
+            [100.0, 50.0, 180.0, 70.0],
+        ), // stator winding
+    ];
+    let (copy, pages) = laid(&source, &words);
+    let read = spans(&copy, &pages[0]);
+    assert_eq!(read.len(), 2, "{read:?}");
+    for ((text, bbox, mode), word) in read.iter().zip(&words) {
+        assert_eq!(text, word.text);
+        let b = word.bbox;
+        assert!(near(*bbox, [b.x0, b.y0, b.x1, b.y1]), "{bbox:?} for {text}");
+        assert_eq!(*mode, 3);
+    }
+    let events = copy.interpret(&pages[0]).unwrap().events;
+    assert!(events.iter().any(|e| matches!(e, Event::Path(_)))); // what the page drew is drawn still
+}
+
+#[test]
+fn a_text_layer_on_a_turned_page_lies_where_it_is_seen() {
+    let source = common::one_page("/Rotate 90 /CropBox [10 5 190 95]", "", &[]);
+    let (copy, pages) = laid(&source, &[word("turned", [12.0, 30.0, 60.0, 44.0])]);
+    assert_eq!(pages[0].size(), (90.0, 180.0));
+    let read = spans(&copy, &pages[0]);
+    assert_eq!(read.len(), 1, "{read:?}");
+    assert_eq!(read[0].0, "turned");
+    assert!(near(read[0].1, [12.0, 30.0, 60.0, 44.0]), "{read:?}");
+}
+
+#[test]
+fn what_the_page_leaves_changed_does_not_move_the_layer() {
+    // a content stream that leaves the page scaled, its text squeezed, raised and filled
+    let source = common::one_page("", "3 0 0 3 50 50 cm 4 Tz 9 Ts 2 Tr", &[]);
+    let (copy, pages) = laid(&source, &[word("kept", [10.0, 10.0, 40.0, 20.0])]);
+    let read = spans(&copy, &pages[0]);
+    assert!(near(read[0].1, [10.0, 10.0, 40.0, 20.0]), "{read:?}");
+    assert_eq!(read[0].2, 3);
+}
+
+#[test]
+fn a_page_s_own_fonts_and_text_are_kept_beside_the_layer() {
+    let font = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>";
+    let source = common::one_page(
+        "/Resources << /Font 5 0 R >>",
+        "BT /F1 12 Tf 10 20 Td (printed) Tj ET",
+        &["<< /F1 6 0 R >>", font],
+    );
+    let (copy, pages) = laid(&source, &[word("laid", [100.0, 10.0, 130.0, 20.0])]);
+    let texts: Vec<String> = spans(&copy, &pages[0]).into_iter().map(|s| s.0).collect();
+    assert_eq!(texts, ["printed", "laid"]);
+}
+
+/// A word with a character beyond the Basic Multilingual Plane (U+1D538, double-struck A): two UTF-16 units.
+const BEYOND_BMP: &str = "b\u{1d538}c";
+
+#[test]
+fn pages_laid_in_one_document_share_one_font_that_names_every_character() {
+    let source = common::one_page("", "", &[]);
+    let source = File::open(source, b"").unwrap();
+    let page = &source.pages().unwrap()[0];
+    let mut writer = Writer::new(Vec::new()).unwrap();
+    writer
+        .copy_page_with_text(&source, page, &[word("ab", [0.0, 0.0, 20.0, 10.0])])
+        .unwrap();
+    writer.copy_page(&source, page).unwrap();
+    writer
+        .copy_page_with_text(&source, page, &[word(BEYOND_BMP, [0.0, 0.0, 30.0, 10.0])])
+        .unwrap();
+    let copy = File::open(writer.finish().unwrap(), b"").unwrap();
+    let pages = copy.pages().unwrap();
+    assert_eq!(text(&copy, &pages[0]), "ab");
+    assert_eq!(text(&copy, &pages[1]), "");
+    assert_eq!(text(&copy, &pages[2]), BEYOND_BMP);
+    let fonts = copy
+        .numbers()
+        .into_iter()
+        .filter(|&n| {
+            let object = copy.object(n).unwrap();
+            object
+                .as_dict()
+                .and_then(|d| d.get(b"Subtype"))
+                .and_then(Object::as_name)
+                == Some(b"Type0")
+        })
+        .count();
+    assert_eq!(fonts, 1);
+}
+
+#[test]
+fn a_word_without_text_or_a_box_is_refused() {
+    let source = File::open(common::one_page("", "", &[]), b"").unwrap();
+    let page = &source.pages().unwrap()[0];
+    let mut writer = Writer::new(Vec::new()).unwrap();
+    for bad in [
+        word("", [0.0, 0.0, 10.0, 10.0]),
+        word("flat", [0.0, 5.0, 10.0, 5.0]),
+        word("nan", [f64::NAN, 0.0, 10.0, 10.0]),
+    ] {
+        let error = writer
+            .copy_page_with_text(&source, page, &[bad])
+            .unwrap_err();
+        assert!(error.message.contains("a word of a text layer"), "{error}");
+    }
+    assert_eq!(writer.pages(), 0);
 }

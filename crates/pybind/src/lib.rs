@@ -1,7 +1,8 @@
 //! `document_lab._pdf`: the `pdf` crate, exposed to Python as plain values -- no PDF logic of its own.
 //!
 //! `open(data, password)` reads a file; its `page(number, curve_samples, annotations)` returns what the page draws
-//! as tuples, which `document_lab.pdf` turns into the IR, and its `image(object)` an image's samples. `create(path)`
+//! as tuples, which `document_lab.pdf` turns into the IR, its `image(object)` an image's samples and its `rgb(object)`
+//! their sRGB where they show as they stand. `create(path)`
 //! writes a PDF of image pages, or of pages copied from a `Reader` (`document_lab.capture`).
 //!
 //! A refusal raises by its kind: [`Refused`] and its kinds when the reader refuses the input, `ValueError` for a
@@ -53,8 +54,9 @@ create_exception!(
 
 /// A box as `(x0, y0, x1, y1)`.
 type Box4 = (f64, f64, f64, f64);
-/// The layer an event is drawn in: hidden by optional content, and the subtype of the annotation drawing it.
-type LayerRow = (bool, Option<String>);
+/// The layer an event is drawn in: hidden by optional content, inkless (painted in the colorant `None`), and the
+/// subtype of the annotation drawing it.
+type LayerRow = (bool, bool, Option<String>);
 /// A span: text, font name (no subset tag), size, bold, box, render mode, the number it shares with the spans its
 /// words run on into with no space between (None: none), and its layer.
 type SpanRow = (
@@ -202,6 +204,12 @@ impl Reader {
         Ok((spans, paths, images, content.warnings))
     }
 
+    /// The image `XObject` `object`'s samples as 8-bit sRGB, three bytes a sample, rows top-down -- through its
+    /// profile when it has one -- when they show as they stand (`pdf::image::Samples::rgb`); None when they do not.
+    fn rgb(&self, object: u32) -> PyResult<Option<Vec<u8>>> {
+        Ok(self.file.image(object).map_err(|e| refused(&e))?.rgb())
+    }
+
     /// The samples of the image `XObject` `object`.
     fn image(&self, object: u32) -> PyResult<SamplesRow> {
         let samples = self.file.image(object).map_err(|e| refused(&e))?;
@@ -340,13 +348,13 @@ fn box4(r: Rect) -> Box4 {
 
 /// A layer as its row.
 fn layer(l: &Layer) -> LayerRow {
-    (l.hidden, l.annotation.clone())
+    (l.hidden, l.inkless, l.annotation.clone())
 }
 
 /// A pattern's kind, by name.
 fn pattern(p: Pattern) -> &'static str {
     match p {
-        Pattern::Tiling => "tiling",
+        Pattern::Tiling { .. } => "tiling",
         Pattern::Shading => "shading",
     }
 }

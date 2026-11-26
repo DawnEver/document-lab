@@ -5,10 +5,12 @@ are 1-based.
 A value from a format without geometry (an HTML table) cites a ``locator`` instead of a box.
 
 A value read off a page is drawn by its content, or by an annotation's appearance (``annotation``: its subtype, when
-the reader is asked for annotations). Optional content the file's default view hides (a layer turned off) is read
-too and flagged ``hidden`` for the caller to keep or drop (:meth:`Page.shown` drops it); ``hidden`` is False by
-default because content no hidden layer draws is seen. A module judging a page's content leaves hidden content
-out unless its ``include_hidden`` says otherwise.
+the reader is asked for annotations). What the page draws but its default view does not show is read too, flagged
+for the caller to keep or drop (:meth:`Page.shown` drops both): ``hidden``, drawn by optional content the default
+view hides (a layer turned off), and ``inkless``, painted in the colorant ``None``, which marks nothing in any view
+(a path, an image or a shading; text is text whatever its color, as an invisible OCR layer's is). Both are False
+by default because what neither flags is seen. A module judging a page's content leaves both out unless its
+``include_hidden`` or ``include_inkless`` says otherwise.
 """
 
 from __future__ import annotations
@@ -125,10 +127,12 @@ class TextSpan:
 class VectorPath:
     """One subpath of a page's vector drawing, curves flattened to points (``read_pdf``'s ``curve_samples`` each).
 
-    A color is sRGB in 0..1 -- a separation's or DeviceN's through its tint transform, a Lab color by the CIE
-    formulas (the reader's ``pdf::color`` says how each space converts) -- else, when the reader cannot convert it,
-    its own components; a pattern's has none but an uncolored tiling's tint. A paint in the colorant ``None`` marks
-    nothing and is no fill or stroke. A shading painted over the clip (``sh``) is the closed rectangle of the box it
+    A color is sRGB in 0..1 -- an ICC-based color through its profile, a separation's or DeviceN's through its
+    tint transform, a calibrated or Lab color by the CIE formulas, a device color by the standard's own (the reader's
+    ``pdf::color`` says how each space converts) -- else, when the reader cannot convert it, its own components; a
+    pattern's has none, but an uncolored tiling pattern's is its tint. A path painted in the colorant ``None`` is
+    ``inkless``, its color its tint's components; one whose fill marks and whose stroke does not (or the reverse) is
+    two paintings, one ``inkless``. A shading painted over the clip (``sh``) is the closed rectangle of the box it
     may cover, filled with a ``'shading'`` pattern.
     """
 
@@ -155,6 +159,8 @@ class VectorPath:
     group: int = 0
     #: Drawn by optional content the default view hides (see the module).
     hidden: bool = False
+    #: Painted in the colorant ``None``: it marks nothing (see the module).
+    inkless: bool = False
     #: The subtype of the annotation whose appearance draws it; None for the page's content.
     annotation: str | None = None
 
@@ -204,6 +210,8 @@ class Figure:
     image: int | None = None
     #: Drawn by optional content the default view hides (see the module).
     hidden: bool = False
+    #: A stencil mask painted, or samples, in the colorant ``None``: it marks nothing (see the module).
+    inkless: bool = False
     #: The subtype of the annotation whose appearance draws it; None for the page's content.
     annotation: str | None = None
 
@@ -238,15 +246,23 @@ class Page:
     #: Content the reader skipped and why (an operation it could not read), in words.
     warnings: tuple[str, ...] = ()
 
-    def shown(self, *, include_hidden: bool = False) -> Page:
-        """The page as its default view shows it: what hidden layers draw left out, unless ``include_hidden``."""
-        if include_hidden:
+    def shown(self, *, include_hidden: bool = False, include_inkless: bool = False) -> Page:
+        """The page as its default view shows it.
+
+        What hidden layers draw is left out unless ``include_hidden``, what the colorant ``None`` paints unless
+        ``include_inkless``.
+        """
+        if include_hidden and include_inkless:
             return self
         return dataclasses.replace(
             self,
-            spans=tuple(s for s in self.spans if not s.hidden),
-            paths=tuple(p for p in self.paths if not p.hidden),
-            figures=tuple(f for f in self.figures if not f.hidden),
+            spans=tuple(s for s in self.spans if include_hidden or not s.hidden),
+            paths=tuple(
+                p for p in self.paths if (include_hidden or not p.hidden) and (include_inkless or not p.inkless)
+            ),
+            figures=tuple(
+                f for f in self.figures if (include_hidden or not f.hidden) and (include_inkless or not f.inkless)
+            ),
         )
 
 
@@ -269,8 +285,9 @@ class Document:
         for page in self.pages:
             yield from page.spans
 
-    def shown(self, *, include_hidden: bool = False) -> Document:
+    def shown(self, *, include_hidden: bool = False, include_inkless: bool = False) -> Document:
         """The document as its default view shows it, page by page (:meth:`Page.shown`)."""
-        if include_hidden:
+        if include_hidden and include_inkless:
             return self
-        return dataclasses.replace(self, pages=tuple(p.shown() for p in self.pages))
+        pages = tuple(p.shown(include_hidden=include_hidden, include_inkless=include_inkless) for p in self.pages)
+        return dataclasses.replace(self, pages=pages)

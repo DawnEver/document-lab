@@ -36,7 +36,7 @@ fn main() {
                 continue;
             }
         };
-        match pdf::File::open(data) {
+        match pdf::File::open(data, b"") {
             Err(e) => {
                 println!("REFUSED {}: {e}", path.display());
                 refused += 1;

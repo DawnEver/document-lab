@@ -16,7 +16,8 @@ __all__ = ['DELTAS', 'REPO']
 REPO: Final = 'document-lab'
 
 DELTAS: Final[dict[str, Delta]] = {
-    '.gitattributes': Delta(repo=REPO, added=(), dropped={}, ceiling=0),
+    # A PDF fixture is bytes: a cross-reference row ends in a space the format requires.
+    '.gitattributes': Delta(repo=REPO, added=('*.pdf binary',), dropped={}, ceiling=1),
     # The built extension (`document_lab._pdf`) lands beside the Python sources: a build output, never source.
     '.gitignore': Delta(repo=REPO, added=('*.pyd', '*.so'), dropped={}, ceiling=2),
 }

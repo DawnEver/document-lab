@@ -3,3 +3,6 @@
 # this repo's own lines are its declared delta. Change one, re-render, commit.
 
 * text=auto eol=lf
+
+# --- document-lab delta, 1 of 1 allowed ---
+*.pdf binary

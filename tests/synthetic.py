@@ -7,6 +7,7 @@ is a known function sampled at known points, so a digitizer that is wrong cannot
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -383,6 +384,63 @@ def raster_pdf(
     doc.save(path)
     doc.close()
     return path, clip
+
+
+def image_pdf(
+    path: Path,
+    stored: bytes,
+    image: str,
+    *,
+    size: tuple[float, float],
+    matrix: Sequence[float] | None = None,
+    deflate: bool = True,
+    rotate: int = 0,
+    soft_mask: bytes | None = None,
+    over: Callable[[pymupdf.Page], object] | None = None,
+) -> Path:
+    """A one-page PDF of ``size`` points placing one image XObject, saved to ``path``.
+
+    ``image`` is the image dictionary's own entries (``/Width 4 /Height 2 /ColorSpace /DeviceGray ...``), ``stored``
+    its stream: deflated when ``deflate``, else stored as given (a codec's ``/Filter`` stated in ``image``).
+    ``matrix`` is the ``cm`` placing it (PDF space, y up; default the whole page, upright); ``rotate`` the page's
+    ``/Rotate``; ``soft_mask`` the 8-bit gray samples of an ``/SMask`` its size; ``over`` draws on the page after.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=size[0], height=size[1])
+    if soft_mask is not None:
+        mask = doc.get_new_xref()
+        width, height = (re.search(rf'/{k} (\d+)', image)[1] for k in ('Width', 'Height'))  # type: ignore[index]
+        entries = f'/Width {width} /Height {height} /ColorSpace /DeviceGray /BitsPerComponent 8'
+        doc.update_object(mask, f'<< /Type /XObject /Subtype /Image {entries} >>')
+        doc.update_stream(mask, soft_mask)
+        image += f' /SMask {mask} 0 R'
+    xobject = doc.get_new_xref()
+    doc.update_object(xobject, f'<< /Type /XObject /Subtype /Image {image} >>')
+    doc.update_stream(xobject, stored, compress=deflate)
+    if not deflate:  # storing it as given drops the dictionary's /Filter and its parameters: state them again
+        doc.update_object(xobject, f'<< /Type /XObject /Subtype /Image {image} /Length {len(stored)} >>')
+    content = doc.get_new_xref()
+    doc.update_object(content, '<< >>')
+    cm = ' '.join(f'{v:g}' for v in (matrix or (size[0], 0, 0, size[1], 0, 0)))
+    doc.update_stream(content, f'q {cm} cm /Im1 Do Q\n'.encode())
+    doc.xref_set_key(page.xref, 'Resources', f'<< /XObject << /Im1 {xobject} 0 R >> >>')
+    doc.xref_set_key(page.xref, 'Contents', f'{content} 0 R')
+    if rotate:
+        page.set_rotation(rotate)
+    if over is not None:
+        over(page)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def fax_g4(white: np.ndarray) -> bytes:
+    """``white`` -- rows of 1 white, 0 black, as CCITT fax decodes by default -- coded Group 4 by MuPDF."""
+    rows, columns = white.shape
+    packed = np.packbits(white.astype(np.uint8), axis=1).tobytes()
+    stride = len(packed) // rows
+    coded = pymupdf.mupdf.fz_compress_ccitt_fax_g4(pymupdf.mupdf.python_buffer_data(packed), columns, rows, stride)
+    return bytes(coded.fz_buffer_extract())
 
 
 TABLE_ROWS = (('Parameter', 'Value', 'Unit'), ('alpha', '1.25', 'mm'), ('beta', '-3', 'kg'), ('gamma', '4.5e2', 's'))

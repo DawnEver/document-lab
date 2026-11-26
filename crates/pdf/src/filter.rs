@@ -18,6 +18,61 @@ pub struct Codec {
     pub params: Option<Dict>,
 }
 
+/// A `CCITTFaxDecode` codec's parameters (ISO 32000-2 Table 11): each as stated, else the standard's default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fax {
+    /// The coding: negative pure two-dimensional (Group 4), 0 one-dimensional (Group 3), positive mixed (Group 3,
+    /// two-dimensional).
+    pub k: i64,
+    /// Samples across a row.
+    pub columns: i64,
+    /// Whether each row begins with an end-of-line code.
+    pub end_of_line: bool,
+    /// Whether each encoded row begins on a byte boundary.
+    pub byte_align: bool,
+    /// Whether 1 bits are black (else 0 bits are).
+    pub black_is_1: bool,
+}
+
+impl Codec {
+    /// Its parameters when it is `CCITTFaxDecode`; None for any other codec.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a parameter of the wrong kind.
+    pub fn fax(&self) -> Result<Option<Fax>> {
+        if self.name != b"CCITTFaxDecode" {
+            return Ok(None);
+        }
+        let empty = Dict::new();
+        let params = self.params.as_ref().unwrap_or(&empty);
+        let int = |key: &str, default: i64| match params.get(key.as_bytes()) {
+            None => Ok(default),
+            Some(v) => v.as_integer().ok_or_else(|| {
+                Error::malformed(format!(
+                    "CCITTFaxDecode's /{key} is an integer, not a {}",
+                    v.kind()
+                ))
+            }),
+        };
+        let flag = |key: &str, default: bool| match params.get(key.as_bytes()) {
+            None => Ok(default),
+            Some(Object::Bool(b)) => Ok(*b),
+            Some(v) => Err(Error::malformed(format!(
+                "CCITTFaxDecode's /{key} is a boolean, not a {}",
+                v.kind()
+            ))),
+        };
+        Ok(Some(Fax {
+            k: int("K", 0)?,
+            columns: int("Columns", 1728)?,
+            end_of_line: flag("EndOfLine", false)?,
+            byte_align: flag("EncodedByteAlign", false)?,
+            black_is_1: flag("BlackIs1", false)?,
+        }))
+    }
+}
+
 /// A stream's data after every lossless filter, and the image codec it is still in, if any.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decoded {
@@ -36,7 +91,7 @@ impl Decoded {
     pub fn into_bytes(self) -> Result<Vec<u8>> {
         match self.codec {
             None => Ok(self.data),
-            Some(c) => Err(Error::new(format!(
+            Some(c) => Err(Error::malformed(format!(
                 "the data is {} image data, which is decoded to pixels, not to bytes",
                 String::from_utf8_lossy(&c.name)
             ))),
@@ -61,9 +116,9 @@ pub fn decode(
     )?;
     let mut data = raw.to_vec();
     for (i, filter) in filters.iter().enumerate() {
-        let name = filter
-            .as_name()
-            .ok_or_else(|| Error::new(format!("a filter is a name, not a {}", filter.kind())))?;
+        let name = filter.as_name().ok_or_else(|| {
+            Error::malformed(format!("a filter is a name, not a {}", filter.kind()))
+        })?;
         let param = match params.get(i).map(resolve).transpose()? {
             Some(Object::Dict(d)) => Some(d),
             _ => None,
@@ -85,7 +140,7 @@ pub fn decode(
             }
             b"Crypt" => data, // the identity crypt filter; a named one is the security handler's, applied before
             other => {
-                return Err(Error::new(format!(
+                return Err(Error::unsupported(format!(
                     "unknown filter /{}",
                     String::from_utf8_lossy(other)
                 )));
@@ -150,7 +205,7 @@ fn ascii_hex(data: &[u8]) -> Result<Vec<u8>> {
             b'a'..=b'f' => b - b'a' + 10,
             b'A'..=b'F' => b - b'A' + 10,
             _ if crate::parser::is_whitespace(b) => continue,
-            _ => return Err(Error::at(i, "ASCIIHexDecode: not a hex digit")),
+            _ => return Err(Error::malformed_at(i, "ASCIIHexDecode: not a hex digit")),
         };
         match high.take() {
             Some(h) => out.push(h << 4 | v),
@@ -183,11 +238,19 @@ fn ascii85(data: &[u8]) -> Result<Vec<u8>> {
                 }
             }
             _ if crate::parser::is_whitespace(b) => {}
-            _ => return Err(Error::at(i - 1, "ASCII85Decode: not a base-85 digit")),
+            _ => {
+                return Err(Error::malformed_at(
+                    i - 1,
+                    "ASCII85Decode: not a base-85 digit",
+                ));
+            }
         }
     }
     if n == 1 {
-        return Err(Error::at(i, "ASCII85Decode: a final group of one digit"));
+        return Err(Error::malformed_at(
+            i,
+            "ASCII85Decode: a final group of one digit",
+        ));
     }
     if n > 1 {
         group[n..].fill(84);
@@ -198,7 +261,7 @@ fn ascii85(data: &[u8]) -> Result<Vec<u8>> {
 
 fn base85(group: [u8; 5], at: usize) -> Result<u32> {
     let v = group.iter().fold(0u64, |acc, &d| acc * 85 + u64::from(d));
-    u32::try_from(v).map_err(|_| Error::at(at, "ASCII85Decode: a group exceeds 2^32"))
+    u32::try_from(v).map_err(|_| Error::malformed_at(at, "ASCII85Decode: a group exceeds 2^32"))
 }
 
 fn run_length(data: &[u8]) -> Result<Vec<u8>> {
@@ -211,14 +274,14 @@ fn run_length(data: &[u8]) -> Result<Vec<u8>> {
             0..=127 => {
                 let run = data
                     .get(i..i + usize::from(len) + 1)
-                    .ok_or_else(|| Error::at(i, "RunLengthDecode: run cut short"))?;
+                    .ok_or_else(|| Error::malformed_at(i, "RunLengthDecode: run cut short"))?;
                 out.extend_from_slice(run);
                 i += usize::from(len) + 1;
             }
             _ => {
                 let &b = data
                     .get(i)
-                    .ok_or_else(|| Error::at(i, "RunLengthDecode: repeat cut short"))?;
+                    .ok_or_else(|| Error::malformed_at(i, "RunLengthDecode: repeat cut short"))?;
                 out.extend(std::iter::repeat_n(b, 257 - usize::from(len)));
                 i += 1;
             }
@@ -272,15 +335,16 @@ fn lzw(data: &[u8], early: bool) -> Result<Vec<u8>> {
                 }
             }
             std::cmp::Ordering::Equal => {
-                let p =
-                    prev.ok_or_else(|| Error::at(pos, "LZWDecode: a new code with no previous"))?;
+                let p = prev.ok_or_else(|| {
+                    Error::malformed_at(pos, "LZWDecode: a new code with no previous")
+                })?;
                 emit(&table, p, &mut out);
                 let first = out[start];
                 out.push(first);
                 table.push((Some(p), first, table[p].2 + 1));
             }
             std::cmp::Ordering::Greater => {
-                return Err(Error::at(pos, "LZWDecode: a code past the table"));
+                return Err(Error::malformed_at(pos, "LZWDecode: a code past the table"));
             }
         }
         prev = Some(code);
@@ -321,13 +385,13 @@ fn predict(data: &[u8], param: Option<&Dict>) -> Result<Vec<u8>> {
     match predictor {
         2 => tiff(data, row, colors, bpc),
         10..=15 => png(data, row, bpp),
-        other => Err(Error::new(format!("unknown predictor {other}"))),
+        other => Err(Error::malformed(format!("unknown predictor {other}"))),
     }
 }
 
 fn tiff(data: &[u8], row: usize, colors: usize, bpc: usize) -> Result<Vec<u8>> {
     if bpc != 8 {
-        return Err(Error::new(format!(
+        return Err(Error::unsupported(format!(
             "TIFF predictor with {bpc} bits per component is not read"
         )));
     }
@@ -346,7 +410,7 @@ fn png(data: &[u8], row: usize, bpp: usize) -> Result<Vec<u8>> {
     for (n, chunk) in data.chunks(row + 1).enumerate() {
         let (&kind, bytes) = chunk
             .split_first()
-            .ok_or_else(|| Error::new("PNG predictor: empty row"))?;
+            .ok_or_else(|| Error::malformed("PNG predictor: empty row"))?;
         let mut line = bytes.to_vec();
         line.resize(row, 0); // a last row cut short is completed with zeros
         for i in 0..row {
@@ -360,7 +424,7 @@ fn png(data: &[u8], row: usize, bpp: usize) -> Result<Vec<u8>> {
                 3 => u8::midpoint(left, up),
                 4 => nearest(left, up, up_left),
                 _ => {
-                    return Err(Error::new(format!(
+                    return Err(Error::malformed(format!(
                         "PNG predictor: unknown row filter {kind} on row {n}"
                     )));
                 }
@@ -480,6 +544,7 @@ mod tests {
 
     #[test]
     fn an_unknown_filter_is_refused() {
-        assert!(run(b"<< /Filter /Nope >>", b"x").is_err());
+        let refused = run(b"<< /Filter /Nope >>", b"x").unwrap_err();
+        assert_eq!(refused.kind, crate::error::Kind::Unsupported);
     }
 }

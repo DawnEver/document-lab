@@ -1,24 +1,62 @@
 //! `document_lab._pdf`: the `pdf` crate, exposed to Python as plain values -- no PDF logic of its own.
 //!
 //! `open(data, password)` reads a file; its `page(number, curve_samples)` returns what the page draws as tuples,
-//! which `document_lab.pdf` turns into the IR, and its `image(object)` an image's samples. `create(path)` writes a
-//! PDF of image pages, or of pages copied from a `Reader` (`document_lab.capture`).
+//! which `document_lab.pdf` turns into the IR, and its `image(object)` an image's samples. `create(path, level)` writes a
+//! PDF of image pages, or of pages copied from a `Reader` (`document_lab.capture`), perhaps with a text layer laid
+//! over them (`document_lab.ocr`).
+//!
+//! A refusal raises by its kind: [`Refused`] and its kinds when the reader refuses the input, `ValueError` for a
+//! request it cannot honor, `OSError` when writing fails.
 
 use std::fs;
 use std::io::BufWriter;
 use std::path::PathBuf;
 
-use pdf::color::Color;
-use pdf::geometry::{Point, Rect};
-use pdf::interpret::{Event, PathEvent, Segment};
+use pdf::error::Kind;
+use pdf::geometry::Rect;
+use pdf::image::Placement;
+use pdf::interpret::{Event, PathEvent};
 use pdf::writer::Image;
+use pyo3::create_exception;
 use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
 
+create_exception!(
+    document_lab._pdf,
+    Refused,
+    PyValueError,
+    "The reader refuses the input: one of its kinds says why."
+);
+create_exception!(
+    document_lab._pdf,
+    NotPdf,
+    Refused,
+    "The input is no PDF at all."
+);
+create_exception!(
+    document_lab._pdf,
+    Locked,
+    Refused,
+    "The PDF is encrypted and the password given -- none, or a wrong one -- opens no access."
+);
+create_exception!(
+    document_lab._pdf,
+    Unsupported,
+    Refused,
+    "The PDF uses what the reader does not read (a security handler, a filter)."
+);
+create_exception!(
+    document_lab._pdf,
+    Malformed,
+    Refused,
+    "The input is not what a PDF must be."
+);
+
 /// A box as `(x0, y0, x1, y1)`.
 type Box4 = (f64, f64, f64, f64);
-/// A span: text, font name, size, descriptor flags, font weight, box, render mode.
-type SpanRow = (String, String, f64, i64, Option<f64>, Box4, i64);
+/// A span: text, font name (no subset tag), size, bold, box, render mode, and the number it shares with the spans
+/// its words run on into with no space between (None: none).
+type SpanRow = (String, String, f64, bool, Box4, i64, Option<usize>);
 /// A path (one subpath): points, closed, stroke color, line width, dashes, dash phase, fill color, even-odd, and
 /// the index of the painted path it belongs to on its page.
 type PathRow = (
@@ -32,12 +70,17 @@ type PathRow = (
     bool,
     usize,
 );
-/// An image: box, sample width and height, object number (None inline).
-type ImageRow = (Box4, i64, i64, Option<u32>);
+/// An image: box, sample width and height, object number (None inline), the matrix `(a, b, c, d, e, f)` from its
+/// unit square to page space, and how it shows its samples (`pdf::image::Placement`: turned, rows reversed, columns
+/// reversed; None when it is skewed).
+type ImageRow = (Box4, i64, i64, Option<u32>, [f64; 6], Option<PlacementRow>);
+/// An image placed square to the page: whether its rows run down the page, and its rows and columns shown reversed.
+type PlacementRow = (bool, bool, bool);
 /// What a page draws: spans, paths, images, warnings.
 type PageRows = (Vec<SpanRow>, Vec<PathRow>, Vec<ImageRow>, Vec<String>);
 /// An image's samples: width, height, color space family (None: a stencil mask), components, bits per component,
-/// the data after every lossless filter, and the image codec it is still in (None: raw samples).
+/// the data after every lossless filter, the image codec it is still in (None: raw samples), its `/Decode` array
+/// (None: not stated), whether it states a mask, and its fax coding when its codec is `CCITTFaxDecode`.
 type SamplesRow = (
     i64,
     i64,
@@ -46,7 +89,12 @@ type SamplesRow = (
     i64,
     Vec<u8>,
     Option<String>,
+    Option<Vec<f64>>,
+    bool,
+    Option<FaxRow>,
 );
+/// A `CCITTFaxDecode` image's coding: K, columns, end-of-line codes, rows byte-aligned, 1 bits black.
+type FaxRow = (i64, i64, bool, bool, bool);
 
 /// A PDF opened.
 #[pyclass(unsendable)]
@@ -88,15 +136,15 @@ impl Reader {
         let spans = pdf::spans::spans(&content.events)
             .into_iter()
             .map(|s| {
-                let font = &s.font;
+                let (font, bold) = (s.font.name_without_subset().to_string(), s.font.bold());
                 (
                     s.text,
-                    font.name.clone(),
+                    font,
                     s.size,
-                    font.flags,
-                    font.weight,
+                    bold,
                     box4(s.bbox),
                     s.render_mode,
+                    s.unspaced,
                 )
             })
             .collect();
@@ -106,11 +154,19 @@ impl Reader {
         for event in &content.events {
             match event {
                 Event::Path(path) => {
-                    paths.extend(subpaths(path, curve_samples.max(1), painted));
+                    paths.extend(subpaths(path, curve_samples, painted));
                     painted += 1;
                 }
                 Event::Image(image) => {
-                    images.push((box4(image.bbox), image.width, image.height, image.object));
+                    images.push((
+                        box4(image.bbox),
+                        image.width,
+                        image.height,
+                        image.object,
+                        image.matrix.0,
+                        Placement::of(&image.matrix)
+                            .map(|p| (p.turned, p.rows_reversed, p.columns_reversed)),
+                    ));
                 }
                 Event::Text(_) => {}
             }
@@ -121,6 +177,10 @@ impl Reader {
     /// The samples of the image `XObject` `object`.
     fn image(&self, object: u32) -> PyResult<SamplesRow> {
         let samples = self.file.image(object).map_err(|e| refused(&e))?;
+        let fax = match &samples.codec {
+            Some(codec) => codec.fax().map_err(|e| refused(&e))?,
+            None => None,
+        };
         let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
         Ok((
             samples.width,
@@ -133,6 +193,9 @@ impl Reader {
             samples.bits,
             samples.data,
             samples.codec.map(|c| text(&c.name)),
+            samples.decode,
+            samples.masked,
+            fax.map(|f| (f.k, f.columns, f.end_of_line, f.byte_align, f.black_is_1)),
         ))
     }
 }
@@ -144,21 +207,36 @@ struct Writer {
     inner: Option<pdf::writer::Writer<BufWriter<fs::File>>>,
 }
 
-/// Start a PDF at `path` (created, or emptied).
+/// Start a PDF at `path` (created, or emptied), the streams it builds compressed at zlib `level` (0-10).
 #[pyfunction]
+#[pyo3(signature = (path, level = pdf::writer::LEVEL))]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "pyo3 hands a path over owned"
 )]
-fn create(path: PathBuf) -> PyResult<Writer> {
+fn create(path: PathBuf, level: u8) -> PyResult<Writer> {
+    if level > 10 {
+        return Err(PyValueError::new_err(format!(
+            "a compression level is 0 to 10, not {level}"
+        )));
+    }
     let file = fs::File::create(&path)
         .map_err(|e| PyOSError::new_err(format!("{}: {e}", path.display())))?;
-    let inner = pdf::writer::Writer::new(BufWriter::new(file)).map_err(|e| refused(&e))?;
+    let inner = pdf::writer::Writer::new(BufWriter::new(file), level).map_err(|e| refused(&e))?;
     Ok(Writer { inner: Some(inner) })
 }
 
+/// The Python exception of `e`'s kind.
 fn refused(e: &pdf::Error) -> PyErr {
-    PyValueError::new_err(e.to_string())
+    let message = e.to_string();
+    match e.kind {
+        Kind::NotPdf => NotPdf::new_err(message),
+        Kind::Password => Locked::new_err(message),
+        Kind::Unsupported => Unsupported::new_err(message),
+        Kind::Malformed => Malformed::new_err(message),
+        Kind::Invalid => PyValueError::new_err(message),
+        Kind::Io => PyOSError::new_err(message),
+    }
 }
 
 #[pymethods]
@@ -209,6 +287,36 @@ impl Writer {
             .map_err(|e| refused(&e))
     }
 
+    /// Add page `number` (1-based) of `reader` as the next page, with `words` -- `(text, (x0, y0, x1, y1))`, each
+    /// box in page space -- laid over it as an invisible text layer.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "pyo3 hands a list over owned"
+    )]
+    fn copy_page_with_text(
+        &mut self,
+        reader: &Reader,
+        number: usize,
+        words: Vec<(String, Box4)>,
+    ) -> PyResult<()> {
+        let page = reader.at(number)?;
+        let words: Vec<pdf::writer::Word> = words
+            .iter()
+            .map(|(text, (x0, y0, x1, y1))| pdf::writer::Word {
+                text,
+                bbox: Rect {
+                    x0: *x0,
+                    y0: *y0,
+                    x1: *x1,
+                    y1: *y1,
+                },
+            })
+            .collect();
+        self.open()?
+            .copy_page_with_text(&reader.file, page, &words)
+            .map_err(|e| refused(&e))
+    }
+
     /// Finish the file: its page tree and cross-reference table; the pages written. Closing twice is refused.
     fn close(&mut self) -> PyResult<usize> {
         let writer = self
@@ -243,67 +351,25 @@ fn box4(r: Rect) -> Box4 {
     (r.x0, r.y0, r.x1, r.y1)
 }
 
-/// A color as RGB when its space defines it, else as its own components.
-fn color(c: &Color) -> Vec<f64> {
-    c.rgb
-        .map_or_else(|| c.components.clone(), |rgb| rgb.to_vec())
-}
-
-/// A painted path as one row per subpath, curves flattened.
+/// A painted path as one row per subpath, its curves flattened to `samples` points.
 fn subpaths(path: &PathEvent, samples: usize, group: usize) -> Vec<PathRow> {
     let stroke = path.stroke.as_ref();
-    let row = |points: Vec<(f64, f64)>, closed: bool| -> PathRow {
-        (
-            points,
-            closed,
-            stroke.map(|s| color(&s.color)),
-            stroke.map_or(0.0, |s| s.width),
-            stroke.map_or_else(Vec::new, |s| s.dashes.clone()),
-            stroke.map_or(0.0, |s| s.dash_phase),
-            path.fill.as_ref().map(|f| color(&f.color)),
-            path.fill.as_ref().is_some_and(|f| f.even_odd),
-            group,
-        )
-    };
-    let mut out = Vec::new();
-    let mut points: Vec<(f64, f64)> = Vec::new();
-    let mut closed = false;
-    let mut last = Point { x: 0.0, y: 0.0 };
-    for segment in &path.segments {
-        match *segment {
-            Segment::MoveTo(p) => {
-                if points.len() > 1 {
-                    out.push(row(std::mem::take(&mut points), closed));
-                }
-                points = vec![(p.x, p.y)];
-                closed = false;
-                last = p;
-            }
-            Segment::LineTo(p) => {
-                points.push((p.x, p.y));
-                last = p;
-            }
-            Segment::CurveTo(c1, c2, p) => {
-                for i in 1..=samples {
-                    #[expect(clippy::cast_precision_loss, reason = "a sample count is small")]
-                    let t = i as f64 / samples as f64;
-                    let u = 1.0 - t;
-                    let weights = [u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t];
-                    let [w0, w1, w2, w3] = weights;
-                    points.push((
-                        w0 * last.x + w1 * c1.x + w2 * c2.x + w3 * p.x,
-                        w0 * last.y + w1 * c1.y + w2 * c2.y + w3 * p.y,
-                    ));
-                }
-                last = p;
-            }
-            Segment::Close => closed = true,
-        }
-    }
-    if points.len() > 1 {
-        out.push(row(points, closed));
-    }
-    out
+    pdf::paths::subpaths(&path.segments, samples)
+        .into_iter()
+        .map(|sub| {
+            (
+                sub.points.iter().map(|p| (p.x, p.y)).collect(),
+                sub.closed,
+                stroke.map(|s| s.color.rgb_or_components()),
+                stroke.map_or(0.0, |s| s.width),
+                stroke.map_or_else(Vec::new, |s| s.dashes.clone()),
+                stroke.map_or(0.0, |s| s.dash_phase),
+                path.fill.as_ref().map(|f| f.color.rgb_or_components()),
+                path.fill.as_ref().is_some_and(|f| f.even_odd),
+                group,
+            )
+        })
+        .collect()
 }
 
 #[pymodule]
@@ -314,5 +380,11 @@ fn extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Reader>()?;
     module.add_function(wrap_pyfunction!(create, module)?)?;
     module.add_class::<Writer>()?;
+    let py = module.py();
+    module.add("Refused", py.get_type::<Refused>())?;
+    module.add("NotPdf", py.get_type::<NotPdf>())?;
+    module.add("Locked", py.get_type::<Locked>())?;
+    module.add("Unsupported", py.get_type::<Unsupported>())?;
+    module.add("Malformed", py.get_type::<Malformed>())?;
     Ok(())
 }

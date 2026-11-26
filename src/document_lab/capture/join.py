@@ -76,7 +76,7 @@ class _Capture:
             if len(placed) != 1 or placed[0][3] is None:
                 msg = f'page {number} of {self.path.name} holds {len(placed)} image(s), not one: it is no capture'
                 raise ValueError(msg)
-            _, width, height, obj = placed[0]
+            _, width, height, obj, *_ = placed[0]
             self._images[index] = _Image(obj, width, height, page_width)
         return self._images[index]
 
@@ -91,7 +91,7 @@ class _Capture:
 
     def rows(self, index: int) -> np.ndarray:
         """Page ``index``'s pixels, ``(h, w, 3)`` uint8."""
-        width, height, space, components, bits, data, codec = self.reader.image(self.image(index).object)
+        width, height, space, components, bits, data, codec, *_ = self.reader.image(self.image(index).object)
         if codec is not None or bits != 8 or components not in {1, 3}:  # noqa: PLR2004 -- 8-bit samples
             msg = (
                 f'page {index + 1} of {self.path.name} is a {space} image of {components} x {bits}-bit samples'
@@ -233,7 +233,7 @@ def join(
             _second(joined, b, cut, dx, dpi)
         joined.close()
     except BaseException:
-        with contextlib.suppress(ValueError):  # closed already: the failure came after
+        with contextlib.suppress(ValueError, OSError):  # closed already, or its write fails too: the first stands
             joined.close()
         part.unlink(missing_ok=True)
         raise

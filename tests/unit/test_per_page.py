@@ -6,7 +6,7 @@ import numpy as np
 import pymupdf
 
 from document_lab.capture.export import to_pdf
-from document_lab.per_page import write_pages
+from document_lab.per_page import RENDER_DPI, write_pages
 
 
 def test_each_page_gets_its_markdown_and_image_and_the_index_names_them(tmp_path):
@@ -32,12 +32,29 @@ def test_each_page_gets_its_markdown_and_image_and_the_index_names_them(tmp_path
     assert '- [page 1](page-001.md) -- 4 Duty' in index
 
 
-def test_a_page_that_is_one_image_keeps_its_own_pixels(tmp_path):
+def test_a_page_that_is_one_image_keeps_its_own_pixels(tmp_path, monkeypatch):
     image = np.random.default_rng(1).integers(0, 256, (90, 70, 3), dtype=np.uint8)
-    done = write_pages(to_pdf(image, tmp_path / 'capture.pdf'), tmp_path / 'out')
+    capture = to_pdf(image, tmp_path / 'capture.pdf')
+    monkeypatch.setattr(pymupdf.Page, 'get_pixmap', None)  # taken from the reader's samples, never rendered
+    done = write_pages(capture, tmp_path / 'out')
     assert done.textless == (1,)
     pix = pymupdf.Pixmap(str(tmp_path / 'out' / 'page-001.png'))
     assert np.array_equal(np.frombuffer(pix.samples, dtype=np.uint8).reshape(90, 70, 3), image)
+
+
+def test_a_page_of_text_placing_one_small_image_is_rendered_whole_not_taken_for_the_image(tmp_path):
+    """A standard's cover: its text, and one image -- the publisher's logo -- that is not the page."""
+    logo = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 30, 20), False)
+    logo.set_rect(logo.irect, (0, 90, 160))
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=400, height=300)
+        page.insert_image(pymupdf.Rect(20, 20, 80, 60), pixmap=logo)
+        page.insert_text((40, 120), 'Rotating electrical machines', fontsize=14)
+        doc.save(tmp_path / 'cover.pdf')
+    write_pages(tmp_path / 'cover.pdf', tmp_path / 'out')
+    pix = pymupdf.Pixmap(str(tmp_path / 'out' / 'page-001.png'))
+    assert abs(pix.width - 400 * RENDER_DPI / 72) <= 1  # the renderer rounds the page's edges outward
+    assert abs(pix.height - 300 * RENDER_DPI / 72) <= 1
 
 
 def test_figures_tables_and_equations_are_cut_out_and_linked_where_their_text_is(tmp_path):

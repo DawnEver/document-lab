@@ -56,7 +56,8 @@ impl Dict {
     }
 }
 
-/// A stream: its dictionary and its data as stored in the file (still encoded, still encrypted).
+/// A stream: its dictionary and its data as stored in the file, still encoded (decrypted once read from an encrypted
+/// file).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stream {
     /// The stream dictionary.

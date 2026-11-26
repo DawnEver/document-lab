@@ -1,6 +1,7 @@
-"""`gpu` (marker-pdf on a CUDA GPU), `vendor` (a real vendor PDF), `ocr` (Tesseract) and `windows` (a Windows desktop)
-are declared resources: base never selects them, so they cannot skip inside it. The first three are declared
-unproduced on hosted runners (none exists there); `windows` is an OS, so it runs on the hosted windows runner."""
+"""`gpu` (marker-pdf on a CUDA GPU), `vendor` (a real vendor PDF), `reference` (a corpus of real PDFs), `ocr`
+(Tesseract) and `windows` (a Windows desktop) are declared resources: base never selects them, so they cannot skip
+inside it. All but `windows` are declared unproduced on hosted runners (none exists there); `windows` is an OS, so it
+runs on the hosted windows runner."""
 
 import tomllib
 from pathlib import Path
@@ -10,14 +11,15 @@ from lab_commons.hpc.needsets import BASE, read_vocabulary, selecting
 
 from tests.gpu import test_marker
 from tests.ocr import test_ocr
+from tests.reference import test_reference
 from tests.vendor import test_vendor_pdf
 from tests.windows import test_capture_desktop
 
 PYPROJECT = Path(__file__).resolve().parents[2] / 'pyproject.toml'
 
 
-RESOURCES = {'gpu', 'vendor', 'ocr', 'windows'}
-UNPRODUCED = {'gpu', 'vendor', 'ocr'}
+RESOURCES = {'gpu', 'vendor', 'reference', 'ocr', 'windows'}
+UNPRODUCED = {'gpu', 'vendor', 'reference', 'ocr'}
 
 
 def test_each_is_a_declared_resource_so_base_excludes_it():
@@ -40,5 +42,6 @@ def test_all_but_windows_are_declared_unproduced():
 def test_each_part_marks_its_whole_module():
     assert test_marker.pytestmark.name == 'gpu'
     assert test_vendor_pdf.pytestmark.name == 'vendor'
+    assert test_reference.pytestmark.name == 'reference'
     assert test_capture_desktop.pytestmark.name == 'windows'
     assert test_ocr.pytestmark.name == 'ocr'

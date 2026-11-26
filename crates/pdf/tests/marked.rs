@@ -1,8 +1,10 @@
 //! Marked content: what optional content a default view hides draws is reported in a hidden layer; `/ActualText`
-//! replaces the text of the glyphs it spans.
+//! replaces the text of the glyphs it spans, the text they draw kept; each event carries the `/MCID` it is drawn
+//! under, the stream holding it, and whether an `/Artifact` holds it.
 
 mod common;
 
+use pdf::interpret::Marked;
 use pdf::spans::spans;
 use pdf::{Content, Event, File};
 
@@ -36,7 +38,7 @@ const OC: &str = "/OCProperties << /OCGs [6 0 R 7 0 R] /D << /OFF [7 0 R] >> >>"
 /// The two groups as marked-content properties.
 const PROPERTIES: &str = "/Properties << /On 6 0 R /Off 7 0 R >>";
 
-/// The text of the glyphs in the layer `hidden` says, glyph by glyph.
+/// The text of the glyphs in the layer `hidden` states (an `/ActualText`'s where one is), glyph by glyph.
 fn text_in(content: &Content, hidden: bool) -> String {
     content
         .events
@@ -45,7 +47,12 @@ fn text_in(content: &Content, hidden: bool) -> String {
             Event::Text(t) if t.layer.hidden == hidden => Some(
                 t.glyphs
                     .iter()
-                    .map(|g| g.text.clone().unwrap_or_else(|| "\u{FFFD}".into()))
+                    .map(|g| {
+                        g.actual_text
+                            .clone()
+                            .or_else(|| g.text.clone())
+                            .unwrap_or_else(|| "\u{FFFD}".into())
+                    })
                     .collect::<String>(),
             ),
             _ => None,
@@ -144,7 +151,7 @@ fn hidden_content_ends_at_its_own_emc_across_nesting_and_q() {
         OC,
         PROPERTIES,
         "BT /F1 10 Tf 10 50 Td \
-         /OC /Off BDC (a) Tj /Span BMC (b) Tj EMC (c) Tj q Q /P << /MCID 0 >> BDC (d) Tj EMC (e) Tj EMC \
+         /OC /Off BDC (a) Tj /Span BMC (b) Tj EMC (c) Tj q Q /P << /Lang (en) >> BDC (d) Tj EMC (e) Tj EMC \
          (f) Tj ET \
          q /OC /Off BDC Q 0 0 5 5 re f EMC 0 0 5 5 re f",
         &[],
@@ -268,38 +275,44 @@ fn without_optional_content_properties_every_group_shows() {
 }
 
 #[test]
-fn actual_text_replaces_the_text_of_the_glyphs_it_spans() {
+fn actual_text_replaces_the_text_of_the_glyphs_it_spans_keeping_what_they_draw() {
     let content = page(
         "",
         "",
         "BT /F1 10 Tf 10 50 Td (Ex) Tj /Span << /ActualText (fi) >> BDC (XY) Tj EMC (nal) Tj ET",
         &[],
     );
-    let glyphs: Vec<Option<String>> = content
+    let glyphs: Vec<(String, Option<String>)> = content
         .events
         .iter()
         .filter_map(|e| match e {
-            Event::Text(t) => Some(t.glyphs.iter().map(|g| g.text.clone())),
+            Event::Text(t) => Some(
+                t.glyphs
+                    .iter()
+                    .map(|g| (g.text.clone().unwrap(), g.actual_text.clone())),
+            ),
             _ => None,
         })
         .flatten()
         .collect();
-    let some = |s: &str| Some(s.to_string());
+    let drawn = |s: &str| (s.to_string(), None);
+    let stated = |s: &str, actual: &str| (s.to_string(), Some(actual.to_string()));
     assert_eq!(
         glyphs,
         [
-            some("E"),
-            some("x"),
-            some("fi"),
-            some(""),
-            some("n"),
-            some("a"),
-            some("l")
+            drawn("E"),
+            drawn("x"),
+            stated("X", "fi"),
+            stated("Y", ""),
+            drawn("n"),
+            drawn("a"),
+            drawn("l")
         ]
     );
     let read = spans(&content.events);
     assert_eq!(read.len(), 1);
     assert_eq!(read[0].text, "Exfinal");
+    assert_eq!(read[0].drawn.as_deref(), Some("ExXYnal"));
     // Every glyph's box is kept: the span ends where `l` does, the replaced `Y` inside it.
     let Event::Text(last) = content.events.last().unwrap() else {
         panic!()
@@ -330,6 +343,116 @@ fn an_empty_actual_text_takes_a_hyphen_out_of_the_text_but_not_its_box() {
     let read = spans(&content.events);
     assert_eq!(read.len(), 1);
     assert_eq!(read[0].text, "example");
+    assert_eq!(read[0].drawn.as_deref(), Some("exam-ple"));
+}
+
+#[test]
+fn a_span_no_actual_text_touches_states_no_drawn_text_apart() {
+    let content = page("", "", "BT /F1 10 Tf 10 50 Td (plain) Tj ET", &[]);
+    let read = spans(&content.events);
+    assert_eq!(
+        (read[0].text.as_str(), read[0].drawn.as_deref()),
+        ("plain", None)
+    );
+}
+
+/// Each event's marked content, in drawing order.
+fn marks(content: &Content) -> Vec<Marked> {
+    content
+        .events
+        .iter()
+        .map(|e| match e {
+            Event::Path(p) => p.marked,
+            Event::Image(i) => i.marked,
+            Event::Text(t) => t.marked,
+            Event::Shading(s) => s.marked,
+        })
+        .collect()
+}
+
+fn mark(mcid: i64, stream: Option<u32>) -> Marked {
+    Marked {
+        mcid: Some(mcid),
+        stream,
+        artifact: false,
+    }
+}
+
+#[test]
+fn each_event_carries_the_mcid_of_the_innermost_sequence_with_one() {
+    let content = page(
+        "",
+        "/Properties << /Named << /MCID 4 >> >>",
+        "0 0 1 1 re f /P << /MCID 0 >> BDC 0 0 2 2 re f /Span BMC 0 0 3 3 re f EMC          /Span << /MCID 1 >> BDC BT /F1 10 Tf 10 50 Td (a) Tj ET EMC EMC /P /Named BDC 0 0 4 4 re f EMC",
+        &[],
+    );
+    assert_eq!(
+        marks(&content),
+        [
+            Marked::default(),
+            mark(0, None),
+            mark(0, None),
+            mark(1, None),
+            mark(4, None)
+        ]
+    );
+}
+
+#[test]
+fn a_forms_own_mcid_names_its_stream_and_a_form_inside_a_page_sequence_belongs_to_it() {
+    let tagged = common::stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 50 50]",
+        "/P << /MCID 0 >> BDC 0 0 9 9 re f EMC 0 0 8 8 re f",
+    );
+    let content = page(
+        "",
+        "/XObject << /A 8 0 R >>",
+        "/A Do /Figure << /MCID 3 >> BDC /A Do EMC",
+        &[&tagged],
+    );
+    assert_eq!(
+        marks(&content),
+        [
+            mark(0, Some(8)),
+            Marked::default(),
+            mark(0, Some(8)),
+            mark(3, None)
+        ]
+    );
+}
+
+#[test]
+fn what_an_artifact_sequence_holds_is_flagged_an_artifact() {
+    let content = page(
+        "",
+        "",
+        "/Artifact BMC 0 0 1 1 re f EMC /Artifact << /Type /Pagination >> BDC 0 0 2 2 re f EMC 0 0 3 3 re f",
+        &[],
+    );
+    let artifacts: Vec<bool> = marks(&content).iter().map(|m| m.artifact).collect();
+    assert_eq!(artifacts, [true, true, false]);
+}
+
+#[test]
+fn a_span_never_joins_glyphs_of_two_marked_sequences() {
+    let content = page(
+        "",
+        "",
+        "BT /F1 10 Tf 10 50 Td /Span << /MCID 0 >> BDC (ab) Tj EMC /Span << /MCID 1 >> BDC (cd) Tj EMC ET",
+        &[],
+    );
+    let read: Vec<(String, Option<i64>, Option<usize>)> = spans(&content.events)
+        .into_iter()
+        .map(|s| (s.text, s.marked.mcid, s.unspaced))
+        .collect();
+    // Two spans, one word: the second continues the first with no gap between.
+    assert_eq!(
+        read,
+        [
+            ("ab".into(), Some(0), Some(0)),
+            ("cd".into(), Some(1), Some(0))
+        ]
+    );
 }
 
 #[test]

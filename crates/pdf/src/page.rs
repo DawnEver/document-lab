@@ -17,6 +17,8 @@ const MAX_DEPTH: usize = 64;
 pub struct Page {
     /// 1-based, in document order.
     pub number: usize,
+    /// The page dictionary's object number; None for a page written directly in its parent's `/Kids`.
+    pub object: Option<u32>,
     /// The page dictionary.
     pub dict: Dict,
     /// Its resources (inherited when the page names none).
@@ -81,13 +83,14 @@ impl File {
         };
         let mut pages = Vec::new();
         let mut seen = HashSet::new();
-        self.walk(&root, &Inherited::default(), &mut pages, &mut seen, 0)?;
+        self.walk(&root, None, &Inherited::default(), &mut pages, &mut seen, 0)?;
         Ok(pages)
     }
 
     fn walk(
         &self,
         node: &Dict,
+        object: Option<u32>,
         above: &Inherited,
         pages: &mut Vec<Page>,
         seen: &mut HashSet<u32>,
@@ -113,7 +116,7 @@ impl File {
             Some(Object::Array(kids)) => kids,
             _ if node.get(b"Type").and_then(Object::as_name) == Some(b"Pages") => Vec::new(),
             _ => {
-                self.leaf(node, &here, pages);
+                self.leaf(node, object, &here, pages);
                 return Ok(());
             }
         };
@@ -127,7 +130,10 @@ impl File {
                 )));
             }
             match self.resolve(kid)? {
-                Object::Dict(d) => self.walk(&d, &here, pages, seen, depth + 1)?,
+                Object::Dict(d) => {
+                    let object = kid.as_reference().map(|r| r.num);
+                    self.walk(&d, object, &here, pages, seen, depth + 1)?;
+                }
                 Object::Null => {}
                 other => {
                     return Err(Error::malformed(format!(
@@ -140,7 +146,7 @@ impl File {
         Ok(())
     }
 
-    fn leaf(&self, dict: &Dict, inherited: &Inherited, pages: &mut Vec<Page>) {
+    fn leaf(&self, dict: &Dict, object: Option<u32>, inherited: &Inherited, pages: &mut Vec<Page>) {
         let number = pages.len() + 1;
         // A page without a media box is read as US Letter, as every viewer does (7.7.3.3 makes it required).
         let media_box = inherited.media_box.unwrap_or_else(|| {
@@ -166,6 +172,7 @@ impl File {
         let turns = inherited.rotate.unwrap_or(0).rem_euclid(360) / 90;
         pages.push(Page {
             number,
+            object,
             dict: dict.clone(),
             resources: inherited.resources.clone().unwrap_or_default(),
             media_box,

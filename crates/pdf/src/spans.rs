@@ -3,7 +3,11 @@
 //! Consecutive glyphs join while their font, size and writing direction hold and each starts where the last
 //! ended: on its baseline (within [`BASELINE`] sizes) and no further on than [`BREAK`] sizes. A gap wider than
 //! [`SPACE`] sizes with no space glyph in it reads as a space, as the eye reads it. Text events are taken in
-//! drawing order, so a span never joins glyphs drawn apart, nor glyphs of two layers (hidden, an annotation's).
+//! drawing order, so a span never joins glyphs drawn apart, nor glyphs of two layers (hidden, an annotation's), nor
+//! glyphs of two marked-content sequences a structure tree may refer to apart ([`Marked`]).
+//!
+//! A span's text is what its glyphs state: an `/ActualText`'s replacement where one is stated. The text the glyphs'
+//! fonts give is kept beside it ([`Span::drawn`]) whenever a replacement changed it, so neither is lost.
 //!
 //! Where a word gap is, is this module's alone. A span continues the word of another that ends at most [`SPACE`]
 //! sizes before its start, raised or lowered by no more than [`RISE`] sizes, no space glyph between -- a change
@@ -21,7 +25,7 @@ use std::rc::Rc;
 use crate::accents;
 use crate::font::FontInfo;
 use crate::geometry::{Point, Rect};
-use crate::interpret::{Event, Layer, TextEvent};
+use crate::interpret::{Event, Layer, Marked, TextEvent};
 
 /// A gap wider than this many font sizes between two glyphs is a space.
 pub const SPACE: f64 = 0.15;
@@ -36,8 +40,10 @@ pub const RISE: f64 = 0.5;
 /// A run of text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Span {
-    /// Its text; a glyph no source names is U+FFFD.
+    /// Its text -- an `/ActualText`'s replacement where one is stated; a glyph no source names is U+FFFD.
     pub text: String,
+    /// The text its glyphs' fonts give, when an `/ActualText` replaced any of it; None when `text` is that already.
+    pub drawn: Option<String>,
     /// Its font.
     pub font: Rc<FontInfo>,
     /// The font size in page space.
@@ -48,6 +54,8 @@ pub struct Span {
     pub render_mode: i64,
     /// The layer its glyphs are drawn in: a span never joins glyphs of two.
     pub layer: Layer,
+    /// The marked content its glyphs are drawn in: a span never joins glyphs of two sequences.
+    pub marked: Marked,
     /// The number it shares, on its page, with the spans it continues or that continue it, no word gap between:
     /// a change of font, size or baseline inside a word (`Head` set bold in `Headline`; the `2` of `H2O`). None
     /// when it continues no span and none continues it.
@@ -56,6 +64,9 @@ pub struct Span {
 
 struct Open {
     span: Span,
+    /// The text its glyphs' fonts give, and whether an `/ActualText` replaced any of it.
+    drawn: String,
+    replaced: bool,
     /// Where its first glyph starts.
     origin: Point,
     end: Point,
@@ -64,11 +75,13 @@ struct Open {
     inked: bool,
 }
 
-/// A glyph as spans read it: its text event, its text (U+FFFD when no source names it), where it starts and ends,
-/// and its box.
+/// A glyph as spans read it: its text event, its text (U+FFFD when no source names it) as stated and as its font
+/// gives it, where it starts and ends, and its box.
 struct Placed<'a> {
     event: &'a TextEvent,
     text: Cow<'a, str>,
+    drawn: Cow<'a, str>,
+    replaced: bool,
     origin: Point,
     end: Point,
     bbox: Rect,
@@ -77,22 +90,7 @@ struct Placed<'a> {
 /// The spans of a page's events, in drawing order.
 #[must_use]
 pub fn spans(events: &[Event]) -> Vec<Span> {
-    let mut glyphs: Vec<Placed> = events
-        .iter()
-        .filter_map(|event| match event {
-            Event::Text(text) => Some(text),
-            _ => None,
-        })
-        .flat_map(|event| {
-            event.glyphs.iter().map(move |glyph| Placed {
-                event,
-                text: Cow::Borrowed(glyph.text.as_deref().unwrap_or("\u{FFFD}")),
-                origin: glyph.origin,
-                end: glyph.end,
-                bbox: glyph.bbox,
-            })
-        })
-        .collect();
+    let mut glyphs = placed(events);
     compose_accents(&mut glyphs);
     let mut out: Vec<Open> = Vec::new();
     let mut open: Option<Open> = None;
@@ -115,7 +113,12 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
             if gap && !o.span.text.ends_with(' ') && !piece.starts_with(' ') {
                 o.span.text.push(' ');
             }
+            if gap && !o.drawn.ends_with(' ') && !glyph.drawn.starts_with(' ') {
+                o.drawn.push(' ');
+            }
             o.span.text.push_str(piece);
+            o.drawn.push_str(&glyph.drawn);
+            o.replaced |= glyph.replaced;
             let ink = inks(piece);
             if ink {
                 o.span.bbox = if o.inked {
@@ -132,13 +135,17 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
         open = Some(Open {
             span: Span {
                 text: piece.to_string(),
+                drawn: None,
                 font: Rc::clone(&text.font),
                 size: text.size,
                 bbox: glyph.bbox,
                 render_mode: text.render_mode,
                 layer: text.layer.clone(),
+                marked: text.marked,
                 unspaced: None,
             },
+            drawn: glyph.drawn.to_string(),
+            replaced: glyph.replaced,
             origin: glyph.origin,
             end: glyph.end,
             direction,
@@ -154,7 +161,40 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
             let mut span = o.span;
             let trimmed = span.text.trim_end().len();
             span.text.truncate(trimmed);
-            Span { unspaced, ..span }
+            let drawn = o.replaced.then(|| o.drawn.trim_end().to_string());
+            Span {
+                drawn,
+                unspaced,
+                ..span
+            }
+        })
+        .collect()
+}
+
+/// Every glyph of `events`' text, in drawing order, as spans read it.
+fn placed(events: &[Event]) -> Vec<Placed<'_>> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Text(text) => Some(text),
+            _ => None,
+        })
+        .flat_map(|event| {
+            event.glyphs.iter().map(move |glyph| {
+                let drawn = Cow::Borrowed(glyph.text.as_deref().unwrap_or("\u{FFFD}"));
+                Placed {
+                    event,
+                    text: glyph
+                        .actual_text
+                        .as_deref()
+                        .map_or_else(|| drawn.clone(), Cow::Borrowed),
+                    drawn,
+                    replaced: glyph.actual_text.is_some(),
+                    origin: glyph.origin,
+                    end: glyph.end,
+                    bbox: glyph.bbox,
+                }
+            })
         })
         .collect()
 }
@@ -207,6 +247,9 @@ fn compose_accents(glyphs: &mut Vec<Placed>) {
             }
             if let Some(text) = accents::compose(&glyphs[j].text, mark) {
                 glyphs[j].text = Cow::Owned(text);
+                if let Some(drawn) = accents::compose(&glyphs[j].drawn, mark) {
+                    glyphs[j].drawn = Cow::Owned(drawn);
+                }
                 glyphs[j].bbox = glyphs[j].bbox.union(glyphs[i].bbox);
                 gone[i] = true;
                 break;
@@ -253,6 +296,7 @@ fn join(open: &Open, text: &TextEvent, origin: Point, direction: (f64, f64)) -> 
         || (open.span.size - text.size).abs() > 0.01 * size
         || open.span.render_mode != text.render_mode
         || open.span.layer != text.layer
+        || open.span.marked != text.marked
         || (open.direction.0 - direction.0).abs() + (open.direction.1 - direction.1).abs() > 0.01
     {
         return None;

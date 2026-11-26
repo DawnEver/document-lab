@@ -8,7 +8,8 @@
 //! resolved by reference), [`page`] (the page tree), [`content`] (a content stream's operations), [`font`] and [`cmap`], [`color`] and
 //! [`geometry`], [`image`] (an image's samples), [`optional`] (which optional content shows), and [`interpret`] (what a
 //! page draws, as events in page space),
-//! read as [`spans`] (runs of text) and [`paths`] (subpaths, curves flattened).
+//! read as [`spans`] (runs of text) and [`paths`] (subpaths, curves flattened). [`structure`] reads a tagged PDF's
+//! structure tree: its elements in order, and the marked content each covers.
 //! [`writer`] writes a PDF of image pages, or of pages copied from a [`File`].
 
 mod accents;
@@ -33,6 +34,7 @@ pub mod page;
 pub mod parser;
 pub mod paths;
 pub mod spans;
+pub mod structure;
 pub mod writer;
 pub mod xref;
 

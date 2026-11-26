@@ -43,7 +43,7 @@ class _Located:
     """The regions a picture page's text locates (`document_lab.regions`), read once per document, per page."""
 
     def __init__(self, pdf_path: Path) -> None:
-        self.read = read_pdf(pdf_path, tables=False)
+        self.read = read_pdf(pdf_path)
         self.body = layout.body_size(self.read)
 
     def crop(self, page_num: int, label: str) -> pymupdf.Rect | None:

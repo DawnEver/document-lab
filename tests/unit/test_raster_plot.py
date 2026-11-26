@@ -46,7 +46,7 @@ def test_a_vector_curve_says_its_basis_and_has_no_pixel_uncertainty(tmp_path):
     from tests.synthetic import plot_pdf  # noqa: PLC0415
 
     spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)])
-    (plot,) = plots(read_pdf(plot_pdf(tmp_path / 'v.pdf', spec), tables=False).page(1))
+    (plot,) = plots(read_pdf(plot_pdf(tmp_path / 'v.pdf', spec)).page(1))
     (curve,) = plot.curves
     assert (curve.basis, curve.x_uncertainty, curve.y_uncertainty) == ('vector', None, None)
 

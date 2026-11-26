@@ -15,7 +15,7 @@ XS = [float(x) for x in range(0, 101, 10)]
 
 
 def _one_plot(tmp_path, spec, **kwargs):
-    doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec), tables=False)
+    doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec))
     (plot,) = plots(doc.page(1), **kwargs)
     return plot
 
@@ -222,7 +222,7 @@ def test_a_label_off_the_tick_row_or_outside_the_frame_is_not_a_tick(tmp_path):
 
 def test_ticks_that_are_not_monotone_along_the_axis_are_refused(tmp_path):
     spec = PlotSpec(Axis([0, 50, 100], labels=['0', '100', '50']), Axis([0, 50, 100]), [(lambda x: x, XS, RED)])
-    doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec), tables=False)
+    doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec))
     with pytest.raises(ValueError, match='monotone'):
         plots(doc.page(1))
 
@@ -362,7 +362,7 @@ def test_a_bare_digit_without_power_of_ten_labels_still_refuses_a_non_monotone_a
         Axis([1, 3, 10, 30, 100], log=True, labels=['1', '5', '10', '5', '100']),
         [(lambda x: 10 ** (x / 50), XS, RED)],
     )
-    doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec), tables=False)
+    doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec))
     with pytest.raises(ValueError, match='not monotone'):
         plots(doc.page(1))
 
@@ -374,7 +374,7 @@ def test_an_outlined_exponent_set_a_point_apart_is_still_the_power(tmp_path):
         Axis([1, 10, 100, 1000], log=True, power_labels=True, exponent_gap=1.0),
         [(lambda x: 10 ** (x / 50), XS, RED)],
     )
-    doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False)
+    doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True))
     (plot,) = plots(doc.page(1))
     assert sorted(v for _, v in plot.y.ticks) == pytest.approx([1, 10, 100, 1000], rel=1e-12, abs=0)
 
@@ -407,7 +407,7 @@ def test_labels_set_as_glyph_outlines_calibrate_the_axes(tmp_path):
     x = Axis([-50, 0, 50, 100, 500, 1000], at=[0, 0.2, 0.4, 0.6, 0.8, 1])
     xs = [-50.0, 0.0, 70.0, 300.0, 1000.0]
     spec = PlotSpec(x, Axis([0, 100, 200, 300, 400, 500]), [(lambda v: v / 4 + 200, xs, RED)])
-    doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False)
+    doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True))
     assert not doc.page(1).spans  # the planted premise: nothing here is text
     (plot,) = plots(doc.page(1))
     assert sorted(v for _, v in plot.x.ticks) == [-50, 0, 50, 100, 500, 1000]
@@ -424,7 +424,7 @@ def test_outlined_powers_of_ten_and_a_drawn_minus_read_as_their_values(tmp_path)
         Axis([0.01, 0.1, 1, 10, 100], log=True, power_labels=True, vector_minus=True),
         [(lambda x: 10 ** (x / 50), [-50.0, 0.0, 100.0], RED)],
     )
-    doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False)
+    doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True))
     (plot,) = plots(doc.page(1))
     assert sorted(v for _, v in plot.x.ticks) == [-50, 0, 50, 100]
     assert sorted(v for _, v in plot.y.ticks) == pytest.approx([0.01, 0.1, 1, 10, 100], rel=1e-12, abs=0)
@@ -437,7 +437,7 @@ def test_outlined_units_and_grades_read_as_text(tmp_path):
     words = ['mT', 'degC', 'N96', 'N88', 'kHz', 'oO0']
     stray = [(w, 450.0, 120.0 + 20 * k, 8.0) for k, w in enumerate(words)]
     spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=stray)
-    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False).page(1)
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1)
     assert not page.spans  # the planted premise: nothing here is text
     text = outline_text(page)
     assert sorted(s.text for s in text) == sorted(words)  # tick labels are numbers, not text
@@ -448,7 +448,7 @@ def test_outlined_units_and_grades_read_as_text(tmp_path):
 def test_an_outlined_legend_names_its_sample_line(tmp_path):
     legend = [('N96', RED, None), ('100mT', BLUE, None)]
     spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], legend=legend)
-    (plot,) = plots(read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False).page(1))
+    (plot,) = plots(read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1))
     assert sorted(s.label for s in plot.legend) == ['100mT', 'N96']
 
 
@@ -456,7 +456,7 @@ def test_a_letter_the_reference_font_draws_as_another_is_refused_not_guessed(tmp
     """``l`` and ``I`` are one bar in Helvetica: a word holding either is absent, never read as its twin."""
     stray = [('Il', 450.0, 120.0, 8.0), ('l', 450.0, 140.0, 8.0), ('mT', 450.0, 160.0, 8.0)]
     spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=stray)
-    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False).page(1)
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1)
     assert [s.text for s in outline_text(page)] == ['mT']  # the control beside them still reads
 
 
@@ -464,14 +464,14 @@ def test_a_letter_the_reference_font_draws_as_another_is_refused_not_guessed(tmp
 def test_an_unreadable_outlined_tick_label_refuses_the_frame_by_name(tmp_path, label):
     """Older SIFERRIT sheets: a label the glyph reader cannot read was dropped and the axis fit from the rest."""
     spec = PlotSpec(Axis([0, 50, 100], labels=['0', '50', label]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)])
-    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False).page(1)
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1)
     with pytest.raises(UnrecognizedFrame, match='unrecognized frame'):
         plots(page)
 
 
 def test_a_recognized_outlined_frame_still_reads_beside_an_outlined_axis_title(tmp_path):
     spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=[('Il', 240.0, 325.0, 8.0)])
-    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False).page(1)
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1)
     (plot,) = plots(page)  # an unreadable word below the label row is a title, not a label
     assert sorted(v for _, v in plot.x.ticks) == [0, 50, 100]
 
@@ -482,7 +482,7 @@ def test_outlined_lowercase_words_dotted_letters_and_primes_read_as_text(tmp_pat
     words = ['max.', 'min.', mu + "'", mu + "''", 'mT']
     stray = [(w, 450.0, 120.0 + 20 * k, 8.0) for k, w in enumerate(words)]
     spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=stray)
-    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False).page(1)
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1)
     assert sorted(s.text for s in outline_text(page)) == sorted(words)
 
 
@@ -490,7 +490,7 @@ def test_an_outlined_word_is_read_at_its_own_scale_and_a_lone_letter_by_shape_al
     """``ox`` tops at the x-height and ``OX`` at the ascent; a lone ``x`` has no baseline to tell ``x`` from ``X``."""
     stray = [('ox', 450.0, 120.0, 8.0), ('OX', 450.0, 140.0, 8.0), ('x', 450.0, 160.0, 8.0), ('B', 450.0, 180.0, 8.0)]
     spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=stray)
-    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False).page(1)
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1)
     assert sorted(s.text for s in outline_text(page)) == ['B', 'OX', 'ox']
 
 
@@ -498,7 +498,7 @@ def test_an_outlined_number_before_min_or_max_is_one_bound_span(tmp_path):
     """TDK E-core drawings: a window span set ``12.5 min.`` is a lower bound, not a bare number beside a word."""
     stray = [('12.5', 420.0, 400.0, 8.0), ('min.', 440.0, 400.0, 8.0), ('3', 420.0, 430.0, 8.0)]
     spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=stray)
-    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True), tables=False).page(1)
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1)
     (span,) = outline_text(page)  # the lone 3 stays a number
     assert span.text == '12.5 min.'
     assert bound(span.text) == ('min', 12.5)
@@ -527,13 +527,13 @@ def test_axes_drawn_through_the_corner_still_frame_the_plot(tmp_path, grid):
 
 
 def _one_plot_list(tmp_path, spec):
-    return plots(read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec), tables=False).page(1))
+    return plots(read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec)).page(1))
 
 
 def test_a_page_whose_every_labeled_frame_fails_to_read_raises_naming_the_page_and_frame(tmp_path):
     """SIFERRIT N72 p3: a frame with one readable x label read as no plot and raised nothing."""
     spec = PlotSpec(Axis([0, 50, 100], labels=['', '50', '']), Axis([0, 50, 100]), [(lambda x: x, XS, RED)])
-    doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec), tables=False)
+    doc = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec))
     with pytest.raises(UnreadFrame, match=r'page 1: .*\(100\.0, 100\.0, 400\.0, 300\.0\)'):
         plots(doc.page(1))
 
@@ -545,7 +545,7 @@ def test_a_readable_frame_beside_an_unreadable_one_is_still_returned(tmp_path):
     doc[0].draw_rect(pymupdf.Rect(450, 400, 550, 500), color=(0, 0, 0), width=0.8)
     doc[0].insert_text((440, 503), '7', fontname='helv', fontsize=8)  # one label: the box reads as no plot
     doc.save(tmp_path / 'two.pdf')
-    (plot,) = plots(read_pdf(tmp_path / 'two.pdf', tables=False).page(1))
+    (plot,) = plots(read_pdf(tmp_path / 'two.pdf').page(1))
     assert tuple(plot.frame) == pytest.approx((100, 100, 400, 300), abs=0.5)  # points
 
 
@@ -553,7 +553,7 @@ def _with_stroke(tmp_path, spec, points):
     doc = pymupdf.open(plot_pdf(tmp_path / 'plot.pdf', spec))
     doc[0].draw_polyline(points, color=BLUE, width=1.0)
     doc.save(tmp_path / 'stroked.pdf')
-    return read_pdf(tmp_path / 'stroked.pdf', tables=False).page(1)
+    return read_pdf(tmp_path / 'stroked.pdf').page(1)
 
 
 def _left_of_50(spec):
@@ -587,7 +587,7 @@ def _with_multiplier(tmp_path, spec, cy):
     doc = pymupdf.open(plot_pdf(tmp_path / 'plot.pdf', spec))
     _power_label(doc[0], 1e-6, spec.frame.x0 - 4, cy, vector_minus=False, span_minus=True, minus_glyph='_')
     doc.save(tmp_path / 'multiplied.pdf')
-    return read_pdf(tmp_path / 'multiplied.pdf', tables=False).page(1)
+    return read_pdf(tmp_path / 'multiplied.pdf').page(1)
 
 
 def test_a_power_of_ten_stacked_under_the_end_label_scales_the_axis(tmp_path):
@@ -610,7 +610,7 @@ def _outlined_with(tmp_path, spec, draw):
     doc = pymupdf.open(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True))
     draw(doc[0])
     doc.save(tmp_path / 'drawn.pdf')
-    return read_pdf(tmp_path / 'drawn.pdf', tables=False).page(1)
+    return read_pdf(tmp_path / 'drawn.pdf').page(1)
 
 
 def _log_grid(**kwargs):
@@ -637,9 +637,7 @@ def test_an_outlined_axis_title_arrowhead_in_the_label_column_is_no_tick_label(t
 
 def test_an_unreadable_outlined_word_in_the_label_column_still_refuses(tmp_path):
     """The control: a real glyph the reader cannot read where the arrowhead sat still refuses the frame."""
-    page = read_pdf(
-        plot_pdf(tmp_path / 'plot.pdf', _log_grid(stray=[('Il', 85.0, 143.0, 8.0)]), outlined=True), tables=False
-    ).page(1)
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', _log_grid(stray=[('Il', 85.0, 143.0, 8.0)]), outlined=True)).page(1)
     with pytest.raises(UnrecognizedFrame, match='unrecognized frame'):
         plots(page)
 
@@ -669,7 +667,7 @@ def _stroked_lettered(tmp_path, where):
     doc = pymupdf.open(plot_pdf(tmp_path / 'plot.pdf', spec))
     _stroked_digits(doc[0], spec, where=where)
     doc.save(tmp_path / 'stroked.pdf')
-    return read_pdf(tmp_path / 'stroked.pdf', tables=False).page(1)
+    return read_pdf(tmp_path / 'stroked.pdf').page(1)
 
 
 def test_tick_labels_drawn_as_stroked_lettering_refuse_the_frame_by_name(tmp_path):
@@ -691,7 +689,7 @@ def test_a_text_exponent_set_apart_from_its_ten_is_still_the_power(tmp_path, gap
         Axis([1, 10, 100, 1000], log=True, power_labels=True, exponent_gap=gap),
         [(lambda x: 10 ** (x / 50), XS, RED)],
     )
-    (plot,) = plots(read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec), tables=False).page(1))
+    (plot,) = plots(read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec)).page(1))
     assert sorted(v for _, v in plot.y.ticks) == pytest.approx([1, 10, 100, 1000], rel=1e-12, abs=0)
 
 
@@ -718,7 +716,7 @@ def test_a_readable_frame_beside_a_stroke_lettered_one_is_still_returned(tmp_pat
     draw_plot(doc[0], lettered)
     _stroked_digits(doc[0], lettered)
     doc.save(tmp_path / 'both.pdf')
-    (plot,) = plots(read_pdf(tmp_path / 'both.pdf', tables=False).page(1))
+    (plot,) = plots(read_pdf(tmp_path / 'both.pdf').page(1))
     assert tuple(plot.frame) == pytest.approx((100, 100, 400, 300), abs=0.5)  # points
 
 
@@ -740,7 +738,7 @@ def _stroke_page(tmp_path, spec, draw=None):
     if draw is not None:
         draw(doc[0])
     doc.save(tmp_path / 'lettered.pdf')
-    return read_pdf(tmp_path / 'lettered.pdf', tables=False).page(1)
+    return read_pdf(tmp_path / 'lettered.pdf').page(1)
 
 
 def test_tick_labels_in_the_stroke_font_calibrate_the_axes(tmp_path):
@@ -862,7 +860,7 @@ def test_a_rotated_outlined_y_title_in_the_label_column_is_no_tick_label(tmp_pat
     titled = PlotSpec(Axis([0, 50, 100]), y, [(lambda x: x, XS, RED)], y_title=planted)
     control = PlotSpec(Axis([0, 50, 100]), y, [(lambda x: x, XS, RED)])
     read = [
-        plots(read_pdf(plot_pdf(tmp_path / f'{k}.pdf', spec, outlined=True), tables=False).page(1))
+        plots(read_pdf(plot_pdf(tmp_path / f'{k}.pdf', spec, outlined=True)).page(1))
         for k, spec in enumerate((titled, control))
     ]
     (plot,), (bare,) = read

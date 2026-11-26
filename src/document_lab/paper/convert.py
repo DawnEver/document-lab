@@ -72,7 +72,7 @@ def convert(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> tuple[str,
     used = tool or choose_tool()
     flat = out_dir / 'img' / 'flat'
     flat.mkdir(parents=True, exist_ok=True)
-    return (_run_marker(pdf, out_dir) if used == 'marker' else to_markdown(read_pdf(pdf, tables=False))), used
+    return (_run_marker(pdf, out_dir) if used == 'marker' else to_markdown(read_pdf(pdf))), used
 
 
 def _run_marker(pdf: Path, out_dir: Path) -> str:

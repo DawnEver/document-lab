@@ -158,7 +158,7 @@ def _clauses(markdown: str) -> str:
 
 def write_pages(pdf: Path, out: Path) -> Paged:
     """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive."""
-    read = read_pdf(pdf, tables=False)
+    read = read_pdf(pdf)
     body = layout.body_size(read)
     texts = page_markdowns(read)
     width = max(3, len(str(len(texts))))

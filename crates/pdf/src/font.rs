@@ -409,8 +409,30 @@ impl File {
             .and_then(Object::as_number)
             .unwrap_or(0.0);
         let standard = base14(name);
+        let encoding = self.simple_encoding(dict, subtype, standard, descriptor.as_ref())?;
+        Ok((
+            descriptor,
+            Kind::Simple {
+                first,
+                widths,
+                missing,
+                encoding,
+                base14: standard,
+            },
+            false,
+        ))
+    }
+
+    /// A simple font's text by code: its base encoding (named, built into its program, or by its kind) with its
+    /// `/Differences` over it.
+    fn simple_encoding(
+        &self,
+        dict: &Dict,
+        subtype: &str,
+        standard: Option<&'static Metrics>,
+        descriptor: Option<&Dict>,
+    ) -> Result<Vec<Option<String>>> {
         let symbolic = descriptor
-            .as_ref()
             .and_then(|d| d.get(b"Flags"))
             .and_then(Object::as_integer)
             .is_some_and(|f| f & 4 != 0);
@@ -444,12 +466,19 @@ impl File {
         };
         let mut encoding: Vec<Option<String>> = (0..=255u8)
             .map(|b| base.and_then(|m| m.get(b)).map(String::from))
+            // The tables map code 32, the glyph `space`, to U+00A0; it is U+0020 (the AGL's `space`).
+            .map(|t| {
+                if t.as_deref() == Some("\u{A0}") {
+                    Some(" ".to_string())
+                } else {
+                    t
+                }
+            })
             .collect();
         // An embedded Type 1 program with no base encoding named: the program's own encoding is the base.
         if base_name.is_none()
             && matches!(subtype, "Type1" | "MMType1")
             && let Some(Object::Stream(program)) = descriptor
-                .as_ref()
                 .map(|d| self.get(d, b"FontFile"))
                 .transpose()?
                 .flatten()
@@ -478,17 +507,7 @@ impl File {
                 }
             }
         }
-        Ok((
-            descriptor,
-            Kind::Simple {
-                first,
-                widths,
-                missing,
-                encoding,
-                base14: standard,
-            },
-            false,
-        ))
+        Ok(encoding)
     }
 
     fn composite(&self, dict: &Dict) -> Result<(Option<Dict>, Kind, bool)> {

@@ -66,10 +66,10 @@ def _page(reader: _pdf.Reader, number: int, size: tuple[float, float], here: Pro
 
 
 def _span(row: tuple, here: Provenance) -> TextSpan:
-    text, font, size, flags, weight, box, _mode = row
+    text, font, size, flags, weight, box, _mode, vertical = row
     name = _SUBSET.sub('', font)
     bold = bool(flags & FORCE_BOLD) or (weight or 0) >= BOLD_WEIGHT or 'bold' in name.lower()
-    return TextSpan(text, size, name, here.at(bbox=BBox(*box)), bold)
+    return TextSpan(text, size, name, here.at(bbox=BBox(*box)), bold, vertical)
 
 
 def _path(row: tuple, here: Provenance) -> VectorPath:

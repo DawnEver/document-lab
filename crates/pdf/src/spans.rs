@@ -1,9 +1,10 @@
-//! Glyphs to spans: runs of text in one font and size along one baseline, the unit a page's text is read in.
+//! Glyphs to spans: runs of text in one font and size along one baseline -- or down one column, when the font writes
+//! vertically -- the unit a page's text is read in.
 //!
-//! Consecutive glyphs join while their font, size and writing direction hold and each starts where the last
+//! Consecutive glyphs join while their font, size, writing mode and direction hold and each starts where the last
 //! ended: on its baseline (within [`BASELINE`] sizes) and no further on than [`BREAK`] sizes. A gap wider than
 //! [`SPACE`] sizes with no space glyph in it reads as a space, as the eye reads it. Text events are taken in
-//! drawing order, so a span never joins glyphs drawn apart.
+//! drawing order, so a span never joins glyphs drawn apart, and a vertical span's text reads top to bottom.
 
 use std::rc::Rc;
 
@@ -31,6 +32,8 @@ pub struct Span {
     pub bbox: Rect,
     /// The text rendering mode it was shown in (3: invisible, as an OCR text layer is).
     pub render_mode: i64,
+    /// Whether it is written vertically (its font's writing mode): its text reads down its column.
+    pub vertical: bool,
 }
 
 struct Open {
@@ -56,7 +59,12 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
                     (glyph.end.y - glyph.origin.y) / length,
                 )
             } else {
-                open.as_ref().map_or((1.0, 0.0), |o| o.direction)
+                let along = if text.vertical {
+                    (0.0, 1.0)
+                } else {
+                    (1.0, 0.0)
+                };
+                open.as_ref().map_or(along, |o| o.direction)
             };
             let piece = glyph.text.as_deref().unwrap_or("\u{FFFD}");
             let joined = open
@@ -89,6 +97,7 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
                     size: text.size,
                     bbox: glyph.bbox,
                     render_mode: text.render_mode,
+                    vertical: text.vertical,
                 },
                 end: glyph.end,
                 direction,
@@ -112,6 +121,7 @@ fn join(open: &Open, text: &TextEvent, origin: Point, direction: (f64, f64)) -> 
     if open.span.font != text.font
         || (open.span.size - text.size).abs() > 0.01 * size
         || open.span.render_mode != text.render_mode
+        || open.span.vertical != text.vertical
         || (open.direction.0 - direction.0).abs() + (open.direction.1 - direction.1).abs() > 0.01
     {
         return None;

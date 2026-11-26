@@ -842,6 +842,13 @@ impl Interpreter<'_> {
             )));
         };
         let font = Rc::new(self.file.font(&dict)?);
+        for warning in &font.warnings {
+            self.out.warnings.push(format!(
+                "font /{} ({}): {warning}",
+                String::from_utf8_lossy(name),
+                font.info.name
+            ));
+        }
         if let Some(n) = number {
             self.fonts.insert(n, Rc::clone(&font));
         }

@@ -23,7 +23,8 @@ pub struct FontInfo {
     pub descriptor_weight: Option<f64>,
     /// The weight class (100-900) the embedded program states of itself, when it states one this reader reads: a
     /// TrueType/OpenType program's `OS/2` `usWeightClass` (or its `head` `macStyle` bold bit), a Type 1 program's
-    /// `/Weight`. A bare CFF program's (`/FontFile3` `Type1C`, `CIDFontType0C`) is not read.
+    /// `/Weight`, a bare CFF program's (`/FontFile3` `Type1C`, `CIDFontType0C`) Top DICT `Weight`, else its
+    /// `FullName`'s or font name's style part.
     pub program_weight: Option<f64>,
     /// The descriptor's `/ItalicAngle` (degrees), when stated.
     pub italic_angle: Option<f64>,
@@ -49,7 +50,7 @@ impl FontInfo {
     /// (`Arial,Bold`). The first word is the family's: a family named `Black...` is not black.
     #[must_use]
     pub fn name_weight(&self) -> Option<f64> {
-        style_weight(words(self.name_without_subset()).into_iter().skip(1))
+        name_style_weight(&self.name)
     }
 
     /// Whether it is bold: its descriptor sets `ForceBold`, or a statement of its weight -- the descriptor's
@@ -75,12 +76,13 @@ impl FontInfo {
 }
 
 impl FontInfo {
-    /// The facts of the font named `name`, of `subtype`, its descriptor and embedded program stating them.
+    /// The facts of the font named `name`, of `subtype`, its descriptor stating them and its embedded program
+    /// stating `program_weight`.
     fn new(
         name: String,
         subtype: String,
         descriptor: Option<&Dict>,
-        program: Option<&Program>,
+        program_weight: Option<f64>,
     ) -> Self {
         let number = |key: &[u8]| {
             descriptor
@@ -95,7 +97,7 @@ impl FontInfo {
                 .and_then(Object::as_integer)
                 .unwrap_or(0),
             descriptor_weight: number(b"FontWeight"),
-            program_weight: program.and_then(Program::weight),
+            program_weight,
             italic_angle: number(b"ItalicAngle"),
             embedded: descriptor.is_some_and(|d| {
                 [&b"FontFile"[..], b"FontFile2", b"FontFile3"]
@@ -142,6 +144,12 @@ pub(crate) fn words(name: &str) -> Vec<&str> {
     out.push(&name[start..]);
     out.retain(|w| !w.is_empty());
     out
+}
+
+/// The weight class the style part of the font name `name` states -- its words after the first, a subset tag
+/// dropped -- as [`FontInfo::name_weight`] reads it.
+pub(crate) fn name_style_weight(name: &str) -> Option<f64> {
+    style_weight(words(without_subset(name)).into_iter().skip(1))
 }
 
 /// Weight words, lower-cased, and their weight classes (100-900), the abbreviations of PostScript names (`Bd`,
@@ -252,6 +260,8 @@ pub struct Font {
     pub descent: f64,
     /// Whether the writing mode is vertical (read as horizontal; the text is kept).
     pub vertical: bool,
+    /// What of it could not be read, in words (a program too malformed to state its weight); empty when all was.
+    pub warnings: Vec<String>,
 }
 
 /// One code of a string: its value, Unicode text and width in text space (before the font size).
@@ -485,8 +495,15 @@ impl File {
             Some(cid_font) => self.cid_to_gid(cid_font)?,
             None => None,
         };
+        let (program_weight, warnings) = match program.as_ref().map(Program::weight) {
+            Some(Err(e)) => (None, vec![format!("its program's weight unread: {e}")]),
+            weight => (
+                weight.and_then(std::result::Result::ok).flatten(),
+                Vec::new(),
+            ),
+        };
         Ok(Font {
-            info: FontInfo::new(base_name, subtype, descriptor.as_ref(), program.as_ref()),
+            info: FontInfo::new(base_name, subtype, descriptor.as_ref(), program_weight),
             kind,
             to_unicode,
             program: match program {
@@ -498,6 +515,7 @@ impl File {
             ascent,
             descent,
             vertical,
+            warnings,
         })
     }
 
@@ -518,6 +536,14 @@ impl File {
                     if s.dict.get(b"Subtype").and_then(Object::as_name) == Some(b"OpenType") =>
                 {
                     decoded(&s).map(Program::Sfnt)
+                }
+                (_, _, Some(Object::Stream(s)))
+                    if matches!(
+                        s.dict.get(b"Subtype").and_then(Object::as_name),
+                        Some(b"Type1C" | b"CIDFontType0C")
+                    ) =>
+                {
+                    decoded(&s).map(Program::Cff)
                 }
                 (Some(Object::Stream(s)), ..) => decoded(&s).map(Program::Type1),
                 _ => None,
@@ -766,14 +792,17 @@ enum Program {
     Type1(Vec<u8>),
     /// A TrueType or OpenType program (`/FontFile2`, `/FontFile3` of subtype `OpenType`): its tables.
     Sfnt(Vec<u8>),
+    /// A bare CFF program (`/FontFile3` of subtype `Type1C` or `CIDFontType0C`).
+    Cff(Vec<u8>),
 }
 
 impl Program {
-    /// The weight class the program states of itself.
-    fn weight(&self) -> Option<f64> {
+    /// The weight class the program states of itself; an error names what makes it unreadable.
+    fn weight(&self) -> std::result::Result<Option<f64>, String> {
         match self {
-            Self::Type1(data) => fontfile::type1_weight(data),
-            Self::Sfnt(data) => fontfile::sfnt_weight(data),
+            Self::Type1(data) => Ok(fontfile::type1_weight(data)),
+            Self::Sfnt(data) => Ok(fontfile::sfnt_weight(data)),
+            Self::Cff(data) => fontfile::cff_weight(data).map_err(|e| format!("CFF: {e}")),
         }
     }
 }

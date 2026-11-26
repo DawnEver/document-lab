@@ -5,10 +5,12 @@ them, ``DOCUMENT_LAB_REFERENCE_PDFS`` when none is given (real documents are nev
 corpus). A local measuring script, not a test: it prints a table and judges nothing.
 
 Each document is read in a fresh process per reader, so a reading's peak memory is its own: ``ours`` reads every
-page through ``read_pdf`` (``Document.pages``), PyMuPDF extracts the same per page -- ``get_text('rawdict')``,
-``get_drawings()``, ``get_image_info()``. Time is wall time from the path to the last page (imports excluded); memory
-is the process's peak working set (resident set) over its working set once both readers were imported. A document
-PyMuPDF asks a password for is skipped.
+page through ``read_pdf`` (``Document.pages``), PyMuPDF extracts the same per page through its fastest calls by
+default -- ``get_texttrace()`` (every glyph with its box, font and color), ``get_cdrawings()``,
+``get_image_info()``; ``--text`` and ``--drawings`` select its structured calls instead (``rawdict`` builds a dict
+per character, ``get_drawings`` one per path; they cost it about ten times more). Time is wall time from the path to
+the last page (imports excluded); memory is the process's peak working set (resident set) over its working set
+once both readers were imported. A document PyMuPDF asks a password for is skipped.
 """
 
 from __future__ import annotations
@@ -26,6 +28,11 @@ from lab_commons.log import emit
 
 #: Seconds a reading may take before it is reported as timed out.
 TIMEOUT = 600
+
+#: PyMuPDF's path readers: ``get_cdrawings`` returns its raw tuples, ``get_drawings`` builds a dict per path on them.
+DRAWINGS = ('get_cdrawings', 'get_drawings')
+#: PyMuPDF's text readers: ``texttrace`` its raw glyph trace, ``rawdict``/``dict`` blocks of lines of spans built on it.
+TEXTS = ('texttrace', 'rawdict', 'dict')
 
 
 def _resident() -> tuple[int, int]:
@@ -71,20 +78,20 @@ def _ours(pdf: Path) -> int:
     return sum(1 for _ in doc.pages)
 
 
-def _theirs(pdf: Path) -> int:
+def _theirs(pdf: Path, text: str, drawings: str) -> int:
     import pymupdf  # noqa: PLC0415 -- imported before the clock starts, see _worker
 
     pages = 0
     with pymupdf.open(pdf) as doc:
         for page in doc:
-            page.get_text('rawdict')
-            page.get_drawings()
+            page.get_texttrace() if text == 'texttrace' else page.get_text(text)
+            getattr(page, drawings)()
             page.get_image_info()
             pages += 1
     return pages
 
 
-def _worker(reader: str, pdf: Path) -> dict:
+def _worker(reader: str, pdf: Path, text: str, drawings: str) -> dict:
     """One reading in this process: pages, seconds, and peak working set over the one after imports (MB)."""
     import pymupdf  # noqa: PLC0415
 
@@ -95,14 +102,15 @@ def _worker(reader: str, pdf: Path) -> dict:
             return {'locked': True}
     base, _ = _resident()
     start = time.perf_counter()
-    pages = (_ours if reader == 'ours' else _theirs)(pdf)
+    pages = _ours(pdf) if reader == 'ours' else _theirs(pdf, text, drawings)
     seconds = time.perf_counter() - start
     _, peak = _resident()
     return {'pages': pages, 'seconds': seconds, 'peak_mb': max(peak - base, 0) / 2**20, 'base_mb': base / 2**20}
 
 
-def _measure(reader: str, pdf: Path) -> dict:
-    cmd = [sys.executable, '-m', 'tests.reference.bench', '--worker', reader, str(pdf)]
+def _measure(reader: str, pdf: Path, text: str, drawings: str) -> dict:
+    cmd = [sys.executable, '-m', 'tests.reference.bench', '--worker', reader, '--text', text, '--drawings', drawings]
+    cmd.append(str(pdf))
     try:
         done = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT, check=False)
     except subprocess.TimeoutExpired:
@@ -119,13 +127,15 @@ def _pdfs(paths: list[str]) -> list[Path]:
     return sorted({pdf for root in roots for pdf in ([root] if root.is_file() else root.rglob('*.pdf'))})
 
 
-def _report(rows: list[dict]) -> None:
+def _report(rows: list[dict], text: str, drawings: str) -> None:
     read = [r for r in rows if 'seconds' in r['ours'] and 'seconds' in r['theirs']]
     failed = [r for r in rows if 'error' in r['ours'] or 'error' in r['theirs']]
     ours, theirs = (sum(r[k]['seconds'] for r in read) for k in ('ours', 'theirs'))
     pages = sum(r['ours']['pages'] for r in read)
     locked = sum(1 for r in rows if r['ours'].get('locked'))
-    emit(f'{len(read)} documents, {pages} pages; {locked} locked, {len(failed)} failed')
+    emit(
+        f'{len(read)} documents, {pages} pages; {locked} locked, {len(failed)} failed; PyMuPDF by {text}, {drawings}()'
+    )
     emit(f'total time: ours {ours:.2f} s, PyMuPDF {theirs:.2f} s (ours/PyMuPDF {ours / max(theirs, 1e-9):.2f})')
     peak = max(read, key=lambda r: r['ours']['peak_mb'], default=None)
     if peak is not None:
@@ -156,19 +166,32 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument('paths', nargs='*', help='PDFs or directories (default: DOCUMENT_LAB_REFERENCE_PDFS)')
     parser.add_argument('--jobs', type=int, default=1, help='documents measured at once (1: timings undisturbed)')
     parser.add_argument('--json', type=Path, help='also write every measurement here')
+    parser.add_argument(
+        '--drawings',
+        choices=DRAWINGS,
+        default=DRAWINGS[0],
+        help='the PyMuPDF call that reads paths (default: its fastest)',
+    )
+    parser.add_argument(
+        '--text', choices=TEXTS, default=TEXTS[0], help='the PyMuPDF call that reads text (default: its fastest)'
+    )
     parser.add_argument('--worker', choices=('ours', 'theirs'), help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.worker:
-        emit(json.dumps(_worker(args.worker, Path(args.paths[0]))))
+        emit(json.dumps(_worker(args.worker, Path(args.paths[0]), args.text, args.drawings)))
         return
     pdfs = _pdfs(args.paths)
 
     def one(pdf: Path) -> dict:
-        return {'pdf': pdf, 'ours': _measure('ours', pdf), 'theirs': _measure('theirs', pdf)}
+        return {
+            'pdf': pdf,
+            'ours': _measure('ours', pdf, args.text, args.drawings),
+            'theirs': _measure('theirs', pdf, args.text, args.drawings),
+        }
 
     with ThreadPoolExecutor(args.jobs) as pool:
         rows = list(pool.map(one, pdfs))
-    _report(rows)
+    _report(rows, args.text, args.drawings)
     if args.json:
         args.json.write_text(json.dumps([{**r, 'pdf': str(r['pdf'])} for r in rows], indent=1), encoding='utf-8')
 

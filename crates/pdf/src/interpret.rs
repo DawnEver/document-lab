@@ -1,9 +1,12 @@
 //! The content-stream interpreter (ISO 32000-2 sections 8-9): what a page draws, as events in page space.
 //!
 //! The graphics state is tracked across `q`/`Q`, `cm`, colors, line style and Form `XObject`s; each painted path
-//! and each image placed is an event, its geometry already in page space (points, y down). Clipping and
-//! shadings are not painted marks and give no event. An operation that cannot be read is skipped and named
-//! in [`Content::warnings`], never silently.
+//! and each image placed is an event, its geometry already in page space (points, y down). The clip is tracked as
+//! the box it lies in -- the page's crop box, narrowed by each clipping path's bounds and each Form's `/BBox` --
+//! and a mark wholly outside it is not seen: a path or image gives no event, a glyph is left out of its text event.
+//! A box is the clip's bounds, so a mark outside a curved clip but inside its bounds is kept, never one lost.
+//! Shadings are not painted marks and give no event. An operation that cannot be read is skipped and named in
+//! [`Content::warnings`], never silently.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -154,6 +157,8 @@ struct State {
     cap: i64,
     join: i64,
     text: TextState,
+    /// The box the clip lies in, page space.
+    clip: Rect,
 }
 
 /// The text state parameters (9.3), part of the graphics state.
@@ -170,9 +175,10 @@ struct TextState {
 }
 
 impl State {
-    fn new(ctm: Matrix) -> Self {
+    fn new(ctm: Matrix, clip: Rect) -> Self {
         Self {
             ctm,
+            clip,
             stroke_color: Space::Gray.initial(),
             stroke_space: Space::Gray,
             fill_color: Space::Gray.initial(),
@@ -203,6 +209,8 @@ struct Interpreter<'a> {
     path: Vec<Segment>,
     current: Option<Point>,
     start: Option<Point>,
+    /// A clipping path is set (`W`, `W*`): the path ends by narrowing the clip, after it is painted.
+    clipping: bool,
     /// The text matrix and the text line matrix (9.4.2), between `BT` and `ET`.
     text_matrix: Matrix,
     line_matrix: Matrix,
@@ -238,13 +246,21 @@ impl File {
                 )));
             }
         }
+        let (width, height) = page.size();
+        let shown = Rect {
+            x0: 0.0,
+            y0: 0.0,
+            x1: width,
+            y1: height,
+        };
         let mut interpreter = Interpreter {
             file: self,
-            state: State::new(page.to_page_space()),
+            state: State::new(page.to_page_space(), shown),
             stack: Vec::new(),
             path: Vec::new(),
             current: None,
             start: None,
+            clipping: false,
             text_matrix: Matrix::IDENTITY,
             line_matrix: Matrix::IDENTITY,
             fonts: HashMap::new(),
@@ -335,7 +351,8 @@ impl Interpreter<'_> {
                     );
                 }
             }
-            _ => {} // text, clipping, shading, marked content and compatibility operators draw no path or image
+            b"W" | b"W*" => self.clipping = true,
+            _ => {} // shading, marked content and compatibility operators draw no path or image
         }
         Ok(())
     }
@@ -628,10 +645,12 @@ impl Interpreter<'_> {
         out
     }
 
-    fn text_event(&mut self, glyphs: Vec<Glyph>) {
+    fn text_event(&mut self, mut glyphs: Vec<Glyph>) {
         let Some(font) = &self.state.text.font else {
             return;
         };
+        let clip = self.state.clip;
+        glyphs.retain(|g| g.bbox.meets(clip));
         if glyphs.is_empty() {
             return;
         }
@@ -703,12 +722,24 @@ impl Interpreter<'_> {
     }
 
     fn end_path(&mut self) {
+        let bounds = bounds(&self.path);
+        self.ended(bounds);
+    }
+
+    /// The path, in `bounds`, has ended: when it clips, the clip narrows to them.
+    fn ended(&mut self, bounds: Option<Rect>) {
+        if std::mem::take(&mut self.clipping)
+            && let Some(bounds) = bounds
+        {
+            self.state.clip = self.state.clip.intersect(bounds);
+        }
         self.path.clear();
         (self.current, self.start) = (None, None);
     }
 
     fn paint(&mut self, stroke: bool, fill: Option<bool>) {
-        if !self.path.is_empty() {
+        let bounds = bounds(&self.path);
+        if bounds.is_some_and(|b| b.meets(self.state.clip)) {
             let state = &self.state;
             let scale = state.ctm.scale();
             let event = PathEvent {
@@ -728,7 +759,7 @@ impl Interpreter<'_> {
             };
             self.out.events.push(Event::Path(event));
         }
-        self.end_path();
+        self.ended(bounds);
     }
 
     fn ext_state(&mut self, operands: &[Object], resources: &Dict) -> Result<()> {
@@ -824,6 +855,15 @@ impl Interpreter<'_> {
                     self.start,
                 );
                 self.state.ctm = matrix.then(self.state.ctm);
+                if let Some(Object::Array(b)) = self.file.get(&stream.dict, b"BBox")?
+                    && let [x0, y0, x1, y1] =
+                        b.iter().filter_map(Object::as_number).collect::<Vec<_>>()[..]
+                {
+                    let corners =
+                        [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| self.point(x, y));
+                    let shown = Rect::around(&corners).expect("four corners");
+                    self.state.clip = self.state.clip.intersect(shown);
+                }
                 self.run(&data, &own, depth + 1);
                 self.state = saved.0;
                 self.stack.truncate(saved.1);
@@ -849,6 +889,9 @@ impl Interpreter<'_> {
             m.apply(Point { x: 0.0, y: 1.0 }),
         ];
         let bbox = Rect::around(&corners).expect("four corners");
+        if !bbox.meets(self.state.clip) {
+            return;
+        }
         self.out.events.push(Event::Image(ImageEvent {
             bbox,
             matrix: m,
@@ -858,6 +901,19 @@ impl Interpreter<'_> {
             inline,
         }));
     }
+}
+
+/// The box a path's points lie in -- a curve's control points too, so it holds the curve -- or None when empty.
+fn bounds(path: &[Segment]) -> Option<Rect> {
+    let points: Vec<Point> = path
+        .iter()
+        .flat_map(|s| match *s {
+            Segment::MoveTo(p) | Segment::LineTo(p) => vec![p],
+            Segment::CurveTo(a, b, p) => vec![a, b, p],
+            Segment::Close => vec![],
+        })
+        .collect();
+    Rect::around(&points)
 }
 
 fn numbers_in(operands: &[Object]) -> Vec<f64> {

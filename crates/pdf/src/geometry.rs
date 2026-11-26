@@ -109,6 +109,23 @@ impl Rect {
     pub fn height(self) -> f64 {
         self.y1 - self.y0
     }
+
+    /// The part both boxes cover; an empty box (`x0 > x1` or `y0 > y1`) when they do not meet.
+    #[must_use]
+    pub fn intersect(self, other: Self) -> Self {
+        Self {
+            x0: self.x0.max(other.x0),
+            y0: self.y0.max(other.y0),
+            x1: self.x1.min(other.x1),
+            y1: self.y1.min(other.y1),
+        }
+    }
+
+    /// Whether the boxes share a point (touching edges do).
+    #[must_use]
+    pub fn meets(self, other: Self) -> bool {
+        self.x0 <= other.x1 && other.x0 <= self.x1 && self.y0 <= other.y1 && other.y0 <= self.y1
+    }
 }
 
 #[cfg(test)]

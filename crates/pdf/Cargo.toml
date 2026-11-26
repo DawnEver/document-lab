@@ -1,0 +1,12 @@
+[package]
+name = "pdf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# document-lab's own PDF reader and image-page writer: syntax, filters, encryption, fonts, the content-stream
+# interpreter. Pure Rust, no Python.
+[dependencies]
+
+[lints]
+workspace = true

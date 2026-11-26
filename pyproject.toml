@@ -90,8 +90,8 @@ ignore = ["COM812", "D203", "D213", "D400", "D401", "N818", "PLR0913", "Q000", "
 # constants read inline, their branching IS the heuristic, and its re.sub callbacks run synchronously in the loop.
 "src/document_lab/{paper/**,markdown.py}" = ["PLR2004", "C901", "PLR0911", "PLR0912", "PLR0915", "PLR0917", "FBT001", "FBT002", "B023"]
 "tests/**" = ["S101", "SLF001", "D", "ANN", "ARG", "FBT003", "PLR2004", "PT018", "INP001"]
-# A crate's fixture generator is a script beside its fixtures, not a package.
-"crates/*/tests/fixtures/*.py" = ["INP001"]
+# A crate's generator (of its test fixtures, of its data tables) is a script beside its output, not a package.
+"crates/*/{tests/fixtures,data}/*.py" = ["INP001"]
 
 [tool.dev_lab.branchset]
 trunk = 'main'

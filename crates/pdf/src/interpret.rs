@@ -5,10 +5,14 @@
 //! shadings are not painted marks and give no event. An operation that cannot be read is skipped and named
 //! in [`Content::warnings`], never silently.
 
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use crate::color::{Color, Space};
 use crate::content::{Operation, operations};
 use crate::error::{Error, Result};
 use crate::file::File;
+use crate::font::{Font, FontInfo};
 use crate::geometry::{Matrix, Point, Rect};
 use crate::object::{Dict, Object};
 use crate::page::Page;
@@ -83,6 +87,38 @@ pub struct ImageEvent {
     pub inline: Option<(Dict, Vec<u8>)>,
 }
 
+/// One glyph of a text event.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Glyph {
+    /// Its character code in the font.
+    pub code: u32,
+    /// Its text, when the font says what it is.
+    pub text: Option<String>,
+    /// Where its baseline starts, in page space.
+    pub origin: Point,
+    /// The box from the font's descent to its ascent across the glyph's advance, in page space.
+    pub bbox: Rect,
+}
+
+/// The glyphs one string shows, in one font, size and state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextEvent {
+    /// The font.
+    pub font: Rc<FontInfo>,
+    /// The font size in page space (the text matrix and the CTM applied).
+    pub size: f64,
+    /// The text rendering mode (`Tr`): 0 fill, 1 stroke, 3 invisible (an OCR text layer), 7 clip, ...
+    pub render_mode: i64,
+    /// The fill color.
+    pub fill: Color,
+    /// The stroke color.
+    pub stroke: Color,
+    /// Whether the font writes vertically (its glyphs are still placed along the baseline).
+    pub vertical: bool,
+    /// The glyphs, in showing order.
+    pub glyphs: Vec<Glyph>,
+}
+
 /// An event of a page, in drawing order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -90,6 +126,8 @@ pub enum Event {
     Path(PathEvent),
     /// A placed image.
     Image(ImageEvent),
+    /// Text shown.
+    Text(TextEvent),
 }
 
 /// What a page draws.
@@ -113,6 +151,20 @@ struct State {
     dash_phase: f64,
     cap: i64,
     join: i64,
+    text: TextState,
+}
+
+/// The text state parameters (9.3), part of the graphics state.
+#[derive(Debug, Clone)]
+struct TextState {
+    char_spacing: f64,
+    word_spacing: f64,
+    scale: f64,
+    leading: f64,
+    font: Option<Rc<Font>>,
+    size: f64,
+    render_mode: i64,
+    rise: f64,
 }
 
 impl State {
@@ -128,6 +180,16 @@ impl State {
             dash_phase: 0.0,
             cap: 0,
             join: 0,
+            text: TextState {
+                char_spacing: 0.0,
+                word_spacing: 0.0,
+                scale: 1.0,
+                leading: 0.0,
+                font: None,
+                size: 0.0,
+                render_mode: 0,
+                rise: 0.0,
+            },
         }
     }
 }
@@ -139,6 +201,11 @@ struct Interpreter<'a> {
     path: Vec<Segment>,
     current: Option<Point>,
     start: Option<Point>,
+    /// The text matrix and the text line matrix (9.4.2), between `BT` and `ET`.
+    text_matrix: Matrix,
+    line_matrix: Matrix,
+    /// Fonts read, by the font dictionary's object number.
+    fonts: HashMap<u32, Rc<Font>>,
     out: Content,
 }
 
@@ -176,6 +243,9 @@ impl File {
             path: Vec::new(),
             current: None,
             start: None,
+            text_matrix: Matrix::IDENTITY,
+            line_matrix: Matrix::IDENTITY,
+            fonts: HashMap::new(),
             out: Content::default(),
         };
         interpreter.run(&data, &page.resources, 0);
@@ -186,12 +256,23 @@ impl File {
 /// The last `count` operands, which must be numbers.
 fn last(operands: &[Object], count: usize) -> Result<Vec<f64>> {
     operands
-        .iter()
-        .map(Object::as_number)
-        .collect::<Option<Vec<f64>>>()
-        .filter(|v| v.len() >= count)
-        .map(|v| v[v.len() - count..].to_vec())
+        .len()
+        .checked_sub(count)
+        .and_then(|from| {
+            operands[from..]
+                .iter()
+                .map(Object::as_number)
+                .collect::<Option<Vec<f64>>>()
+        })
         .ok_or_else(|| Error::new(format!("needs {count} numbers")))
+}
+
+/// The last operand, a string.
+fn string(operands: &[Object]) -> Result<&[u8]> {
+    match operands.last() {
+        Some(Object::String(s)) => Ok(s),
+        _ => Err(Error::new("needs a string")),
+    }
 }
 
 /// The last operand, an integer (a style code is whole).
@@ -231,6 +312,7 @@ impl Interpreter<'_> {
             || self.path_operation(operator, operands)?
             || self.paint_operation(operator)
             || self.color_operation(operator, operands, resources)?
+            || self.text_operation(operator, operands, resources)?
         {
             return Ok(());
         }
@@ -373,6 +455,192 @@ impl Interpreter<'_> {
         }
         self.paint(stroke, fill);
         true
+    }
+
+    /// Text objects, state, positioning and showing; whether `operator` is one.
+    fn text_operation(
+        &mut self,
+        operator: &[u8],
+        operands: &[Object],
+        resources: &Dict,
+    ) -> Result<bool> {
+        let text = &mut self.state.text;
+        match operator {
+            b"BT" => (self.text_matrix, self.line_matrix) = (Matrix::IDENTITY, Matrix::IDENTITY),
+            b"ET" => {}
+            b"Tc" => text.char_spacing = last(operands, 1)?[0],
+            b"Tw" => text.word_spacing = last(operands, 1)?[0],
+            b"Tz" => text.scale = last(operands, 1)?[0] / 100.0,
+            b"TL" => text.leading = last(operands, 1)?[0],
+            b"Ts" => text.rise = last(operands, 1)?[0],
+            b"Tr" => text.render_mode = integer(operands)?,
+            b"Tf" => {
+                text.size = last(operands, 1)?[0];
+                let name = operands
+                    .first()
+                    .and_then(Object::as_name)
+                    .ok_or_else(|| Error::new("needs a font name"))?;
+                let font = self.load_font(name, resources)?;
+                self.state.text.font = Some(font);
+            }
+            b"Td" => {
+                let v = last(operands, 2)?;
+                self.next_line(v[0], v[1]);
+            }
+            b"TD" => {
+                let v = last(operands, 2)?;
+                text.leading = -v[1];
+                self.next_line(v[0], v[1]);
+            }
+            b"Tm" => {
+                let m = Matrix::from_numbers(&last(operands, 6)?)
+                    .ok_or_else(|| Error::new("needs 6 numbers"))?;
+                (self.text_matrix, self.line_matrix) = (m, m);
+            }
+            b"T*" => {
+                let leading = text.leading;
+                self.next_line(0.0, -leading);
+            }
+            b"Tj" => self.show(string(operands)?),
+            b"'" => {
+                let leading = text.leading;
+                self.next_line(0.0, -leading);
+                self.show(string(operands)?);
+            }
+            b"\"" => {
+                let v = last(&operands[..operands.len().saturating_sub(1)], 2)?;
+                (text.word_spacing, text.char_spacing) = (v[0], v[1]);
+                let leading = text.leading;
+                self.next_line(0.0, -leading);
+                self.show(string(operands)?);
+            }
+            b"TJ" => {
+                let items = operands
+                    .last()
+                    .and_then(Object::as_array)
+                    .ok_or_else(|| Error::new("needs an array"))?;
+                let mut glyphs = Vec::new();
+                for item in items {
+                    match item {
+                        Object::String(s) => glyphs.extend(self.glyphs(s)),
+                        other => {
+                            let adjust = other.as_number().unwrap_or(0.0);
+                            let text = &self.state.text;
+                            self.advance(-adjust / 1000.0 * text.size * text.scale);
+                        }
+                    }
+                }
+                self.text_event(glyphs);
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn next_line(&mut self, tx: f64, ty: f64) {
+        self.line_matrix = Matrix([1.0, 0.0, 0.0, 1.0, tx, ty]).then(self.line_matrix);
+        self.text_matrix = self.line_matrix;
+    }
+
+    fn advance(&mut self, tx: f64) {
+        self.text_matrix = Matrix([1.0, 0.0, 0.0, 1.0, tx, 0.0]).then(self.text_matrix);
+    }
+
+    fn load_font(&mut self, name: &[u8], resources: &Dict) -> Result<Rc<Font>> {
+        let Some(Object::Dict(fonts)) = self.file.get(resources, b"Font")? else {
+            return Err(Error::new("no /Font resources"));
+        };
+        let reference = fonts
+            .get(name)
+            .ok_or_else(|| Error::new(format!("no font /{}", String::from_utf8_lossy(name))))?;
+        let number = reference.as_reference().map(|r| r.num);
+        if let Some(font) = number.and_then(|n| self.fonts.get(&n)) {
+            return Ok(Rc::clone(font));
+        }
+        let Object::Dict(dict) = self.file.resolve(reference)? else {
+            return Err(Error::new(format!(
+                "font /{} is not a dictionary",
+                String::from_utf8_lossy(name)
+            )));
+        };
+        let font = Rc::new(self.file.font(&dict)?);
+        if let Some(n) = number {
+            self.fonts.insert(n, Rc::clone(&font));
+        }
+        Ok(font)
+    }
+
+    fn show(&mut self, bytes: &[u8]) {
+        let glyphs = self.glyphs(bytes);
+        self.text_event(glyphs);
+    }
+
+    /// The glyphs `bytes` shows, the text matrix advanced past each.
+    fn glyphs(&mut self, bytes: &[u8]) -> Vec<Glyph> {
+        let Some(font) = self.state.text.font.clone() else {
+            self.out
+                .warnings
+                .push("text shown with no font set; skipped".to_string());
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for code in font.codes(bytes) {
+            let text = &self.state.text;
+            let render = Matrix([text.size * text.scale, 0.0, 0.0, text.size, 0.0, text.rise])
+                .then(self.text_matrix)
+                .then(self.state.ctm);
+            let (ascent, descent) = (
+                font.ascent * font.matrix.0[3],
+                font.descent * font.matrix.0[3],
+            );
+            let corners = [
+                render.apply(Point { x: 0.0, y: descent }),
+                render.apply(Point {
+                    x: code.width,
+                    y: descent,
+                }),
+                render.apply(Point {
+                    x: code.width,
+                    y: ascent,
+                }),
+                render.apply(Point { x: 0.0, y: ascent }),
+            ];
+            let space = if code.bytes == 1 && code.code == 32 {
+                text.word_spacing
+            } else {
+                0.0
+            };
+            let advance = (code.width * text.size + text.char_spacing + space) * text.scale;
+            out.push(Glyph {
+                code: code.code,
+                text: code.text,
+                origin: render.apply(Point { x: 0.0, y: 0.0 }),
+                bbox: Rect::around(&corners).expect("four corners"),
+            });
+            self.advance(advance);
+        }
+        out
+    }
+
+    fn text_event(&mut self, glyphs: Vec<Glyph>) {
+        let Some(font) = &self.state.text.font else {
+            return;
+        };
+        if glyphs.is_empty() {
+            return;
+        }
+        let text = &self.state.text;
+        let m = self.text_matrix.then(self.state.ctm).0;
+        let event = TextEvent {
+            font: Rc::new(font.info.clone()),
+            size: text.size * m[2].hypot(m[3]),
+            render_mode: text.render_mode,
+            fill: self.state.fill_color.clone(),
+            stroke: self.state.stroke_color.clone(),
+            vertical: font.vertical,
+            glyphs,
+        };
+        self.out.events.push(Event::Text(event));
     }
 
     /// Color spaces and colors; whether `operator` sets one.

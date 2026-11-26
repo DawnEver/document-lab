@@ -5,15 +5,19 @@
 //!
 //! Layers, each depending only on those above it: [`error`], [`object`] (the values), [`parser`] (bytes to
 //! values), [`filter`] (stream data decoded), [`crypt`] (strings and streams decrypted), [`xref`] (where each object is), [`file`] (a PDF opened: objects
-//! resolved by reference), [`page`] (the page tree), [`content`] (a content stream's operations), [`color`] and
+//! resolved by reference), [`page`] (the page tree), [`content`] (a content stream's operations), [`font`] and [`cmap`], [`color`] and
 //! [`geometry`], and [`interpret`] (what a page draws, as events in page space).
 
+mod base14;
+pub mod cmap;
 pub mod color;
 pub mod content;
 pub mod crypt;
 pub mod error;
 pub mod file;
 pub mod filter;
+pub mod font;
+mod fontfile;
 pub mod geometry;
 mod inflate;
 pub mod interpret;

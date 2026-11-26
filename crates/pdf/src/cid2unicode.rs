@@ -15,6 +15,7 @@ pub struct Collection {
     pub long: &'static [(u16, &'static str)],
 }
 
+// spelling-off: the code points below are data, not words.
 /// Every collection with a table.
 pub static COLLECTIONS: [Collection; 5] = [
     // Adobe-Japan1, supplements 0 to 7.
@@ -5754,3 +5755,4 @@ pub static COLLECTIONS: [Collection; 5] = [
         ],
     },
 ];
+// spelling-on

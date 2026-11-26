@@ -145,5 +145,10 @@ if __name__ == '__main__':
     notice = fetch('LICENSE.txt')
     (CRATE / 'src' / 'cid2unicode' / 'LICENSE.txt').write_text(notice, encoding='utf-8', newline='\n')
     count = len(ORDERINGS)
-    table = f'/// Every collection with a table.\npub static COLLECTIONS: [Collection; {count}] = [\n{body}];\n'
+    # The escapes' hex digits are code points, not words: the family spelling check's door for data skips them.
+    table = (
+        '// spelling-off: the code points below are data, not words.\n'
+        f'/// Every collection with a table.\npub static COLLECTIONS: [Collection; {count}] = [\n{body}];\n'
+        '// spelling-on\n'
+    )
     (CRATE / 'src' / 'cid2unicode.rs').write_text(HEADER + table, encoding='utf-8', newline='\n')

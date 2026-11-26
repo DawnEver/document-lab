@@ -180,8 +180,8 @@ impl<'a> Parser<'a> {
     fn number_or_reference(&mut self) -> Result<Object> {
         let at = self.pos;
         let word = self.token();
-        let number = parse_number(word)
-            .ok_or_else(|| Error::at(at, format!("not a number: `{}`", show(word))))?;
+        let number =
+            number(word).ok_or_else(|| Error::at(at, format!("not a number: `{}`", show(word))))?;
         if let Object::Integer(num) = number
             && let (Ok(num), true) = (u32::try_from(num), word[0].is_ascii_digit())
         {
@@ -431,7 +431,9 @@ fn parse_unsigned(word: &[u8]) -> Option<u64> {
     std::str::from_utf8(word).ok()?.parse().ok()
 }
 
-fn parse_number(word: &[u8]) -> Option<Object> {
+/// The number `word` spells, integer or real.
+#[must_use]
+pub fn number(word: &[u8]) -> Option<Object> {
     let text = std::str::from_utf8(word).ok()?;
     let digits = text.trim_start_matches(['+', '-']);
     if digits.is_empty()

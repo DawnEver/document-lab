@@ -5,17 +5,25 @@
 //!
 //! Layers, each depending only on those above it: [`error`], [`object`] (the values), [`parser`] (bytes to
 //! values), [`filter`] (stream data decoded), [`crypt`] (strings and streams decrypted), [`xref`] (where each object is), [`file`] (a PDF opened: objects
-//! resolved by reference).
+//! resolved by reference), [`page`] (the page tree), [`content`] (a content stream's operations), [`color`] and
+//! [`geometry`], and [`interpret`] (what a page draws, as events in page space).
 
+pub mod color;
+pub mod content;
 pub mod crypt;
 pub mod error;
 pub mod file;
 pub mod filter;
+pub mod geometry;
 mod inflate;
+pub mod interpret;
 pub mod object;
+pub mod page;
 pub mod parser;
 pub mod xref;
 
 pub use error::{Error, Result};
 pub use file::File;
+pub use interpret::{Content, Event};
 pub use object::{Dict, ObjRef, Object, Stream};
+pub use page::Page;

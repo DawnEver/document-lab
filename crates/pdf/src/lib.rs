@@ -4,9 +4,10 @@
 //! with the origin top-left and y growing down. Layout, regions and pixels are not this crate's.
 //!
 //! Layers, each depending only on those above it: [`error`], [`object`] (the values), [`parser`] (bytes to
-//! values), [`filter`] (stream data decoded), [`xref`] (where each object is), [`file`] (a PDF opened: objects
+//! values), [`filter`] (stream data decoded), [`crypt`] (strings and streams decrypted), [`xref`] (where each object is), [`file`] (a PDF opened: objects
 //! resolved by reference).
 
+pub mod crypt;
 pub mod error;
 pub mod file;
 pub mod filter;

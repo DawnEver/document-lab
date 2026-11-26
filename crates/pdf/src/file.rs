@@ -4,6 +4,7 @@ use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::crypt::Decryptor;
 use crate::error::{Error, Result};
 use crate::filter::{self, Decoded};
 use crate::object::{Dict, Object, Stream};
@@ -26,15 +27,18 @@ pub struct File {
     streams: RefCell<HashMap<u32, Rc<Members>>>,
     /// What was repaired to read this file, in words (empty for a sound file).
     repairs: RefCell<Vec<String>>,
+    /// The decryption of an encrypted file, and its encryption dictionary's object number (never decrypted).
+    decryptor: Option<(Decryptor, Option<u32>)>,
 }
 
 impl File {
-    /// Open `data`: the cross-reference sections when they lead to a catalog, else the table rebuilt by a scan.
+    /// Open `data` with `password` (empty: none, as a file anyone may read needs): the cross-reference sections
+    /// when they lead to a catalog, else the table rebuilt by a scan.
     ///
     /// # Errors
     ///
-    /// Refuses input that is not what a PDF must be here; the [`Error`] says what and where.
-    pub fn open(data: Vec<u8>) -> Result<Self> {
+    /// Refuses input that is not what a PDF must be here, and an encrypted file `password` does not open.
+    pub fn open(data: Vec<u8>, password: &[u8]) -> Result<Self> {
         if find(&data[..data.len().min(1024)], b"%PDF-").is_none() {
             return Err(Error::new(
                 "not a PDF: no `%PDF-` header in the first 1024 bytes",
@@ -53,17 +57,35 @@ impl File {
                 )),
             ),
         };
-        let file = Self {
+        let mut file = Self {
             data,
             xref,
             scanned: OnceCell::new(),
             streams: RefCell::new(HashMap::new()),
             repairs: RefCell::new(repair.into_iter().collect()),
+            decryptor: None,
         };
-        if file.xref.trailer.get(b"Encrypt").is_some() {
-            return Err(Error::new(
-                "the file is encrypted, which this reader does not decrypt",
-            ));
+        if let Some(encrypt) = file.xref.trailer.get(b"Encrypt").cloned() {
+            let dict = match file.resolve(&encrypt)? {
+                Object::Dict(d) => d,
+                other => {
+                    return Err(Error::new(format!(
+                        "/Encrypt is a {}, not a dictionary",
+                        other.kind()
+                    )));
+                }
+            };
+            let first_id = match file.get(&file.xref.trailer, b"ID")? {
+                Some(Object::Array(ids)) => {
+                    match ids.first().map(|i| file.resolve(i)).transpose()? {
+                        Some(Object::String(s)) => s,
+                        _ => Vec::new(),
+                    }
+                }
+                _ => Vec::new(),
+            };
+            let decryptor = Decryptor::new(&dict, &first_id, password)?;
+            file.decryptor = Some((decryptor, encrypt.as_reference().map(|r| r.num)));
         }
         file.catalog()?;
         Ok(file)
@@ -181,12 +203,18 @@ impl File {
                 format!("object {num}: offset past the end of the file"),
             ));
         }
-        let (id, value) = Parser::new(&self.data, offset).indirect_object(|o| self.length(o))?;
+        let (id, mut value) =
+            Parser::new(&self.data, offset).indirect_object(|o| self.length(o))?;
         if id.num != num {
             return Err(Error::at(
                 offset,
                 format!("object {num}: the table points at object {}", id.num),
             ));
+        }
+        if let Some((decryptor, own)) = &self.decryptor
+            && *own != Some(num)
+        {
+            decryptor.object(id, &mut value)?;
         }
         Ok(value)
     }
@@ -281,7 +309,8 @@ mod tests {
 
     #[test]
     fn a_classic_table_resolves_references() {
-        let file = File::open(classic(&[CATALOG, PAGES], "<< /Size 3 /Root 1 0 R >>")).unwrap();
+        let file =
+            File::open(classic(&[CATALOG, PAGES], "<< /Size 3 /Root 1 0 R >>"), b"").unwrap();
         let pages = file
             .get(&file.catalog().unwrap(), b"Pages")
             .unwrap()
@@ -305,7 +334,7 @@ mod tests {
             ],
             "<< /Size 5 /Root 1 0 R >>",
         );
-        let file = File::open(data).unwrap();
+        let file = File::open(data, b"").unwrap();
         let Object::Stream(s) = file.object(3).unwrap() else {
             panic!()
         };
@@ -321,7 +350,7 @@ mod tests {
                 .iter()
                 .copied(),
         );
-        let file = File::open(data).unwrap();
+        let file = File::open(data, b"").unwrap();
         assert!(file.catalog().is_ok());
         assert_ne!(file.repairs(), Vec::<String>::new());
     }
@@ -331,7 +360,7 @@ mod tests {
         let data =
             b"%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF"
                 .to_vec();
-        let file = File::open(data).unwrap();
+        let file = File::open(data, b"").unwrap();
         assert_eq!(
             file.catalog().unwrap().get(b"Type"),
             Some(&Object::Name(b"Catalog".to_vec()))
@@ -367,7 +396,7 @@ mod tests {
         );
         out.extend_from_slice(&rows);
         out.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{o4}\n%%EOF\n").as_bytes());
-        let file = File::open(out).unwrap();
+        let file = File::open(out, b"").unwrap();
         let pages = file
             .get(&file.catalog().unwrap(), b"Pages")
             .unwrap()
@@ -395,7 +424,7 @@ mod tests {
         data.extend_from_slice(
             format!("xref\n2 1\n{o2:010} 00000 n \ntrailer\n<< /Size 3 /Root 1 0 R /Prev {prev_at} >>\nstartxref\n{at}\n%%EOF\n").as_bytes(),
         );
-        let file = File::open(data).unwrap();
+        let file = File::open(data, b"").unwrap();
         assert_eq!(
             file.object(2).unwrap().as_dict().unwrap().get(b"Count"),
             Some(&Object::Integer(7))
@@ -403,12 +432,12 @@ mod tests {
     }
 
     #[test]
-    fn not_a_pdf_and_an_encrypted_pdf_are_refused() {
-        assert!(File::open(b"hello".to_vec()).is_err());
+    fn not_a_pdf_and_an_unknown_security_handler_are_refused() {
+        assert!(File::open(b"hello".to_vec(), b"").is_err());
         let data = classic(
-            &[CATALOG, PAGES, "<< /Filter /Standard >>"],
+            &[CATALOG, PAGES, "<< /Filter /Adobe.PubSec /R 4 >>"],
             "<< /Size 4 /Root 1 0 R /Encrypt 3 0 R >>",
         );
-        assert!(File::open(data).is_err());
+        assert!(File::open(data, b"").is_err());
     }
 }

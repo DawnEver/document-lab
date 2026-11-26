@@ -38,6 +38,11 @@ impl Dict {
         self.0.iter().map(|(k, v)| (k.as_slice(), v))
     }
 
+    /// Every value, to change in place.
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut Object> {
+        self.0.iter_mut().map(|(_, v)| v)
+    }
+
     /// How many entries.
     #[must_use]
     pub fn len(&self) -> usize {

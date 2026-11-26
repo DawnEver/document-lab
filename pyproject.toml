@@ -90,6 +90,8 @@ ignore = ["COM812", "D203", "D213", "D400", "D401", "N818", "PLR0913", "Q000", "
 # constants read inline, their branching IS the heuristic, and its re.sub callbacks run synchronously in the loop.
 "src/document_lab/{paper/**,markdown.py}" = ["PLR2004", "C901", "PLR0911", "PLR0912", "PLR0915", "PLR0917", "FBT001", "FBT002", "B023"]
 "tests/**" = ["S101", "SLF001", "D", "ANN", "ARG", "FBT003", "PLR2004", "PT018", "INP001"]
+# A crate's fixture generator is a script beside its fixtures, not a package.
+"crates/*/tests/fixtures/*.py" = ["INP001"]
 
 [tool.dev_lab.branchset]
 trunk = 'main'
@@ -144,10 +146,12 @@ pending = []
 
 [[tool.dev_lab.hooks.pre-commit]]
 id = "filechecks"
-# The base row restated with one narrowing: large-files passes the lock file.
+# The base row restated with two narrowings: large-files passes the lock file; the text checks pass every PDF,
+# which is bytes (a cross-reference row ends in a space the format requires) even when no NUL marks it binary.
 run = [
     "python", "-m", "dev_lab.dev.filechecks", "all",
     "--exclude", 'large-files=^uv\.lock$',
+    "--exclude", 'trailing-whitespace=\.pdf$',
 ]
 
 [tool.dev_lab.doors]

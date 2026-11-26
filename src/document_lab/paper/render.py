@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pymupdf
 
@@ -20,6 +21,9 @@ from document_lab.paper.text import slug
 from document_lab.pdf import read_pdf
 from document_lab.regions import regions
 
+if TYPE_CHECKING:
+    from document_lab.ir import BBox, Document, Page
+
 _CAPTION_RE = re.compile(rf'(?P<label>Figure\s+\d+|Fig\.\s*\d+|Table\s+(?:\d+|{_RN}))\.(?P<rest>.+)', re.IGNORECASE)
 
 
@@ -29,54 +33,60 @@ _CAPTION_RE = re.compile(rf'(?P<label>Figure\s+\d+|Fig\.\s*\d+|Table\s+(?:\d+|{_
 _FULL_PAGE_IMAGE = 0.9  # share of a page one image covers for the page to be that image (a screen capture, a scan)
 
 
-def is_full_page_image(page: pymupdf.Page) -> bool:
+def is_full_page_image(page: Page) -> bool:
     """Is ``page`` one picture of a page -- a screen capture or a scan -- with nothing drawn beside it?
 
     Its figures and tables are pixels inside that picture, so there is nothing to crop them from.
     """
-    area = abs(page.rect)
-    covered = [abs(pymupdf.Rect(info['bbox']) & page.rect) for info in page.get_image_info()]
-    return len(covered) == 1 and covered[0] >= _FULL_PAGE_IMAGE * area and not page.get_drawings()
+    area = page.width * page.height
+    covered = [_covered(f.provenance.bbox, page) for f in page.figures if f.provenance.bbox is not None]
+    return len(covered) == 1 and covered[0] >= _FULL_PAGE_IMAGE * area and not page.paths
+
+
+def _covered(box: BBox, page: Page) -> float:
+    """The area of ``box`` on the page."""
+    width = min(box.x1, page.width) - max(box.x0, 0.0)
+    height = min(box.y1, page.height) - max(box.y0, 0.0)
+    return max(width, 0.0) * max(height, 0.0)
 
 
 class _Located:
-    """The regions a picture page's text locates (`document_lab.regions`), read once per document, per page."""
+    """The regions a picture page's text locates (`document_lab.regions`), per page of a document read once."""
 
-    def __init__(self, pdf_path: Path) -> None:
-        self.read = read_pdf(pdf_path)
-        self.body = layout.body_size(self.read)
+    def __init__(self, read: Document) -> None:
+        self.read = read
+        self.body = layout.body_size(read)
 
-    def crop(self, page_num: int, label: str) -> pymupdf.Rect | None:
+    def crop(self, page_num: int, label: str) -> BBox | None:
         """The region labeled ``label`` (``Figure 2``, ``Table 1``, ``(3)``) on the page, or None."""
         found = [r for r in regions(self.read.pages[page_num], self.body) if r.label == label]
-        return pymupdf.Rect(*found[0].bbox) if len(found) == 1 else None
+        return found[0].bbox if len(found) == 1 else None
 
 
-def _render(page: pymupdf.Page, img_path: Path, crop: pymupdf.Rect | None) -> None:
+def _render(pdf: pymupdf.Document, page_num: int, img_path: Path, crop: BBox | None) -> None:
+    """The page, or its ``crop``, rendered at twice its size to ``img_path`` (once)."""
     if img_path.exists():
         return
     mat = pymupdf.Matrix(2.0, 2.0)
-    pix = page.get_pixmap(matrix=mat, clip=crop) if crop else page.get_pixmap(matrix=mat)
+    page = pdf[page_num]
+    pix = page.get_pixmap(matrix=mat, clip=pymupdf.Rect(*crop)) if crop else page.get_pixmap(matrix=mat)
     img_path.parent.mkdir(parents=True, exist_ok=True)
     pix.save(str(img_path))
 
 
 def _render_one_equation(
-    doc: pymupdf.Document, page_num: int, eq_num: str, img_path: Path, located: _Located | None
+    pdf: pymupdf.Document, read: Document, page_num: int, eq_num: str, img_path: Path, located: _Located | None
 ) -> None:
     if img_path.exists():
         return
-    page = doc[page_num]
+    page = read.pages[page_num]
     if is_full_page_image(page):  # a picture page: where its text locates the number, if it does
         crop = located.crop(page_num, f'({eq_num})') if located is not None else None
     else:
         crop = crop_equation(page, eq_num)
     if crop is None:
         return  # equation position not found on page; skip
-    mat = pymupdf.Matrix(2.0, 2.0)
-    pix = page.get_pixmap(matrix=mat, clip=crop)
-    img_path.parent.mkdir(parents=True, exist_ok=True)
-    pix.save(str(img_path))
+    _render(pdf, page_num, img_path, crop)
 
 
 # ── Markdown insertion helpers ────────────────────────────────────────────────
@@ -308,11 +318,12 @@ def render_figure_pages(
     Returns (figure_images, page_section_map) where figure_images maps normalized
     figure label → relative image path (for INDEX.md).
     """
-    figure_page_map = build_figure_page_map(pdf_path)
-    page_section_map = build_page_section_map(figure_page_map, body_sections, pdf_path)
+    read = read_pdf(pdf_path)
+    figure_page_map = build_figure_page_map(read)
+    page_section_map = build_page_section_map(figure_page_map, body_sections, read)
     figure_images: dict[str, str] = {}
 
-    doc = pymupdf.open(str(pdf_path))
+    pdf = pymupdf.open(str(pdf_path))
 
     # Collect unique figure entries (label, normalized, page, owning_section)
     seen: dict[str, int] = {}
@@ -333,9 +344,9 @@ def render_figure_pages(
             seen[normalized] = owning
             unique_entries.append((label, normalized, page_num, owning))
 
-    located = _Located(pdf_path) if any(is_full_page_image(doc[e[2]]) for e in unique_entries) else None
+    located = _Located(read) if any(is_full_page_image(read.pages[e[2]]) for e in unique_entries) else None
     for label, normalized, page_num, owning in unique_entries:
-        page = doc[page_num]
+        page = read.pages[page_num]
         own = f'page-{page_num + 1:02d}-{normalized.lower().replace(" ", "-")}.png'
         if not is_full_page_image(page):
             crop, img_name = crop_figure(page, label, content_below=label.upper().startswith('TABLE')), own
@@ -344,10 +355,10 @@ def render_figure_pages(
         else:  # nothing locates it: the page itself, once, shared by every such label on it
             crop, img_name = None, f'page-{page_num + 1:02d}.png'
         img_path = out_dir / 'img' / f'sec{owning:02d}' / img_name
-        _render(page, img_path, crop)
+        _render(pdf, page_num, img_path, crop)
         figure_images[normalized] = f'img/sec{owning:02d}/{img_name}'
 
-    doc.close()
+    pdf.close()
 
     _fix_cross_section_image_refs(out_dir, body_sections, page_section_map)
 
@@ -371,12 +382,13 @@ def render_equation_images(
 
     Returns updated figure_images dict with equation entries added.
     """
-    eq_page_map = build_equation_page_map(pdf_path)
+    read = read_pdf(pdf_path)
+    eq_page_map = build_equation_page_map(read)
     if not eq_page_map:
         return figure_images
 
-    doc = pymupdf.open(str(pdf_path))
-    located = _Located(pdf_path) if any(is_full_page_image(doc[p]) for p in eq_page_map.values()) else None
+    pdf = pymupdf.open(str(pdf_path))
+    located = _Located(read) if any(is_full_page_image(read.pages[p]) for p in eq_page_map.values()) else None
 
     for eq_label, page_num in eq_page_map.items():
         eq_num = eq_label.split()[-1]
@@ -396,17 +408,17 @@ def render_equation_images(
 
         img_name = f'page-{page_num + 1:02d}-{eq_label.lower().replace(" ", "-")}.png'
         img_path = out_dir / 'img' / f'sec{owning:02d}' / img_name
-        _render_one_equation(doc, page_num, eq_num, img_path, located)
+        _render_one_equation(pdf, read, page_num, eq_num, img_path, located)
         figure_images[eq_label] = f'img/sec{owning:02d}/{img_name}'
 
     # Build context (lead-in + formula text) for equations that may lack (N) in markdown
     eq_context: dict[str, tuple[str | None, str | None]] = {}
     for eq_label, page_num in eq_page_map.items():
         eq_num = eq_label.split()[-1]
-        lead_in, formula_text = get_equation_context(doc[page_num], eq_num)
+        lead_in, formula_text = get_equation_context(read.pages[page_num], eq_num)
         eq_context[eq_label] = (lead_in, formula_text)
 
-    doc.close()
+    pdf.close()
 
     for idx, (heading, _) in enumerate(body_sections, 1):
         sec_slug = slug(heading) or 'body'

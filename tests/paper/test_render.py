@@ -5,6 +5,7 @@ import numpy as np
 import pymupdf
 
 from document_lab.paper.render import is_full_page_image, render_figure_pages
+from document_lab.pdf import read_pdf
 
 
 def _picture_page(doc: pymupdf.Document, captions: list[str]) -> None:
@@ -27,7 +28,8 @@ def test_a_picture_of_a_page_is_told_from_a_drawn_one(tmp_path):
     _drawn_page(doc, 'Figure 2. Two')
     small = doc.new_page()  # the control: a small picture on a page is a figure, not the page
     small.insert_image(pymupdf.Rect(72, 72, 200, 200), pixmap=pymupdf.Pixmap(pymupdf.csRGB, 4, 4, bytes(48), 0))
-    assert [is_full_page_image(p) for p in doc] == [True, False, False]
+    doc.save(tmp_path / 'pages.pdf')
+    assert [is_full_page_image(p) for p in read_pdf(tmp_path / 'pages.pdf').pages] == [True, False, False]
 
 
 def test_two_figures_on_a_picture_page_share_one_whole_page_image(tmp_path):

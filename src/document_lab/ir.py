@@ -130,6 +130,8 @@ class VectorPath:
     fill: tuple[float, ...] | None = None
     #: Filled by the even-odd rule rather than the nonzero winding rule.
     even_odd: bool = False
+    #: The painted path it is a subpath of, numbered on its page: one drawing's subpaths share it.
+    group: int = 0
 
 
 @dataclass(frozen=True, slots=True)

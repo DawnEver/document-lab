@@ -104,3 +104,8 @@ def test_a_raster_renders_at_the_native_resolution_of_the_image_under_it(doc, tm
     raster = read_raster(path, 1, BBox(72, 600, 172, 700))
     rows, columns = raster.pixels.shape[:2]  # 8 samples across 100 points: 5.76 dpi, a pixel per sample
     assert abs(rows - 8) <= 1 and abs(columns - 8) <= 1  # the renderer rounds the clip's edges outward
+
+
+def test_a_missing_file_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        read_pdf(tmp_path / 'absent.pdf')

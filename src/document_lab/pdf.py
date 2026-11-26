@@ -73,7 +73,7 @@ def _span(row: tuple, here: Provenance) -> TextSpan:
 
 
 def _path(row: tuple, here: Provenance) -> VectorPath:
-    points, closed, stroke, width, dashes, phase, fill, even_odd = row
+    points, closed, stroke, width, dashes, phase, fill, even_odd, group = row
     xs, ys = zip(*points, strict=True)
     return VectorPath(
         points=tuple(points),
@@ -85,6 +85,7 @@ def _path(row: tuple, here: Provenance) -> VectorPath:
         dash_phase=phase,
         fill=None if fill is None else tuple(fill),
         even_odd=even_odd,
+        group=group,
     )
 
 

@@ -1,14 +1,20 @@
-"""Figure and equation region cropping from PDF pages."""
+"""Figure and equation region cropping from a page read into the IR (its text blocks, images and drawings)."""
 
 from __future__ import annotations
 
 import re
 import warnings
+from collections import defaultdict
+from typing import TYPE_CHECKING
 
-import pymupdf
+from document_lab import layout
+from document_lab.ir import BBox, union
+
+if TYPE_CHECKING:
+    from document_lab.ir import Page
 
 
-def crop_figure(page: pymupdf.Page, label: str, content_below: bool = False) -> pymupdf.Rect | None:
+def crop_figure(page: Page, label: str, content_below: bool = False) -> BBox | None:
     """Return a tight crop rect for *label* on *page*, or None to fall back to full page.
 
     Strategy (works for typical IEEE 2-column layouts):
@@ -19,8 +25,8 @@ def crop_figure(page: pymupdf.Page, label: str, content_below: bool = False) -> 
     3. The crop spans from the top of those blocks down to the bottom of the caption,
        with a small margin. Column width is inferred from the caption block's x-span.
     """
-    page_rect = page.rect
-    blocks = page.get_text('dict', flags=pymupdf.TEXT_PRESERVE_WHITESPACE)['blocks']
+    page_rect = BBox(0.0, 0.0, page.width, page.height)
+    blocks = layout.blocks(page)
 
     caption_rect = _find_caption_rect(blocks, label)
     if caption_rect is None:
@@ -76,16 +82,16 @@ def crop_figure(page: pymupdf.Page, label: str, content_below: bool = False) -> 
     )
 
 
-def crop_equation(page: pymupdf.Page, eq_num: str) -> pymupdf.Rect | None:
+def crop_equation(page: Page, eq_num: str) -> BBox | None:
     """Find and crop the equation region for equation number *eq_num*.
 
     Locates "(N)" on the page, collects image/graphic blocks above it in the
     same column within a reasonable distance, then merges nearby candidates.
     Falls back to any equation-shaped image block when the number isn't found.
     """
-    page_rect = page.rect
+    page_rect = BBox(0.0, 0.0, page.width, page.height)
     page_mid = page_rect.width / 2
-    blocks = page.get_text('dict', flags=pymupdf.TEXT_PRESERVE_WHITESPACE)['blocks']
+    blocks = layout.blocks(page)
 
     eq_num_y, eq_num_x = _find_eq_number_pos(blocks, eq_num)
     candidates = _collect_eq_candidates(page, eq_num_y, eq_num_x, page_mid, page_rect)
@@ -96,7 +102,7 @@ def crop_equation(page: pymupdf.Page, eq_num: str) -> pymupdf.Rect | None:
         if merged:
             margin = 8
             r = merged[0]
-            return pymupdf.Rect(
+            return BBox(
                 max(0.0, r.x0 - margin),
                 max(0.0, r.y0 - margin),
                 min(page_rect.width, r.x1 + margin),
@@ -111,6 +117,25 @@ def crop_equation(page: pymupdf.Page, eq_num: str) -> pymupdf.Rect | None:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
+def _line_box(line: layout.Line) -> BBox:
+    return BBox(line.x0, line.y0, line.x1, line.y1)
+
+
+def _images(page: Page) -> list[BBox]:
+    """The box of each image placed on the page."""
+    return [f.provenance.bbox for f in page.figures if f.provenance.bbox is not None]
+
+
+def _drawings(page: Page) -> list[BBox]:
+    """The box of each painted path on the page (all its subpaths: one drawing)."""
+    parts: dict[int, list[BBox]] = defaultdict(list)
+    for path in page.paths:
+        if path.provenance.bbox is not None:
+            parts[path.group].append(path.provenance.bbox)
+    return [union(boxes) for boxes in parts.values()]
+
+
 _CAP_LABEL_RE = re.compile(r'(?:Fig\.|Figure|Table)\s+', re.IGNORECASE)
 # Maximum block height for a caption (incl. multi-line subfigure layouts).
 # Body-text paragraphs are typically 80-200 pt; IEEE captions are <=60 pt.
@@ -118,7 +143,7 @@ _CAP_MAX_HEIGHT = 45.0
 
 
 def _find_caption_bounds(
-    blocks: list, cap_x0: float, cap_top: float, cap_bottom: float, page_mid: float
+    blocks: list[layout.Block], cap_x0: float, cap_top: float, cap_bottom: float, page_mid: float
 ) -> tuple[float, float]:
     """Return (upper_bound, lower_bound) y-coords from nearest same-column captions above/below.
 
@@ -130,10 +155,8 @@ def _find_caption_bounds(
     same_col_left = cap_x0 < page_mid
 
     for blk in blocks:
-        if blk['type'] != 0:
-            continue
-        blk_text = ''.join(span.get('text', '') for line in blk.get('lines', []) for span in line.get('spans', []))
-        bx0, y0, bx1, y1 = blk['bbox']
+        blk_text = ''.join(ln.text for ln in blk.lines)
+        bx0, y0, bx1, y1 = blk.bbox
         blk_height = y1 - y0
         # Only compact blocks that look like captions (short text, narrow height)
         if len(blk_text) > 350 or not _CAP_LABEL_RE.search(blk_text) or blk_height > _CAP_MAX_HEIGHT:
@@ -151,7 +174,7 @@ def _find_caption_bounds(
 _MIN_TABLE_HEIGHT = 40.0  # body text must start at least this far below the table caption
 
 
-def _find_body_text_lower(page: pymupdf.Page, cap_bottom: float, col_x0: float, col_x1: float) -> float:
+def _find_body_text_lower(page: Page, cap_bottom: float, col_x0: float, col_x1: float) -> float:
     """Return y0 of first full-column-width body-paragraph text block below the table.
 
     Body paragraphs span ≥70% of the column width.  We require a minimum gap of
@@ -161,15 +184,11 @@ def _find_body_text_lower(page: pymupdf.Page, cap_bottom: float, col_x0: float, 
     threshold = col_width * 0.70
     earliest_body_y = cap_bottom + _MIN_TABLE_HEIGHT
 
-    def _in_col(r: pymupdf.Rect) -> bool:
+    def _in_col(r: BBox) -> bool:
         return col_x0 < (r.x0 + r.x1) / 2 < col_x1
 
-    for blk in sorted(
-        page.get_text('dict', flags=pymupdf.TEXT_PRESERVE_WHITESPACE)['blocks'], key=lambda b: b['bbox'][1]
-    ):
-        if blk['type'] != 0:
-            continue
-        r = pymupdf.Rect(blk['bbox'])
+    for blk in sorted(layout.blocks(page), key=lambda b: b.bbox.y0):
+        r = blk.bbox
         if r.y0 < earliest_body_y or not _in_col(r):
             continue
         if r.width >= threshold:
@@ -178,8 +197,8 @@ def _find_body_text_lower(page: pymupdf.Page, cap_bottom: float, col_x0: float, 
 
 
 def _collect_table_row_bounds(
-    page: pymupdf.Page, cap_bottom: float, col_x0: float, col_x1: float, lower_bound: float
-) -> tuple[list[pymupdf.Rect], float]:
+    page: Page, cap_bottom: float, col_x0: float, col_x1: float, lower_bound: float
+) -> tuple[list[BBox], float]:
     """Return (row_rects, last_y1) for table-row text blocks below the caption.
 
     row_rects are used to expand the crop x-bounds.  last_y1 is the y1 of the
@@ -189,15 +208,13 @@ def _collect_table_row_bounds(
     threshold = col_width * 0.70
     limit = min(cap_bottom + 300, lower_bound)
     last_y1 = cap_bottom
-    rects: list[pymupdf.Rect] = []
+    rects: list[BBox] = []
 
-    def _in_col(r: pymupdf.Rect) -> bool:
+    def _in_col(r: BBox) -> bool:
         return col_x0 < (r.x0 + r.x1) / 2 < col_x1
 
-    for blk in page.get_text('dict', flags=pymupdf.TEXT_PRESERVE_WHITESPACE)['blocks']:
-        if blk['type'] != 0:
-            continue
-        r = pymupdf.Rect(blk['bbox'])
+    for blk in layout.blocks(page):
+        r = blk.bbox
         if r.y0 < cap_bottom - 5 or r.y1 > limit or not _in_col(r):
             continue
         rects.append(r)
@@ -206,7 +223,7 @@ def _collect_table_row_bounds(
     return rects, last_y1
 
 
-def _find_caption_rect(blocks: list, label: str) -> pymupdf.Rect | None:
+def _find_caption_rect(blocks: list[layout.Block], label: str) -> BBox | None:
     """Return the best-match caption block for *label*.
 
     Collects all short blocks (≤350 chars) that contain "label." and returns
@@ -224,18 +241,16 @@ def _find_caption_rect(blocks: list, label: str) -> pymupdf.Rect | None:
     if m:
         patterns.append(re.compile(rf'Fig\.\s*{m.group(1)}\.', re.IGNORECASE))
 
-    candidates: list[tuple[float, pymupdf.Rect]] = []
+    candidates: list[tuple[float, BBox]] = []
     for blk in blocks:
-        if blk['type'] != 0:
-            continue
-        blk_text = ''.join(span.get('text', '') for line in blk.get('lines', []) for span in line.get('spans', []))
+        blk_text = ''.join(ln.text for ln in blk.lines)
         if len(blk_text) > 350:
             continue
         for pat in patterns:
             if pat.search(blk_text):
-                bbox = blk['bbox']
+                bbox = blk.bbox
                 height = bbox[3] - bbox[1]
-                candidates.append((height, pymupdf.Rect(bbox)))
+                candidates.append((height, bbox))
                 break
 
     if not candidates:
@@ -245,7 +260,7 @@ def _find_caption_rect(blocks: list, label: str) -> pymupdf.Rect | None:
     return candidates[0][1]
 
 
-def _column_bounds(page_rect: pymupdf.Rect, cap_x0: float) -> tuple[float, float]:
+def _column_bounds(page_rect: BBox, cap_x0: float) -> tuple[float, float]:
     page_mid = page_rect.width / 2
     if cap_x0 < page_mid:
         return 0.0, page_mid + 20
@@ -253,7 +268,7 @@ def _column_bounds(page_rect: pymupdf.Rect, cap_x0: float) -> tuple[float, float
 
 
 def _collect_graphic_rects(
-    page: pymupdf.Page,
+    page: Page,
     cap_top: float,
     cap_bottom: float,
     half_page: float,
@@ -262,51 +277,44 @@ def _collect_graphic_rects(
     content_below: bool,
     upper_bound: float = 0.0,
     lower_bound: float = float('inf'),
-) -> list[pymupdf.Rect]:
-    def _in_col(r: pymupdf.Rect) -> bool:
+) -> list[BBox]:
+    def _in_col(r: BBox) -> bool:
         return col_x0 < (r.x0 + r.x1) / 2 < col_x1
 
-    rects: list[pymupdf.Rect] = []
+    rects: list[BBox] = []
 
-    for blk in page.get_text('dict')['blocks']:
-        if blk['type'] != 1:
-            continue
-        r = pymupdf.Rect(blk['bbox'])
+    for r in _images(page):
         if content_below:
             if r.y0 >= cap_bottom - 10 and r.y1 - cap_bottom <= half_page and _in_col(r) and r.y1 <= lower_bound:
                 rects.append(r)
         elif r.y1 <= cap_top + 20 and cap_top - r.y0 <= half_page and _in_col(r) and r.y0 >= upper_bound:
             rects.append(r)
 
-    try:
-        for draw in page.get_drawings():
-            r = pymupdf.Rect(draw['rect'])
-            if r.height < 3 or r.width < 3:
-                continue
-            if content_below:
-                if r.y0 >= cap_bottom - 10 and r.y1 - cap_bottom <= half_page and _in_col(r) and r.y1 <= lower_bound:
-                    rects.append(r)
-            elif r.y1 <= cap_top + 20 and cap_top - r.y0 <= half_page and _in_col(r) and r.y0 >= upper_bound:
+    for r in _drawings(page):
+        if r.height < 3 or r.width < 3:
+            continue
+        if content_below:
+            if r.y0 >= cap_bottom - 10 and r.y1 - cap_bottom <= half_page and _in_col(r) and r.y1 <= lower_bound:
                 rects.append(r)
-    except (RuntimeError, AttributeError) as e:
-        warnings.warn(f'get_drawings() failed on page {page.number}: {e}', stacklevel=2)
+        elif r.y1 <= cap_top + 20 and cap_top - r.y0 <= half_page and _in_col(r) and r.y0 >= upper_bound:
+            rects.append(r)
 
     return rects
 
 
 def _build_crop_rect(
-    page_rect: pymupdf.Rect,
+    page_rect: BBox,
     cap_x0: float,
     cap_x1: float,
     cap_top: float,
     cap_bottom: float,
     half_page: float,
-    graphic_rects: list[pymupdf.Rect],
+    graphic_rects: list[BBox],
     content_below: bool,
     upper_bound: float = 0.0,
     lower_bound: float = float('inf'),
     extra_x_rects: list | None = None,
-) -> pymupdf.Rect | None:
+) -> BBox | None:
     margin = 6
     x0, x1 = cap_x0, cap_x1
     for r in list(graphic_rects) + list(extra_x_rects or []):
@@ -337,7 +345,7 @@ def _build_crop_rect(
         content_top = max(content_top, upper_bound)
         content_bottom = cap_bottom
 
-    crop = pymupdf.Rect(
+    crop = BBox(
         max(0.0, x0 - margin),
         max(0.0, content_top - margin),
         min(page_rect.width, x1 + margin),
@@ -346,7 +354,7 @@ def _build_crop_rect(
     return crop if crop.height >= 40 else None
 
 
-def _find_eq_number_pos(blocks: list, eq_num: str) -> tuple[float | None, float | None]:
+def _find_eq_number_pos(blocks: list[layout.Block], eq_num: str) -> tuple[float | None, float | None]:
     """Find the y/x position of equation number (N) on the page.
 
     Returns the y/x center of the specific LINE (not block) containing "(N)" so that
@@ -355,20 +363,16 @@ def _find_eq_number_pos(blocks: list, eq_num: str) -> tuple[float | None, float 
     """
     pattern = re.compile(rf'\({re.escape(eq_num)}\)\s*$')
     for blk in blocks:
-        if blk['type'] != 0:
-            continue
         # Scan individual lines to find the one ending with (N)
-        for line in blk.get('lines', []):
-            line_text = ''.join(span.get('text', '') for span in line.get('spans', [])).strip()
+        for line in blk.lines:
+            line_text = line.text.strip()
             if pattern.search(line_text):
-                lb = line['bbox']
+                lb = _line_box(line)
                 return (lb[1] + lb[3]) / 2, (lb[0] + lb[2]) / 2
         # Fallback: check full block text (some renderers produce single-span blocks)
-        blk_text = ''.join(
-            span.get('text', '') for line in blk.get('lines', []) for span in line.get('spans', [])
-        ).strip()
+        blk_text = ''.join(ln.text for ln in blk.lines).strip()
         if pattern.search(blk_text):
-            bbox = blk['bbox']
+            bbox = blk.bbox
             return (bbox[1] + bbox[3]) / 2, (bbox[0] + bbox[2]) / 2
     return None, None
 
@@ -401,15 +405,15 @@ def _is_body_text_line(text: str) -> bool:
 
 
 def _crop_eq_text_region(
-    blocks: list,
+    blocks: list[layout.Block],
     eq_num: str,
     eq_num_x: float | None,
     page_mid: float,
-    page_rect: pymupdf.Rect,
+    page_rect: BBox,
     margin_top: int = 2,
     margin_bottom: int = 6,
     margin_side: int = 8,
-) -> pymupdf.Rect | None:
+) -> BBox | None:
     """Crop the PDF page region that contains a text-rendered equation.
 
     Finds the BLOCK containing "(N)", uses its full bbox (all formula lines), then
@@ -422,19 +426,17 @@ def _crop_eq_text_region(
 
     # Step 1: find the block containing (N) and extract only the equation lines from it.
     # Walk backwards from the (N) line, stopping at body-text lines.
-    eq_line_rects: list[pymupdf.Rect] = []
+    eq_line_rects: list[BBox] = []
 
     for blk in blocks:
-        if blk['type'] != 0:
-            continue
-        blk_col_left = (blk['bbox'][0] + blk['bbox'][2]) / 2 < page_mid
+        blk_col_left = (blk.bbox.x0 + blk.bbox.x1) / 2 < page_mid
         if not is_full_width and blk_col_left != eq_col_left:
             continue
-        lines = blk.get('lines', [])
+        lines = blk.lines
         # Find the index of the line ending with (N)
         eq_line_idx = None
         for i, line in enumerate(lines):
-            lt = ''.join(s.get('text', '') for s in line.get('spans', [])).strip()
+            lt = line.text.strip()
             if pattern.search(lt):
                 eq_line_idx = i
                 break
@@ -445,19 +447,19 @@ def _crop_eq_text_region(
         collected = []
         for i in range(eq_line_idx, -1, -1):
             line = lines[i]
-            lt = ''.join(s.get('text', '') for s in line.get('spans', [])).strip()
+            lt = line.text.strip()
             if i < eq_line_idx and _is_body_text_line(lt):
                 break  # stop before body paragraph text
-            lb = line['bbox']
+            lb = _line_box(line)
             if lb[2] > lb[0] and lb[3] > lb[1]:  # skip degenerate lines
-                collected.append(pymupdf.Rect(lb))
+                collected.append(lb)
         eq_line_rects = collected
         break
 
     if not eq_line_rects:
         return None
 
-    eq_block_rect = pymupdf.Rect(
+    eq_block_rect = BBox(
         min(r.x0 for r in eq_line_rects),
         min(r.y0 for r in eq_line_rects),
         max(r.x1 for r in eq_line_rects),
@@ -468,14 +470,12 @@ def _crop_eq_text_region(
     # Only needed when (N) is in its own narrow block (len==1).
     # Includes same-level blocks (formula beside (N)) and blocks within _MAX_EQ_TEXT_ABOVE above.
     body_threshold = max(eq_block_rect.width * 1.1, 200)
-    above: list[pymupdf.Rect] = []
+    above: list[BBox] = []
     # Run sibling search when the collected region is narrow (equation-number only, formula elsewhere)
     needs_sibling_search = len(eq_line_rects) <= 3 and eq_block_rect.width < 100
     if not is_full_width and needs_sibling_search:
         for blk in blocks:
-            if blk['type'] != 0:
-                continue
-            r = pymupdf.Rect(blk['bbox'])
+            r = blk.bbox
             blk_col_left = (r.x0 + r.x1) / 2 < page_mid
             if blk_col_left != eq_col_left:
                 continue
@@ -489,8 +489,8 @@ def _crop_eq_text_region(
                 continue
             if r.width > body_threshold:
                 continue
-            blk_lines = blk.get('lines', [])
-            if any(_is_body_text_line(''.join(s.get('text', '') for s in ln.get('spans', []))) for ln in blk_lines):
+            blk_lines = blk.lines
+            if any(_is_body_text_line(ln.text) for ln in blk_lines):
                 continue
             above.append(r)
 
@@ -500,7 +500,7 @@ def _crop_eq_text_region(
     x1 = max(r.x1 for r in all_rects)
     y1 = max(r.y1 for r in all_rects)
 
-    return pymupdf.Rect(
+    return BBox(
         max(0.0, x0 - margin_side),
         max(0.0, y0 - margin_top),
         min(page_rect.width, x1 + margin_side),
@@ -508,7 +508,7 @@ def _crop_eq_text_region(
     )
 
 
-def get_equation_context(page: pymupdf.Page, eq_num: str) -> tuple[str | None, str | None]:
+def get_equation_context(page: Page, eq_num: str) -> tuple[str | None, str | None]:
     """Return (lead_in_text, formula_text) for equation *eq_num*.
 
     lead_in_text: the body-prose sentence immediately before the formula,
@@ -522,9 +522,9 @@ def get_equation_context(page: pymupdf.Page, eq_num: str) -> tuple[str | None, s
     lead-in.  For standalone (N) blocks that contain no body text, fall back
     to the last body-text LINE of the preceding same-column block.
     """
-    page_rect = page.rect
+    page_rect = BBox(0.0, 0.0, page.width, page.height)
     page_mid = page_rect.width / 2
-    blocks = page.get_text('dict', flags=pymupdf.TEXT_PRESERVE_WHITESPACE)['blocks']
+    blocks = layout.blocks(page)
 
     eq_num_y, eq_num_x = _find_eq_number_pos(blocks, eq_num)
     if eq_num_y is None:
@@ -539,22 +539,20 @@ def get_equation_context(page: pymupdf.Page, eq_num: str) -> tuple[str | None, s
 
     # ── Step 1: within-block backward walk ────────────────────────────────────
     for blk in blocks:
-        if blk['type'] != 0:
-            continue
-        blk_col_left = (blk['bbox'][0] + blk['bbox'][2]) / 2 < page_mid
+        blk_col_left = (blk.bbox.x0 + blk.bbox.x1) / 2 < page_mid
         if blk_col_left != eq_col_left:
             continue
-        lines = blk.get('lines', [])
+        lines = blk.lines
         eq_line_idx = None
         for i, line in enumerate(lines):
-            lt = ''.join(s.get('text', '') for s in line.get('spans', [])).strip()
+            lt = line.text.strip()
             if pattern.search(lt):
                 eq_line_idx = i
                 break
         if eq_line_idx is None:
             continue
 
-        eq_block_y0 = blk['bbox'][1]
+        eq_block_y0 = blk.bbox.y0
 
         # Walk backward: collect formula lines, then ALL consecutive body-text lines
         # that form the lead-in sentence (may span multiple lines, e.g. "...can be\n"
@@ -562,7 +560,7 @@ def get_equation_context(page: pymupdf.Page, eq_num: str) -> tuple[str | None, s
         lead_in_parts: list[str] = []
         collecting_lead_in = False
         for i in range(eq_line_idx - 1, -1, -1):
-            lt = ''.join(s.get('text', '') for s in lines[i].get('spans', [])).strip()
+            lt = lines[i].text.strip()
             if _is_body_text_line(lt):
                 collecting_lead_in = True
                 lead_in_parts.insert(0, lt)
@@ -578,17 +576,15 @@ def get_equation_context(page: pymupdf.Page, eq_num: str) -> tuple[str | None, s
     if lead_in_text is None and eq_block_y0 is not None:
         best_y1 = 0.0
         for blk in blocks:
-            if blk['type'] != 0:
-                continue
-            bx0, _by0, bx1, by1 = blk['bbox']
+            bx0, _by0, bx1, by1 = blk.bbox
             blk_col_left = (bx0 + bx1) / 2 < page_mid
             if blk_col_left != eq_col_left or by1 > eq_block_y0 + 5:
                 continue
             if by1 <= best_y1:
                 continue
             # Find the last body-text line in this block
-            for line in reversed(blk.get('lines', [])):
-                lt = ''.join(s.get('text', '') for s in line.get('spans', [])).strip()
+            for line in reversed(blk.lines):
+                lt = line.text.strip()
                 if _is_body_text_line(lt):
                     best_y1 = by1
                     lead_in_text = lt
@@ -599,17 +595,14 @@ def get_equation_context(page: pymupdf.Page, eq_num: str) -> tuple[str | None, s
 
 
 def _collect_eq_candidates(
-    page: pymupdf.Page,
+    page: Page,
     eq_num_y: float | None,
     eq_num_x: float | None,
     page_mid: float,
-    page_rect: pymupdf.Rect,
-) -> list[pymupdf.Rect]:
-    candidates: list[pymupdf.Rect] = []
-    for blk in page.get_text('dict')['blocks']:
-        if blk['type'] != 1:
-            continue
-        r = pymupdf.Rect(blk['bbox'])
+    page_rect: BBox,
+) -> list[BBox]:
+    candidates: list[BBox] = []
+    for r in _images(page):
         if r.width < 30 or r.height < 8:
             continue
         if eq_num_y is not None:
@@ -627,11 +620,11 @@ def _collect_eq_candidates(
     return candidates
 
 
-def _merge_nearby(rects: list[pymupdf.Rect], gap: float) -> list[pymupdf.Rect]:
-    merged: list[pymupdf.Rect] = []
+def _merge_nearby(rects: list[BBox], gap: float) -> list[BBox]:
+    merged: list[BBox] = []
     for r in rects:
         if merged and r.y0 - merged[-1].y1 < gap:
-            merged[-1] = pymupdf.Rect(min(merged[-1].x0, r.x0), merged[-1].y0, max(merged[-1].x1, r.x1), r.y1)
+            merged[-1] = BBox(min(merged[-1].x0, r.x0), merged[-1].y0, max(merged[-1].x1, r.x1), r.y1)
         else:
             merged.append(r)
     return merged

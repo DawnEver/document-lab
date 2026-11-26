@@ -13,7 +13,8 @@ use pyo3::prelude::*;
 type Box4 = (f64, f64, f64, f64);
 /// A span: text, font name, size, descriptor flags, font weight, box, render mode.
 type SpanRow = (String, String, f64, i64, Option<f64>, Box4, i64);
-/// A path (one subpath): points, closed, stroke color, line width, dashes, dash phase, fill color, even-odd.
+/// A path (one subpath): points, closed, stroke color, line width, dashes, dash phase, fill color, even-odd, and
+/// the index of the painted path it belongs to on its page.
 type PathRow = (
     Vec<(f64, f64)>,
     bool,
@@ -23,6 +24,7 @@ type PathRow = (
     f64,
     Option<Vec<f64>>,
     bool,
+    usize,
 );
 /// An image: box, sample width and height, object number (None inline).
 type ImageRow = (Box4, i64, i64, Option<u32>);
@@ -90,9 +92,13 @@ impl Reader {
             .collect();
         let mut paths = Vec::new();
         let mut images = Vec::new();
+        let mut painted = 0;
         for event in &content.events {
             match event {
-                Event::Path(path) => paths.extend(subpaths(path, curve_samples.max(1))),
+                Event::Path(path) => {
+                    paths.extend(subpaths(path, curve_samples.max(1), painted));
+                    painted += 1;
+                }
                 Event::Image(image) => {
                     images.push((box4(image.bbox), image.width, image.height, image.object));
                 }
@@ -114,7 +120,7 @@ fn color(c: &Color) -> Vec<f64> {
 }
 
 /// A painted path as one row per subpath, curves flattened.
-fn subpaths(path: &PathEvent, samples: usize) -> Vec<PathRow> {
+fn subpaths(path: &PathEvent, samples: usize, group: usize) -> Vec<PathRow> {
     let stroke = path.stroke.as_ref();
     let row = |points: Vec<(f64, f64)>, closed: bool| -> PathRow {
         (
@@ -126,6 +132,7 @@ fn subpaths(path: &PathEvent, samples: usize) -> Vec<PathRow> {
             stroke.map_or(0.0, |s| s.dash_phase),
             path.fill.as_ref().map(|f| color(&f.color)),
             path.fill.as_ref().is_some_and(|f| f.even_odd),
+            group,
         )
     };
     let mut out = Vec::new();

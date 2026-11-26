@@ -21,6 +21,7 @@ from document_lab.paper.convert import convert
 from document_lab.paper.output import write_paper_output
 from document_lab.paper.sections import clean_sections, split_sections
 from document_lab.paper.text import slug
+from document_lab.pdf import read_pdf
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -55,8 +56,7 @@ def _scanned_pages(pdf: Path, out_dir: Path) -> int:
     Raster scans and outlined glyphs: each inked page becomes ``img/pages/page-NNN.png`` with one section
     ``md/NN-page-N.md`` linking it.
     """
-    doc = pymupdf.open(pdf)
-    inked = [i for i, page in enumerate(doc) if page.get_images() or page.get_drawings()]
+    inked = [i for i, page in enumerate(read_pdf(pdf).pages) if page.figures or page.paths]
     if not inked:
         return 0
     img_dir, md_dir = out_dir / 'img' / 'pages', out_dir / 'md'
@@ -65,7 +65,8 @@ def _scanned_pages(pdf: Path, out_dir: Path) -> int:
     links = []
     for k, i in enumerate(inked, 1):
         name = f'page-{i + 1:03d}.png'
-        doc[i].get_pixmap(matrix=pymupdf.Matrix(_SCAN_ZOOM, _SCAN_ZOOM)).save(str(img_dir / name))
+        with pymupdf.open(pdf) as rendered:
+            rendered[i].get_pixmap(matrix=pymupdf.Matrix(_SCAN_ZOOM, _SCAN_ZOOM)).save(str(img_dir / name))
         section = f'{k:02d}-page-{i + 1}.md'
         (md_dir / section).write_text(
             f'# {pdf.stem} page {i + 1}\n\nno text layer: the page is the image\n\n'

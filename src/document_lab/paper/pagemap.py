@@ -1,18 +1,20 @@
-"""Label → page and page → section mapping utilities."""
+"""Label → page and page → section mapping utilities, over a document read into the IR."""
 
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-import pymupdf
-
+from document_lab import layout
 from document_lab.paper.text import RN_PATTERN as _RN
+
+if TYPE_CHECKING:
+    from document_lab.ir import Document
 
 FIG_TABLE_RE = re.compile(rf'(Figure\s+\d+|Fig\.\s*\d+|Table\s+(?:\d+|{_RN}))', re.IGNORECASE)
 
 
-def build_figure_page_map(pdf_path: Path) -> dict[str, int]:
+def build_figure_page_map(doc: Document) -> dict[str, int]:
     """Normalized figure/table labels -> the 0-based page of their CAPTION.
 
     A caption is a LINE opening with its label (``Fig. 3. ...``, ``TABLE I`` over its title), or a compact block
@@ -20,30 +22,27 @@ def build_figure_page_map(pdf_path: Path) -> dict[str, int]:
     A label only mentioned, never captioned (``see Table IV``), has no figure to crop and is absent.
     """
     captions: dict[str, tuple[float, int]] = {}
-    with pymupdf.open(str(pdf_path)) as doc:
-        for page_num, page in enumerate(doc):
-            for blk in page.get_text('dict', flags=pymupdf.TEXT_PRESERVE_WHITESPACE)['blocks']:
-                if blk['type'] != 0:
-                    continue
-                lines = [''.join(s.get('text', '') for s in ln.get('spans', [])).strip() for ln in blk.get('lines', [])]
-                text = ''.join(lines)
-                height = blk['bbox'][3] - blk['bbox'][1]
-                for m in FIG_TABLE_RE.finditer(text):
-                    label = re.sub(r'\s+', ' ', m.group(1)).strip()
-                    opens = re.compile(re.escape(label) + r'(?![\w])', re.IGNORECASE)
-                    is_caption = any(opens.match(line) for line in lines) or (
-                        len(text) <= 350 and re.search(re.escape(label) + r'\.', text, re.IGNORECASE)
-                    )
-                    normalized = re.sub(r'(?i)^Fig\.\s*', 'Figure ', label)
-                    if is_caption and (normalized not in captions or height < captions[normalized][0]):
-                        captions[normalized] = (height, page_num)
+    for page_num, page in enumerate(doc.pages):
+        for blk in layout.blocks(page):
+            lines = [ln.text.strip() for ln in blk.lines]
+            text = ''.join(lines)
+            height = blk.bbox.height
+            for m in FIG_TABLE_RE.finditer(text):
+                label = re.sub(r'\s+', ' ', m.group(1)).strip()
+                opens = re.compile(re.escape(label) + r'(?![\w])', re.IGNORECASE)
+                is_caption = any(opens.match(line) for line in lines) or (
+                    len(text) <= 350 and re.search(re.escape(label) + r'\.', text, re.IGNORECASE)
+                )
+                normalized = re.sub(r'(?i)^Fig\.\s*', 'Figure ', label)
+                if is_caption and (normalized not in captions or height < captions[normalized][0]):
+                    captions[normalized] = (height, page_num)
     return {norm: page for norm, (_, page) in captions.items()}
 
 
 def build_page_section_map(
     figure_page_map: dict[str, int],
     body_sections: list[tuple[str, str]],
-    pdf_path: Path | None = None,
+    doc: Document | None = None,
 ) -> dict[int, int]:
     """Map page number -> 1-based section index based on where figure captions appear.
 
@@ -51,7 +50,7 @@ def build_page_section_map(
     that *owns* that figure's page.  Plain mentions ("Fig. 2") are
     cross-references and do not confer ownership.
 
-    If *pdf_path* is provided, also scans each PDF page for section headings
+    If *doc* is provided, also scans each page for section headings
     from *body_sections* and propagates ownership to all pages between the
     first and last mapped page.  This ensures equation-only pages and other
     pages without figure captions still receive correct section assignment.
@@ -67,8 +66,7 @@ def build_page_section_map(
     # Detect section heading pages from the PDF to cover pages without figure
     # captions.  This is essential for 2-column IEEE papers where section
     # boundaries may fall on pages that have no figure/table captions.
-    if pdf_path:
-        doc = pymupdf.open(str(pdf_path))
+    if doc is not None:
         seen_pages = set(page_to_section)
         for idx, (_heading, _body) in enumerate(body_sections, 1):
             if idx in page_to_section.values():
@@ -82,15 +80,16 @@ def build_page_section_map(
             if not m:
                 continue
             numeral = m.group(1)
-            for page_num in range(len(doc)):
+            for page_num in range(len(doc.pages)):
                 if page_num in seen_pages:
                     continue
-                page_text = doc[page_num].get_text('text')
+                page_text = '\n'.join(
+                    ln.text for ln in layout.ordered(layout.lines(doc.pages[page_num], weighted=True))
+                )
                 if re.search(rf'\b{re.escape(numeral)}\.\s+[A-Z]', page_text):
                     page_to_section[page_num] = idx
                     seen_pages.add(page_num)
                     break
-        doc.close()
 
     # Fill unmapped pages by forward propagation: each unmapped page inherits
     # the section of the nearest lower-numbered mapped page.
@@ -107,24 +106,20 @@ def build_page_section_map(
     return page_to_section
 
 
-def build_equation_page_map(pdf_path: Path) -> dict[str, int]:
+def build_equation_page_map(doc: Document) -> dict[str, int]:
     """Map equation numbers like 'Equation (2)' to 0-based pages.
 
     Scans for parenthesized equation numbers near the right margin (IEEE
     convention) and also at the end of text lines.
     """
     eq_pages: dict[str, int] = {}
-    doc = pymupdf.open(str(pdf_path))
-    page_width = doc[0].rect.width
-    for page_num in range(len(doc)):
-        blocks = doc[page_num].get_text('dict', flags=pymupdf.TEXT_PRESERVE_WHITESPACE)['blocks']
-        for blk in blocks:
-            if blk['type'] != 0:
-                continue
-            blk_text = ''.join(
-                span.get('text', '') for line in blk.get('lines', []) for span in line.get('spans', [])
-            ).strip()
-            bbox = blk['bbox']
+    if not doc.pages:
+        return eq_pages
+    page_width = doc.pages[0].width
+    for page_num, page in enumerate(doc.pages):
+        for blk in layout.blocks(page):
+            blk_text = ''.join(ln.text for ln in blk.lines).strip()
+            bbox = blk.bbox
 
             # Standalone equation number at column right margin: "(1)", "(12)"
             # Left column right edge ~0.40-0.47*width; right column ~0.87-0.97*width
@@ -146,13 +141,11 @@ def build_equation_page_map(pdf_path: Path) -> dict[str, int]:
             # Per-line scan: catch (N) on its own line inside a multi-line prose block
             # (e.g. "...as:\n[formula chars]\n(1)\nwhere ...") — the block-level checks above
             # would not match because blk_text contains surrounding prose.
-            for line in blk.get('lines', []):
-                line_text = ''.join(s.get('text', '') for s in line.get('spans', [])).strip()
-                line_bbox = line['bbox']
+            for line in blk.lines:
+                line_text = line.text.strip()
                 m_line = re.match(r'^\((\d+)\)$', line_text)
-                if m_line and line_bbox[0] > page_width * 0.35:
+                if m_line and line.x0 > page_width * 0.35:
                     key = f'Equation {m_line.group(1)}'
                     if key not in eq_pages:
                         eq_pages[key] = page_num
-    doc.close()
     return eq_pages

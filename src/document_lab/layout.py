@@ -94,11 +94,11 @@ def lines(page: Page, *, weighted: bool) -> list[Line]:
     found: list[Line] = []
     for span in sorted(page.spans, key=lambda s: (s.provenance.bbox.x0, s.provenance.bbox.y0)):
         box = span.provenance.bbox
-        centre = (box.y0 + box.y1) / 2
+        center = (box.y0 + box.y1) / 2
         for line in found:
             reach = CLAUSE_GAP if not weighted and _CLAUSE.match(line.text) else LINE_GAP
             near = -GUTTER <= box.x0 - line.x1 <= reach * max(span.size, line.size)
-            if near and abs((line.y0 + line.y1) / 2 - centre) <= 0.4 * max(span.size, line.size):
+            if near and abs((line.y0 + line.y1) / 2 - center) <= 0.4 * max(span.size, line.size):
                 line.spans.append(span)
                 break
         else:

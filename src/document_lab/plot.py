@@ -6,7 +6,7 @@ Every :class:`Curve` says which (``basis``); a raster curve carries one pixel's 
 A plot here is an axis-aligned rectangular frame with numeric tick labels below it (x) and left of it (y). A label
 is text, or glyph outlines / stroke-font polylines / pixels read by shape (:mod:`document_lab.glyphs`, which refuses
 rather than guesses); stroke-font lettering that reads is never a curve. Each
-label's position is snapped to the tick mark or grid line it labels when one is drawn, else its box centre is
+label's position is snapped to the tick mark or grid line it labels when one is drawn, else its box center is
 used. A tick label is a number in the axis' common font size, aligned with the others on one row (x) or column
 (y), whose box overlaps the frame's extent along the axis; a stray number off that row or past the frame is not.
 
@@ -15,7 +15,7 @@ smaller misfit; two labels fit both exactly, so they read as linear unless told 
 the axis is cut at every tick where the data-per-point spacing (in the scale's units) changes by more than
 ``BREAK_TOL``, and each piece is a least-squares line through its own ticks -- a broken axis whose scale changes at
 a break reads right, and an axis whose spacing is neither linear nor log10 maps linearly between each pair of
-labelled ticks. Ticks whose values are not strictly monotone along the axis are refused (``ValueError``).
+labeled ticks. Ticks whose values are not strictly monotone along the axis are refused (``ValueError``).
 
 Every stroked open polyline inside the frame (a polyline drawn past the frame is clipped to it) that is not a tick,
 a grid line or the frame is a curve, after fragments are joined: polylines of one style (stroke, width, dash
@@ -67,14 +67,14 @@ __all__ = [
     'Basis',
     'Curve',
     'LegendSample',
-    'NoCurveOfColour',
+    'NoCurveOfColor',
     'NoPlotFrame',
     'Plot',
     'RasterPlot',
     'Scale',
     'UnreadFrame',
     'UnreadableTickLabels',
-    'UnrecognisedFrame',
+    'UnrecognizedFrame',
     'outline_text',
     'plots',
     'raster_plot',
@@ -114,7 +114,7 @@ SIZE_TOL: Final = 0.25
 SNAP_TOL: Final = 0.75
 #: A grid line spans at least this fraction of the frame.
 GRID_SPAN: Final = 0.9
-#: The relative change in data-per-point spacing between neighbouring tick intervals that marks an axis break.
+#: The relative change in data-per-point spacing between neighboring tick intervals that marks an axis break.
 BREAK_TOL: Final = 0.1
 #: Decimals (points) to which two fragment ends must agree to meet.
 JOIN_DIGITS: Final = 2
@@ -130,7 +130,7 @@ RAISED: Final = 0.85
 BLOB_MAX: Final = 3 * GLYPH_MAX
 #: The widest gap between a number and the ``min.``/``max.`` after it, as a fraction of the word's height.
 BOUND_GAP: Final = 1.5
-#: A glyph at most this fraction of its neighbour's height is a mark (a dot, a prime), not a letter or digit.
+#: A glyph at most this fraction of its neighbor's height is a mark (a dot, a prime), not a letter or digit.
 MARK_HEIGHT_PT: Final = 0.45
 #: A fill thinner than this (points) is a sliver (an arrowhead's cut apex), never a glyph: a minus is 0.5 thick at 8.
 SLIVER: Final = 0.1
@@ -150,15 +150,15 @@ WORD_GAP: Final = 0.6
 TURNED_GLYPHS: Final = 3
 #: A pixel this dark (0 white .. 1 black, the mean of R, G and B) is ink: a hairline grid at 100 dpi averages 0.2.
 INK_LEVEL: Final = 0.15
-#: A pixel whose R, G, B spread at least this much is coloured ink, however light.
+#: A pixel whose R, G, B spread at least this much is colored ink, however light.
 CHROMA_MIN: Final = 0.3
-#: Hue sectors (degrees) a coloured curve is told apart by; the first is centred on red.
+#: Hue sectors (degrees) a colored curve is told apart by; the first is centered on red.
 HUE_SECTOR: Final = 30.0
 #: A traced curve spans at least this share of the frame's width or height (smaller ink is text or a marker).
 CURVE_SPAN: Final = 0.05
 #: A pixel row or column inked across this share of the frame interior is a grid line, not a curve.
 GRID_INK: Final = 0.9
-#: A raster edge at least this share dark along its line is a frame or tick line; a curve's colour fills the rest.
+#: A raster edge at least this share dark along its line is a frame or tick line; a curve's color fills the rest.
 DARK_SHARE: Final = 0.25
 #: The share of the frame an image must cover for a curve-less plot to count as a raster plot.
 RASTER_COVER: Final = 0.25
@@ -179,7 +179,7 @@ class UnreadFrame(ValueError):
     """
 
 
-class UnrecognisedFrame(ValueError):
+class UnrecognizedFrame(ValueError):
     """A vector frame's tick-label row or column holds an outlined word the glyph reader refuses.
 
     Calibrating from the labels that did read would silently drop one (older SIFERRIT sheets set labels in glyphs
@@ -187,8 +187,8 @@ class UnrecognisedFrame(ValueError):
     """
 
 
-class NoCurveOfColour(ValueError):
-    """A raster plot holds no curve of the colour the caller asked :func:`raster_plot` for."""
+class NoCurveOfColor(ValueError):
+    """A raster plot holds no curve of the color the caller asked :func:`raster_plot` for."""
 
 
 class UnreadableTickLabels(ValueError):
@@ -205,7 +205,7 @@ class Axis:
     scale: Scale
     #: The pieces in increasing position: (position the piece starts at, slope, intercept).
     pieces: tuple[tuple[float, float, float], ...]
-    #: The calibration points: (page coordinate, labelled value).
+    #: The calibration points: (page coordinate, labeled value).
     ticks: tuple[tuple[float, float], ...]
 
     def to_data(self, position: np.ndarray) -> np.ndarray:
@@ -219,7 +219,7 @@ class Axis:
 
 @dataclass(frozen=True, slots=True, eq=False)
 class Curve:
-    """One digitised curve in data coordinates."""
+    """One digitized curve in data coordinates."""
 
     x: np.ndarray
     y: np.ndarray
@@ -356,9 +356,9 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
         )
         msg = (
             f'page {page.number}: no frame reads as a plot, and these draw their tick labels as stroked lines '
-            f'(stroke-font lettering), which the glyph reader does not read: {named}: an unrecognised frame'
+            f'(stroke-font lettering), which the glyph reader does not read: {named}: an unrecognized frame'
         )
-        raise UnrecognisedFrame(msg)
+        raise UnrecognizedFrame(msg)
     if not found and unread_frames:
         named = '; '.join(
             f'{tuple(round(v, 1) for v in frame)} with {nx} x and {ny} y tick labels' for frame, nx, ny in unread_frames
@@ -389,7 +389,7 @@ def _refuse_unread(
     unread: Sequence[BBox],
     marks: tuple[Sequence[float], Sequence[float]],
 ) -> None:
-    """Raise :class:`UnrecognisedFrame` when an unreadable outlined word sits among the frame's tick labels.
+    """Raise :class:`UnrecognizedFrame` when an unreadable outlined word sits among the frame's tick labels.
 
     Among means on the x-label row (between the read labels' top and bottom) or the y-label column (within the read
     labels' extent across); an unreadable word farther out is a title, not a label. On an axis that draws tick marks
@@ -407,9 +407,9 @@ def _refuse_unread(
         if on_row or on_col:
             msg = (
                 f'page {page.number}: the plot framed at {tuple(round(v, 1) for v in frame)} has a tick label at '
-                f'{tuple(round(v, 1) for v in box)} whose glyphs read as no number or word: an unrecognised frame'
+                f'{tuple(round(v, 1) for v in box)} whose glyphs read as no number or word: an unrecognized frame'
             )
-            raise UnrecognisedFrame(msg)
+            raise UnrecognizedFrame(msg)
 
 
 def _stroked_label(
@@ -462,18 +462,18 @@ def _multiplied(labels: list[_Label], marks: Sequence[float], *, vertical: bool)
 
     (power,) = powers
     rest = sorted((lb for lb in labels if lb is not power), key=at)
-    neighbour = min((rest[0], rest[-1]), key=lambda lb: abs(at(lb) - at(power)))
+    neighbor = min((rest[0], rest[-1]), key=lambda lb: abs(at(lb) - at(power)))
     lo, hi = ('y0', 'y1') if vertical else ('x0', 'x1')
-    gap = max(getattr(power.box, lo) - getattr(neighbour.box, hi), getattr(neighbour.box, lo) - getattr(power.box, hi))
+    gap = max(getattr(power.box, lo) - getattr(neighbor.box, hi), getattr(neighbor.box, lo) - getattr(power.box, hi))
     half = (getattr(power.box, hi) - getattr(power.box, lo)) / 2
     if gap > EDGE_TOL or (marks and _on_a_mark(at(power), half, marks)):
         return labels
     return [_Label(lb.value * power.value, lb.box, lb.size) for lb in rest]
 
 
-def _on_a_mark(centre: float, half: float, marks: Sequence[float]) -> bool:
-    """Whether a word centred at ``centre`` could label a mark: one lies within ``half`` of it, or none is drawn."""
-    return not marks or any(abs(m - centre) <= half + SNAP_TOL for m in marks)
+def _on_a_mark(center: float, half: float, marks: Sequence[float]) -> bool:
+    """Whether a word centered at ``center`` could label a mark: one lies within ``half`` of it, or none is drawn."""
+    return not marks or any(abs(m - center) <= half + SNAP_TOL for m in marks)
 
 
 def _edges(paths: Sequence[VectorPath]) -> list[_Edge]:
@@ -556,7 +556,7 @@ def _labels(spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> list[_Label]:
 def _outline_labels(outlined: Sequence[tuple[float | None, str | None, BBox]], dashes: Sequence[_Edge]) -> list[_Label]:
     """Numbers set as filled glyph OUTLINES (a sheet exported with its text converted to paths).
 
-    A glyph is a small filled shape plus the subpaths whose centres it encloses (a ``0``'s hole); a word is a row of
+    A glyph is a small filled shape plus the subpaths whose centers it encloses (a ``0``'s hole); a word is a row of
     glyphs no further apart than ``WORD_GAP`` of its height, and a raised smaller glyph starts a word of its own (an
     exponent). A word reading ``10`` followed by a raised integer word is that power of ten, as with text labels; a
     drawn dash before a label (or between ``10`` and its exponent) is its minus. A word the reader cannot read is no
@@ -836,7 +836,7 @@ def _arrowhead(points: Sequence[tuple[float, float]], box: BBox) -> bool:
 def _dotted(
     glyphs: list[tuple[BBox, list[tuple[tuple[float, float], ...]]]],
 ) -> list[tuple[BBox, list[tuple[tuple[float, float], ...]]]]:
-    """Each small mark just above a taller glyph whose extent across holds its centre, joined to it (an ``i``'s dot).
+    """Each small mark just above a taller glyph whose extent across holds its center, joined to it (an ``i``'s dot).
 
     Just above is a gap of at most ``DOT_GAP`` of the glyph's height; the joined glyph is read as one shape.
     """
@@ -1056,7 +1056,7 @@ def _y_labels(frame: BBox, labels: list[_Label]) -> list[_Label]:
 
 
 def _aligned(labels: list[_Label], *, vertical: bool) -> list[_Label]:
-    """The largest set of labels sharing one row (x: top, bottom or centre) or column (y: right, left or centre).
+    """The largest set of labels sharing one row (x: top, bottom or center) or column (y: right, left or center).
 
     A tie goes to the edge facing the axis (x: top, y: right): an axis title flush with the labels' far edge ties
     with them there, and is not one.
@@ -1139,7 +1139,7 @@ def _fit(ticks: tuple[tuple[float, float], ...], forced: Scale | None) -> Axis:
 
 
 def _pieces(pos: np.ndarray, target: np.ndarray) -> tuple[tuple[float, float, float], ...]:
-    """Lines through runs of tick intervals of one data-per-point spacing; neighbouring pieces share a break tick."""
+    """Lines through runs of tick intervals of one data-per-point spacing; neighboring pieces share a break tick."""
     rates = np.diff(target) / np.diff(pos)
     runs = [[0]]
     for i in range(1, len(rates)):
@@ -1338,29 +1338,29 @@ def raster_plot(
     y_values: Sequence[float] | None = None,
     x_scale: Scale | None = None,
     y_scale: Scale | None = None,
-    colour: tuple[float, float, float] | None = None,
+    color: tuple[float, float, float] | None = None,
 ) -> Plot:
     """The plot in a RASTER image: its frame, axes calibrated from its tick labels, and its curves traced.
 
-    The frame is found as in :func:`plots`, from the image's long dark (not coloured) horizontal and vertical pixel
+    The frame is found as in :func:`plots`, from the image's long dark (not colored) horizontal and vertical pixel
     runs: of those with two or more aligned label glyph rows below it and left of it (a drop shadow frames none), the
-    one whose fewer-labelled axis READS the most labels, then has the most, then the largest (a border box around the
+    one whose fewer-labeled axis READS the most labels, then has the most, then the largest (a border box around the
     figure, with a caption's numbers below it, is not the plot's frame). A
     tick label is a row of ink glyphs below the frame (x) or left of it (y), read by :mod:`document_lab.glyphs`; one
-    the reader refuses raises :class:`UnreadableTickLabels` -- unless the caller states the axis' labelled values
+    the reader refuses raises :class:`UnreadableTickLabels` -- unless the caller states the axis' labeled values
     (``x_values`` left to right, ``y_values`` bottom to top), which are then paired with the label positions found
     and checked against those that read (:func:`_stated`). Positions snap to tick marks and grid lines as for vector
     plots.
 
-    Curves are the frame's ink less its grid lines (rows or columns inked across ``GRID_INK`` of it). Coloured ink is
-    one curve per ``HUE_SECTOR`` (so two crossing curves of two colours stay two); dark ink is one curve per
+    Curves are the frame's ink less its grid lines (rows or columns inked across ``GRID_INK`` of it). Colored ink is
+    one curve per ``HUE_SECTOR`` (so two crossing curves of two colors stay two); dark ink is one curve per
     connected component spanning ``CURVE_SPAN`` of the frame (dark curves that touch are one). A curve is sampled per
-    pixel column at each run's centre, or every stroke width along a run longer than two (a steep stretch); a curve
+    pixel column at each run's center, or every stroke width along a run longer than two (a steep stretch); a curve
     that folds back over x (a loop) keeps both branches' samples, in column order. Each point carries one pixel's
     extent in data units as its uncertainty.
 
-    ``colour`` (RGB, 0..1) keeps only the curves drawn in it: those of its ``HUE_SECTOR`` when it is coloured, the
-    dark ones when it is not; when none is, :class:`NoCurveOfColour` is raised rather than an empty plot returned.
+    ``color`` (RGB, 0..1) keeps only the curves drawn in it: those of its ``HUE_SECTOR`` when it is colored, the
+    dark ones when it is not; when none is, :class:`NoCurveOfColor` is raised rather than an empty plot returned.
     """
     box = raster.provenance.bbox
     rgb = raster.pixels.astype(float) / 255
@@ -1388,12 +1388,12 @@ def raster_plot(
     x_axis = _raster_axis('x', frame, values=x_values, scale=x_scale, **found)
     y_axis = _raster_axis('y', frame, values=y_values, scale=y_scale, **found)
     masks, occluders = _curve_masks(ink, chroma, rgb, frame=frame, box=box, scale=scale)
-    if colour is not None:
-        masks = [m for m in masks if _sector(rgb[m].mean(axis=0)) == _sector(np.asarray(colour, dtype=float))]
+    if color is not None:
+        masks = [m for m in masks if _sector(rgb[m].mean(axis=0)) == _sector(np.asarray(color, dtype=float))]
         if not masks:
             where = tuple(round(v, 1) for v in frame)
-            msg = f'no curve drawn in colour {tuple(colour)} inside the plot framed at {where}'
-            raise NoCurveOfColour(msg)
+            msg = f'no curve drawn in color {tuple(color)} inside the plot framed at {where}'
+            raise NoCurveOfColor(msg)
     traced = (
         _traced(mask, occluders & ~mask, rgb=rgb, here=raster.provenance, scale=scale, axes=(x_axis, y_axis))
         for mask in masks
@@ -1406,7 +1406,7 @@ def _dark_edges(ink: np.ndarray, dark: np.ndarray, box: BBox, scale: tuple[float
     """The runs of ``ink`` (:func:`_pixel_edges`) at least :data:`DARK_SHARE` dark along their line.
 
     A frame and its ticks are drawn dark; a curve drawn over the x axis from the origin covers the axis' pixels with
-    its colour, so the axis read from dark ink alone stopped short of the corner. Read from all ink, the axis runs
+    its color, so the axis read from dark ink alone stopped short of the corner. Read from all ink, the axis runs
     on under the curve; a curve alone (no dark under it) is still no edge.
     """
     sx, sy = scale
@@ -1424,7 +1424,7 @@ def _dark_edges(ink: np.ndarray, dark: np.ndarray, box: BBox, scale: tuple[float
 
 
 def _pixel_edges(ink: np.ndarray, box: BBox, scale: tuple[float, float]) -> list[_Edge]:
-    """Every run of ink pixels along a row (horizontal) or a column (vertical), runs on neighbouring lines merged."""
+    """Every run of ink pixels along a row (horizontal) or a column (vertical), runs on neighboring lines merged."""
     out = []
     for vertical, grid in ((False, ink), (True, ink.T)):
         step, along = (scale[0], scale[1]) if vertical else (scale[1], scale[0])
@@ -1540,11 +1540,11 @@ def _raster_axis(
     vertical = name == 'y'
     near = _y_labels(frame, labels) if vertical else _x_labels(frame, labels)
     row = sorted(_aligned(near, vertical=vertical), key=lambda lb: (lb.box.y0 + lb.box.y1) if vertical else lb.box.x0)
-    centre = (lambda b: (b.y0 + b.y1) / 2) if vertical else (lambda b: (b.x0 + b.x1) / 2)
+    center = (lambda b: (b.y0 + b.y1) / 2) if vertical else (lambda b: (b.x0 + b.x1) / 2)
     marks = _marks(frame, edges, vertical=not vertical)
     if values is not None:
-        return _fit(_stated(name, row, values, marks, centre), scale)
-    ticks = [(centre(lb.box), lb.value) for lb in row if not math.isnan(lb.value)]
+        return _fit(_stated(name, row, values, marks, center), scale)
+    ticks = [(center(lb.box), lb.value) for lb in row if not math.isnan(lb.value)]
     if len(ticks) < 2:  # noqa: PLR2004 -- a line needs two points
         refused = next((refusals[labels.index(lb)] for lb in row if math.isnan(lb.value)), None)
         msg = (
@@ -1556,7 +1556,7 @@ def _raster_axis(
 
 
 def _stated(
-    name: str, row: Sequence[_Label], values: Sequence[float], marks: Sequence[float], centre: Callable[[BBox], float]
+    name: str, row: Sequence[_Label], values: Sequence[float], marks: Sequence[float], center: Callable[[BBox], float]
 ) -> tuple[tuple[float, float], ...]:
     """The caller's ``values`` (left to right, bottom to top) paired with the axis' labels, snapped to ``marks``.
 
@@ -1569,9 +1569,9 @@ def _stated(
         raise UnreadableTickLabels(msg)
     for lb, v in zip(ordered, values, strict=True):
         if not math.isnan(lb.value) and not math.isclose(lb.value, v, rel_tol=1e-9, abs_tol=0.0):
-            msg = f'{name} axis: the label at {centre(lb.box):.1f} reads {lb.value:g}, the stated value is {v:g}'
+            msg = f'{name} axis: the label at {center(lb.box):.1f} reads {lb.value:g}, the stated value is {v:g}'
             raise UnreadableTickLabels(msg)
-    return _snap([(centre(lb.box), float(v)) for lb, v in zip(ordered, values, strict=True)], marks)
+    return _snap([(center(lb.box), float(v)) for lb, v in zip(ordered, values, strict=True)], marks)
 
 
 def _curve_masks(
@@ -1579,7 +1579,7 @@ def _curve_masks(
 ) -> tuple[list[np.ndarray], np.ndarray]:
     """One pixel mask per curve inside the frame, and every pixel that can hide a curve's ink.
 
-    A mask is a hue sector of coloured ink or a component of dark ink; what can hide ink is any ink, and everything
+    A mask is a hue sector of colored ink or a component of dark ink; what can hide ink is any ink, and everything
     outside the frame's interior.
     """
     sx, sy = scale
@@ -1592,11 +1592,11 @@ def _curve_masks(
     grid_cols = mask[r0:r1, :].mean(axis=0) >= GRID_INK
     mask &= ~grid_rows[:, None] & ~grid_cols[None, :]
     span_x, span_y = CURVE_SPAN * (c1 - c0), CURVE_SPAN * (r1 - r0)
-    coloured = chroma > CHROMA_MIN
+    colored = chroma > CHROMA_MIN
     sector = np.floor(((_hue(rgb) + HUE_SECTOR / 2) % 360) / HUE_SECTOR).astype(int)
     out = []
-    classes = [mask & coloured & (sector == k) for k in range(round(360 / HUE_SECTOR))]
-    for k, cls in enumerate([*classes, mask & ~coloured]):
+    classes = [mask & colored & (sector == k) for k in range(round(360 / HUE_SECTOR))]
+    for k, cls in enumerate([*classes, mask & ~colored]):
         labels = _components(_bridged(cls, grid_rows, grid_cols))
         kept = []
         for label in range(1, int(labels.max()) + 1):
@@ -1630,7 +1630,7 @@ def _bridged(mask: np.ndarray, grid_rows: np.ndarray, grid_cols: np.ndarray) -> 
 
 
 def _sector(rgb: np.ndarray) -> int:
-    """The ``HUE_SECTOR`` a colour falls in (as :func:`_curve_masks` sorts curves), or -1 when it is not coloured."""
+    """The ``HUE_SECTOR`` a color falls in (as :func:`_curve_masks` sorts curves), or -1 when it is not colored."""
     if float(rgb.max() - rgb.min()) <= CHROMA_MIN:
         return -1
     return int(np.floor(((float(_hue(rgb)) + HUE_SECTOR / 2) % 360) / HUE_SECTOR))
@@ -1654,7 +1654,7 @@ def _traced(
     """The curve's samples, mapped through ``axes``.
 
     A column run that ends against ``hidden`` pixels (another curve's ink, a grid line, the frame) is skipped: part
-    of its stroke may lie under them, and its centre is then not the curve's.
+    of its stroke may lie under them, and its center is then not the curve's.
     """
     box = here.bbox
     sx, sy = scale
@@ -1665,22 +1665,22 @@ def _traced(
     runs = [(c, lo, hi) for c, lo, hi in every if not (lo == 0 or hi == rows_n or hidden[lo - 1, c] or hidden[hi, c])]
     cols, rows = [], []
     for c, lo, hi in runs:
-        centres = [(lo + hi - 1) / 2] if hi - lo <= 2 * stroke else np.arange(lo + stroke / 2, hi - stroke / 2, stroke)
-        cols.extend([c] * len(centres))
-        rows.extend(centres)
+        centers = [(lo + hi - 1) / 2] if hi - lo <= 2 * stroke else np.arange(lo + stroke / 2, hi - stroke / 2, stroke)
+        cols.extend([c] * len(centers))
+        rows.extend(centers)
     px = box.x0 + (np.array(cols, dtype=float) + 0.5) * sx
     py = box.y0 + (np.array(rows, dtype=float) + 0.5) * sy
     rr, cc = np.nonzero(mask)
     bbox = BBox(
         box.x0 + cc.min() * sx, box.y0 + rr.min() * sy, box.x0 + (cc.max() + 1) * sx, box.y0 + (rr.max() + 1) * sy
     )
-    colour = tuple(round(float(v), 2) for v in rgb[mask].mean(axis=0))
+    color = tuple(round(float(v), 2) for v in rgb[mask].mean(axis=0))
     return Curve(
         x_axis.to_data(px),
         y_axis.to_data(py),
         here.at(bbox=bbox),
         (x_axis.scale, y_axis.scale),
-        colour,
+        color,
         stroke * sy,
         (),
         'raster',

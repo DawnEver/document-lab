@@ -174,7 +174,7 @@ def test_cancel_on_the_panel_before_start_grabs_and_writes_nothing(tmp_path, fak
 
 def test_adjust_on_the_panel_reopens_the_selection_on_the_area_set_then_waits_again(tmp_path, fake, monkeypatch):
     asked, waited = [], []
-    monkeypatch.setattr(desktop, 'select', lambda marked: asked.append(marked) or marked)
+    monkeypatch.setattr(desktop, 'select', lambda _memory, marked: asked.append(marked) or marked)
     answer = FakeHud.ready
     monkeypatch.setattr(FakeHud, 'ready', lambda self: waited.append(1) or answer(self))
     monkeypatch.setattr(FakeHud, 'answers', ['adjust'])
@@ -271,7 +271,7 @@ def test_python_3_13_0_in_a_venv_without_tcl_is_told_before_tkinter_starts(tmp_p
 
 
 def test_a_tkinter_that_cannot_start_ends_the_run_with_the_remedy(tmp_path, fake, monkeypatch, capsys):
-    monkeypatch.setattr(desktop, 'tk_problem', lambda: 'Use Python 3.13.1 or later')
+    monkeypatch.setattr(desktop, 'tk_problem', lambda *_: 'Use Python 3.13.1 or later')
     shown = []
     monkeypatch.setattr(FakeHud, 'ready', lambda self: shown.append(1) or 'start')
     assert run(tmp_path) == 1
@@ -455,3 +455,15 @@ def test_resume_with_an_area_a_few_pixels_narrower_makes_it_as_wide_and_goes_on(
     assert main([*argv, '--auto', '--delay', '0', '--settle', '0', '--end-wait', '0', '--page-height', '0']) == 0
     assert f'it is made {WIDTH} px wide' in capsys.readouterr().out
     assert np.array_equal(pdf_pixels(tmp_path / 'c.pdf')[0], fake.IMAGE)
+
+
+def test_now_starts_on_the_named_area_without_waiting_for_the_panel(tmp_path, fake):
+    FakeHud.answers = ['cancel']  # what the panel would answer, were it asked
+    assert auto(tmp_path, '--now') == 0
+    assert 'ready' not in FakeHud.shown
+    assert (tmp_path / 'c.pdf').exists()
+
+
+def test_now_without_a_named_area_is_refused(tmp_path, fake):
+    with pytest.raises(ValueError, match='--window, --hwnd or --rect'):
+        main(['capture', str(tmp_path / 'c.pdf'), '--now'])

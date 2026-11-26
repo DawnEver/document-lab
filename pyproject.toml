@@ -93,7 +93,7 @@ sessions = ['integrate/main']
 ephemeral = ['pr/*']  # a PR head: deleted with its merge
 prune_merged = true
 max_ahead = 30  # an unlanded branch holding more than 30 commits integration lacks is an alarm
-max_idle_hours = 24  # a branch idle 24 h is pruned when merged, alarmed when not
+max_idle = "24 h"  # a branch idle 24 h is pruned when merged, alarmed when not
 
 [tool.dev_lab.parts]
 output = "output/logs"
@@ -132,6 +132,10 @@ breakglass = ["app:5704921", "role:admin"]  # the ops App merges break-glass; ad
 # Git hooks: the family base (dev_lab/dev/githooks/base.toml) plus one merged row. The lock is generated and
 # exceeds the 500 KB large-files bound because the `gpu` extra (marker-pdf -> torch) resolves in it; the size check guards against
 # committed blobs, which a lock is not.
+[tool.dev_lab.env]
+entry = ["src/document_lab/capture/cli.py"]
+pending = []
+
 [tool.dev_lab.hooks]
 
 [[tool.dev_lab.hooks.pre-commit]]

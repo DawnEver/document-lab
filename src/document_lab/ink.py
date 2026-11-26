@@ -9,7 +9,7 @@ A pixel darker than :data:`DARK` is ink. The text's ink is wiped first (the call
 formula read as noise among them), then ink within ``reach`` points (the caller's: a page's scale is its own) is
 one drawing. Each drawing is a box in
 points, whatever its size, with what it is drawn with (:class:`Drawing`): its rules, the ink off them, its longest
-stroke. Which drawings are regions, and of what kind, is `document_lab.regions`' judgement, not this module's.
+stroke. Which drawings are regions, and of what kind, is `document_lab.regions`' judgment, not this module's.
 """
 
 from __future__ import annotations
@@ -130,7 +130,7 @@ def _longest(own: np.ndarray) -> int:
 
 
 def _runs(flags: np.ndarray) -> int:
-    """How many runs of True ``flags`` holds: neighbouring inked rows are one rule."""
+    """How many runs of True ``flags`` holds: neighboring inked rows are one rule."""
     return int(np.count_nonzero(flags[1:] & ~flags[:-1]) + bool(flags[0])) if flags.size else 0
 
 

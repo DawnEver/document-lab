@@ -31,7 +31,7 @@ def test_a_span_carries_its_page_and_box(doc):
     assert span.size == pytest.approx(14, abs=1e-6)
 
 
-def test_a_drawn_polyline_is_one_vector_path_with_its_points_and_colour(doc):
+def test_a_drawn_polyline_is_one_vector_path_with_its_points_and_color(doc):
     (path,) = [p for p in doc.page(2).paths if p.stroke == RED]
     assert [c for p in path.points for c in p] == pytest.approx([100, 100, 200, 150, 300, 120], abs=1e-3)
     assert path.width == pytest.approx(1.5, abs=1e-6)

@@ -1,4 +1,4 @@
-"""The capture loop against a fake viewport over a known tall image: it scrolls to the end, stops there, honours
+"""The capture loop against a fake viewport over a known tall image: it scrolls to the end, stops there, honors
 its caps, and waits for a frame that is still changing to settle."""
 
 import numpy as np

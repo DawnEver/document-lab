@@ -22,7 +22,7 @@ __all__ = ['LEAST_SEPARATORS', 'Rhythm', 'page_rhythm']
 LEAST_SEPARATORS: Final = 3  # separators that make a chain: two are a coincidence, three a pitch
 _SLACK: Final = 1  # rows a separator may sit off the pitch: frames placed to a fraction of a row
 _LEAST_PITCH: Final = 64  # rows: no page is shorter
-_GREY_STEP: Final = 8  # grey levels quantised together, so a re-rendered row still matches
+_GREY_STEP: Final = 8  # grey levels quantized together, so a re-rendered row still matches
 
 
 @dataclass(frozen=True)

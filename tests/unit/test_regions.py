@@ -207,7 +207,7 @@ def test_a_frame_round_a_lines_words_a_margin_note_and_a_short_line_are_no_regio
 
     page, body = _page(tmp_path, draw)
     link = _drawn((55, 190, 150, 204), rules=(2, 2))  # a link's frame round words of the line
-    margin = _drawn((5, 100, 20, 700))  # a sideways licence note beside the text column
+    margin = _drawn((5, 100, 20, 700))  # a sideways license note beside the text column
     rule = _drawn((50, 400, 500, 401))  # a rule under a header
     words = _drawn((60, 500, 120, 540), stroke=8)  # words OCR missed: glyphs, no drawn line
     beside = _drawn((42, 190, 58, 222))  # a link's frame just before the line, its words unread, a line below caught

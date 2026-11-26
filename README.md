@@ -8,7 +8,7 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 | `ir` | frozen IR: `Provenance`, `TextSpan`, `VectorPath`, `Table`/`Cell`, `Figure`, `Raster`, `Page`, `Document` |
 | `pdf` | `read_pdf(path)`: spans, vector paths, ruled tables with per-cell boxes, image figures and captions (PyMuPDF); `read_raster(path, page, bbox)`: a region's pixels at its images' native resolution |
 | `html` | `read_html(path)`: every `<table>` as a `Table` (standard-library parser) |
-| `plot` | `plots(page)`: curves digitised from VECTOR plots (axes linear, log10, or piecewise between labelled ticks; labels as text, glyph outlines or stroke-font polylines; fragments joined; legend samples apart); a raster plot raises `RasterPlot`. `raster_plot(raster)`: one plot traced from pixels, each point with its pixel uncertainty; unreadable labels raise `UnreadableTickLabels` unless stated (`x_values=`, `y_values=`) |
+| `plot` | `plots(page)`: curves digitized from VECTOR plots (axes linear, log10, or piecewise between labeled ticks; labels as text, glyph outlines or stroke-font polylines; fragments joined; legend samples apart); a raster plot raises `RasterPlot`. `raster_plot(raster)`: one plot traced from pixels, each point with its pixel uncertainty; unreadable labels raise `UnreadableTickLabels` unless stated (`x_values=`, `y_values=`) |
 | `strokes` | thick strokes in a `Raster`: `fragments` (a morphological opening drops hairlines), `link` (dashes joined end to start along their own direction; crossing curves stay apart), `bands` (fragments to the nearest solid curve), `dots` + `split_by_dots` (a smaller opening keeps dash-dot dots; they trace the dash-dot curve, telling it from a dashed one two strokes away) |
 | `glyphs` | digits and words read from glyph shapes (outlines, pixels or stroked polylines) against a `Font`: `HELVETICA`, or `STROKE` (the SIFERRIT stroke font, templates in `strokefont`); a near tie, a twin, a letter nearer than any digit or a glyph under 14 px raises `UnreadableGlyph` |
 | `numbers` | the one number grammar: `parse_number` (whole text) and `first_number` (a cell's leading value) |
@@ -110,7 +110,7 @@ Stitching (`capture.stitch`): what stays put while the page scrolls -- a sticky 
 thumb -- is left out of the match, so no setting is needed for it. The scroll is the offset at which the frames are
 most alike -- not exactly alike: at 175% scaling an application scrolls by fractions of a pixel and re-renders the text,
 so no offset ever matches pixel for pixel. Its mean grey error, the worst `--outliers` share (default 5%) left out, must
-be at most `--tolerance` (default 8) and clearly below every offset that is not its neighbour; candidates come from the
+be at most `--tolerance` (default 8) and clearly below every offset that is not its neighbor; candidates come from the
 mean squared difference of every row at every offset, by FFT. An offset that is not unique (a repeating view), or none, stops the capture there: what was stitched is written, the reason is printed and the exit status is 1.
 `--drop-overlays` (off by default) also removes the overlays from where they would recur: each spot of the page is
 taken from the frame that showed it least covered. `--ignore-top/--ignore-bottom` exclude chrome that changes as it
@@ -130,9 +130,9 @@ every other page copied as it is (its OCR layer too). Captures that share nothin
 fit more than one place, or differ in width are refused, never butted together.
 
 A PDF only its viewer may open (a secured standard): `capture-files <pdf|dir|list.txt>... -o <dir>` opens each in
-Adobe Acrobat (`--viewer` names another), maximises the window and shows the document full screen (`ctrl+l`:
+Adobe Acrobat (`--viewer` names another), maximizes the window and shows the document full screen (`ctrl+l`:
 one page at a time, fitted to the monitor, on black); then each page is taken as it shows and the viewer paged on (`pagedown`):
-one image a page, one PDF page each, no stitching. `--monitor N` maximises the viewer on another monitor (0 the primary); a portrait one shows a page sharper. `--area mark` (default) asks you to mark the page once, on the first
+one image a page, one PDF page each, no stitching. `--monitor N` maximizes the viewer on another monitor (0 the primary); a portrait one shows a page sharper. `--area mark` (default) asks you to mark the page once, on the first
 PDF, from the area last confirmed; `--area view` finds the page against the viewer's backdrop on every page;
 `L,T,W,H` names it. It stops at the PDF's own page count when the PDF opens here, else when paging on changes nothing;
 a PDF already captured is kept (`--overwrite` takes it again); `--ocr` lays a text layer over each. A PDF that fails

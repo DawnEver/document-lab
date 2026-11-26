@@ -98,10 +98,10 @@ class TextSpan:
 
     @property
     def center(self) -> tuple[float, float]:
-        """The centre of the span's box."""
+        """The center of the span's box."""
         box = self.provenance.bbox
         if box is None:
-            msg = 'a span without a box has no centre'
+            msg = 'a span without a box has no center'
             raise ValueError(msg)
         return ((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2)
 

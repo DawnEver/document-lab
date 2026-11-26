@@ -40,6 +40,7 @@ LIANG = Paper(
     tables=frozenset({'I'}),
     absent_figures=frozenset({9}),  # the paper's numbering skips 9
 )
+# spelling-off -- the paper's own title and headings, as it spells them
 HAIRPIN = Paper(
     'wang-hairpin-2025.pdf',
     'Scripting-Based 3D Geometry Modelling of Hairpin Windings in EV Traction Motors',
@@ -55,6 +56,7 @@ HAIRPIN = Paper(
     figures=frozenset(range(1, 14)),
     tables=frozenset({'I', 'II', 'III'}),
 )
+# spelling-on
 PAPERS = (IEEE, LIANG, HAIRPIN)
 
 

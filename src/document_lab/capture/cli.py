@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import os
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal
 
 from lab_commons.log import emit
 
@@ -29,6 +30,11 @@ if TYPE_CHECKING:
     from document_lab.capture.stitch import Stitcher
 
 __all__ = ['add_files_parser', 'add_merge_parser', 'add_parser', 'run', 'run_files', 'run_merge']
+
+
+def memory() -> Path:
+    """Where the last area confirmed is kept: this user's, on this machine (the environment is read here, the entry)."""
+    return Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'document-lab' / 'capture-area.json'
 
 
 def _rect(text: str) -> tuple[int, int, int, int]:
@@ -67,6 +73,12 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     target.add_argument('--hwnd', type=lambda v: int(v, 0), help='the window with this handle (see --list)')
     target.add_argument('--rect', type=_rect, metavar='L,T,W,H', help='a screen rectangle in physical pixels')
     target.add_argument('--list', action='store_true', help='print the capturable windows and exit')
+    capture.add_argument(
+        '--now',
+        action='store_true',
+        help='start at once on the area --window, --hwnd or --rect names, without waiting for Start on the panel '
+        '(a script, a test: nobody is there to click); a start --resume refuses ends the run with its reason',
+    )
     scroll = capture.add_argument_group(
         'scrolling', 'By default you scroll (wheel, scrollbar, keys) at your own pace and it follows; Finish ends it.'
     )
@@ -219,7 +231,7 @@ def add_files_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser
     files = sub.add_parser(
         'capture-files',
         help='each PDF opened in its viewer (Acrobat) and captured whole, one PDF each (Windows)',
-        description='Each PDF is opened in the viewer, its window maximised and shown full screen (one page at a '
+        description='Each PDF is opened in the viewer, its window maximized and shown full screen (one page at a '
         'time); each page is taken as it shows, paged on to the last, one PDF page each; the window is closed.',
     )
     files.add_argument('sources', type=Path, nargs='+', metavar='SOURCE', help='PDFs, directories of PDFs, or lists')
@@ -236,7 +248,7 @@ def add_files_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser
         '--monitor',
         type=int,
         default=0,
-        help='the monitor the viewer is maximised on: 0 the primary (default), then left to right; a portrait one '
+        help='the monitor the viewer is maximized on: 0 the primary (default), then left to right; a portrait one '
         'shows a page taller and sharper',
     )
     files.add_argument('--open-wait', type=float, default=60.0, help='seconds the window of a PDF may take to appear')
@@ -324,7 +336,7 @@ def _attempt(
         if args.area == 'mark' and marked is None:
             emit('mark the page to capture (it opens on the area last confirmed), then Enter or Confirm')
             shown = desktop.view(window, viewer.view)
-            chosen = desktop.select(desktop.recall(desktop.virtual_screen()) or shown)
+            chosen = desktop.select(memory(), desktop.recall(desktop.virtual_screen(), memory()) or shown)
             marked = chosen.client() if isinstance(chosen, desktop.Window) else chosen
         shapes = files.page_shapes(pdf)
         taken = files.page_through(window, viewer, out, area=marked, shapes=shapes, dpi=args.dpi, gate=gate, park=park)
@@ -433,7 +445,7 @@ def _target(args: argparse.Namespace) -> Window | Region:
     if args.rect is not None:
         return desktop.Region(*args.rect)
     emit('click a window or drag a rectangle, then Enter or Confirm (Esc cancels); then Start on the panel')
-    return desktop.select()
+    return desktop.select(memory())
 
 
 _BACK: Final = {
@@ -534,16 +546,31 @@ def _no_reason(_target: Window | Region, _area: Region) -> str | Region | None:
 
 
 def _started(
-    target: Window | Region, refuse: Callable[[Window | Region, Region], str | Region | None] = _no_reason
+    target: Window | Region,
+    refuse: Callable[[Window | Region, Region], str | Region | None] = _no_reason,
+    *,
+    now: Literal['start', 'auto'] | None = None,
 ) -> tuple[Window | Region, Region, Hud, bool] | None:
     """The area set, its HUD and whether to scroll for the user (Auto scroll) once a start is clicked; None on Cancel.
 
     The desktop is free and nothing is grabbed until then; Adjust reopens the selection on the area. A start that
     ``refuse`` gives a reason for is not one: the reason is shown, and the panel waits again. One it answers with an
-    area starts there instead (moved sideways to line up with the earlier capture).
+    area starts there instead (moved sideways to line up with the earlier capture). ``now`` (``--now``) starts at
+    once as that answer, none awaited from the panel; a start ``refuse`` gives a reason for is then refused
+    (ValueError), nobody being there to move the view.
     """
     from document_lab.capture import desktop  # noqa: PLC0415
 
+    if now:
+        area = target.client() if isinstance(target, desktop.Window) else target
+        verdict = refuse(target, area)
+        if isinstance(verdict, str):
+            raise ValueError(verdict)
+        if verdict is not None:
+            target = area = verdict
+        hud = desktop.Hud(area)
+        hud.begin(now)
+        return target, area, hud, now == 'auto'
     while True:
         area = target.client() if isinstance(target, desktop.Window) else target
         hud = desktop.Hud(area)
@@ -563,7 +590,7 @@ def _started(
         hud.close()
         if answer == 'cancel':
             return None
-        target = desktop.select(target)
+        target = desktop.select(memory(), target)
 
 
 def _prepare(args: argparse.Namespace) -> str | None:
@@ -592,8 +619,13 @@ def _prepare(args: argparse.Namespace) -> str | None:
         if path is not None:
             check_name(path)
     _refuse_existing(args)
+    if args.now and args.window is None and args.hwnd is None and args.rect is None:
+        msg = '--now starts on a named area: give --window, --hwnd or --rect'
+        raise ValueError(msg)
 
-    return desktop.tk_problem()  # the selection and the panel are tkinter windows
+    return desktop.tk_problem(
+        tuple(sys.version_info[:3]), sys.prefix, sys.base_prefix, os.environ
+    )  # the selection and the panel are tkinter windows
 
 
 def _refuse_existing(args: argparse.Namespace) -> None:
@@ -704,7 +736,7 @@ def run(args: argparse.Namespace) -> int:
         emit(problem)
         return 1
     target = _target(args)
-    started = _started(target, _resumable(args))
+    started = _started(target, _resumable(args), now=('auto' if args.auto else 'start') if args.now else None)
     if started is None:
         emit('cancelled')
         return 1

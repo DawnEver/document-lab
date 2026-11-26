@@ -47,7 +47,7 @@ class _Located:
         self.body = layout.body_size(self.read)
 
     def crop(self, page_num: int, label: str) -> pymupdf.Rect | None:
-        """The region labelled ``label`` (``Figure 2``, ``Table 1``, ``(3)``) on the page, or None."""
+        """The region labeled ``label`` (``Figure 2``, ``Table 1``, ``(3)``) on the page, or None."""
         found = [r for r in regions(self.read.pages[page_num], self.body) if r.label == label]
         return pymupdf.Rect(*found[0].bbox) if len(found) == 1 else None
 
@@ -177,7 +177,7 @@ def _insert_equations_inline(
             is_cross_ref = bool(text_after_on_line) or bool(re.search(r'[a-zA-Z]', text_before_on_line))
             if not is_cross_ref:
                 preceding = content[max(0, m.start() - 200) : m.start()]
-                if not re.search(rf'!\[.*?[Ee]quation.*?{eq_num}.*?\]', preceding):
+                if not re.search(rf'!\[.*?[Ee]equation.*?{eq_num}.*?\]', preceding):
                     insertion = f'\n\n![{eq_label}]({img_path})\n\n'
                     insert_at = max(m.start(), min_insert_pos)
                     content = content[:insert_at] + insertion + content[insert_at:]
@@ -226,7 +226,7 @@ def _insert_equations_inline(
             if m2 is None:
                 continue
             preceding = content[max(0, m2.start() - 200) : m2.start()]
-            if not re.search(rf'!\[.*?[Ee]quation.*?{eq_num}.*?\]', preceding):
+            if not re.search(rf'!\[.*?[Ee]equation.*?{eq_num}.*?\]', preceding):
                 insertion = f'\n\n![{eq_label}]({img_path})\n\n'
                 insert_at = max(m2.start(), min_insert_pos)
                 content = content[:insert_at] + insertion + content[insert_at:]
@@ -305,7 +305,7 @@ def render_figure_pages(
     caption and the prose around it), and else links the whole page, rendered once as ``page-NN.png`` however many
     such labels the page holds.
 
-    Returns (figure_images, page_section_map) where figure_images maps normalised
+    Returns (figure_images, page_section_map) where figure_images maps normalized
     figure label → relative image path (for INDEX.md).
     """
     figure_page_map = build_figure_page_map(pdf_path)

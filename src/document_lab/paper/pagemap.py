@@ -13,7 +13,7 @@ FIG_TABLE_RE = re.compile(rf'(Figure\s+\d+|Fig\.\s*\d+|Table\s+(?:\d+|{_RN}))', 
 
 
 def build_figure_page_map(pdf_path: Path) -> dict[str, int]:
-    """Normalised figure/table labels -> the 0-based page of their CAPTION.
+    """Normalized figure/table labels -> the 0-based page of their CAPTION.
 
     A caption is a LINE opening with its label (``Fig. 3. ...``, ``TABLE I`` over its title), or a compact block
     holding ``label.``; of several, the most compact block wins (a body cross-reference sits in a tall paragraph).

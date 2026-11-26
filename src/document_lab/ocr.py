@@ -1,6 +1,6 @@
 """A text layer over a PDF of page images, by Tesseract: its words readable, its pixels exactly as they were.
 
-Each page's image is recognised at the resolution it carries (`pymupdf.Pixmap.pdfocr_tobytes`) and only the words
+Each page's image is recognized at the resolution it carries (`pymupdf.Pixmap.pdfocr_tobytes`) and only the words
 Tesseract lays out -- invisible, over where they are seen -- are placed on the page; the page and its image are not
 touched. A page that already has text, or holds no image, is left as it is, so a layer is never laid twice.
 :func:`check` refuses a missing Tesseract or language before any work is spent.
@@ -49,10 +49,10 @@ _DRAWN: Final = re.compile(rb'/[A-Za-z0-9]+\s+Do(?![A-Za-z])')  # an XObject dra
 def _lay(page: pymupdf.Page, pix: pymupdf.Pixmap, languages: str) -> None:
     """Tesseract's page for ``pix`` with its image taken out -- not drawn, not held -- shown over ``page``."""
     with pymupdf.open('pdf', pix.pdfocr_tobytes(language=languages)) as words:
-        recognised = words[0]
-        for xref in recognised.get_contents():
+        recognized = words[0]
+        for xref in recognized.get_contents():
             words.update_stream(xref, _DRAWN.sub(b'', words.xref_stream(xref)))
-        words.xref_set_key(recognised.xref, 'Resources/XObject', '<<>>')
+        words.xref_set_key(recognized.xref, 'Resources/XObject', '<<>>')
         page.show_pdf_page(page.rect, words, 0)
 
 

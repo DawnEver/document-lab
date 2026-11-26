@@ -6,7 +6,7 @@ import pytest
 
 from document_lab.ir import BBox
 from document_lab.pdf import read_raster
-from document_lab.strokes import Fragment, bands, centre_line, coverage, dots, fragments, link, opening, split_by_dots
+from document_lab.strokes import Fragment, bands, center_line, coverage, dots, fragments, link, opening, split_by_dots
 
 STROKE = 1.5  # pt, the curves
 HAIR = 0.3  # pt, the grid
@@ -57,7 +57,7 @@ def test_the_grid_is_opened_away_and_a_dashed_curve_comes_out_as_its_dashes(tmp_
     frags = fragments(_pdf(tmp_path, [(fn, 60, 340, DASH)]), opening_pt=0.9, min_pt=1.0)
     assert len(frags) >= 30
     for f in frags:
-        assert np.all(np.abs(f.y - fn(f.x)) < STROKE / 3)  # the centre line, not an edge (a round cap skews its end)
+        assert np.all(np.abs(f.y - fn(f.x)) < STROKE / 3)  # the center line, not an edge (a round cap skews its end)
         assert f.stroke == pytest.approx(STROKE, abs=0.25)
 
 
@@ -67,7 +67,7 @@ def test_a_dashed_curve_links_into_one_chain_that_is_not_solid(tmp_path):
     chains = link(frags)
     assert len(chains) == 1
     assert coverage(frags, chains[0]) < 0.8
-    x, y = centre_line(frags, chains[0])
+    x, y = center_line(frags, chains[0])
     assert np.all(np.abs(y - fn(x)) < 0.3)
 
 

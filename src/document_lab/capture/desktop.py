@@ -17,6 +17,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Mapping
 from ctypes import wintypes
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -225,7 +226,7 @@ class Region:
     height: int
 
     @property
-    def centre(self) -> tuple[int, int]:
+    def center(self) -> tuple[int, int]:
         """The middle pixel."""
         return self.left + self.width // 2, self.top + self.height // 2
 
@@ -262,7 +263,7 @@ def _cloaked(hwnd: int) -> bool:
 
 
 def windows() -> list[Window]:
-    """Visible, titled, non-minimised, uncloaked top-level windows, front to back."""
+    """Visible, titled, non-minimized, uncloaked top-level windows, front to back."""
     user32 = _dll('user32')
     found: list[Window] = []
 
@@ -383,10 +384,10 @@ def monitors() -> list[Region]:
 
 
 def maximize(window: Window, monitor: Region | None = None) -> None:
-    """Maximise ``window`` on ``monitor`` (default: the primary), so every window shows its view at the same place.
+    """Maximize ``window`` on ``monitor`` (default: the primary), so every window shows its view at the same place.
 
     A program reopens where it last was; the window is restored and moved to the monitor's corner first, so it
-    maximises there.
+    maximizes there.
     """
     user32 = _dll('user32')
     where = monitor or monitors()[0]
@@ -507,25 +508,23 @@ _CURSORS: Final = {
     'move': 'fleur',
 }
 _DIM: Final = 0.45  # the overlay's opacity: how dark the screen outside the mark goes
-_HOLE: Final = '#ff00fe'  # the colour Windows leaves fully transparent in the overlay: the mark is painted in it
+_HOLE: Final = '#ff00fe'  # the color Windows leaves fully transparent in the overlay: the mark is painted in it
 _GLASS: Final = 0.01  # the opacity of the pane over the mark: invisible, yet it takes the mouse (0 would not)
 _PANEL: Final = '#202020'
 _SHOWN_MS: Final = 150  # how long the overlay takes to be shown and active, before a remembered mark
 
 
 def tk_problem(
-    version: tuple[int, ...] | None = None,
-    prefix: str = sys.prefix,
-    base_prefix: str = sys.base_prefix,
-    environ: dict[str, str] | None = None,
+    version: tuple[int, ...],
+    prefix: str,
+    base_prefix: str,
+    environ: Mapping[str, str],
 ) -> str | None:
     """Why tkinter cannot start here, with the remedy; None when it can.
 
     Python 3.13.0 in a venv looks for Tcl under the venv rather than the base install (cpython #125235, fixed in
     3.13.1): ``Can't find a usable init.tcl`` -- unless the venv holds a ``tcl`` folder or ``TCL_LIBRARY`` names one.
     """
-    version = tuple(sys.version_info[:3]) if version is None else version
-    environ = dict(os.environ) if environ is None else environ
     if version != (3, 13, 0) or prefix == base_prefix or 'TCL_LIBRARY' in environ or (Path(prefix) / 'tcl').is_dir():
         return None
     return (
@@ -573,7 +572,7 @@ class _Overlay:
     """A dark, translucent window over every monitor on which a target is marked, then confirmed.
 
     It dims the LIVE screen -- nothing is grabbed or drawn, so it opens at once -- and the mark is painted in
-    :data:`_HOLE`, a colour Windows leaves fully transparent: the marked area shows clear, the rest dim. Such a hole
+    :data:`_HOLE`, a color Windows leaves fully transparent: the marked area shows clear, the rest dim. Such a hole
     also lets clicks through, so a pane of glass -- a window over it at :data:`_GLASS` opacity, unseen -- takes them:
     a drag inside the mark marks again. The hint and the confirm button are their own small opaque windows.
     """
@@ -807,44 +806,39 @@ class _Overlay:
             self.root.quit()
 
 
-def select(marked: Window | Region | None = None) -> Window | Region:
+def select(memory: Path, marked: Window | Region | None = None) -> Window | Region:
     """What the user marks over every monitor (the rest dimmed, the mark clear), confirmed before it is returned.
 
-    ``marked``: an area set before, shown marked to adjust; Esc then keeps it rather than cancelling. Without it the
-    overlay opens on the last area confirmed (:func:`recall`), if it is still on the screen; Esc cancels as ever.
+    ``memory``: the file the last area confirmed is kept in (:func:`remember`). ``marked``: an area set before,
+    shown marked to adjust; Esc then keeps it rather than cancelling. Without it the overlay
+    opens on the last area confirmed (:func:`recall`), if it is still on the screen; Esc cancels as ever.
 
     A click marks the window under it, a drag marks a rectangle; marking again replaces the mark. Enter, or the
     confirm button by the mark, confirms it; Esc cancels (``KeyboardInterrupt``). The overlay then goes: the desktop
     is the user's again, the capture waiting for :meth:`Hud.ready`.
     """
     found, screen = windows(), virtual_screen()  # the windows first: the overlay is never a candidate
-    chosen = _Overlay(found, screen, marked or recall(screen)).run() or marked
+    chosen = _Overlay(found, screen, marked or recall(screen, memory)).run() or marked
     if chosen is None:
         msg = 'selection cancelled'
         raise KeyboardInterrupt(msg)
-    remember(chosen.client() if isinstance(chosen, Window) else chosen)
+    remember(chosen.client() if isinstance(chosen, Window) else chosen, memory)
     time.sleep(0.2)  # the overlay is repainted away before the first grab
     return chosen
 
 
-def _memory() -> Path:
-    """Where the last area confirmed is kept: this user's, on this machine."""
-    return Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'document-lab' / 'capture-area.json'
-
-
-def remember(area: Region) -> None:
-    """Keep ``area`` as the last confirmed, for the next selection to open on."""
-    path = _memory()
+def remember(area: Region, path: Path) -> None:
+    """Keep ``area`` in ``path`` as the last confirmed, for the next selection to open on."""
     path.parent.mkdir(parents=True, exist_ok=True)
     part = path.with_suffix('.part')
     part.write_text(json.dumps(asdict(area)), encoding='utf-8')
     part.replace(path)  # whole or not at all: two captures at once never leave half a file
 
 
-def recall(screen: Region) -> Region | None:
+def recall(screen: Region, path: Path) -> Region | None:
     """The last area confirmed, if one was and it still lies wholly on ``screen`` (monitors change); else None."""
     try:
-        area = Region(**json.loads(_memory().read_text(encoding='utf-8')))
+        area = Region(**json.loads(path.read_text(encoding='utf-8')))
     except (OSError, ValueError, TypeError):  # none yet, or not one this code wrote: nothing to open on
         return None
     inside = (
@@ -934,10 +928,10 @@ def _bring_to_front(window: int) -> None:
 
 
 def scroll(target: Window | Region, notches: int, method: str = 'wheel') -> None:
-    """Scroll the view under ``target``'s centre by ``notches`` wheel notches (or arrow presses): down, up if < 0."""
+    """Scroll the view under ``target``'s center by ``notches`` wheel notches (or arrow presses): down, up if < 0."""
     user32 = _dll('user32')
     area = target.client() if isinstance(target, Window) else target
-    x, y = area.centre
+    x, y = area.center
     if method == 'wheel':
         _require_on_top(target, x, y)
         cursor = wintypes.POINT()
@@ -1004,7 +998,7 @@ class Hud:
         ):
             self._edges.append(self._window(tk, x, y, (w, h)))
         width = _MINI[0] + 16
-        self.panel = self._window(tk, 0, 0, None, colour='#202020')
+        self.panel = self._window(tk, 0, 0, None, color='#202020')
         self.finished = False  # set by the Finish button: a deliberate click ends the capture, a stray key does not
         self.paused = False  # toggled by Pause / Resume: nothing is grabbed or scrolled while it is set
         self.answer: Answer | None = None  # what the panel answered before the capture
@@ -1053,9 +1047,9 @@ class Hud:
             ok=None,
         )
 
-    def _window(self, tk: object, x: int, y: int, size: tuple[int, int] | None, colour: str = OK) -> object:
+    def _window(self, tk: object, x: int, y: int, size: tuple[int, int] | None, color: str = OK) -> object:
         """A borderless topmost window at ``x, y``: ``size`` pixels, or as large as what it holds when None."""
-        window = tk.Toplevel(self.root, bg=colour)
+        window = tk.Toplevel(self.root, bg=color)
         window.overrideredirect(boolean=True)
         window.attributes('-topmost', True)  # noqa: FBT003 -- Tk's own spelling
         shape = '' if size is None else f'{size[0]}x{size[1]}'

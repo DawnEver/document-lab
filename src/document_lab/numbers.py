@@ -1,6 +1,6 @@
 """The one number grammar: how a document spells a number, read whole (a tick label) or first-in-text (a cell).
 
-Recognised: a sign (hyphen or the typographic minus), thousands commas in groups of three, thin-space digit
+Recognized: a sign (hyphen or the typographic minus), thousands commas in groups of three, thin-space digit
 groups, a decimal point, ``e`` exponents, ``x 10^n`` multipliers (``x``, ``*`` or the multiplication sign)
 and a bare ``10ⁿ`` power. A decimal COMMA is not read as one: ``1,5`` is ambiguous with a thousands
 separator, so its first number is ``1``. A number qualified ``min.`` or ``max.`` (``12.5 min.``, ``max. 3``) is a

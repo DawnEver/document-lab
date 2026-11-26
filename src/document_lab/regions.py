@@ -334,12 +334,14 @@ def _bands_of(page: _Page, lines: list[layout.Line]) -> list[list[layout.Line]]:
     return bands
 
 
-def regions(page: Page, body: float, drawings: Sequence[Drawing] = ()) -> list[Region]:
+def regions(page: Page, body: float, drawings: Sequence[Drawing] = (), *, include_hidden: bool = False) -> list[Region]:
     """The figures, tables and equations of ``page`` (``body``: the document's body size), top to bottom.
 
     ``drawings``: the page's drawn ink (`document_lab.ink`), when the caller holds its picture;
-    without them a region is told by its words alone.
+    without them a region is told by its words alone. ``include_hidden``: what hidden layers draw counts too (see
+    `document_lab.ir`).
     """
+    page = page.shown(include_hidden=include_hidden)
     if not page.spans or body <= 0:
         return []
     judged = _Page(page, body)

@@ -9,7 +9,7 @@ import pytest
 from document_lab.numbers import bound
 from document_lab.pdf import read_pdf
 from document_lab.plot import RasterPlot, UnreadFrame, UnrecognizedFrame, outline_text, plots
-from tests.synthetic import BLUE, FRAME, RED, Axis, PlotSpec, draw_plot, plot_pdf, to_page
+from tests.synthetic import BLUE, FRAME, RED, Axis, PlotSpec, draw_plot, hidden_layer, plot_pdf, to_page
 
 XS = [float(x) for x in range(0, 101, 10)]
 
@@ -866,3 +866,12 @@ def test_a_rotated_outlined_y_title_in_the_label_column_is_no_tick_label(tmp_pat
     (plot,), (bare,) = read
     assert sorted(v for _, v in plot.y.ticks) == [0, 250, 500, 750, 1000]
     assert plot.y.ticks == bare.y.ticks  # the title removed gives the same ticks
+
+
+def test_a_plot_a_hidden_layer_draws_is_read_only_when_asked(tmp_path):
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=[('mT', 450.0, 120.0, 8.0)])
+    page = hidden_layer(read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1))
+    assert (plots(page), outline_text(page)) == ([], [])
+    (plot,) = plots(page, include_hidden=True)
+    assert plot.curves[0].y == pytest.approx(XS, abs=0.5)
+    assert [s.text for s in outline_text(page, include_hidden=True)] == ['mT']

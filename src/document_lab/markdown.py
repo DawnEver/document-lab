@@ -48,17 +48,26 @@ _TOC_ENTRY: Final = re.compile(r'^(?=.*[A-Za-z]).*?(?:(?:\.\s?){4,}|\u2026{2,}|\
 TOC_LINES: Final = 3
 
 
-def to_markdown(doc: Document) -> str:
-    """The document as markdown, page after page: a paragraph a page break cut is joined again."""
-    return '\n\n'.join(_rejoin([block for page in _blocks(doc) for block in page])) + '\n'
+def to_markdown(doc: Document, *, include_hidden: bool = False) -> str:
+    """The document as markdown, page after page: a paragraph a page break cut is joined again.
+
+    ``include_hidden``: the text hidden layers draw is written too (see `document_lab.ir`).
+    """
+    return (
+        '\n\n'.join(_rejoin([block for page in _blocks(doc.shown(include_hidden=include_hidden)) for block in page]))
+        + '\n'
+    )
 
 
-def page_markdowns(doc: Document) -> list[str]:
+def page_markdowns(doc: Document, *, include_hidden: bool = False) -> list[str]:
     """Each page's own markdown, in order (empty for a page without text).
 
     Body size and title are judged over the whole document; nothing is joined across a page break: a page stands alone.
+    ``include_hidden``: as for :func:`to_markdown`.
     """
-    return ['\n\n'.join(_rejoin(page)) + '\n' if page else '' for page in _blocks(doc)]
+    return [
+        '\n\n'.join(_rejoin(page)) + '\n' if page else '' for page in _blocks(doc.shown(include_hidden=include_hidden))
+    ]
 
 
 def _blocks(doc: Document) -> list[list[str]]:

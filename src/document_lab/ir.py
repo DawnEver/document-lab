@@ -6,8 +6,9 @@ A value from a format without geometry (an HTML table) cites a ``locator`` inste
 
 A value read off a page is drawn by its content, or by an annotation's appearance (``annotation``: its subtype, when
 the reader is asked for annotations). Optional content the file's default view hides (a layer turned off) is read
-too and flagged ``hidden`` for the caller to keep or drop; ``hidden`` is False by default because content no hidden
-layer draws is seen.
+too and flagged ``hidden`` for the caller to keep or drop (:meth:`Page.shown` drops it); ``hidden`` is False by
+default because content no hidden layer draws is seen. A module judging a page's content leaves hidden content
+out unless its ``include_hidden`` says otherwise.
 """
 
 from __future__ import annotations
@@ -231,6 +232,17 @@ class Page:
     #: Content the reader skipped and why (an operation it could not read), in words.
     warnings: tuple[str, ...] = ()
 
+    def shown(self, *, include_hidden: bool = False) -> Page:
+        """The page as its default view shows it: what hidden layers draw left out, unless ``include_hidden``."""
+        if include_hidden:
+            return self
+        return dataclasses.replace(
+            self,
+            spans=tuple(s for s in self.spans if not s.hidden),
+            paths=tuple(p for p in self.paths if not p.hidden),
+            figures=tuple(f for f in self.figures if not f.hidden),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class Document:
@@ -250,3 +262,9 @@ class Document:
         """Every text span, page by page."""
         for page in self.pages:
             yield from page.spans
+
+    def shown(self, *, include_hidden: bool = False) -> Document:
+        """The document as its default view shows it, page by page (:meth:`Page.shown`)."""
+        if include_hidden:
+            return self
+        return dataclasses.replace(self, pages=tuple(p.shown() for p in self.pages))

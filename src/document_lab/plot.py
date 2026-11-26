@@ -292,8 +292,14 @@ class _Edge:
         return self.hi - self.lo
 
 
-def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = None) -> list[Plot]:
-    """Every vector plot on ``page``; ``x_scale``/``y_scale`` force an axis scale instead of inferring it."""
+def plots(
+    page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = None, include_hidden: bool = False
+) -> list[Plot]:
+    """Every vector plot on ``page``; ``x_scale``/``y_scale`` force an axis scale instead of inferring it.
+
+    ``include_hidden``: what hidden layers draw is read too (see `document_lab.ir`).
+    """
+    page = page.shown(include_hidden=include_hidden)
     edges = _edges(page.paths)
     dashes = _dashes(page.paths)
     labels = _labels(page.spans, dashes)
@@ -609,13 +615,15 @@ def _outline_labels(outlined: Sequence[tuple[float | None, str | None, BBox]], d
     return out
 
 
-def outline_text(page: Page) -> list[TextSpan]:
+def outline_text(page: Page, *, include_hidden: bool = False) -> list[TextSpan]:
     """Each word ``page`` sets as filled glyph OUTLINES that reads as text (a unit, a grade), as a span.
 
     A word that spells a number is a tick label (read by :func:`plots`), not text -- unless a ``min.`` or ``max.``
     word follows it, when the two are one span (``12.5 min.``, read by :func:`document_lab.numbers.bound`); a word
     the reader refuses is absent. The span's size is the word's ink height and its font ``outline``.
+    ``include_hidden``: as for :func:`plots`.
     """
+    page = page.shown(include_hidden=include_hidden)
     return _text_spans(page, _outline_words(page.paths))
 
 

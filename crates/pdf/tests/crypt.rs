@@ -1,6 +1,7 @@
 //! Encrypted files open with the user password, the owner password, or none when anyone may read them; their
 //! strings and streams come back decrypted. The fixtures are synthetic (`fixtures/make_encrypted.py`).
 
+use pdf::error::Kind;
 use pdf::{File, Object};
 
 const METHODS: [&str; 4] = ["rc4-40", "rc4-128", "aes-128", "aes-256"];
@@ -73,15 +74,15 @@ fn a_file_anyone_may_read_opens_without_a_password() {
 }
 
 #[test]
-fn a_wrong_password_is_refused_by_name() {
+fn a_wrong_or_missing_password_is_refused_as_a_password_refusal() {
     for method in METHODS {
         let Err(err) = File::open(fixture(method), b"wrong") else {
             panic!("{method} opened")
         };
-        assert!(err.message.contains("password"), "{method}: {err}");
-        assert!(
-            File::open(fixture(method), b"").is_err(),
-            "{method} opened without its password"
-        );
+        assert_eq!(err.kind, Kind::Password, "{method}: {err}");
+        let Err(err) = File::open(fixture(method), b"") else {
+            panic!("{method} opened without its password")
+        };
+        assert_eq!(err.kind, Kind::Password, "{method}: {err}");
     }
 }

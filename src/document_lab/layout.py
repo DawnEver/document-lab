@@ -1,7 +1,9 @@
 """A page's spans as lines in reading order: what every layout of a page -- its markdown, its regions -- starts from.
 
 - Lines: spans on one baseline, each starting within :data:`LINE_GAP` font sizes of the line's right end; a column
-  gutter is wider, so two columns' lines at one height stay two lines. In an unweighted document (no bold span:
+  gutter is wider, so two columns' lines at one height stay two lines. A line's text spaces two neighboring spans
+  apart unless they share an ``unspaced`` number (:class:`~document_lab.ir.TextSpan`): where a word gap is, is
+  the spans' source's to say, never measured here. In an unweighted document (no bold span:
   OCR'd text carries no weight) a bare clause number or bullet takes the text set apart beside it, within
   :data:`CLAUSE_GAP` font sizes, as a standard sets ``4.1    General``.
 - Columns: a line is FULL width (crossing the page middle) or in the LEFT or RIGHT column; :func:`ordered` reads the
@@ -30,7 +32,6 @@ __all__ = [
     'CLAUSE_GAP',
     'GUTTER',
     'LINE_GAP',
-    'WORD_GAP',
     'Block',
     'Line',
     'blocks',
@@ -40,8 +41,6 @@ __all__ = [
     'wordy',
 ]
 
-#: A gap between spans wider than this many font sizes is a space.
-WORD_GAP: Final = 0.15
 #: A span further right of a line than this many font sizes starts another line (a column gutter).
 LINE_GAP: Final = 1.0
 #: Unweighted: a bare clause number (``4.1``) or bullet takes the text beside it within this many font sizes.
@@ -65,15 +64,14 @@ class Line:
 
     @property
     def text(self) -> str:
-        """The spans' text left to right, a space where they stand apart."""
+        """The spans' text left to right, a space between two unless they share an ``unspaced`` number."""
         parts: list[str] = []
-        right = None
+        before = None
         for span in sorted(self.spans, key=lambda s: s.provenance.bbox.x0):
-            box = span.provenance.bbox
-            if right is not None and box.x0 - right > WORD_GAP * span.size:
+            if before is not None and (span.unspaced is None or span.unspaced != before.unspaced):
                 parts.append(' ')
             parts.append(span.text)
-            right = box.x1
+            before = span
         return ' '.join(''.join(parts).split())
 
     @property

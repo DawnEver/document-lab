@@ -4,7 +4,8 @@ Recognized: a sign (hyphen or the typographic minus), thousands commas in groups
 groups, a decimal point, ``e`` exponents, ``x 10^n`` multipliers (``x``, ``*`` or the multiplication sign)
 and a bare ``10ⁿ`` power. A decimal COMMA is not read as one: ``1,5`` is ambiguous with a thousands
 separator, so its first number is ``1``. A number qualified ``min.`` or ``max.`` (``12.5 min.``, ``max. 3``) is a
-BOUND, read by :func:`bound`.
+BOUND, read by :func:`bound`. Variation selectors (U+FE00-U+FE0F, U+E0100-U+E01EF), which the reader keeps
+where a font states them, are not part of a number's spelling and are dropped.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ __all__ = ['bound', 'first_number', 'parse_number']
 _SUPERSCRIPT: Final = str.maketrans('⁰¹²³⁴⁵⁶⁷⁸⁹⁻⁺', '0123456789-+')
 _MINUS: Final = chr(0x2212)
 _THIN: Final = chr(0x2009)
+_VARIATION_SELECTORS: Final = dict.fromkeys([*range(0xFE00, 0xFE10), *range(0xE0100, 0xE01F0)])
 
 _MANTISSA: Final = r'[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d*)?(?:[eE][+-]?\d+)?|[+-]?\.\d+(?:[eE][+-]?\d+)?'
 _TIMES_TEN: Final = rf'\s*[x{chr(0xD7)}*]\s*10\s*\^?\s*([+-]?\d+)'
@@ -26,7 +28,7 @@ _POWER: Final = re.compile(r'^10\^?([+-]?\d+)$')
 
 
 def _normal(text: str) -> str:
-    return text.replace(_MINUS, '-').replace(_THIN, '').translate(_SUPERSCRIPT).strip()
+    return text.replace(_MINUS, '-').replace(_THIN, '').translate(_SUPERSCRIPT).translate(_VARIATION_SELECTORS).strip()
 
 
 def _value(match: re.Match[str]) -> float:

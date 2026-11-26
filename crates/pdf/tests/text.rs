@@ -143,3 +143,14 @@ fn win_ansi_names_a_hyphen_and_spaces_not_their_latin_1_twins() {
     let (events, _) = texts(r"BT /F1 10 Tf 0 50 Td (a\255b c\240d) Tj ET", font, &[]);
     assert_eq!(text(&events[0]), "a-b c d"); // the glyphs `hyphen` and `space`: U+002D and U+0020
 }
+
+#[test]
+fn variation_selectors_a_to_unicode_states_are_kept() {
+    let font = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 6 0 R >>";
+    let cmap = common::stream(
+        "",
+        "1 begincodespacerange <00> <FF> endcodespacerange 2 beginbfchar <31> <0031FE0E> <32> <8FBADB40DD00> endbfchar",
+    );
+    let (events, _) = texts("BT /F1 10 Tf 0 50 Td (12) Tj ET", font, &[&cmap]);
+    assert_eq!(text(&events[0]), "1\u{FE0E}\u{8FBA}\u{E0100}"); // as stated, not stripped: numbers strips them
+}

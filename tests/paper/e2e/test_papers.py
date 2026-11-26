@@ -67,12 +67,12 @@ def bound(tmp_path_factory):
     with pymupdf.open(DATA / LIANG.pdf) as doc, pymupdf.open(DATA / HAIRPIN.pdf) as tail:
         doc.insert_pdf(tail)
         doc.save(path)
-    return ingested(path, 'pymupdf', tmp_path_factory)
+    return ingested(path, 'ir', tmp_path_factory)
 
 
 @pytest.mark.parametrize('paper', PAPERS, ids=lambda p: p.pdf)
 def test_the_ingested_paper_has_the_pdfs_structure(paper, tmp_path_factory):
-    assert problems(ingested(DATA / paper.pdf, 'pymupdf', tmp_path_factory), paper) == []
+    assert problems(ingested(DATA / paper.pdf, 'ir', tmp_path_factory), paper) == []
 
 
 def test_a_second_paper_bound_in_is_split_off(bound):
@@ -99,7 +99,7 @@ WRONG = {
 @pytest.mark.parametrize('paper', PAPERS, ids=lambda p: p.pdf)
 def test_a_wrong_truth_is_found(paper, wrong, tmp_path_factory):
     """The planted control: the same check against a falsified truth must report it."""
-    out = ingested(DATA / paper.pdf, 'pymupdf', tmp_path_factory)
+    out = ingested(DATA / paper.pdf, 'ir', tmp_path_factory)
     assert problems(out, WRONG[wrong](paper)), f'{wrong}: the check could not say no'
 
 

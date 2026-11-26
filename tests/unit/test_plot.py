@@ -1,5 +1,6 @@
 """Curves digitized from synthetic vector plots whose data are known exactly (the planted controls)."""
 
+import dataclasses
 import math
 
 import numpy as np
@@ -18,6 +19,7 @@ from tests.synthetic import (
     PlotSpec,
     draw_mark,
     draw_plot,
+    hidden_layer,
     mark_box_height,
     plot_pdf,
     to_page,
@@ -1028,3 +1030,24 @@ def test_marker_glyphs_joined_into_one_span_refuse_the_frame(tmp_path):
     assert any(s.text.replace(' ', '') == '\u25cf\u25cf' for s in page.spans)  # the premise: the reader joined them
     with pytest.raises(JoinedMarkers, match='page 1'):
         plots(page)
+
+
+def test_a_plot_a_hidden_layer_draws_is_read_only_when_asked(tmp_path):
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=[('mT', 450.0, 120.0, 8.0)])
+    page = hidden_layer(read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1))
+    assert (plots(page), outline_text(page)) == ([], [])
+    (plot,) = plots(page, include_hidden=True)
+    assert plot.curves[0].y == pytest.approx(XS, abs=0.5)
+    assert [s.text for s in outline_text(page, include_hidden=True)] == ['mT']
+
+
+def test_markers_a_hidden_layer_draws_are_read_only_when_asked(tmp_path):
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', _marker_spec())).page(1)
+    marks = {'\u25cf', '\u25b2'}
+    page = dataclasses.replace(
+        page, spans=tuple(dataclasses.replace(s, hidden=True) if s.text in marks else s for s in page.spans)
+    )
+    (plot,) = plots(page)
+    assert plot.markers == ()
+    (shown,) = plots(page, include_hidden=True)
+    assert sorted(len(m.x) for m in shown.markers) == [len(TRIANGLES), len(DOTS)]

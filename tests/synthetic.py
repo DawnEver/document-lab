@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import functools
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -19,6 +19,8 @@ from document_lab.strokefont import TEMPLATES
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from pathlib import Path
+
+    from document_lab.ir import Page
 
 FRAME = pymupdf.Rect(100, 100, 400, 300)
 RED = (1, 0, 0)
@@ -475,3 +477,13 @@ def mixed_pdf(path: Path) -> Path:
     doc.save(path)
     doc.close()
     return path
+
+
+def hidden_layer(page: Page) -> Page:
+    """``page`` with everything it draws in a hidden layer: what a layer turned off in the default view reads as."""
+    return replace(
+        page,
+        spans=tuple(replace(s, hidden=True) for s in page.spans),
+        paths=tuple(replace(p, hidden=True) for p in page.paths),
+        figures=tuple(replace(f, hidden=True) for f in page.figures),
+    )

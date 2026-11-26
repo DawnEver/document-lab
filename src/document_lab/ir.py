@@ -3,6 +3,12 @@
 Coordinates are PDF points in page space: origin at the top-left of the page as displayed, y grows DOWN; pages
 are 1-based.
 A value from a format without geometry (an HTML table) cites a ``locator`` instead of a box.
+
+A value read off a page is drawn by its content, or by an annotation's appearance (``annotation``: its subtype, when
+the reader is asked for annotations). Optional content the file's default view hides (a layer turned off) is read
+too and flagged ``hidden`` for the caller to keep or drop (:meth:`Page.shown` drops it); ``hidden`` is False by
+default because content no hidden layer draws is seen. A module judging a page's content leaves hidden content
+out unless its ``include_hidden`` says otherwise.
 """
 
 from __future__ import annotations
@@ -96,6 +102,14 @@ class TextSpan:
     font: str
     provenance: Provenance
     bold: bool = False
+    #: The number it shares, on its page, with the spans it continues or that continue it, no word gap between: a
+    #: change of font, size or baseline inside a word (the ``2`` of ``H2O``). None: it continues none and none
+    #: continues it. Its source decides where a word gap is; a reader setting spans into lines spaces them by it.
+    unspaced: int | None = None
+    #: Drawn by optional content the default view hides (see the module).
+    hidden: bool = False
+    #: The subtype of the annotation whose appearance draws it; None for the page's content.
+    annotation: str | None = None
     #: The color its glyphs are filled with; None when they are not filled (stroked or invisible text) or the source
     #: states no fill.
     fill: tuple[float, ...] | None = None
@@ -114,7 +128,9 @@ class TextSpan:
 class VectorPath:
     """One subpath of a page's vector drawing, curves flattened to points (``read_pdf``'s ``curve_samples`` each).
 
-    A color is RGB in 0..1 when its color space defines one, else its own components (a separation's tint).
+    A color is RGB in 0..1 when its color space defines one, else its own components (a separation's tint); a
+    pattern's has none but an uncolored tiling's tint. A shading painted over the clip (``sh``) is the closed
+    rectangle of the box it may cover, filled with a ``'shading'`` pattern.
     """
 
     points: tuple[tuple[float, float], ...]
@@ -133,8 +149,15 @@ class VectorPath:
     fill: tuple[float, ...] | None = None
     #: Filled by the even-odd rule rather than the nonzero winding rule.
     even_odd: bool = False
+    #: The pattern the fill paints instead of one color: ``'shading'`` (a gradient) or ``'tiling'`` (a repeated cell,
+    #: not read); None for one color or no fill.
+    pattern: str | None = None
     #: The painted path it is a subpath of, numbered on its page: one drawing's subpaths share it.
     group: int = 0
+    #: Drawn by optional content the default view hides (see the module).
+    hidden: bool = False
+    #: The subtype of the annotation whose appearance draws it; None for the page's content.
+    annotation: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +203,10 @@ class Figure:
     height: int
     #: The image's object number in the file; None for an inline image.
     image: int | None = None
+    #: Drawn by optional content the default view hides (see the module).
+    hidden: bool = False
+    #: The subtype of the annotation whose appearance draws it; None for the page's content.
+    annotation: str | None = None
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -212,6 +239,17 @@ class Page:
     #: Content the reader skipped and why (an operation it could not read), in words.
     warnings: tuple[str, ...] = ()
 
+    def shown(self, *, include_hidden: bool = False) -> Page:
+        """The page as its default view shows it: what hidden layers draw left out, unless ``include_hidden``."""
+        if include_hidden:
+            return self
+        return dataclasses.replace(
+            self,
+            spans=tuple(s for s in self.spans if not s.hidden),
+            paths=tuple(p for p in self.paths if not p.hidden),
+            figures=tuple(f for f in self.figures if not f.hidden),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class Document:
@@ -231,3 +269,9 @@ class Document:
         """Every text span, page by page."""
         for page in self.pages:
             yield from page.spans
+
+    def shown(self, *, include_hidden: bool = False) -> Document:
+        """The document as its default view shows it, page by page (:meth:`Page.shown`)."""
+        if include_hidden:
+            return self
+        return dataclasses.replace(self, pages=tuple(p.shown() for p in self.pages))

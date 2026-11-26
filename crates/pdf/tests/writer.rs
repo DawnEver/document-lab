@@ -9,7 +9,7 @@ use pdf::{Event, File};
 
 /// Every text glyph a page draws, as its text.
 fn text(file: &File, page: &pdf::Page) -> String {
-    file.interpret(page)
+    file.interpret(page, false)
         .unwrap()
         .events
         .iter()
@@ -47,7 +47,7 @@ fn image_pages_read_back_as_written() {
         pages.iter().map(pdf::Page::size).collect::<Vec<_>>(),
         [(30.0, 15.5), (60.0, 31.0)]
     );
-    let events = file.interpret(&pages[1]).unwrap().events;
+    let events = file.interpret(&pages[1], false).unwrap().events;
     let [Event::Image(placed)] = events.as_slice() else {
         panic!("{events:?}")
     };
@@ -80,7 +80,7 @@ fn encoded_samples_are_written_as_given_with_their_filter() {
     writer.image_page(&image, (10.0, 10.0)).unwrap();
     let file = File::open(writer.finish().unwrap(), b"").unwrap();
     let page = &file.pages().unwrap()[0];
-    let events = file.interpret(page).unwrap().events;
+    let events = file.interpret(page, false).unwrap().events;
     let [Event::Image(placed)] = events.as_slice() else {
         panic!("{events:?}")
     };
@@ -100,6 +100,7 @@ fn a_space_or_depth_no_image_page_has_is_refused() {
         data: &[0, 0, 0],
     };
     let error = writer.image_page(&image, (1.0, 1.0)).unwrap_err();
+    assert_eq!(error.kind, pdf::error::Kind::Invalid, "{error}");
     assert!(error.message.contains("not Lab"), "{error}");
     image.space = b"DeviceRGB";
     image.bits = 3;

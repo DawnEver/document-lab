@@ -7,7 +7,7 @@ fn main() {
     let file = pdf::File::open(std::fs::read(path).expect("readable"), b"").expect("a PDF");
     for page in file.pages().expect("a page tree") {
         println!("\x0c{}", page.number);
-        let Ok(content) = file.interpret(&page) else {
+        let Ok(content) = file.interpret(&page, false) else {
             continue;
         };
         for event in content.events {

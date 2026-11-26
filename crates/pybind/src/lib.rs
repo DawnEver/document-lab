@@ -1,7 +1,7 @@
 //! `document_lab._pdf`: the `pdf` crate, exposed to Python as plain values -- no PDF logic of its own.
 //!
 //! `open(data, password)` reads a file; its `page(number, curve_samples)` returns what the page draws as tuples,
-//! which `document_lab.pdf` turns into the IR, and its `image(object)` an image's samples. `create(path)` writes a
+//! which `document_lab.pdf` turns into the IR, and its `image(object)` an image's samples. `create(path, level)` writes a
 //! PDF of image pages, or of pages copied from a `Reader` (`document_lab.capture`), perhaps with a text layer laid
 //! over them (`document_lab.ocr`).
 //!
@@ -76,7 +76,7 @@ type ImageRow = (Box4, i64, i64, Option<u32>, [f64; 6]);
 type PageRows = (Vec<SpanRow>, Vec<PathRow>, Vec<ImageRow>, Vec<String>);
 /// An image's samples: width, height, color space family (None: a stencil mask), components, bits per component,
 /// the data after every lossless filter, the image codec it is still in (None: raw samples), its `/Decode` array
-/// (None: not stated) and whether it states a mask.
+/// (None: not stated), whether it states a mask, and its fax coding when its codec is `CCITTFaxDecode`.
 type SamplesRow = (
     i64,
     i64,
@@ -87,7 +87,10 @@ type SamplesRow = (
     Option<String>,
     Option<Vec<f64>>,
     bool,
+    Option<FaxRow>,
 );
+/// A `CCITTFaxDecode` image's coding: K, columns, end-of-line codes, rows byte-aligned, 1 bits black.
+type FaxRow = (i64, i64, bool, bool, bool);
 
 /// A PDF opened.
 #[pyclass(unsendable)]
@@ -168,6 +171,10 @@ impl Reader {
     /// The samples of the image `XObject` `object`.
     fn image(&self, object: u32) -> PyResult<SamplesRow> {
         let samples = self.file.image(object).map_err(|e| refused(&e))?;
+        let fax = match &samples.codec {
+            Some(codec) => codec.fax().map_err(|e| refused(&e))?,
+            None => None,
+        };
         let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
         Ok((
             samples.width,
@@ -182,6 +189,7 @@ impl Reader {
             samples.codec.map(|c| text(&c.name)),
             samples.decode,
             samples.masked,
+            fax.map(|f| (f.k, f.columns, f.end_of_line, f.byte_align, f.black_is_1)),
         ))
     }
 }
@@ -193,16 +201,22 @@ struct Writer {
     inner: Option<pdf::writer::Writer<BufWriter<fs::File>>>,
 }
 
-/// Start a PDF at `path` (created, or emptied).
+/// Start a PDF at `path` (created, or emptied), the streams it builds compressed at zlib `level` (0-10).
 #[pyfunction]
+#[pyo3(signature = (path, level = pdf::writer::LEVEL))]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "pyo3 hands a path over owned"
 )]
-fn create(path: PathBuf) -> PyResult<Writer> {
+fn create(path: PathBuf, level: u8) -> PyResult<Writer> {
+    if level > 10 {
+        return Err(PyValueError::new_err(format!(
+            "a compression level is 0 to 10, not {level}"
+        )));
+    }
     let file = fs::File::create(&path)
         .map_err(|e| PyOSError::new_err(format!("{}: {e}", path.display())))?;
-    let inner = pdf::writer::Writer::new(BufWriter::new(file)).map_err(|e| refused(&e))?;
+    let inner = pdf::writer::Writer::new(BufWriter::new(file), level).map_err(|e| refused(&e))?;
     Ok(Writer { inner: Some(inner) })
 }
 

@@ -65,6 +65,38 @@ fn a_standard_font_places_each_glyph_by_its_width() {
 }
 
 #[test]
+fn a_font_names_and_measures_itself_through_references() {
+    let (events, _) = texts(
+        "BT /F1 10 Tf 1 0 0 1 10 50 Tm (AB) Tj ET",
+        "<< /Type /Font /Subtype 6 0 R /BaseFont 7 0 R /FontDescriptor 8 0 R >>",
+        &[
+            "/Type1",
+            "/Helvetica",
+            "<< /Type /FontDescriptor /FontName /Helvetica /Ascent 9 0 R /Descent 10 0 R /Flags 11 0 R /FontWeight 12 0 R >>",
+            "900",
+            "-100",
+            "262176",
+            "700",
+        ],
+    );
+    let event = &events[0];
+    let info = &event.font;
+    assert_eq!(
+        (text(event), info.name.as_str(), info.subtype.as_str()),
+        ("AB".to_string(), "Helvetica", "Type1")
+    );
+    assert_eq!((info.flags, info.weight), (262_176, Some(700.0)));
+    // The standard font's widths, found by its name, and the descriptor's ascent and descent.
+    let a = &event.glyphs[0];
+    assert!(close(event.glyphs[1].origin.x, 16.67));
+    assert!(
+        close(a.bbox.y0, 50.0 - 9.0) && close(a.bbox.y1, 50.0 + 1.0),
+        "{:?}",
+        a.bbox
+    );
+}
+
+#[test]
 fn tj_adjustments_and_spacing_move_the_next_glyph() {
     let (events, _) = texts(
         "BT /F1 10 Tf 10 50 Td [(A) -1000 (B)] TJ ET",

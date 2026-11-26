@@ -3,24 +3,70 @@
 //! `open(data, password)` reads a file; its `page(number, curve_samples, annotations)` returns what the page draws
 //! as tuples, which `document_lab.pdf` turns into the IR, and its `image(object)` an image's samples. `create(path)`
 //! writes a PDF of image pages, or of pages copied from a `Reader` (`document_lab.capture`).
+//!
+//! A refusal raises by its kind: [`Refused`] and its kinds when the reader refuses the input, `ValueError` for a
+//! request it cannot honor, `OSError` when writing fails.
 
 use std::fs;
 use std::io::BufWriter;
 use std::path::PathBuf;
 
-use pdf::color::{Color, Pattern};
-use pdf::geometry::{Point, Rect};
-use pdf::interpret::{Event, Layer, PathEvent, Segment};
+use pdf::color::Pattern;
+use pdf::error::Kind;
+use pdf::geometry::Rect;
+use pdf::interpret::{Event, Layer, PathEvent};
 use pdf::writer::Image;
+use pyo3::create_exception;
 use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
+
+create_exception!(
+    document_lab._pdf,
+    Refused,
+    PyValueError,
+    "The reader refuses the input: one of its kinds says why."
+);
+create_exception!(
+    document_lab._pdf,
+    NotPdf,
+    Refused,
+    "The input is no PDF at all."
+);
+create_exception!(
+    document_lab._pdf,
+    Locked,
+    Refused,
+    "The PDF is encrypted and the password given -- none, or a wrong one -- opens no access."
+);
+create_exception!(
+    document_lab._pdf,
+    Unsupported,
+    Refused,
+    "The PDF uses what the reader does not read (a security handler, a filter)."
+);
+create_exception!(
+    document_lab._pdf,
+    Malformed,
+    Refused,
+    "The input is not what a PDF must be."
+);
 
 /// A box as `(x0, y0, x1, y1)`.
 type Box4 = (f64, f64, f64, f64);
 /// The layer an event is drawn in: hidden by optional content, and the subtype of the annotation drawing it.
 type LayerRow = (bool, Option<String>);
-/// A span: text, font name, size, descriptor flags, font weight, box, render mode, layer.
-type SpanRow = (String, String, f64, i64, Option<f64>, Box4, i64, LayerRow);
+/// A span: text, font name (no subset tag), size, bold, box, render mode, the number it shares with the spans its
+/// words run on into with no space between (None: none), and its layer.
+type SpanRow = (
+    String,
+    String,
+    f64,
+    bool,
+    Box4,
+    i64,
+    Option<usize>,
+    LayerRow,
+);
 /// A path (one subpath): points, closed, stroke color, line width, dashes, dash phase, fill color, even-odd, the
 /// fill's pattern (`tiling`, `shading`; None: one color), the index of the painted path it belongs to on its
 /// page, and its layer. A shading painted with `sh` is the closed rectangle of its box, filled with a `shading`.
@@ -96,15 +142,15 @@ impl Reader {
         let spans = pdf::spans::spans(&content.events)
             .into_iter()
             .map(|s| {
-                let font = &s.font;
+                let (font, bold) = (s.font.name_without_subset().to_string(), s.font.bold());
                 (
                     s.text,
-                    font.name.clone(),
+                    font,
                     s.size,
-                    font.flags,
-                    font.weight,
+                    bold,
                     box4(s.bbox),
                     s.render_mode,
+                    s.unspaced,
                     layer(&s.layer),
                 )
             })
@@ -115,7 +161,7 @@ impl Reader {
         for event in &content.events {
             match event {
                 Event::Path(path) => {
-                    paths.extend(subpaths(path, curve_samples.max(1), painted));
+                    paths.extend(subpaths(path, curve_samples, painted));
                     painted += 1;
                 }
                 Event::Image(image) => {
@@ -130,7 +176,6 @@ impl Reader {
                 Event::Shading(shading) => {
                     let r = shading.bbox;
                     let corners = vec![(r.x0, r.y0), (r.x1, r.y0), (r.x1, r.y1), (r.x0, r.y1)];
-                    let shaded = Some(pattern(Pattern::Shading));
                     paths.push((
                         corners,
                         true,
@@ -140,7 +185,7 @@ impl Reader {
                         0.0,
                         Some(Vec::new()),
                         false,
-                        shaded,
+                        Some(pattern(Pattern::Shading)),
                         painted,
                         layer(&shading.layer),
                     ));
@@ -191,8 +236,17 @@ fn create(path: PathBuf) -> PyResult<Writer> {
     Ok(Writer { inner: Some(inner) })
 }
 
+/// The Python exception of `e`'s kind.
 fn refused(e: &pdf::Error) -> PyErr {
-    PyValueError::new_err(e.to_string())
+    let message = e.to_string();
+    match e.kind {
+        Kind::NotPdf => NotPdf::new_err(message),
+        Kind::Password => Locked::new_err(message),
+        Kind::Unsupported => Unsupported::new_err(message),
+        Kind::Malformed => Malformed::new_err(message),
+        Kind::Invalid => PyValueError::new_err(message),
+        Kind::Io => PyOSError::new_err(message),
+    }
 }
 
 #[pymethods]
@@ -277,12 +331,6 @@ fn box4(r: Rect) -> Box4 {
     (r.x0, r.y0, r.x1, r.y1)
 }
 
-/// A color as RGB when its space defines it, else as its own components.
-fn color(c: &Color) -> Vec<f64> {
-    c.rgb
-        .map_or_else(|| c.components.clone(), |rgb| rgb.to_vec())
-}
-
 /// A layer as its row.
 fn layer(l: &Layer) -> LayerRow {
     (l.hidden, l.annotation.clone())
@@ -296,66 +344,30 @@ fn pattern(p: Pattern) -> &'static str {
     }
 }
 
-/// A painted path as one row per subpath, curves flattened.
+/// A painted path as one row per subpath, its curves flattened to `samples` points.
 fn subpaths(path: &PathEvent, samples: usize, group: usize) -> Vec<PathRow> {
     let stroke = path.stroke.as_ref();
-    let row = |points: Vec<(f64, f64)>, closed: bool| -> PathRow {
-        (
-            points,
-            closed,
-            stroke.map(|s| color(&s.color)),
-            stroke.map_or(0.0, |s| s.width),
-            stroke.map_or_else(Vec::new, |s| s.dashes.clone()),
-            stroke.map_or(0.0, |s| s.dash_phase),
-            path.fill.as_ref().map(|f| color(&f.color)),
-            path.fill.as_ref().is_some_and(|f| f.even_odd),
-            path.fill
-                .as_ref()
-                .and_then(|f| f.color.pattern)
-                .map(pattern),
-            group,
-            layer(&path.layer),
-        )
-    };
-    let mut out = Vec::new();
-    let mut points: Vec<(f64, f64)> = Vec::new();
-    let mut closed = false;
-    let mut last = Point { x: 0.0, y: 0.0 };
-    for segment in &path.segments {
-        match *segment {
-            Segment::MoveTo(p) => {
-                if points.len() > 1 {
-                    out.push(row(std::mem::take(&mut points), closed));
-                }
-                points = vec![(p.x, p.y)];
-                closed = false;
-                last = p;
-            }
-            Segment::LineTo(p) => {
-                points.push((p.x, p.y));
-                last = p;
-            }
-            Segment::CurveTo(c1, c2, p) => {
-                for i in 1..=samples {
-                    #[expect(clippy::cast_precision_loss, reason = "a sample count is small")]
-                    let t = i as f64 / samples as f64;
-                    let u = 1.0 - t;
-                    let weights = [u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t];
-                    let [w0, w1, w2, w3] = weights;
-                    points.push((
-                        w0 * last.x + w1 * c1.x + w2 * c2.x + w3 * p.x,
-                        w0 * last.y + w1 * c1.y + w2 * c2.y + w3 * p.y,
-                    ));
-                }
-                last = p;
-            }
-            Segment::Close => closed = true,
-        }
-    }
-    if points.len() > 1 {
-        out.push(row(points, closed));
-    }
-    out
+    pdf::paths::subpaths(&path.segments, samples)
+        .into_iter()
+        .map(|sub| {
+            (
+                sub.points.iter().map(|p| (p.x, p.y)).collect(),
+                sub.closed,
+                stroke.map(|s| s.color.rgb_or_components()),
+                stroke.map_or(0.0, |s| s.width),
+                stroke.map_or_else(Vec::new, |s| s.dashes.clone()),
+                stroke.map_or(0.0, |s| s.dash_phase),
+                path.fill.as_ref().map(|f| f.color.rgb_or_components()),
+                path.fill.as_ref().is_some_and(|f| f.even_odd),
+                path.fill
+                    .as_ref()
+                    .and_then(|f| f.color.pattern)
+                    .map(pattern),
+                group,
+                layer(&path.layer),
+            )
+        })
+        .collect()
 }
 
 #[pymodule]
@@ -366,5 +378,11 @@ fn extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Reader>()?;
     module.add_function(wrap_pyfunction!(create, module)?)?;
     module.add_class::<Writer>()?;
+    let py = module.py();
+    module.add("Refused", py.get_type::<Refused>())?;
+    module.add("NotPdf", py.get_type::<NotPdf>())?;
+    module.add("Locked", py.get_type::<Locked>())?;
+    module.add("Unsupported", py.get_type::<Unsupported>())?;
+    module.add("Malformed", py.get_type::<Malformed>())?;
     Ok(())
 }

@@ -72,9 +72,9 @@ impl File {
     pub fn pages(&self) -> Result<Vec<Page>> {
         let root = self
             .get(&self.catalog()?, b"Pages")?
-            .ok_or_else(|| Error::new("the catalog names no /Pages"))?;
+            .ok_or_else(|| Error::malformed("the catalog names no /Pages"))?;
         let Object::Dict(root) = root else {
-            return Err(Error::new(format!(
+            return Err(Error::malformed(format!(
                 "/Pages is a {}, not a dictionary",
                 root.kind()
             )));
@@ -94,7 +94,7 @@ impl File {
         depth: usize,
     ) -> Result<()> {
         if depth > MAX_DEPTH {
-            return Err(Error::new("the page tree nests too deep"));
+            return Err(Error::malformed("the page tree nests too deep"));
         }
         let mut here = above.clone();
         if let Some(Object::Dict(r)) = self.get(node, b"Resources")? {
@@ -121,7 +121,7 @@ impl File {
             if let Some(r) = kid.as_reference()
                 && !seen.insert(r.num)
             {
-                return Err(Error::new(format!(
+                return Err(Error::malformed(format!(
                     "the page tree visits object {} twice",
                     r.num
                 )));
@@ -130,7 +130,7 @@ impl File {
                 Object::Dict(d) => self.walk(&d, &here, pages, seen, depth + 1)?,
                 Object::Null => {}
                 other => {
-                    return Err(Error::new(format!(
+                    return Err(Error::malformed(format!(
                         "a page tree node is a {}",
                         other.kind()
                     )));

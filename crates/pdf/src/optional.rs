@@ -97,7 +97,9 @@ impl OptionalContent {
         }
         let number = oc.as_reference().map(|r| r.num);
         let Object::Dict(dict) = file.resolve(oc)? else {
-            return Err(Error::new("optional content that is not a dictionary"));
+            return Err(Error::malformed(
+                "optional content that is not a dictionary",
+            ));
         };
         let kind = file.get(&dict, b"Type")?;
         match kind.as_ref().and_then(Object::as_name) {
@@ -107,7 +109,7 @@ impl OptionalContent {
                 self.member_shows(file, &dict)
             }
             _ if dict.get(b"Name").is_some() => self.group_on(file, number, &dict),
-            _ => Err(Error::new(
+            _ => Err(Error::malformed(
                 "optional content that is neither a group nor a membership dictionary",
             )),
         }
@@ -117,7 +119,7 @@ impl OptionalContent {
     fn group(&self, file: &File, value: &Object) -> Result<bool> {
         match file.resolve(value)? {
             Object::Dict(dict) => self.group_on(file, value.as_reference().map(|r| r.num), &dict),
-            other => Err(Error::new(format!(
+            other => Err(Error::malformed(format!(
                 "a membership names a {}, not a group",
                 other.kind()
             ))),
@@ -173,7 +175,7 @@ impl OptionalContent {
     /// The value of the visibility expression `value` (8.11.2.2): a group, or `[/And|/Or|/Not operand ...]`.
     fn expression(&self, file: &File, value: &Object, depth: usize) -> Result<bool> {
         if depth > MAX_EXPRESSION_DEPTH {
-            return Err(Error::new("a visibility expression nests too deep"));
+            return Err(Error::malformed("a visibility expression nests too deep"));
         }
         let Object::Array(items) = file.resolve(value)? else {
             return self.group(file, value);
@@ -187,7 +189,7 @@ impl OptionalContent {
             (b"Not", [one]) => Ok(!one),
             (b"And", [_, ..]) => Ok(operands.iter().all(|&s| s)),
             (b"Or", [_, ..]) => Ok(operands.iter().any(|&s| s)),
-            _ => Err(Error::new(format!(
+            _ => Err(Error::malformed(format!(
                 "a visibility expression /{} of {} operands",
                 String::from_utf8_lossy(operator),
                 operands.len()

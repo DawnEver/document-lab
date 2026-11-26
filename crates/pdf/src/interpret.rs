@@ -322,7 +322,7 @@ impl File {
                 }
             }
             Some(other) => {
-                return Err(Error::new(format!(
+                return Err(Error::malformed(format!(
                     "page {}: /Contents is a {}",
                     page.number,
                     other.kind()
@@ -377,14 +377,14 @@ fn last(operands: &[Object], count: usize) -> Result<Vec<f64>> {
                 .map(Object::as_number)
                 .collect::<Option<Vec<f64>>>()
         })
-        .ok_or_else(|| Error::new(format!("needs {count} numbers")))
+        .ok_or_else(|| Error::malformed(format!("needs {count} numbers")))
 }
 
 /// The last operand, a string.
 fn string(operands: &[Object]) -> Result<&[u8]> {
     match operands.last() {
         Some(Object::String(s)) => Ok(s),
-        _ => Err(Error::new("needs a string")),
+        _ => Err(Error::malformed("needs a string")),
     }
 }
 
@@ -393,7 +393,7 @@ fn integer(operands: &[Object]) -> Result<i64> {
     operands
         .last()
         .and_then(Object::as_integer)
-        .ok_or_else(|| Error::new("needs an integer"))
+        .ok_or_else(|| Error::malformed("needs an integer"))
 }
 
 impl Interpreter<'_> {
@@ -462,13 +462,13 @@ impl Interpreter<'_> {
         let properties = match operands.get(1) {
             Some(Object::Name(name)) => match self.file.get(resources, b"Properties") {
                 Ok(Some(Object::Dict(named))) => named.get(name).cloned().ok_or_else(|| {
-                    Error::new(format!("no properties /{}", String::from_utf8_lossy(name)))
+                    Error::malformed(format!("no properties /{}", String::from_utf8_lossy(name)))
                 }),
-                Ok(_) => Err(Error::new("no /Properties resources")),
+                Ok(_) => Err(Error::malformed("no /Properties resources")),
                 Err(e) => Err(e),
             },
             Some(inline @ Object::Dict(_)) => Ok(inline.clone()),
-            _ => Err(Error::new("needs a tag and properties")),
+            _ => Err(Error::malformed("needs a tag and properties")),
         };
         let tag = operands.first().and_then(Object::as_name);
         let mut hides = false;
@@ -499,7 +499,7 @@ impl Interpreter<'_> {
     /// `EMC`: the innermost open sequence ends.
     fn end_marked(&mut self) -> Result<()> {
         if self.marked.len() <= self.marked_floor {
-            return Err(Error::new("no marked content is open"));
+            return Err(Error::malformed("no marked content is open"));
         }
         self.marked.pop();
         if self
@@ -557,17 +557,19 @@ impl Interpreter<'_> {
         let name = operands
             .last()
             .and_then(Object::as_name)
-            .ok_or_else(|| Error::new("needs a name"))?;
+            .ok_or_else(|| Error::malformed("needs a name"))?;
         let Some(Object::Dict(shadings)) = self.file.get(resources, b"Shading")? else {
-            return Err(Error::new("no /Shading resources"));
+            return Err(Error::malformed("no /Shading resources"));
         };
         let shading = shadings
             .get(name)
             .map(|s| self.file.resolve(s))
             .transpose()?
-            .ok_or_else(|| Error::new(format!("no shading /{}", String::from_utf8_lossy(name))))?;
+            .ok_or_else(|| {
+                Error::malformed(format!("no shading /{}", String::from_utf8_lossy(name)))
+            })?;
         let dict = shading.as_dict().ok_or_else(|| {
-            Error::new(format!(
+            Error::malformed(format!(
                 "shading /{} is a {}",
                 String::from_utf8_lossy(name),
                 shading.kind()
@@ -611,7 +613,7 @@ impl Interpreter<'_> {
             }
             b"cm" => {
                 let matrix = Matrix::from_numbers(&last(operands, 6)?)
-                    .ok_or_else(|| Error::new("needs 6 numbers"))?;
+                    .ok_or_else(|| Error::malformed("needs 6 numbers"))?;
                 self.state.ctm = matrix.then(self.state.ctm);
             }
             b"w" => self.state.line_width = last(operands, 1)?[0],
@@ -621,7 +623,7 @@ impl Interpreter<'_> {
                 let array = operands
                     .first()
                     .and_then(Object::as_array)
-                    .ok_or_else(|| Error::new("needs a dash array"))?;
+                    .ok_or_else(|| Error::malformed("needs a dash array"))?;
                 self.state.dashes = array.iter().filter_map(Object::as_number).collect();
                 self.state.dash_phase = operands.get(1).and_then(Object::as_number).unwrap_or(0.0);
             }
@@ -656,7 +658,9 @@ impl Interpreter<'_> {
             }
             b"v" => {
                 let v = last(operands, 4)?;
-                let c1 = self.current.ok_or_else(|| Error::new("no current point"))?;
+                let c1 = self
+                    .current
+                    .ok_or_else(|| Error::malformed("no current point"))?;
                 let (c2, to) = (self.point(v[0], v[1]), self.point(v[2], v[3]));
                 self.extend(Segment::CurveTo(c1, c2, to), to);
             }
@@ -743,7 +747,7 @@ impl Interpreter<'_> {
                 let name = operands
                     .first()
                     .and_then(Object::as_name)
-                    .ok_or_else(|| Error::new("needs a font name"))?;
+                    .ok_or_else(|| Error::malformed("needs a font name"))?;
                 let font = self.load_font(name, resources)?;
                 self.state.text.font = Some(font);
             }
@@ -758,7 +762,7 @@ impl Interpreter<'_> {
             }
             b"Tm" => {
                 let m = Matrix::from_numbers(&last(operands, 6)?)
-                    .ok_or_else(|| Error::new("needs 6 numbers"))?;
+                    .ok_or_else(|| Error::malformed("needs 6 numbers"))?;
                 (self.text_matrix, self.line_matrix) = (m, m);
             }
             b"T*" => {
@@ -782,7 +786,7 @@ impl Interpreter<'_> {
                 let items = operands
                     .last()
                     .and_then(Object::as_array)
-                    .ok_or_else(|| Error::new("needs an array"))?;
+                    .ok_or_else(|| Error::malformed("needs an array"))?;
                 let mut glyphs = Vec::new();
                 for item in items {
                     match item {
@@ -812,17 +816,17 @@ impl Interpreter<'_> {
 
     fn load_font(&mut self, name: &[u8], resources: &Dict) -> Result<Rc<Font>> {
         let Some(Object::Dict(fonts)) = self.file.get(resources, b"Font")? else {
-            return Err(Error::new("no /Font resources"));
+            return Err(Error::malformed("no /Font resources"));
         };
-        let reference = fonts
-            .get(name)
-            .ok_or_else(|| Error::new(format!("no font /{}", String::from_utf8_lossy(name))))?;
+        let reference = fonts.get(name).ok_or_else(|| {
+            Error::malformed(format!("no font /{}", String::from_utf8_lossy(name)))
+        })?;
         let number = reference.as_reference().map(|r| r.num);
         if let Some(font) = number.and_then(|n| self.fonts.get(&n)) {
             return Ok(Rc::clone(font));
         }
         let Object::Dict(dict) = self.file.resolve(reference)? else {
-            return Err(Error::new(format!(
+            return Err(Error::malformed(format!(
                 "font /{} is not a dictionary",
                 String::from_utf8_lossy(name)
             )));
@@ -983,7 +987,7 @@ impl Interpreter<'_> {
             let name = operands
                 .last()
                 .and_then(Object::as_name)
-                .ok_or_else(|| Error::new("needs a pattern name"))?;
+                .ok_or_else(|| Error::malformed("needs a pattern name"))?;
             color.pattern = Some(self.file.pattern(name, resources)?);
         }
         Ok(color)
@@ -1047,13 +1051,13 @@ impl Interpreter<'_> {
         let name = operands
             .first()
             .and_then(Object::as_name)
-            .ok_or_else(|| Error::new("needs a name"))?;
+            .ok_or_else(|| Error::malformed("needs a name"))?;
         let Some(Object::Dict(states)) = self.file.get(resources, b"ExtGState")? else {
-            return Err(Error::new("no /ExtGState resources"));
+            return Err(Error::malformed("no /ExtGState resources"));
         };
         let Some(Object::Dict(gs)) = states.get(name).map(|o| self.file.resolve(o)).transpose()?
         else {
-            return Err(Error::new(format!(
+            return Err(Error::malformed(format!(
                 "no graphics state /{}",
                 String::from_utf8_lossy(name)
             )));
@@ -1084,15 +1088,15 @@ impl Interpreter<'_> {
         let name = operands
             .first()
             .and_then(Object::as_name)
-            .ok_or_else(|| Error::new("needs a name"))?;
+            .ok_or_else(|| Error::malformed("needs a name"))?;
         let Some(Object::Dict(objects)) = self.file.get(resources, b"XObject")? else {
-            return Err(Error::new("no /XObject resources"));
+            return Err(Error::malformed("no /XObject resources"));
         };
-        let reference = objects
-            .get(name)
-            .ok_or_else(|| Error::new(format!("no XObject /{}", String::from_utf8_lossy(name))))?;
+        let reference = objects.get(name).ok_or_else(|| {
+            Error::malformed(format!("no XObject /{}", String::from_utf8_lossy(name)))
+        })?;
         let Object::Stream(stream) = self.file.resolve(reference)? else {
-            return Err(Error::new(format!(
+            return Err(Error::malformed(format!(
                 "XObject /{} is not a stream",
                 String::from_utf8_lossy(name)
             )));
@@ -1126,7 +1130,7 @@ impl Interpreter<'_> {
     /// own resources (else `resources`, its caller's); the state, the path and its marked content end with it.
     fn form(&mut self, stream: &Stream, resources: &Dict, depth: usize) -> Result<()> {
         if depth >= MAX_FORM_DEPTH {
-            return Err(Error::new("Form XObjects nest too deep"));
+            return Err(Error::malformed("Form XObjects nest too deep"));
         }
         let matrix = self.form_matrix(&stream.dict)?;
         let own = match self.file.get(&stream.dict, b"Resources")? {
@@ -1194,7 +1198,7 @@ impl Interpreter<'_> {
         /// `/F` bits: Hidden (2) and `NoView` (6).
         const NOT_SHOWN: i64 = 1 << 1 | 1 << 5;
         let Object::Dict(annotation) = self.file.resolve(value)? else {
-            return Err(Error::new("not a dictionary"));
+            return Err(Error::malformed("not a dictionary"));
         };
         let subtype = self.file.get(&annotation, b"Subtype")?;
         let subtype = subtype.as_ref().and_then(Object::as_name).unwrap_or(b"");
@@ -1226,7 +1230,7 @@ impl Interpreter<'_> {
             _ => return Ok(()),
         };
         let rect = four(self.file.get(&annotation, b"Rect")?)
-            .ok_or_else(|| Error::new("its /Rect is not four numbers"))?;
+            .ok_or_else(|| Error::malformed("its /Rect is not four numbers"))?;
         let rect = Rect::spanning(
             Point {
                 x: rect[0],
@@ -1239,12 +1243,12 @@ impl Interpreter<'_> {
         );
         let matrix = self.form_matrix(&stream.dict)?;
         let [b0, b1, b2, b3] = four(self.file.get(&stream.dict, b"BBox")?)
-            .ok_or_else(|| Error::new("its appearance's /BBox is not four numbers"))?;
+            .ok_or_else(|| Error::malformed("its appearance's /BBox is not four numbers"))?;
         let corners =
             [(b0, b1), (b2, b1), (b2, b3), (b0, b3)].map(|(x, y)| matrix.apply(Point { x, y }));
         let shown = Rect::around(&corners).expect("four corners");
         if shown.width() <= 0.0 || shown.height() <= 0.0 {
-            return Err(Error::new("its appearance's /BBox is empty"));
+            return Err(Error::malformed("its appearance's /BBox is empty"));
         }
         let (sx, sy) = (rect.width() / shown.width(), rect.height() / shown.height());
         let onto = Matrix([

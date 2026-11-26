@@ -4,6 +4,12 @@
 //! ended: on its baseline (within [`BASELINE`] sizes) and no further on than [`BREAK`] sizes. A gap wider than
 //! [`SPACE`] sizes with no space glyph in it reads as a space, as the eye reads it. Text events are taken in
 //! drawing order, so a span never joins glyphs drawn apart, nor glyphs of two layers (hidden, an annotation's).
+//!
+//! Where a word gap is, is this module's alone. A span continues the word of another that ends at most [`SPACE`]
+//! sizes before its start, raised or lowered by no more than [`RISE`] sizes, no space glyph between -- a change
+//! of font, size or baseline inside a word -- whenever either was drawn (a subscript is often drawn after the
+//! formula it sits in). Spans continuing one another share a number ([`Span::unspaced`]), so a reader setting
+//! spans into lines spaces them by that and measures no gap of its own.
 
 use std::rc::Rc;
 
@@ -17,6 +23,9 @@ pub const SPACE: f64 = 0.15;
 pub const BREAK: f64 = 1.0;
 /// A glyph whose baseline is off the span's by more than this many font sizes starts another span.
 pub const BASELINE: f64 = 0.1;
+/// A glyph raised or lowered by up to this many font sizes (a superscript, a subscript) still continues the word
+/// before it.
+pub const RISE: f64 = 0.5;
 
 /// A run of text.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,10 +42,16 @@ pub struct Span {
     pub render_mode: i64,
     /// The layer its glyphs are drawn in: a span never joins glyphs of two.
     pub layer: Layer,
+    /// The number it shares, on its page, with the spans it continues or that continue it, no word gap between:
+    /// a change of font, size or baseline inside a word (`Head` set bold in `Headline`; the `2` of `H2O`). None
+    /// when it continues no span and none continues it.
+    pub unspaced: Option<usize>,
 }
 
 struct Open {
     span: Span,
+    /// Where its first glyph starts.
+    origin: Point,
     end: Point,
     direction: (f64, f64),
     /// Whether a glyph with ink (not white-space) is in it yet: only those make its box.
@@ -46,7 +61,7 @@ struct Open {
 /// The spans of a page's events, in drawing order.
 #[must_use]
 pub fn spans(events: &[Event]) -> Vec<Span> {
-    let mut out: Vec<Span> = Vec::new();
+    let mut out: Vec<Open> = Vec::new();
     let mut open: Option<Open> = None;
     for event in events {
         let Event::Text(text) = event else { continue };
@@ -81,9 +96,7 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
                 o.end = glyph.end;
                 continue;
             }
-            if let Some(done) = open.take() {
-                out.push(done.span);
-            }
+            out.extend(open.take());
             open = Some(Open {
                 span: Span {
                     text: piece.to_string(),
@@ -92,20 +105,54 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
                     bbox: glyph.bbox,
                     render_mode: text.render_mode,
                     layer: text.layer.clone(),
+                    unspaced: None,
                 },
+                origin: glyph.origin,
                 end: glyph.end,
                 direction,
                 inked: inks(piece),
             });
         }
     }
-    out.extend(open.map(|o| o.span));
-    out.retain(|s| !s.text.trim().is_empty());
-    for span in &mut out {
-        let trimmed = span.text.trim_end().len();
-        span.text.truncate(trimmed);
+    out.extend(open);
+    let unspaced = unspaced(&out);
+    out.into_iter()
+        .zip(unspaced)
+        .filter(|(o, _)| !o.span.text.trim().is_empty())
+        .map(|(o, unspaced)| {
+            let mut span = o.span;
+            let trimmed = span.text.trim_end().len();
+            span.text.truncate(trimmed);
+            Span { unspaced, ..span }
+        })
+        .collect()
+}
+
+/// Each span's [`Span::unspaced`] number: the lowest index among the spans linked to it by continuing one
+/// another's words; None when it is linked to none.
+fn unspaced(spans: &[Open]) -> Vec<Option<usize>> {
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
     }
-    out
+    let mut parent: Vec<usize> = (0..spans.len()).collect();
+    let mut linked = vec![false; spans.len()];
+    for (i, next) in spans.iter().enumerate() {
+        for (j, before) in spans.iter().enumerate() {
+            if i != j && continues_word(before, next) {
+                let (a, b) = (root(&mut parent, i), root(&mut parent, j));
+                parent[a.max(b)] = a.min(b);
+                linked[i] = true;
+                linked[j] = true;
+            }
+        }
+    }
+    (0..spans.len())
+        .map(|i| linked[i].then(|| root(&mut parent, i)))
+        .collect()
 }
 
 /// Whether the glyph at `origin` continues `open`: None when it starts another span, else whether a space lies
@@ -133,4 +180,23 @@ fn join(open: &Open, text: &TextEvent, origin: Point, direction: (f64, f64)) -> 
 /// empty because an `/ActualText` before it in its sequence carries its text.
 fn inks(piece: &str) -> bool {
     piece.is_empty() || !piece.trim().is_empty()
+}
+
+/// Whether `next` continues the word `before` ends in: no space glyph between them, both written the same way in
+/// one layer, `next` starting on from `before`'s end by no more than a word gap (back by no more than half a size),
+/// raised or lowered by no more than [`RISE`] sizes.
+fn continues_word(before: &Open, next: &Open) -> bool {
+    if before.span.text.ends_with(char::is_whitespace)
+        || next.span.text.starts_with(char::is_whitespace)
+        || before.span.layer != next.span.layer
+    {
+        return false;
+    }
+    let size = before.span.size.max(next.span.size).max(f64::MIN_POSITIVE);
+    let (dx, dy) = (before.direction.0, before.direction.1);
+    let along = |from: Point| (next.origin.x - from.x) * dx + (next.origin.y - from.y) * dy;
+    let across = -(next.origin.x - before.end.x) * dy + (next.origin.y - before.end.y) * dx;
+    (dx - next.direction.0).abs() + (dy - next.direction.1).abs() <= 0.01
+        && (-0.5 * size..=SPACE * size).contains(&along(before.end))
+        && across.abs() <= RISE * size
 }

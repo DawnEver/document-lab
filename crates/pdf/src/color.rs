@@ -47,6 +47,16 @@ pub enum Pattern {
     Shading,
 }
 
+impl Color {
+    /// Its RGB when its space defines one, else its own components (a separation's tint): the most a reader can
+    /// say of it without a profile or a tint function.
+    #[must_use]
+    pub fn rgb_or_components(&self) -> Vec<f64> {
+        self.rgb
+            .map_or_else(|| self.components.clone(), |rgb| rgb.to_vec())
+    }
+}
+
 impl Space {
     /// How many components a color of this space has.
     #[must_use]
@@ -145,14 +155,14 @@ impl File {
     pub fn pattern(&self, name: &[u8], resources: &Dict) -> Result<Pattern> {
         let named = || String::from_utf8_lossy(name).into_owned();
         let Some(Object::Dict(patterns)) = self.get(resources, b"Pattern")? else {
-            return Err(Error::new(format!(
+            return Err(Error::malformed(format!(
                 "no /Pattern resources for /{}",
                 named()
             )));
         };
         let pattern = match patterns.get(name) {
             Some(p) => self.resolve(p)?,
-            None => return Err(Error::new(format!("no pattern /{}", named()))),
+            None => return Err(Error::malformed(format!("no pattern /{}", named()))),
         };
         let kind = match pattern.as_dict() {
             Some(d) => self.get(d, b"PatternType")?.and_then(|t| t.as_integer()),
@@ -161,7 +171,7 @@ impl File {
         match kind {
             Some(1) => Ok(Pattern::Tiling),
             Some(2) => Ok(Pattern::Shading),
-            _ => Err(Error::new(format!(
+            _ => Err(Error::malformed(format!(
                 "pattern /{} has no known /PatternType",
                 named()
             ))),
@@ -260,5 +270,13 @@ mod tests {
     fn a_separation_keeps_its_tint_and_gives_no_rgb() {
         let c = Space::Other(b"Separation".to_vec(), 1).color(vec![0.3]);
         assert_eq!((c.components, c.rgb), (vec![0.3], None));
+    }
+
+    #[test]
+    fn a_color_reads_as_its_rgb_else_its_components() {
+        let rgb = Space::Cmyk.color(vec![0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(rgb.rgb_or_components(), [0.0; 3]);
+        let tint = Space::Other(b"Separation".to_vec(), 1).color(vec![0.3]);
+        assert_eq!(tint.rgb_or_components(), [0.3]);
     }
 }

@@ -233,7 +233,7 @@ def join(
             _second(joined, b, cut, dx, dpi)
         joined.close()
     except BaseException:
-        with contextlib.suppress(ValueError):  # closed already: the failure came after
+        with contextlib.suppress(ValueError, OSError):  # closed already, or its write fails too: the first stands
             joined.close()
         part.unlink(missing_ok=True)
         raise

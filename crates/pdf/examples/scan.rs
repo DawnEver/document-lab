@@ -33,6 +33,8 @@ struct Totals {
     warnings: usize,
     paths: usize,
     images: usize,
+    glyphs: usize,
+    unmapped: usize,
 }
 
 fn scan(path: &Path, t: &mut Totals) {
@@ -79,6 +81,11 @@ fn scan(path: &Path, t: &mut Totals) {
                             match e {
                                 pdf::Event::Path(_) => t.paths += 1,
                                 pdf::Event::Image(_) => t.images += 1,
+                                pdf::Event::Text(text) => {
+                                    t.glyphs += text.glyphs.len();
+                                    t.unmapped +=
+                                        text.glyphs.iter().filter(|g| g.text.is_none()).count();
+                                }
                             }
                         }
                     }
@@ -107,7 +114,7 @@ fn main() {
         scan(path, &mut t);
     }
     println!(
-        "{} files: {} sound, {} refused, {} unreadable objects; {} pages, {} failed, {} warnings; {} paths, {} images",
+        "{} files: {} sound, {} refused, {} unreadable objects; {} pages, {} failed, {} warnings; {} paths, {} images, {} glyphs ({} without text)",
         t.files,
         t.sound,
         t.refused,
@@ -116,6 +123,8 @@ fn main() {
         t.bad_pages,
         t.warnings,
         t.paths,
-        t.images
+        t.images,
+        t.glyphs,
+        t.unmapped
     );
 }

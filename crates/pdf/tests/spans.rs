@@ -63,3 +63,20 @@ fn a_span_box_covers_its_glyphs_and_blank_text_is_no_span() {
     );
     assert_eq!(found[0].text, "AB");
 }
+
+#[test]
+fn a_span_carries_the_direction_its_baseline_runs_in_page_space() {
+    let found = page_spans("BT /F1 10 Tf 10 50 Td (across) Tj 0 1 -1 0 100 20 Tm (up) Tj ET");
+    let directions: Vec<(String, (f64, f64))> = found
+        .into_iter()
+        .map(|s| (s.text, (s.direction.0.round(), s.direction.1.round())))
+        .collect();
+    // y grows down in page space: text set bottom to top runs along -y.
+    assert_eq!(
+        directions,
+        [
+            ("across".to_string(), (1.0, 0.0)),
+            ("up".to_string(), (0.0, -1.0))
+        ]
+    );
+}

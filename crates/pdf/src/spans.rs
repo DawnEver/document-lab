@@ -31,12 +31,14 @@ pub struct Span {
     pub bbox: Rect,
     /// The text rendering mode it was shown in (3: invisible, as an OCR text layer is).
     pub render_mode: i64,
+    /// The unit vector its baseline runs along, in page space (y down): `(1, 0)` for text set left to right,
+    /// `(0, -1)` for text set bottom to top.
+    pub direction: (f64, f64),
 }
 
 struct Open {
     span: Span,
     end: Point,
-    direction: (f64, f64),
     /// Whether a glyph with ink (not white-space) is in it yet: only those make its box.
     inked: bool,
 }
@@ -56,7 +58,7 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
                     (glyph.end.y - glyph.origin.y) / length,
                 )
             } else {
-                open.as_ref().map_or((1.0, 0.0), |o| o.direction)
+                open.as_ref().map_or((1.0, 0.0), |o| o.span.direction)
             };
             let piece = glyph.text.as_deref().unwrap_or("\u{FFFD}");
             let joined = open
@@ -89,9 +91,9 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
                     size: text.size,
                     bbox: glyph.bbox,
                     render_mode: text.render_mode,
+                    direction,
                 },
                 end: glyph.end,
-                direction,
                 inked: !piece.trim().is_empty(),
             });
         }
@@ -112,7 +114,8 @@ fn join(open: &Open, text: &TextEvent, origin: Point, direction: (f64, f64)) -> 
     if open.span.font != text.font
         || (open.span.size - text.size).abs() > 0.01 * size
         || open.span.render_mode != text.render_mode
-        || (open.direction.0 - direction.0).abs() + (open.direction.1 - direction.1).abs() > 0.01
+        || (open.span.direction.0 - direction.0).abs() + (open.span.direction.1 - direction.1).abs()
+            > 0.01
     {
         return None;
     }

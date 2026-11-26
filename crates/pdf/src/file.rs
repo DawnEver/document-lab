@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::crypt::Decryptor;
-use crate::error::{Error, Result};
+use crate::error::{Error, Kind, Result};
 use crate::filter::{self, Decoded};
 use crate::object::{Dict, Object, Stream};
 use crate::parser::{Parser, find};
@@ -41,6 +41,7 @@ impl File {
     pub fn open(data: Vec<u8>, password: &[u8]) -> Result<Self> {
         if find(&data[..data.len().min(1024)], b"%PDF-").is_none() {
             return Err(Error::new(
+                Kind::NotPdf,
                 "not a PDF: no `%PDF-` header in the first 1024 bytes",
             ));
         }
@@ -69,7 +70,7 @@ impl File {
             let dict = match file.resolve(&encrypt)? {
                 Object::Dict(d) => d,
                 other => {
-                    return Err(Error::new(format!(
+                    return Err(Error::malformed(format!(
                         "/Encrypt is a {}, not a dictionary",
                         other.kind()
                     )));
@@ -126,10 +127,10 @@ impl File {
             .xref
             .trailer
             .get(b"Root")
-            .ok_or_else(|| Error::new("the trailer names no /Root"))?;
+            .ok_or_else(|| Error::malformed("the trailer names no /Root"))?;
         match self.resolve(root)? {
             Object::Dict(d) => Ok(d),
-            other => Err(Error::new(format!(
+            other => Err(Error::malformed(format!(
                 "/Root is a {}, not a dictionary",
                 other.kind()
             ))),
@@ -165,7 +166,7 @@ impl File {
                 other => return Ok(other),
             }
         }
-        Err(Error::new("a reference chain loops"))
+        Err(Error::malformed("a reference chain loops"))
     }
 
     /// `dict[key]`, resolved; None when absent or null.
@@ -203,7 +204,7 @@ impl File {
 
     fn in_file(&self, num: u32, offset: usize) -> Result<Object> {
         if offset >= self.data.len() {
-            return Err(Error::at(
+            return Err(Error::malformed_at(
                 offset,
                 format!("object {num}: offset past the end of the file"),
             ));
@@ -211,7 +212,7 @@ impl File {
         let (id, mut value) =
             Parser::new(&self.data, offset).indirect_object(|o| self.length(o))?;
         if id.num != num {
-            return Err(Error::at(
+            return Err(Error::malformed_at(
                 offset,
                 format!("object {num}: the table points at object {}", id.num),
             ));
@@ -244,8 +245,9 @@ impl File {
             .get(index as usize)
             .filter(|(n, _)| *n == num)
             .or_else(|| objects.iter().find(|(n, _)| *n == num));
-        hit.map(|(_, o)| o.clone())
-            .ok_or_else(|| Error::new(format!("object {num} is not in object stream {stream}")))
+        hit.map(|(_, o)| o.clone()).ok_or_else(|| {
+            Error::malformed(format!("object {num} is not in object stream {stream}"))
+        })
     }
 
     fn object_stream(&self, stream: u32) -> Result<Rc<Members>> {
@@ -253,7 +255,7 @@ impl File {
             return Ok(Rc::clone(found));
         }
         let Object::Stream(s) = self.object(stream)? else {
-            return Err(Error::new(format!(
+            return Err(Error::malformed(format!(
                 "object {stream} is named an object stream but is no stream"
             )));
         };
@@ -266,15 +268,15 @@ impl File {
             .get(&s.dict, b"First")?
             .and_then(|o| o.as_integer())
             .unwrap_or(0);
-        let first =
-            usize::try_from(first).map_err(|_| Error::new("object stream /First out of range"))?;
+        let first = usize::try_from(first)
+            .map_err(|_| Error::malformed("object stream /First out of range"))?;
         let mut header = Parser::new(&data, 0);
         let mut objects = Vec::new();
         for _ in 0..count {
             let n = u32::try_from(header.unsigned()?)
-                .map_err(|_| Error::new("object number out of range"))?;
+                .map_err(|_| Error::malformed("object number out of range"))?;
             let at = usize::try_from(header.unsigned()?)
-                .map_err(|_| Error::new("offset out of range"))?;
+                .map_err(|_| Error::malformed("offset out of range"))?;
             let value = Parser::new(&data, first + at).object()?;
             objects.push((n, value));
         }
@@ -438,11 +440,12 @@ mod tests {
 
     #[test]
     fn not_a_pdf_and_an_unknown_security_handler_are_refused() {
-        assert!(File::open(b"hello".to_vec(), b"").is_err());
+        let kind = |r: Result<File>| r.err().map(|e| e.kind);
+        assert_eq!(kind(File::open(b"hello".to_vec(), b"")), Some(Kind::NotPdf));
         let data = classic(
             &[CATALOG, PAGES, "<< /Filter /Adobe.PubSec /R 4 >>"],
             "<< /Size 4 /Root 1 0 R /Encrypt 3 0 R >>",
         );
-        assert!(File::open(data, b"").is_err());
+        assert_eq!(kind(File::open(data, b"")), Some(Kind::Unsupported));
     }
 }

@@ -10,7 +10,7 @@ use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use md5::{Digest, Md5};
 use sha2::{Sha256, Sha384, Sha512};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Kind, Result};
 use crate::object::{Dict, ObjRef, Object};
 
 /// The 32-byte padding string a password is completed with (Algorithm 2, step a).
@@ -54,7 +54,7 @@ impl Decryptor {
             .and_then(Object::as_name)
             .unwrap_or(b"");
         if filter != b"Standard" {
-            return Err(Error::new(format!(
+            return Err(Error::unsupported(format!(
                 "the file is encrypted by the /{} security handler; only /Standard (password) is read",
                 String::from_utf8_lossy(filter)
             )));
@@ -62,14 +62,14 @@ impl Decryptor {
         let int = |key: &[u8]| encrypt.get(key).and_then(Object::as_integer);
         let bytes = |key: &[u8]| match encrypt.get(key) {
             Some(Object::String(s)) => Ok(s.clone()),
-            _ => Err(Error::new(format!(
+            _ => Err(Error::malformed(format!(
                 "the encryption dictionary has no /{} string",
                 String::from_utf8_lossy(key)
             ))),
         };
         let version = int(b"V").unwrap_or(0);
         let revision =
-            int(b"R").ok_or_else(|| Error::new("the encryption dictionary has no /R"))?;
+            int(b"R").ok_or_else(|| Error::malformed("the encryption dictionary has no /R"))?;
         let metadata = !matches!(encrypt.get(b"EncryptMetadata"), Some(Object::Bool(false)));
         let (strings, streams) = match version {
             1 | 2 => (Method::Rc4, Method::Rc4),
@@ -77,7 +77,11 @@ impl Decryptor {
                 crypt_filter(encrypt, b"StrF")?,
                 crypt_filter(encrypt, b"StmF")?,
             ),
-            _ => return Err(Error::new(format!("encryption /V {version} is not read"))),
+            _ => {
+                return Err(Error::unsupported(format!(
+                    "encryption /V {version} is not read"
+                )));
+            }
         };
         let (owner, user) = (bytes(b"O")?, bytes(b"U")?);
         let key = match revision {
@@ -88,7 +92,7 @@ impl Decryptor {
                     usize::try_from(int(b"Length").unwrap_or(40) / 8).unwrap_or(5)
                 };
                 if !(5..=16).contains(&length) {
-                    return Err(Error::new(format!(
+                    return Err(Error::malformed(format!(
                         "an RC4 key of {length} bytes is out of range"
                     )));
                 }
@@ -116,13 +120,16 @@ impl Decryptor {
                 )
             }
             _ => {
-                return Err(Error::new(format!(
+                return Err(Error::unsupported(format!(
                     "security handler revision {revision} is not read"
                 )));
             }
         };
         let key = key.ok_or_else(|| {
-            Error::new("the password opens neither the user's nor the owner's access")
+            Error::new(
+                Kind::Password,
+                "the password opens neither the user's nor the owner's access",
+            )
         })?;
         Ok(Self {
             key,
@@ -153,7 +160,7 @@ impl Decryptor {
 
     fn strings_in(&self, id: ObjRef, value: &mut Object, depth: usize) -> Result<()> {
         if depth > 256 {
-            return Err(Error::new("objects nested too deep"));
+            return Err(Error::malformed("objects nested too deep"));
         }
         match value {
             Object::String(s) => *s = self.decrypt(self.strings, id, s)?,
@@ -232,7 +239,7 @@ fn crypt_filter(encrypt: &Dict, which: &[u8]) -> Result<Method> {
         .and_then(|cf| cf.get(name))
         .and_then(Object::as_dict)
         .ok_or_else(|| {
-            Error::new(format!(
+            Error::malformed(format!(
                 "the crypt filter /{} is not defined",
                 String::from_utf8_lossy(name)
             ))
@@ -246,7 +253,7 @@ fn crypt_filter(encrypt: &Dict, which: &[u8]) -> Result<Method> {
         b"V2" => Ok(Method::Rc4),
         b"AESV2" => Ok(Method::Aes128),
         b"AESV3" => Ok(Method::Aes256),
-        other => Err(Error::new(format!(
+        other => Err(Error::unsupported(format!(
             "crypt filter method /{} is not read",
             String::from_utf8_lossy(other)
         ))),
@@ -420,15 +427,15 @@ fn aes_cbc(key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
         return Ok(Vec::new());
     }
     if data.len() < 16 || !data.len().is_multiple_of(16) {
-        return Err(Error::new(format!(
+        return Err(Error::malformed(format!(
             "AES data of {} bytes is not an IV and whole blocks",
             data.len()
         )));
     }
     let (iv, body) = data.split_at(16);
     let mut buf = body.to_vec();
-    let whole = |_| Error::new("AES data is not whole blocks");
-    let wrong_key = |_| Error::new("an AES key is 16 or 32 bytes");
+    let whole = |_| Error::malformed("AES data is not whole blocks");
+    let wrong_key = |_| Error::malformed("an AES key is 16 or 32 bytes");
     if key.len() == 16 {
         let dec = cbc::Decryptor::<aes::Aes128>::new_from_slices(key, iv).map_err(wrong_key)?;
         dec.decrypt_padded::<NoPadding>(&mut buf).map_err(whole)?;

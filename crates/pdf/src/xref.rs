@@ -64,16 +64,17 @@ const MAX_SECTIONS: usize = 4096;
 pub fn read(data: &[u8]) -> Result<Xref> {
     let tail = data.len().saturating_sub(2048);
     let at = rfind(&data[tail..], b"startxref")
-        .ok_or_else(|| Error::new("no `startxref` near the end of the file"))?;
+        .ok_or_else(|| Error::malformed("no `startxref` near the end of the file"))?;
     let mut parser = Parser::new(data, tail + at + b"startxref".len());
     let mut next = Some(
-        usize::try_from(parser.unsigned()?).map_err(|_| Error::new("startxref out of range"))?,
+        usize::try_from(parser.unsigned()?)
+            .map_err(|_| Error::malformed("startxref out of range"))?,
     );
     let mut xref = Xref::default();
     let mut seen = HashSet::new();
     while let Some(offset) = next.take() {
         if !seen.insert(offset) || seen.len() > MAX_SECTIONS {
-            return Err(Error::at(offset, "the `/Prev` chain loops"));
+            return Err(Error::malformed_at(offset, "the `/Prev` chain loops"));
         }
         let trailer = section(data, offset, &mut xref)?;
         next = trailer
@@ -87,13 +88,13 @@ pub fn read(data: &[u8]) -> Result<Xref> {
 }
 
 fn offset_of(v: i64) -> Result<usize> {
-    usize::try_from(v).map_err(|_| Error::new(format!("offset {v} out of range")))
+    usize::try_from(v).map_err(|_| Error::malformed(format!("offset {v} out of range")))
 }
 
 /// Read the section at `offset` into `xref` (older entries never overwrite newer ones); its trailer.
 fn section(data: &[u8], offset: usize, xref: &mut Xref) -> Result<Dict> {
     if offset >= data.len() {
-        return Err(Error::at(
+        return Err(Error::malformed_at(
             offset,
             "a cross-reference offset past the end of the file",
         ));
@@ -124,7 +125,7 @@ fn table(parser: &mut Parser<'_>, xref: &mut Xref) -> Result<Dict> {
             let kind = parser.token();
             rows.push((offset, generation, kind == b"n"));
             if kind != b"n" && kind != b"f" {
-                return Err(Error::at(
+                return Err(Error::malformed_at(
                     at,
                     "a cross-reference entry is neither `n` nor `f`",
                 ));
@@ -138,11 +139,11 @@ fn table(parser: &mut Parser<'_>, xref: &mut Xref) -> Result<Dict> {
         };
         for (i, (offset, generation, used)) in rows.into_iter().enumerate() {
             let num = u32::try_from(first + i as u64)
-                .map_err(|_| Error::new("object number out of range"))?;
+                .map_err(|_| Error::malformed("object number out of range"))?;
             let entry = if used {
                 Entry::InFile {
                     offset: usize::try_from(offset)
-                        .map_err(|_| Error::new("offset out of range"))?,
+                        .map_err(|_| Error::malformed("offset out of range"))?,
                     generation: u16::try_from(generation).unwrap_or(u16::MAX),
                 }
             } else {
@@ -154,7 +155,7 @@ fn table(parser: &mut Parser<'_>, xref: &mut Xref) -> Result<Dict> {
     let trailer = match parser.object()? {
         Object::Dict(d) => d,
         other => {
-            return Err(Error::at(
+            return Err(Error::malformed_at(
                 parser.pos,
                 format!("the trailer is a {}, not a dictionary", other.kind()),
             ));
@@ -178,20 +179,23 @@ fn stream(data: &[u8], offset: usize, xref: &mut Xref) -> Result<Dict> {
     let (_, object) = Parser::new(data, offset)
         .indirect_object(|o| o.as_integer().and_then(|v| usize::try_from(v).ok()))?;
     let Object::Stream(s) = object else {
-        return Err(Error::at(
+        return Err(Error::malformed_at(
             offset,
             "neither `xref` nor a cross-reference stream at this offset",
         ));
     };
     if s.dict.get(b"Type").and_then(Object::as_name) != Some(b"XRef") {
-        return Err(Error::at(offset, "the stream here is not /Type /XRef"));
+        return Err(Error::malformed_at(
+            offset,
+            "the stream here is not /Type /XRef",
+        ));
     }
     let bytes = filter::decode(&s.dict, &s.raw, &|o| Ok(o.clone()))?.into_bytes()?;
     let widths: Vec<usize> = s
         .dict
         .get(b"W")
         .and_then(Object::as_array)
-        .ok_or_else(|| Error::at(offset, "a cross-reference stream without /W"))?
+        .ok_or_else(|| Error::malformed_at(offset, "a cross-reference stream without /W"))?
         .iter()
         .map(|w| {
             w.as_integer()
@@ -200,7 +204,7 @@ fn stream(data: &[u8], offset: usize, xref: &mut Xref) -> Result<Dict> {
         })
         .collect::<Option<_>>()
         .filter(|w: &Vec<usize>| w.len() == 3)
-        .ok_or_else(|| Error::at(offset, "/W is not three byte widths"))?;
+        .ok_or_else(|| Error::malformed_at(offset, "/W is not three byte widths"))?;
     let size = s
         .dict
         .get(b"Size")
@@ -215,8 +219,8 @@ fn stream(data: &[u8], offset: usize, xref: &mut Xref) -> Result<Dict> {
     for pair in index.as_chunks::<2>().0 {
         for i in 0..pair[1] {
             let Some(r) = rows.next() else { break };
-            let num =
-                u32::try_from(pair[0] + i).map_err(|_| Error::new("object number out of range"))?;
+            let num = u32::try_from(pair[0] + i)
+                .map_err(|_| Error::malformed("object number out of range"))?;
             let (f0, rest) = r.split_at(widths[0]);
             let (f1, f2) = rest.split_at(widths[1]);
             // A zero-width type field means type 1.
@@ -225,12 +229,12 @@ fn stream(data: &[u8], offset: usize, xref: &mut Xref) -> Result<Dict> {
                 0 => Entry::Free,
                 1 => Entry::InFile {
                     offset: usize::try_from(be(f1))
-                        .map_err(|_| Error::new("offset out of range"))?,
+                        .map_err(|_| Error::malformed("offset out of range"))?,
                     generation: u16::try_from(be(f2)).unwrap_or(u16::MAX),
                 },
                 2 => Entry::InStream {
                     stream: u32::try_from(be(f1))
-                        .map_err(|_| Error::new("object stream number out of range"))?,
+                        .map_err(|_| Error::malformed("object stream number out of range"))?,
                     index: u32::try_from(be(f2)).unwrap_or(u32::MAX),
                 },
                 _ => continue, // a type this reader does not know is a null object (7.5.8.3)

@@ -1,30 +1,206 @@
 //! Fonts (ISO 32000-2 section 9.5-9.10), read for what text needs: how a string splits into codes, each code's
-//! width and Unicode text, and the font's ascent and descent. Glyph outlines are not read.
+//! width and Unicode text, the font's ascent and descent, and whether it is bold ([`FontInfo::bold`]). Glyph
+//! outlines are not read.
 
 use crate::base14::{FONTS, Metrics};
 use crate::cid2unicode::Collection;
 use crate::cmap::CMap;
 use crate::error::Result;
 use crate::file::File;
-use crate::fontfile::GlyphText;
+use crate::fontfile::{self, GlyphText};
 use crate::geometry::Matrix;
-use crate::object::{Dict, Object};
+use crate::object::{Dict, Object, Stream};
 
-/// What identifies a font to a reader: its name and the descriptor's facts.
+/// What identifies a font to a reader: its name, the descriptor's facts and what its program says of itself.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FontInfo {
-    /// `/BaseFont` (a subset prefix such as `ABCDEF+` kept), or `/Name` for a Type 3 font.
+    /// `/BaseFont` (a subset tag such as `ABCDEF+` kept), or `/Name` for a Type 3 font.
     pub name: String,
     /// `/Subtype`: `Type1`, `TrueType`, `Type0`, `Type3`, `MMType1`.
     pub subtype: String,
     /// The descriptor's `/Flags` (bit 19 `ForceBold`, bit 7 `Italic`, ...); 0 when absent.
     pub flags: i64,
     /// The descriptor's `/FontWeight` (100-900), when stated.
-    pub weight: Option<f64>,
+    pub descriptor_weight: Option<f64>,
+    /// The weight class (100-900) the embedded program states of itself, when it states one this reader reads: a
+    /// TrueType/OpenType program's `OS/2` `usWeightClass` (or its `head` `macStyle` bold bit), a Type 1 program's
+    /// `/Weight`. A bare CFF program's (`/FontFile3` `Type1C`, `CIDFontType0C`) is not read.
+    pub program_weight: Option<f64>,
     /// The descriptor's `/ItalicAngle` (degrees), when stated.
     pub italic_angle: Option<f64>,
     /// Whether the font program is embedded.
     pub embedded: bool,
+}
+
+/// The descriptor's `ForceBold` flag (bit 19): set only for bold glyphs, to keep their stems thick at small sizes.
+const FORCE_BOLD: i64 = 1 << 18;
+/// A weight class this heavy or heavier is bold (600: semibold).
+const BOLD_WEIGHT: f64 = 600.0;
+
+impl FontInfo {
+    /// Its name without a subset tag (ISO 32000-2 9.6.4: six capital letters and `+`, as `ABCDEF+Helvetica`).
+    #[must_use]
+    pub fn name_without_subset(&self) -> &str {
+        without_subset(&self.name)
+    }
+
+    /// The weight class its name states: that of the last weight word (`Bold`, `Semibold`, `Black`, `Light`, ...)
+    /// among its words after the first -- its style part, by the `Family-Style` convention of PostScript names
+    /// (`TimesNewRomanPS-BoldMT`) and the `Family,Style` one ISO 32000-2 9.6.2.2 gives a TrueType `/BaseFont`
+    /// (`Arial,Bold`). The first word is the family's: a family named `Black...` is not black.
+    #[must_use]
+    pub fn name_weight(&self) -> Option<f64> {
+        style_weight(words(self.name_without_subset()).into_iter().skip(1))
+    }
+
+    /// Whether it is bold: its descriptor sets `ForceBold`, or a statement of its weight -- the descriptor's
+    /// `/FontWeight`, its program's own weight class, its name's style part -- is 600 (semibold) or heavier.
+    ///
+    /// Any one statement suffices: none states a weight lighter than the glyphs shown (a regular program shown
+    /// under a `,Bold` name is drawn emboldened), and a missing flag or word states nothing. The name is read
+    /// because a font often states its weight nowhere else -- a TrueType font the file does not embed has its
+    /// style in its name alone -- and only its style part is read, so a family name holding a weight word states
+    /// nothing.
+    #[must_use]
+    pub fn bold(&self) -> bool {
+        self.flags & FORCE_BOLD != 0
+            || [
+                self.descriptor_weight,
+                self.program_weight,
+                self.name_weight(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|w| w >= BOLD_WEIGHT)
+    }
+}
+
+impl FontInfo {
+    /// The facts of the font named `name`, of `subtype`, its descriptor and embedded program stating them.
+    fn new(
+        name: String,
+        subtype: String,
+        descriptor: Option<&Dict>,
+        program: Option<&Program>,
+    ) -> Self {
+        let number = |key: &[u8]| {
+            descriptor
+                .and_then(|d| d.get(key))
+                .and_then(Object::as_number)
+        };
+        Self {
+            name,
+            subtype,
+            flags: descriptor
+                .and_then(|d| d.get(b"Flags"))
+                .and_then(Object::as_integer)
+                .unwrap_or(0),
+            descriptor_weight: number(b"FontWeight"),
+            program_weight: program.and_then(Program::weight),
+            italic_angle: number(b"ItalicAngle"),
+            embedded: descriptor.is_some_and(|d| {
+                [&b"FontFile"[..], b"FontFile2", b"FontFile3"]
+                    .iter()
+                    .any(|k| d.get(k).is_some())
+            }),
+        }
+    }
+}
+
+/// `name` without its subset tag (six capital letters and `+`), if it has one.
+fn without_subset(name: &str) -> &str {
+    match name.split_at_checked(7) {
+        Some((tag, rest))
+            if tag.ends_with('+') && tag.bytes().take(6).all(|b| b.is_ascii_uppercase()) =>
+        {
+            rest
+        }
+        _ => name,
+    }
+}
+
+/// The words of a font name or style: split at `,`, `-`, `_` and spaces, before a capital following a small
+/// letter (`BoldItalic`), and between letters and digits (`LMRoman10`).
+pub(crate) fn words(name: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut previous: Option<char> = None;
+    for (i, c) in name.char_indices() {
+        if matches!(c, ',' | '-' | '_' | ' ') {
+            out.push(&name[start..i]);
+            start = i + c.len_utf8();
+            previous = None;
+            continue;
+        }
+        if let Some(p) = previous
+            && ((p.is_lowercase() && c.is_uppercase()) || p.is_ascii_digit() != c.is_ascii_digit())
+        {
+            out.push(&name[start..i]);
+            start = i;
+        }
+        previous = Some(c);
+    }
+    out.push(&name[start..]);
+    out.retain(|w| !w.is_empty());
+    out
+}
+
+/// Weight words, lower-cased, and their weight classes (100-900), the abbreviations of PostScript names (`Bd`,
+/// `Blk`) among them. `Semi`, `Demi`, `Extra` and `Ultra` join the word after them (`Semi Bold`, `DemiLight`);
+/// `Demi` alone is demibold.
+const WEIGHTS: [(&str, f64); 26] = [
+    ("thin", 100.0),
+    ("hairline", 100.0),
+    ("extralight", 200.0),
+    ("ultralight", 200.0),
+    ("light", 300.0),
+    ("lt", 300.0),
+    ("semilight", 350.0),
+    ("demilight", 350.0),
+    ("book", 400.0),
+    ("normal", 400.0),
+    ("regular", 400.0),
+    ("roman", 400.0),
+    ("medium", 500.0),
+    ("md", 500.0),
+    ("semibold", 600.0),
+    ("demibold", 600.0),
+    ("demi", 600.0),
+    ("bold", 700.0),
+    ("bd", 700.0),
+    ("extrabold", 800.0),
+    ("ultrabold", 800.0),
+    ("heavy", 800.0),
+    ("hv", 800.0),
+    ("black", 900.0),
+    ("blk", 900.0),
+    ("extrablack", 950.0),
+];
+
+/// The weight class `words` state: their last weight word's; None when they hold none.
+pub(crate) fn style_weight<'a>(words: impl IntoIterator<Item = &'a str>) -> Option<f64> {
+    let class = |w: &str| {
+        WEIGHTS
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(w))
+            .map(|&(_, class)| class)
+    };
+    let mut words = words.into_iter().map(str::to_ascii_lowercase).peekable();
+    let mut found = None;
+    while let Some(word) = words.next() {
+        let joined = matches!(word.as_str(), "semi" | "demi" | "extra" | "ultra")
+            .then(|| {
+                words
+                    .peek()
+                    .and_then(|next| class(&format!("{word}{next}")))
+            })
+            .flatten();
+        if joined.is_some() {
+            words.next();
+        }
+        found = joined.or_else(|| class(&word)).or(found);
+    }
+    found
 }
 
 /// How codes become glyphs.
@@ -209,8 +385,7 @@ fn standard_width(metrics: &Metrics, text: Option<&str>) -> Option<f64> {
 
 /// The standard font a `/BaseFont` names (or is a common alias of), if any.
 fn base14(name: &str) -> Option<&'static Metrics> {
-    let name = name.split_once('+').map_or(name, |(_, rest)| rest);
-    let canonical = match name.replace(' ', "").as_str() {
+    let canonical = match without_subset(name).replace(' ', "").as_str() {
         "Arial" | "ArialMT" | "Helvetica" => "Helvetica",
         "Arial,Bold" | "Arial-BoldMT" | "Helvetica-Bold" | "Helvetica,Bold" => "Helvetica-Bold",
         "Arial,Italic" | "Arial-ItalicMT" | "Helvetica-Oblique" | "Helvetica,Italic" => {
@@ -262,10 +437,23 @@ impl File {
                 .map(|d| CMap::parse(&d)),
             _ => None,
         };
-        let (descriptor, kind, vertical) = if subtype == "Type0" {
-            self.composite(dict)?
+        // A composite font's metrics and descriptor are its descendant CID font's.
+        let cid_font = if subtype == "Type0" {
+            Some(self.cid_font(dict)?)
         } else {
-            self.simple(dict, &subtype, &base_name)?
+            None
+        };
+        let descriptor = self.descriptor(cid_font.as_ref().unwrap_or(dict))?;
+        let program = self.program(descriptor.as_ref())?;
+        let (kind, vertical) = match &cid_font {
+            Some(cid_font) => self.composite(dict, cid_font)?,
+            None => self.simple(
+                dict,
+                &subtype,
+                &base_name,
+                descriptor.as_ref(),
+                program.as_ref(),
+            )?,
         };
         let matrix = if subtype == "Type3" {
             match self.get(dict, b"FontMatrix")? {
@@ -304,33 +492,18 @@ impl File {
             .or(standard.map(|m| m.descent))
             .or(bbox.map(|b| b.y0))
             .unwrap_or(-200.0 * unit);
-        let program = self.program(descriptor.as_ref())?;
-        let cid_to_gid = if subtype == "Type0" {
-            self.cid_to_gid(dict)?
-        } else {
-            None
+        let cid_to_gid = match &cid_font {
+            Some(cid_font) => self.cid_to_gid(cid_font)?,
+            None => None,
         };
-        let embedded = descriptor.as_ref().is_some_and(|d| {
-            [&b"FontFile"[..], b"FontFile2", b"FontFile3"]
-                .iter()
-                .any(|k| d.get(k).is_some())
-        });
         Ok(Font {
-            info: FontInfo {
-                name: base_name,
-                subtype,
-                flags: descriptor
-                    .as_ref()
-                    .and_then(|d| d.get(b"Flags"))
-                    .and_then(Object::as_integer)
-                    .unwrap_or(0),
-                weight: number(b"FontWeight"),
-                italic_angle: number(b"ItalicAngle"),
-                embedded,
-            },
+            info: FontInfo::new(base_name, subtype, descriptor.as_ref(), program.as_ref()),
             kind,
             to_unicode,
-            program,
+            program: match program {
+                Some(Program::Sfnt(data)) => Some(GlyphText::parse(&data)),
+                _ => None,
+            },
             cid_to_gid,
             matrix,
             ascent,
@@ -339,40 +512,44 @@ impl File {
         })
     }
 
-    /// The glyph text of the TrueType/OpenType program `descriptor` embeds, if it embeds one.
-    fn program(&self, descriptor: Option<&Dict>) -> Result<Option<GlyphText>> {
+    /// The program `descriptor` embeds, decoded; None when it embeds none, or one that does not decode.
+    fn program(&self, descriptor: Option<&Dict>) -> Result<Option<Program>> {
         let Some(descriptor) = descriptor else {
             return Ok(None);
         };
-        let stream = match self.get(descriptor, b"FontFile2")? {
-            Some(Object::Stream(s)) => s,
-            _ => match self.get(descriptor, b"FontFile3")? {
-                Some(Object::Stream(s))
+        let decoded = |stream: &Stream| self.decode(stream).ok().and_then(|d| d.into_bytes().ok());
+        Ok(
+            match (
+                self.get(descriptor, b"FontFile")?,
+                self.get(descriptor, b"FontFile2")?,
+                self.get(descriptor, b"FontFile3")?,
+            ) {
+                (_, Some(Object::Stream(s)), _) => decoded(&s).map(Program::Sfnt),
+                (_, _, Some(Object::Stream(s)))
                     if s.dict.get(b"Subtype").and_then(Object::as_name) == Some(b"OpenType") =>
                 {
-                    s
+                    decoded(&s).map(Program::Sfnt)
                 }
-                _ => return Ok(None),
+                (Some(Object::Stream(s)), ..) => decoded(&s).map(Program::Type1),
+                _ => None,
             },
-        };
-        Ok(self
-            .decode(&stream)
-            .ok()
-            .and_then(|d| d.into_bytes().ok())
-            .map(|data| GlyphText::parse(&data)))
+        )
     }
 
-    /// A composite font's `/CIDToGIDMap` as glyph ids by CID; None for `/Identity` or none given.
-    fn cid_to_gid(&self, dict: &Dict) -> Result<Option<Vec<u16>>> {
-        let Some(Object::Array(descendants)) = self.get(dict, b"DescendantFonts")? else {
-            return Ok(None);
-        };
-        let Some(Object::Dict(cid_font)) =
-            descendants.first().map(|d| self.resolve(d)).transpose()?
-        else {
-            return Ok(None);
-        };
-        Ok(match self.get(&cid_font, b"CIDToGIDMap")? {
+    /// A composite font's descendant CID font (empty when it names none).
+    fn cid_font(&self, dict: &Dict) -> Result<Dict> {
+        Ok(match self.get(dict, b"DescendantFonts")? {
+            Some(Object::Array(a)) => match a.first().map(|d| self.resolve(d)).transpose()? {
+                Some(Object::Dict(d)) => d,
+                _ => Dict::new(),
+            },
+            _ => Dict::new(),
+        })
+    }
+
+    /// A CID font's `/CIDToGIDMap` as glyph ids by CID; None for `/Identity` or none given.
+    fn cid_to_gid(&self, cid_font: &Dict) -> Result<Option<Vec<u16>>> {
+        Ok(match self.get(cid_font, b"CIDToGIDMap")? {
             Some(Object::Stream(s)) => {
                 self.decode(&s)
                     .ok()
@@ -396,8 +573,14 @@ impl File {
         })
     }
 
-    fn simple(&self, dict: &Dict, subtype: &str, name: &str) -> Result<(Option<Dict>, Kind, bool)> {
-        let descriptor = self.descriptor(dict)?;
+    fn simple(
+        &self,
+        dict: &Dict,
+        subtype: &str,
+        name: &str,
+        descriptor: Option<&Dict>,
+        program: Option<&Program>,
+    ) -> Result<(Kind, bool)> {
         let first = self
             .get(dict, b"FirstChar")?
             .and_then(|o| o.as_integer())
@@ -415,14 +598,12 @@ impl File {
             _ => Vec::new(),
         };
         let missing = descriptor
-            .as_ref()
             .and_then(|d| d.get(b"MissingWidth"))
             .and_then(Object::as_number)
             .unwrap_or(0.0);
         let standard = base14(name);
-        let encoding = self.simple_encoding(dict, subtype, standard, descriptor.as_ref())?;
+        let encoding = self.simple_encoding(dict, subtype, standard, descriptor, program)?;
         Ok((
-            descriptor,
             Kind::Simple {
                 first,
                 widths,
@@ -442,6 +623,7 @@ impl File {
         subtype: &str,
         standard: Option<&'static Metrics>,
         descriptor: Option<&Dict>,
+        program: Option<&Program>,
     ) -> Result<Vec<Option<String>>> {
         let symbolic = descriptor
             .and_then(|d| d.get(b"Flags"))
@@ -484,15 +666,8 @@ impl File {
         // An embedded Type 1 program with no base encoding named: the program's own encoding is the base.
         if base_name.is_none()
             && matches!(subtype, "Type1" | "MMType1")
-            && let Some(Object::Stream(program)) = descriptor
-                .map(|d| self.get(d, b"FontFile"))
-                .transpose()?
-                .flatten()
-            && let Some(names) = self
-                .decode(&program)
-                .ok()
-                .and_then(|d| d.into_bytes().ok())
-                .and_then(|d| crate::fontfile::type1_encoding(&d))
+            && let Some(Program::Type1(program)) = program
+            && let Some(names) = fontfile::type1_encoding(program)
         {
             for (slot, name) in encoding.iter_mut().zip(names) {
                 *slot = name.and_then(|n| glyph_text(&n));
@@ -516,7 +691,7 @@ impl File {
         Ok(encoding)
     }
 
-    fn composite(&self, dict: &Dict) -> Result<(Option<Dict>, Kind, bool)> {
+    fn composite(&self, dict: &Dict, cid_font: &Dict) -> Result<(Kind, bool)> {
         // The `CMap`, and whether the `CID`s it selects are known (Identity's and an embedded one's are).
         let (cmap, vertical, code_text, cids_known) = match self.get(dict, b"Encoding")? {
             Some(Object::Name(n)) => {
@@ -547,19 +722,12 @@ impl File {
             }
             _ => (CMap::identity(), false, CodeText::Unknown, false),
         };
-        let descendant = match self.get(dict, b"DescendantFonts")? {
-            Some(Object::Array(a)) => match a.first().map(|d| self.resolve(d)).transpose()? {
-                Some(Object::Dict(d)) => d,
-                _ => Dict::new(),
-            },
-            _ => Dict::new(),
-        };
         let default = self
-            .get(&descendant, b"DW")?
+            .get(cid_font, b"DW")?
             .and_then(|o| o.as_number())
             .unwrap_or(1000.0);
         let mut widths = Vec::new();
-        if let Some(Object::Array(w)) = self.get(&descendant, b"W")? {
+        if let Some(Object::Array(w)) = self.get(cid_font, b"W")? {
             let items: Vec<Object> = w
                 .iter()
                 .map(|i| self.resolve(i).unwrap_or(Object::Null))
@@ -594,12 +762,11 @@ impl File {
             }
         }
         let collection = if cids_known {
-            self.collection(&descendant)?
+            self.collection(cid_font)?
         } else {
             None
         };
         Ok((
-            self.descriptor(&descendant)?,
             Kind::Composite {
                 cmap,
                 widths,
@@ -624,6 +791,25 @@ impl File {
                 _ => None,
             },
         )
+    }
+}
+
+/// An embedded font program, decoded, by what this reader reads of it.
+#[derive(Debug, Clone)]
+enum Program {
+    /// A Type 1 program (`/FontFile`): its clear-text part.
+    Type1(Vec<u8>),
+    /// A TrueType or OpenType program (`/FontFile2`, `/FontFile3` of subtype `OpenType`): its tables.
+    Sfnt(Vec<u8>),
+}
+
+impl Program {
+    /// The weight class the program states of itself.
+    fn weight(&self) -> Option<f64> {
+        match self {
+            Self::Type1(data) => fontfile::type1_weight(data),
+            Self::Sfnt(data) => fontfile::sfnt_weight(data),
+        }
     }
 }
 
@@ -699,6 +885,82 @@ mod tests {
         );
         assert!(base14("CMR10").is_none());
     }
+    fn info(name: &str) -> FontInfo {
+        FontInfo {
+            name: name.to_string(),
+            subtype: "Type1".to_string(),
+            flags: 0,
+            descriptor_weight: None,
+            program_weight: None,
+            italic_angle: None,
+            embedded: false,
+        }
+    }
+
+    #[test]
+    fn a_subset_tag_is_six_capitals_and_a_plus() {
+        assert_eq!(info("ABCDEF+Helvetica").name_without_subset(), "Helvetica");
+        assert_eq!(
+            info("Abcdef+Helvetica").name_without_subset(),
+            "Abcdef+Helvetica"
+        );
+        assert_eq!(info("ABC+Helvetica").name_without_subset(), "ABC+Helvetica");
+    }
+
+    #[test]
+    fn a_name_states_the_weight_of_its_style_part() {
+        let weight = |name: &str| info(name).name_weight();
+        assert_eq!(weight("ABCDEF+TimesNewRomanPS-BoldMT"), Some(700.0));
+        assert_eq!(weight("Arial,BoldItalic"), Some(700.0));
+        assert_eq!(weight("SourceSansPro-SemiBold"), Some(600.0));
+        assert_eq!(weight("AvantGarde-Demi"), Some(600.0));
+        assert_eq!(weight("NotoSansCJKjp-DemiLight"), Some(350.0));
+        assert_eq!(weight("HelveticaNeueLTStd-BdCn"), Some(700.0));
+        assert_eq!(weight("LMRoman10-Bold"), Some(700.0));
+        assert_eq!(weight("ArialBlack"), Some(900.0));
+        assert_eq!(weight("Times-Roman"), Some(400.0));
+        // The family's own words state nothing, and a name with no style part states no weight.
+        assert_eq!(weight("BlackChancery"), None);
+        assert_eq!(weight("Boldface-Regular"), Some(400.0));
+        assert_eq!(weight("CMBX10"), None);
+    }
+
+    #[test]
+    fn any_statement_of_a_heavy_weight_makes_a_font_bold() {
+        assert!(info("Helvetica-Bold").bold());
+        assert!(!info("Helvetica").bold());
+        assert!(!info("MinionPro-Medium").bold());
+        assert!(
+            FontInfo {
+                flags: 1 << 18,
+                ..info("F1")
+            }
+            .bold()
+        );
+        assert!(
+            FontInfo {
+                descriptor_weight: Some(600.0),
+                ..info("F1")
+            }
+            .bold()
+        );
+        assert!(
+            FontInfo {
+                program_weight: Some(700.0),
+                ..info("CMBX10")
+            }
+            .bold()
+        );
+        // A regular program shown under a bold name is drawn emboldened: the name's statement stands.
+        assert!(
+            FontInfo {
+                program_weight: Some(400.0),
+                ..info("Calibri,Bold")
+            }
+            .bold()
+        );
+    }
+
     #[test]
     fn a_legacy_code_decodes_as_its_encoding() {
         assert_eq!(

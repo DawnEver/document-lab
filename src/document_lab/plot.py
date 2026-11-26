@@ -60,7 +60,7 @@ from document_lab.ir import BBox, Page, Provenance, Raster, TextSpan, VectorPath
 from document_lab.numbers import parse_number
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
 __all__ = [
     'Axis',
@@ -385,11 +385,13 @@ def _dashes(paths: Sequence[VectorPath]) -> list[_Edge]:
     A short flat segment of a longer path is part of a curve (one continuing past the frame under the PDF clip, or
     crossing the label row), never a minus: DMEGC and SIFERRIT curves read so negated a tick label.
     """
-    small = [p.provenance.bbox for p in paths if p.provenance.bbox is not None and _glyph_sized(p.provenance.bbox)]
+    small = _Shapes(
+        [p.provenance.bbox for p in paths if p.provenance.bbox is not None and _glyph_sized(p.provenance.bbox)]
+    )
     out = []
     for path in paths:
         box = path.provenance.bbox
-        if box is not None and box.width <= DASH_MAX + AXIS_TOL and box.height <= RULE_MAX and not _stacked(box, small):
+        if box is not None and box.width <= DASH_MAX + AXIS_TOL and box.height <= RULE_MAX and not small.stacked(box):
             out.extend(e for e in _edges([path]) if not e.vertical and e.length <= DASH_MAX)
     return out
 
@@ -399,15 +401,38 @@ def _glyph_sized(box: BBox) -> bool:
     return box.width <= 2 * DASH_MAX and box.height <= 2 * DASH_MAX
 
 
-def _stacked(box: BBox, small: Sequence[BBox]) -> bool:
-    """Whether another glyph-sized shape lies across ``box`` within ``STACK_GAP`` above or below it."""
-    return any(
-        other != box
-        and other.x0 < box.x1
-        and other.x1 > box.x0
-        and (0 <= box.y0 - other.y1 <= STACK_GAP or 0 <= other.y0 - box.y1 <= STACK_GAP)
-        for other in small
-    )
+class _Shapes:
+    """Glyph-sized shapes' boxes on a grid of ``2 * DASH_MAX`` cells: a box finds its neighbors in a few cells.
+
+    A page may draw 100k of them (a meshed figure), in rows of thousands: no box visits every other.
+    """
+
+    #: The grid's cell side (points): a shape is at most this across, so it covers at most two cells each way.
+    _CELL: Final = 2 * DASH_MAX
+
+    def __init__(self, boxes: Sequence[BBox]) -> None:
+        self._cells: dict[tuple[int, int], list[BBox]] = defaultdict(list)
+        for box in boxes:
+            for cell in self._covering(box.x0, box.y0, box.x1, box.y1):
+                self._cells[cell].append(box)
+
+    def _covering(self, x0: float, y0: float, x1: float, y1: float) -> Iterator[tuple[int, int]]:
+        cell = self._CELL
+        for i in range(math.floor(x0 / cell), math.floor(x1 / cell) + 1):
+            for j in range(math.floor(y0 / cell), math.floor(y1 / cell) + 1):
+                yield i, j
+
+    def stacked(self, box: BBox) -> bool:
+        """Whether another shape lies across ``box`` within ``STACK_GAP`` above or below it."""
+        near = self._covering(box.x0, box.y0 - STACK_GAP, box.x1, box.y1 + STACK_GAP)
+        return any(
+            other != box
+            and other.x0 < box.x1
+            and other.x1 > box.x0
+            and (0 <= box.y0 - other.y1 <= STACK_GAP or 0 <= other.y0 - box.y1 <= STACK_GAP)
+            for cell in near
+            for other in self._cells.get(cell, ())
+        )
 
 
 def _refuse_unread(
@@ -655,11 +680,18 @@ def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, str 
     ]
     shapes.sort(key=lambda p: -p.provenance.bbox.width * p.provenance.bbox.height)
     glyphs: list[tuple[BBox, list[np.ndarray]]] = []
+    # Each glyph's index on a grid of GLYPH_MAX cells (a glyph covers at most two each way): a shape's host is the
+    # first glyph holding its center, found among those in the center's cell, not among every glyph of the page.
+    cells: dict[tuple[int, int], list[int]] = defaultdict(list)
     for shape in shapes:
         box = shape.provenance.bbox
         cx, cy = (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2
-        host = next((g for g in glyphs if g[0].contains(cx, cy) and g[0] != box), None)
+        near = cells.get((math.floor(cx / GLYPH_MAX), math.floor(cy / GLYPH_MAX)), ())
+        host = next((glyphs[k] for k in near if glyphs[k][0].contains(cx, cy) and glyphs[k][0] != box), None)
         if host is None:
+            for i in range(math.floor(box.x0 / GLYPH_MAX), math.floor(box.x1 / GLYPH_MAX) + 1):
+                for j in range(math.floor(box.y0 / GLYPH_MAX), math.floor(box.y1 / GLYPH_MAX) + 1):
+                    cells[i, j].append(len(glyphs))
             glyphs.append((box, [shape.points]))
         else:
             host[1].append(shape.points)

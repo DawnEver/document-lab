@@ -63,6 +63,7 @@ testpaths = ["tests"]
 markers = [
     "gpu: converts with marker-pdf on a CUDA GPU: its own part (tests/gpu), never tests/base",
     "vendor: reads the real document DOCUMENT_LAB_VENDOR_PDF names: its own part (tests/vendor), never tests/base",
+    "papers: ingests the real papers in the directory DOCUMENT_LAB_PAPERS names: its own part (tests/paper/e2e), never tests/base",
     "windows: drives a real window on the Windows desktop: its own part (tests/windows), never tests/base",
     "ocr: lays a Tesseract text layer over a capture: its own part (tests/ocr), never tests/base",
 ]
@@ -100,10 +101,10 @@ max_idle = "24 h"  # a branch idle 24 h is pruned when merged, alarmed when not
 
 [tool.dev_lab.parts]
 output = "output/logs"
-# No resource exists on a hosted runner: `gpu` needs a CUDA GPU and the gpu extra, `vendor` a vendor PDF that may
-# never be committed, `ocr` Tesseract with English data. This repo's tests run on GitHub Actions alone (user ruling
+# No resource exists on a hosted runner: `gpu` needs a CUDA GPU and the gpu extra, `vendor` a vendor PDF and
+# `papers` the real papers, neither of which may be committed (the repo is public), `ocr` Tesseract with English data. This repo's tests run on GitHub Actions alone (user ruling
 # 2026-11-11), so no part here produces them: they stay marked, and a consumer's unified run selects them by marker.
-unproduced = ["gpu", "vendor", "ocr"]
+unproduced = ["gpu", "vendor", "papers", "ocr"]
 
 # The extras every environment carries: `dev` (the kit, pytest, ruff; it carries `ai`). `gpu` (marker-pdf -> torch)
 # is installed only for an environment whose need-set holds the `gpu` resource marker; `capture` is empty.
@@ -113,7 +114,7 @@ needs = { gpu = "gpu" }
 
 [tool.lab_commons.tests]
 produce = ["-m", "dev_lab.dev.verify", "--part", "{part}"]
-resources = ["gpu", "vendor", "ocr", "windows"]
+resources = ["gpu", "vendor", "papers", "ocr", "windows"]
 
 # The family branch flow: integrate/main coordinates; main moves only by `integrate promote` (fast-forward).
 [tool.dev_lab.integrator]
@@ -143,11 +144,10 @@ pending = []
 
 [[tool.dev_lab.hooks.pre-commit]]
 id = "filechecks"
-# The base row restated with one narrowing: large-files also passes the three papers the paper e2e goldens were
-# measured on (paper_pdf_ingest's own test data, up to 1.6 MB).
+# The base row restated with one narrowing: large-files passes the lock file.
 run = [
     "python", "-m", "dev_lab.dev.filechecks", "all",
-    "--exclude", 'large-files=^(uv\.lock|tests/paper/data/[^/]+\.pdf)$',
+    "--exclude", 'large-files=^uv\.lock$',
 ]
 
 [tool.dev_lab.doors]

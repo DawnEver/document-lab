@@ -62,15 +62,15 @@ class Paged:
     textless: tuple[int, ...]
 
 
-def _picture(page: pymupdf.Page) -> tuple[pymupdf.Pixmap, float]:
-    """The page as seen, and its pixels per point: its one image's own pixels, else rendered."""
-    images = page.get_images()
-    if len(images) == 1:
-        pix = pymupdf.Pixmap(page.parent, images[0][0])
+def _picture(pdf: pymupdf.Document, page: Page) -> tuple[pymupdf.Pixmap, float]:
+    """The page as seen, and its pixels per point: the one image it places, its own pixels; else rendered."""
+    placed = [f.image for f in page.figures]
+    if len(placed) == 1 and placed[0] is not None:
+        pix = pymupdf.Pixmap(pdf, placed[0])
         pix = pymupdf.Pixmap(pix, 0) if pix.alpha else pix
     else:
-        pix = page.get_pixmap(dpi=RENDER_DPI)
-    return pix, pix.width / page.rect.width
+        pix = pdf[page.number - 1].get_pixmap(dpi=RENDER_DPI)
+    return pix, pix.width / page.width
 
 
 def _drawings(pix: pymupdf.Pixmap, scale: float, page: Page, body: float) -> list[Drawing]:
@@ -158,27 +158,27 @@ def _clauses(markdown: str) -> str:
 
 def write_pages(pdf: Path, out: Path) -> Paged:
     """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive."""
-    read = read_pdf(pdf, tables=False)
+    read = read_pdf(pdf)
     body = layout.body_size(read)
     texts = page_markdowns(read)
     width = max(3, len(str(len(texts))))
     index = [f'# {pdf.stem}', '']
     textless = []
     with pymupdf.open(pdf) as doc:
-        drawn = [_drawings(*_picture(page), ir_page, body) for page, ir_page in zip(doc, read.pages, strict=True)]
+        drawn = [_drawings(*_picture(doc, page), page, body) for page in read.pages]
     drawn = _without_furniture(drawn, body)
     with pymupdf.open(pdf) as doc, _files(out) as put:
         if out / pdf.name != pdf:  # the layout stands alone; a PDF already where it goes is not copied onto itself
             put(pdf.name, pdf.read_bytes())
-        for number, (page, text, ir_page) in enumerate(zip(doc, texts, read.pages, strict=True), start=1):
+        for number, (text, page) in enumerate(zip(texts, read.pages, strict=True), start=1):
             name = f'page-{number:0{width}d}'
-            pix, scale = _picture(page)
+            pix, scale = _picture(doc, page)
             put(f'{name}.png', pix.tobytes('png'))
             links = []
-            for region in (found := regions(ir_page, body, drawn[number - 1])):
+            for region in (found := regions(page, body, drawn[number - 1])):
                 file = _file(name, region)
                 put(file, _cut(pix, scale, region).tobytes('png'))
-                more = ' (continues on the next page)' if region.bbox.y1 >= page.rect.height - _FOOT else ''
+                more = ' (continues on the next page)' if region.bbox.y1 >= page.height - _FOOT else ''
                 links.append((region.label, f'![{region.label}]({file}){more}'))
             put(f'{name}.md', f'[{pdf.name}, page {number}]({name}.png)\n\n{_linked(text, links)}'.encode())
             if not text.strip():

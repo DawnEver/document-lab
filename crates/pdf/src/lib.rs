@@ -24,6 +24,7 @@ pub mod interpret;
 pub mod object;
 pub mod page;
 pub mod parser;
+pub mod spans;
 pub mod xref;
 
 pub use error::{Error, Result};

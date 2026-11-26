@@ -1,6 +1,7 @@
 """The document IR: frozen values, each able to cite where in its source it came from.
 
-Coordinates are PDF points in PyMuPDF's convention: origin top-left, y grows DOWN, pages are 1-based.
+Coordinates are PDF points in page space: origin at the top-left of the page as displayed, y grows DOWN; pages
+are 1-based.
 A value from a format without geometry (an HTML table) cites a ``locator`` instead of a box.
 """
 
@@ -108,15 +109,29 @@ class TextSpan:
 
 @dataclass(frozen=True, slots=True)
 class VectorPath:
-    """One stroked polyline of a page's vector drawing (curves flattened to their control polygon)."""
+    """One subpath of a page's vector drawing, curves flattened to points (``read_pdf``'s ``curve_samples`` each).
+
+    A color is RGB in 0..1 when its color space defines one, else its own components (a separation's tint).
+    """
 
     points: tuple[tuple[float, float], ...]
+    #: The stroking color; None when the path is not stroked.
     stroke: tuple[float, ...] | None
+    #: The stroke's line width (points); 0 when not stroked.
     width: float
     #: The stroke's dash array (points: on, off, ...); empty for a solid stroke.
     dashes: tuple[float, ...]
+    #: Whether the subpath is closed (`h`, a rectangle).
     closed: bool
     provenance: Provenance
+    #: Where in the dash array the stroke starts (points).
+    dash_phase: float = 0.0
+    #: The filling color; None when the path is not filled.
+    fill: tuple[float, ...] | None = None
+    #: Filled by the even-odd rule rather than the nonzero winding rule.
+    even_odd: bool = False
+    #: The painted path it is a subpath of, numbered on its page: one drawing's subpaths share it.
+    group: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,10 +168,15 @@ class Table:
 
 @dataclass(frozen=True, slots=True)
 class Figure:
-    """A picture region (raster image or drawing) and its caption when one was found."""
+    """An image placed on a page: the box it covers, and its size in samples (its native resolution)."""
 
     provenance: Provenance
-    caption: str | None = None
+    #: Its width in samples.
+    width: int
+    #: Its height in samples.
+    height: int
+    #: The image's object number in the file; None for an inline image.
+    image: int | None = None
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -185,8 +205,9 @@ class Page:
     height: float
     spans: tuple[TextSpan, ...] = ()
     paths: tuple[VectorPath, ...] = ()
-    tables: tuple[Table, ...] = ()
     figures: tuple[Figure, ...] = ()
+    #: Content the reader skipped and why (an operation it could not read), in words.
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +217,8 @@ class Document:
     sha256: str
     uri: str
     pages: tuple[Page, ...] = field(default=())
+    #: What the reader repaired to read the file (a rebuilt cross-reference table, ...), in words.
+    repairs: tuple[str, ...] = ()
 
     def page(self, number: int) -> Page:
         """The page with 1-based ``number``."""
@@ -205,8 +228,3 @@ class Document:
         """Every text span, page by page."""
         for page in self.pages:
             yield from page.spans
-
-    def tables(self) -> Iterator[Table]:
-        """Every table, page by page."""
-        for page in self.pages:
-            yield from page.tables

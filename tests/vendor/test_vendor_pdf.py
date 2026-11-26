@@ -25,7 +25,7 @@ _PATH = os.environ.get('DOCUMENT_LAB_VENDOR_PDF')
 def found():
     if not _PATH:
         pytest.fail('the vendor part needs DOCUMENT_LAB_VENDOR_PDF naming a real PDF with vector plots')
-    doc = read_pdf(Path(_PATH), tables=False)
+    doc = read_pdf(Path(_PATH))
     return [plot for page in doc.pages for plot in plots(page)]
 
 

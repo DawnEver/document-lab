@@ -29,7 +29,7 @@ def md(tmp_path):
     _write(page, RIGHT, 180, 'REFERENCES')
     _write(page, RIGHT, 200, '[1] A. Author, A paper.')
     doc.save(tmp_path / 'p.pdf')
-    return to_markdown(read_pdf(tmp_path / 'p.pdf', tables=False))
+    return to_markdown(read_pdf(tmp_path / 'p.pdf'))
 
 
 def test_the_title_and_sections_are_headings_in_reading_order(md):
@@ -68,7 +68,7 @@ def test_a_table_of_contents_page_opens_no_sections(tmp_path):
     _write(body, LEFT, 120, 'This standard applies to rotating machines.')
     _write(body, LEFT, 760, '2', font='tibo')  # a page number in bold: no letters, no heading
     doc.save(tmp_path / 'toc.pdf')
-    headings = [ln for ln in to_markdown(read_pdf(tmp_path / 'toc.pdf', tables=False)).splitlines() if ln[:1] == '#']
+    headings = [ln for ln in to_markdown(read_pdf(tmp_path / 'toc.pdf')).splitlines() if ln[:1] == '#']
     assert headings == ['# A Standard', '## 1 Scope']
 
 
@@ -78,7 +78,7 @@ def test_one_contents_line_is_not_a_heading_but_a_page_of_them_is_a_contents_pag
     _write(page, LEFT, 100, 'II. METHOD ........ 4')
     _write(page, LEFT, 120, 'III. RESULTS')  # the control: a real heading on a page with one entry stays one
     doc.save(tmp_path / 'one.pdf')
-    headings = [ln for ln in to_markdown(read_pdf(tmp_path / 'one.pdf', tables=False)).splitlines() if ln[:1] == '#']
+    headings = [ln for ln in to_markdown(read_pdf(tmp_path / 'one.pdf')).splitlines() if ln[:1] == '#']
     assert headings == ['## III. RESULTS']
 
 
@@ -88,11 +88,11 @@ def test_each_page_stands_alone_and_a_page_without_text_is_empty(tmp_path):
     doc.new_page()
     doc.new_page().insert_text((72, 72), 'ends here.', fontsize=10)
     doc.save(tmp_path / 'p.pdf')
-    pages = page_markdowns(read_pdf(tmp_path / 'p.pdf', tables=False))
+    pages = page_markdowns(read_pdf(tmp_path / 'p.pdf'))
     assert pages[1] == ''
     assert 'ends here' not in pages[0]
     assert pages[2].startswith('ends here.')
-    assert 'next page and ends here.' in to_markdown(read_pdf(tmp_path / 'p.pdf', tables=False))
+    assert 'next page and ends here.' in to_markdown(read_pdf(tmp_path / 'p.pdf'))
 
 
 def test_a_clause_number_set_apart_from_its_title_heads_the_clause_even_not_bold(tmp_path):
@@ -107,7 +107,7 @@ def test_a_clause_number_set_apart_from_its_title_heads_the_clause_even_not_bold
     _write(page, 57, 180, '1', size=10)
     _write(page, 100, 180, 'The motor shall be rated for the duty declared by the purchaser.', size=10)
     doc.save(tmp_path / 's.pdf')
-    md = to_markdown(read_pdf(tmp_path / 's.pdf', tables=False))
+    md = to_markdown(read_pdf(tmp_path / 's.pdf'))
     assert '## 4 Effects on performance' in md
     assert '### 4.1 General' in md
     assert '1 The motor shall be rated' in md  # a numbered sentence stays text
@@ -125,7 +125,7 @@ def test_ocr_noise_heads_nothing_in_an_unweighted_document(tmp_path):
     _write(page, 57, 240, '4.2 Duty types', size=11)
     _write(page, 57, 270, 'The duty shall be declared by the purchaser of the machine.', size=10)
     doc.save(tmp_path / 's.pdf')
-    md = to_markdown(read_pdf(tmp_path / 's.pdf', tables=False))
+    md = to_markdown(read_pdf(tmp_path / 's.pdf'))
     assert '### 4.2 Duty types' in md
     heads = [line for line in md.splitlines() if line.startswith('#')]
     assert heads == ['### 4.2 Duty types']
@@ -143,5 +143,5 @@ def test_a_table_row_led_by_a_year_heads_nothing(tmp_path):
     _write(page, 57, 170, '12 Tests', size=11)
     _write(page, 57, 200, 'The duty shall be declared by the purchaser of the machine.', size=10)
     doc.save(tmp_path / 's.pdf')
-    heads = [line for line in to_markdown(read_pdf(tmp_path / 's.pdf', tables=False)).splitlines() if line[:1] == '#']
+    heads = [line for line in to_markdown(read_pdf(tmp_path / 's.pdf')).splitlines() if line[:1] == '#']
     assert heads == ['### 4.2 Duty types', '## 12 Tests']

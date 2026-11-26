@@ -96,6 +96,8 @@ pub struct Glyph {
     pub text: Option<String>,
     /// Where its baseline starts, in page space.
     pub origin: Point,
+    /// Where its baseline ends (its origin plus its width, before spacing), in page space.
+    pub end: Point,
     /// The box from the font's descent to its ascent across the glyph's advance, in page space.
     pub bbox: Rect,
 }
@@ -615,6 +617,10 @@ impl Interpreter<'_> {
                 code: code.code,
                 text: code.text,
                 origin: render.apply(Point { x: 0.0, y: 0.0 }),
+                end: render.apply(Point {
+                    x: code.width,
+                    y: 0.0,
+                }),
                 bbox: Rect::around(&corners).expect("four corners"),
             });
             self.advance(advance);

@@ -6,6 +6,8 @@
   :data:`CLAUSE_GAP` font sizes, as a standard sets ``4.1    General``.
 - Columns: a line is FULL width (crossing the page middle) or in the LEFT or RIGHT column; :func:`ordered` reads the
   bands between full-width lines, each its left column, then its right.
+- Blocks: :func:`blocks` sets lines into paragraphs -- each next line within :data:`BLOCK_GAP` font sizes below
+  the last, in its column, overlapping it across.
 - Words: :func:`wordy` tells text that reads as words from OCR noise (a figure's labels, a garbled leader);
   :func:`body_size` is the size most of a document's text is set in.
 """
@@ -18,10 +20,25 @@ from dataclasses import dataclass
 from statistics import median
 from typing import TYPE_CHECKING, Final
 
+from document_lab.ir import BBox
+
 if TYPE_CHECKING:
     from document_lab.ir import Document, Page, TextSpan
 
-__all__ = ['CLAUSE_GAP', 'GUTTER', 'LINE_GAP', 'WORD_GAP', 'Line', 'body_size', 'lines', 'ordered', 'wordy']
+__all__ = [
+    'BLOCK_GAP',
+    'CLAUSE_GAP',
+    'GUTTER',
+    'LINE_GAP',
+    'WORD_GAP',
+    'Block',
+    'Line',
+    'blocks',
+    'body_size',
+    'lines',
+    'ordered',
+    'wordy',
+]
 
 #: A gap between spans wider than this many font sizes is a space.
 WORD_GAP: Final = 0.15
@@ -29,6 +46,8 @@ WORD_GAP: Final = 0.15
 LINE_GAP: Final = 1.0
 #: Unweighted: a bare clause number (``4.1``) or bullet takes the text beside it within this many font sizes.
 CLAUSE_GAP: Final = 8.0
+#: A line this many font sizes or less below a block's last line, overlapping it across, continues the block.
+BLOCK_GAP: Final = 0.6
 #: Points a column line may cross the page middle.
 GUTTER: Final = 5.0
 #: Words: a word of at least this many letters, and letters (and spaces) this share of the text.
@@ -106,6 +125,49 @@ def lines(page: Page, *, weighted: bool) -> list[Line]:
     for line in found:
         line.column = 'L' if line.x1 <= mid + GUTTER else 'R' if line.x0 >= mid - GUTTER else 'F'
     return [line for line in found if line.text]
+
+
+@dataclass
+class Block:
+    """Lines set as one paragraph, top to bottom."""
+
+    lines: list[Line]
+
+    @property
+    def bbox(self) -> BBox:
+        """The box round its lines."""
+        return BBox(
+            min(ln.x0 for ln in self.lines),
+            min(ln.y0 for ln in self.lines),
+            max(ln.x1 for ln in self.lines),
+            max(ln.y1 for ln in self.lines),
+        )
+
+    @property
+    def text(self) -> str:
+        """Its lines' text, a line to a line."""
+        return '\n'.join(ln.text for ln in self.lines)
+
+
+def blocks(page: Page) -> list[Block]:
+    """The page's lines set into paragraphs, in reading order (:func:`ordered` of their first lines)."""
+    found: list[Block] = []
+    for line in sorted(lines(page, weighted=True), key=lambda ln: (ln.y0, ln.x0)):
+        for block in found:
+            last = block.lines[-1]
+            gap = line.y0 - last.y1
+            across = line.x0 < block.bbox.x1 and block.bbox.x0 < line.x1
+            if (
+                last.column == line.column
+                and across
+                and -0.5 * line.size <= gap <= BLOCK_GAP * max(line.size, last.size)
+            ):
+                block.lines.append(line)
+                break
+        else:
+            found.append(Block([line]))
+    first = {id(b.lines[0]): b for b in found}
+    return [first[id(ln)] for ln in ordered([b.lines[0] for b in found])]
 
 
 def ordered(found: list[Line]) -> list[Line]:

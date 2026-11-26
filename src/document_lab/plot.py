@@ -60,7 +60,7 @@ from document_lab.ir import BBox, Page, Provenance, Raster, TextSpan, VectorPath
 from document_lab.numbers import parse_number
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Sequence
 
 __all__ = [
     'Axis',
@@ -100,6 +100,9 @@ RULE_MAX: Final = 1.5
 DASH_MAX: Final = 5.0
 #: The widest gap (points) between a drawn minus sign and its digits.
 DASH_GAP: Final = 2.5
+#: A minus candidate with another glyph-sized shape this close (points) above or below it, across it, is a stroke of
+#: a word set vertically -- the l or i of a rotated axis title -- not a minus, which stands alone.
+STACK_GAP: Final = 6.0
 #: How far (decades) a bare mantissa digit may sit from the power labels' line to be read as a multiple of a decade.
 MANTISSA_TOL: Final = 0.15
 #: A span holding only one of these is a minus sign set apart from its digits (``_``: TDK SIFERRIT sheets).
@@ -265,6 +268,14 @@ class _Label:
     size: float
     #: Set as ``10`` plus a raised exponent, not as digits.
     power: bool = False
+    #: The box the label stands at, when not all of ``box``: a power label stands where its ``10`` stands, the
+    #: raised exponent set off it.
+    base: BBox | None = None
+
+    def at(self, *, vertical: bool) -> float:
+        """Where along the axis the label stands: the middle of its base box (its whole box but for a power)."""
+        b = self.base or self.box
+        return (b.y0 + b.y1) / 2 if vertical else (b.x0 + b.x1) / 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,7 +330,7 @@ def plots(page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = N
             max(lb.box.width for lb in xs) / 2,
         )
         y_ticks = _snap(
-            [((lb.box.y0 + lb.box.y1) / 2, lb.value) for lb in ys],
+            [(lb.at(vertical=True), lb.value) for lb in ys],
             _marks(frame, edges, vertical=False),
             max(lb.box.height for lb in ys) / 2,
         )
@@ -374,12 +385,29 @@ def _dashes(paths: Sequence[VectorPath]) -> list[_Edge]:
     A short flat segment of a longer path is part of a curve (one continuing past the frame under the PDF clip, or
     crossing the label row), never a minus: DMEGC and SIFERRIT curves read so negated a tick label.
     """
+    small = [p.provenance.bbox for p in paths if p.provenance.bbox is not None and _glyph_sized(p.provenance.bbox)]
     out = []
     for path in paths:
         box = path.provenance.bbox
-        if box is not None and box.width <= DASH_MAX + AXIS_TOL and box.height <= RULE_MAX:
+        if box is not None and box.width <= DASH_MAX + AXIS_TOL and box.height <= RULE_MAX and not _stacked(box, small):
             out.extend(e for e in _edges([path]) if not e.vertical and e.length <= DASH_MAX)
     return out
+
+
+def _glyph_sized(box: BBox) -> bool:
+    """Whether a shape is no bigger than a glyph of a label (a dash's length either way)."""
+    return box.width <= 2 * DASH_MAX and box.height <= 2 * DASH_MAX
+
+
+def _stacked(box: BBox, small: Sequence[BBox]) -> bool:
+    """Whether another glyph-sized shape lies across ``box`` within ``STACK_GAP`` above or below it."""
+    return any(
+        other != box
+        and other.x0 < box.x1
+        and other.x1 > box.x0
+        and (0 <= box.y0 - other.y1 <= STACK_GAP or 0 <= other.y0 - box.y1 <= STACK_GAP)
+        for other in small
+    )
 
 
 def _refuse_unread(
@@ -458,7 +486,7 @@ def _multiplied(labels: list[_Label], marks: Sequence[float], *, vertical: bool)
         return labels
 
     def at(lb: _Label) -> float:
-        return (lb.box.y0 + lb.box.y1) / 2 if vertical else (lb.box.x0 + lb.box.x1) / 2
+        return lb.at(vertical=vertical)
 
     (power,) = powers
     rest = sorted((lb for lb in labels if lb is not power), key=at)
@@ -541,7 +569,7 @@ def _labels(spans: Sequence[TextSpan], dashes: Sequence[_Edge]) -> list[_Label]:
             if found is not None:
                 j, power = found
                 used.add(j)
-                out.append(_Label(10.0**power, union([box, spans[j].provenance.bbox]), span.size, power=True))
+                out.append(_Label(10.0**power, union([box, spans[j].provenance.bbox]), span.size, power=True, base=box))
                 continue
         value = parse_number(span.text)
         if value is None:
@@ -1015,7 +1043,7 @@ def _decade_mantissas(labels: list[_Label], *, vertical: bool) -> list[_Label]:
     """
 
     def at(lb: _Label) -> float:
-        return (lb.box.y0 + lb.box.y1) / 2 if vertical else (lb.box.x0 + lb.box.x1) / 2
+        return lb.at(vertical=vertical)
 
     ordered = sorted(labels, key=at)
     steps = np.diff([lb.value for lb in ordered])
@@ -1540,11 +1568,10 @@ def _raster_axis(
     vertical = name == 'y'
     near = _y_labels(frame, labels) if vertical else _x_labels(frame, labels)
     row = sorted(_aligned(near, vertical=vertical), key=lambda lb: (lb.box.y0 + lb.box.y1) if vertical else lb.box.x0)
-    center = (lambda b: (b.y0 + b.y1) / 2) if vertical else (lambda b: (b.x0 + b.x1) / 2)
     marks = _marks(frame, edges, vertical=not vertical)
     if values is not None:
-        return _fit(_stated(name, row, values, marks, center), scale)
-    ticks = [(center(lb.box), lb.value) for lb in row if not math.isnan(lb.value)]
+        return _fit(_stated(name, row, values, marks), scale)
+    ticks = [(lb.at(vertical=vertical), lb.value) for lb in row if not math.isnan(lb.value)]
     if len(ticks) < 2:  # noqa: PLR2004 -- a line needs two points
         refused = next((refusals[labels.index(lb)] for lb in row if math.isnan(lb.value)), None)
         msg = (
@@ -1556,7 +1583,7 @@ def _raster_axis(
 
 
 def _stated(
-    name: str, row: Sequence[_Label], values: Sequence[float], marks: Sequence[float], center: Callable[[BBox], float]
+    name: str, row: Sequence[_Label], values: Sequence[float], marks: Sequence[float]
 ) -> tuple[tuple[float, float], ...]:
     """The caller's ``values`` (left to right, bottom to top) paired with the axis' labels, snapped to ``marks``.
 
@@ -1564,14 +1591,16 @@ def _stated(
     value is checked against what the page shows, never trusted blind. Else :class:`UnreadableTickLabels` is raised.
     """
     ordered = list(row[::-1] if name == 'y' else row)  # values run bottom to top, positions top to bottom
+    vertical = name == 'y'
     if len(ordered) != len(values):
         msg = f'{name} axis: {len(ordered)} labels found, {len(values)} values stated'
         raise UnreadableTickLabels(msg)
     for lb, v in zip(ordered, values, strict=True):
         if not math.isnan(lb.value) and not math.isclose(lb.value, v, rel_tol=1e-9, abs_tol=0.0):
-            msg = f'{name} axis: the label at {center(lb.box):.1f} reads {lb.value:g}, the stated value is {v:g}'
+            at = lb.at(vertical=vertical)
+            msg = f'{name} axis: the label at {at:.1f} reads {lb.value:g}, the stated value is {v:g}'
             raise UnreadableTickLabels(msg)
-    return _snap([(center(lb.box), float(v)) for lb, v in zip(ordered, values, strict=True)], marks)
+    return _snap([(lb.at(vertical=vertical), float(v)) for lb, v in zip(ordered, values, strict=True)], marks)
 
 
 def _curve_masks(

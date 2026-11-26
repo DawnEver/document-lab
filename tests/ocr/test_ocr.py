@@ -36,7 +36,7 @@ def test_the_text_layer_reads_back_over_the_same_pixels(tmp_path):
         ((xref, *_),) = after[0].get_images()
         pix = pymupdf.Pixmap(after, xref)
         assert np.array_equal(np.frombuffer(pix.samples, dtype=np.uint8).reshape(image.shape), image)
-    text = ' '.join(span.text for page in read_pdf(tmp_path / 'ocr.pdf', tables=False).pages for span in page.spans)
+    text = ' '.join(span.text for page in read_pdf(tmp_path / 'ocr.pdf').pages for span in page.spans)
     for word in WORDS:
         assert word in text.casefold()
     assert text_layer(tmp_path / 'ocr.pdf', tmp_path / 'again.pdf') == 0  # a page with text is never laid twice

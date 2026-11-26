@@ -95,8 +95,9 @@ def problems(found: Compared) -> list[str]:
         ]
         out.append(f'text agrees {found.agreement:.4f} < {DOCUMENT_AGREEMENT}; pages {", ".join(pages[:10])}')
     if found.location < DOCUMENT_LOCATION:
-        pages = [p.number for p in found.pages if p.stated - p.located > PAGE_SLACK]
-        out.append(f'text located {found.location:.4f} < {DOCUMENT_LOCATION}; pages {_pages(pages)}')
+        worst = sorted((p for p in found.pages if p.stated > p.located), key=lambda p: p.located - p.stated)
+        pages = ', '.join(f'{p.number} ({p.stated - p.located} not located)' for p in worst[:10])
+        out.append(f'text located {found.location:.4f} < {DOCUMENT_LOCATION}; pages {pages}')
     spans = [(p.number, e.along) for p in found.pages for e in p.edges]
     off = [n for n, along in spans if along > ALONG]
     if len(off) > SPANS_OFF * len(spans):

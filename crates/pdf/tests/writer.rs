@@ -101,6 +101,7 @@ fn a_space_or_depth_no_image_page_has_is_refused() {
         data: &[0, 0, 0],
     };
     let error = writer.image_page(&image, (1.0, 1.0)).unwrap_err();
+    assert_eq!(error.kind, pdf::error::Kind::Invalid, "{error}");
     assert!(error.message.contains("not Lab"), "{error}");
     image.space = b"DeviceRGB";
     image.bits = 3;
@@ -309,6 +310,7 @@ fn a_word_without_text_or_a_box_is_refused() {
             .copy_page_with_text(&source, page, &[bad])
             .unwrap_err();
         assert!(error.message.contains("a word of a text layer"), "{error}");
+        assert_eq!(error.kind, pdf::error::Kind::Invalid, "{error}");
     }
     assert_eq!(writer.pages(), 0);
 }

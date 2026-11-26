@@ -185,7 +185,7 @@ def page_shapes(pdf: Path) -> list[float] | None:
 
     try:
         reader = _pdf.open(pdf.read_bytes(), b'')
-    except ValueError:
+    except _pdf.Refused:
         return None
     return [height / width for _, width, height in reader.pages]
 

@@ -1,6 +1,9 @@
-//! An embedded TrueType/OpenType font program (`/FontFile2`, or `/FontFile3` of subtype `OpenType`), read only
-//! for the text of its glyphs: its `cmap` table reversed (glyph to Unicode) and its `post` table's glyph names.
-//! What a font says about its glyphs is the last word a reader has when the PDF gives no `ToUnicode` `CMap`.
+//! An embedded font program, read only for the text of its glyphs and the weight it states of itself.
+//!
+//! A TrueType/OpenType program (`/FontFile2`, or `/FontFile3` of subtype `OpenType`) gives its `cmap` table
+//! reversed (glyph to Unicode) and its `post` table's glyph names -- what a font says about its glyphs is the last
+//! word a reader has when the PDF gives no `ToUnicode` `CMap` -- and its `OS/2` weight class; a Type 1 program
+//! (`/FontFile`) its built-in encoding and its `/Weight`.
 
 use std::collections::HashMap;
 
@@ -121,6 +124,43 @@ pub fn type1_encoding(program: &[u8]) -> Option<Vec<Option<String>>> {
         }
     }
     found.then_some(names)
+}
+
+/// The weight class (100-900) a TrueType/OpenType program states of itself: its `OS/2` table's `usWeightClass`
+/// (an old 1-9 scale read as hundreds), else 700 when its `head` table's `macStyle` marks it bold. None when it
+/// states neither: a subset program often keeps no `OS/2` table, and an unset bold bit says nothing of a
+/// semibold.
+#[must_use]
+pub fn sfnt_weight(data: &[u8]) -> Option<f64> {
+    let tables = tables(data)?;
+    let table = |tag: &[u8; 4]| {
+        let &(offset, len) = tables.get(tag)?;
+        data.get(offset..offset.checked_add(len)?)
+    };
+    let class = table(b"OS/2").and_then(|os2| u16_at(os2, 4));
+    match class {
+        Some(c @ 1..=9) => Some(f64::from(c) * 100.0),
+        Some(c @ 100..=1000) => Some(f64::from(c)),
+        _ => table(b"head")
+            .and_then(|head| u16_at(head, 44))
+            .filter(|style| style & 1 != 0)
+            .map(|_| 700.0),
+    }
+}
+
+/// The weight class a Type 1 program states of itself: its `/Weight` string (`(Bold)`, `(Medium)`, ...) in its
+/// clear-text part, read as a font name's style words are.
+#[must_use]
+pub fn type1_weight(program: &[u8]) -> Option<f64> {
+    let clear = &program[..crate::parser::find(program, b"eexec").unwrap_or(program.len())];
+    let rest = &clear[crate::parser::find(clear, b"/Weight")? + b"/Weight".len()..];
+    let open = rest.iter().position(|&b| !b.is_ascii_whitespace())?;
+    if rest[open] != b'(' {
+        return None;
+    }
+    let close = open + rest[open..].iter().position(|&b| b == b')')?;
+    let weight = String::from_utf8_lossy(&rest[open + 1..close]);
+    crate::font::style_weight(crate::font::words(&weight))
 }
 
 fn u16_at(data: &[u8], at: usize) -> Option<u16> {
@@ -584,5 +624,52 @@ mod tests {
     #[test]
     fn data_that_is_no_font_reads_as_no_text() {
         assert_eq!(GlyphText::parse(b"%!PS-AdobeFont").text(1), None);
+    }
+
+    /// A program of the tables given, each `(tag, data)`.
+    fn sfnt(tables: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let count = u16::try_from(tables.len()).unwrap();
+        let mut out = vec![0, 1, 0, 0];
+        out.extend(count.to_be_bytes());
+        out.extend([0; 6]);
+        let mut at = 12 + 16 * tables.len();
+        for (tag, data) in tables {
+            out.extend(*tag);
+            out.extend([0; 4]);
+            out.extend(u32::try_from(at).unwrap().to_be_bytes());
+            out.extend(u32::try_from(data.len()).unwrap().to_be_bytes());
+            at += data.len();
+        }
+        for (_, data) in tables {
+            out.extend(data);
+        }
+        out
+    }
+
+    #[test]
+    fn a_truetype_program_states_its_weight_class_else_its_bold_bit() {
+        let os2 = |class: u16| [&[0, 4, 0, 0][..], &class.to_be_bytes()].concat();
+        let head = |style: u16| [&[0; 44][..], &style.to_be_bytes()].concat();
+        assert_eq!(sfnt_weight(&sfnt(&[(b"OS/2", os2(600))])), Some(600.0));
+        assert_eq!(sfnt_weight(&sfnt(&[(b"OS/2", os2(7))])), Some(700.0));
+        assert_eq!(sfnt_weight(&sfnt(&[(b"head", head(1))])), Some(700.0));
+        assert_eq!(sfnt_weight(&sfnt(&[(b"head", head(2))])), None);
+        assert_eq!(
+            sfnt_weight(&sfnt(&[(b"OS/2", os2(400)), (b"head", head(1))])),
+            Some(400.0)
+        );
+        assert_eq!(sfnt_weight(b"%!PS-AdobeFont"), None);
+    }
+
+    #[test]
+    fn a_type1_program_states_its_weight_in_its_clear_text() {
+        let program = b"%!PS-AdobeFont-1.0: CMBX12\n/FontInfo 9 dict dup begin\n/Weight (Bold) readonly def\n\
+            end readonly def\ncurrentfile eexec \x80\x81";
+        assert_eq!(type1_weight(program), Some(700.0));
+        assert_eq!(type1_weight(b"/Weight (Medium) readonly def"), Some(500.0));
+        assert_eq!(
+            type1_weight(b"/FontName /CMR12 def eexec /Weight (Bold)"),
+            None
+        );
     }
 }

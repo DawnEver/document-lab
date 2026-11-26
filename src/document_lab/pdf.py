@@ -10,8 +10,9 @@ opens no access), :class:`Unsupported`, :class:`Malformed` -- each a ``ValueErro
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Final
+from typing import Final, overload
 
 import numpy as np
 import pymupdf
@@ -38,7 +39,10 @@ VECTOR_DPI: Final = 300.0
 
 
 def read_pdf(path: Path | str, *, password: str = '', curve_samples: int = CURVE_SAMPLES) -> Document:
-    """Read every page of the PDF at ``path``, opened with ``password`` when it is encrypted.
+    """The PDF at ``path``, opened with ``password`` when it is encrypted; each page read when first asked for.
+
+    The file is read whole here, hashed, and kept in memory for the document's life: no file handle stays open,
+    and the pages read later are those of the bytes hashed, whatever becomes of the file.
 
     ``curve_samples``: the points each curve of a vector path is flattened to.
 
@@ -54,11 +58,67 @@ def read_pdf(path: Path | str, *, password: str = '', curve_samples: int = CURVE
     sha = hashlib.sha256(data).hexdigest()
     uri = path.resolve().as_uri()
     reader = _pdf.open(data, password.encode())
-    pages = tuple(
-        _page(reader, number, (width, height), Provenance(sha, uri, page=number), curve_samples)
-        for number, width, height in reader.pages
-    )
-    return Document(sha256=sha, uri=uri, pages=pages, repairs=tuple(reader.repairs))
+    return Document(sha256=sha, uri=uri, pages=_Pages(reader, sha, uri, curve_samples), repairs=_Repairs(reader))
+
+
+class _Repairs(Sequence[str]):
+    """What the reader has repaired so far: opening the file, then reading each page read since."""
+
+    __slots__ = ('_reader',)
+
+    def __init__(self, reader: _pdf.Reader) -> None:
+        self._reader = reader
+
+    def __len__(self) -> int:
+        return len(self._reader.repairs)
+
+    @overload
+    def __getitem__(self, index: int) -> str: ...
+    @overload
+    def __getitem__(self, index: slice) -> list[str]: ...
+    def __getitem__(self, index: int | slice) -> str | list[str]:
+        return self._reader.repairs[index]
+
+    def __repr__(self) -> str:
+        return repr(self._reader.repairs)
+
+
+class _Pages(Sequence[Page]):
+    """A document's pages, each read when it is first asked for, then kept for the document's life.
+
+    Kept, not read again: callers come back to pages (``per_page`` passes over a document four times, ``paper``
+    goes back and forth between captions and figures), and a page read again would cost the reading again and be
+    another object than the one a caller holds. A page kept is mostly arrays -- its drawing's points are one
+    array, no Python object per point -- so every page kept costs no more than reading them all at once did.
+    """
+
+    __slots__ = ('_kept', '_reader', '_samples', '_sha', '_sizes', '_uri')
+
+    def __init__(self, reader: _pdf.Reader, sha: str, uri: str, samples: int) -> None:
+        self._reader, self._sha, self._uri, self._samples = reader, sha, uri, samples
+        self._sizes: list[tuple[int, float, float]] = reader.pages
+        self._kept: list[Page | None] = [None] * len(self._sizes)
+
+    def __len__(self) -> int:
+        return len(self._sizes)
+
+    @overload
+    def __getitem__(self, index: int) -> Page: ...
+    @overload
+    def __getitem__(self, index: slice) -> tuple[Page, ...]: ...
+    def __getitem__(self, index: int | slice) -> Page | tuple[Page, ...]:
+        if isinstance(index, slice):
+            return tuple(self[i] for i in range(len(self))[index])
+        i = range(len(self))[index]
+        page = self._kept[i]
+        if page is None:
+            number, width, height = self._sizes[i]
+            here = Provenance(self._sha, self._uri, page=number)
+            page = self._kept[i] = _page(self._reader, number, (width, height), here, self._samples)
+        return page
+
+    def __repr__(self) -> str:
+        return f'<{len(self)} pages, {sum(p is not None for p in self._kept)} read>'
 
 
 def _page(reader: _pdf.Reader, number: int, size: tuple[float, float], here: Provenance, samples: int) -> Page:

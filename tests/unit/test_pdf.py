@@ -21,7 +21,7 @@ def test_the_document_is_named_by_its_content_hash(tmp_path):
     assert doc.uri == path.resolve().as_uri()
     assert [p.number for p in doc.pages] == [1, 2]
     assert (doc.page(1).width, doc.page(1).height) == (612, 792)
-    assert doc.repairs == ()
+    assert list(doc.repairs) == []
     assert doc.page(1).warnings == ()
 
 
@@ -143,3 +143,52 @@ def test_a_raster_renders_at_the_native_resolution_of_the_image_under_it(doc, tm
 def test_a_missing_file_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         read_pdf(tmp_path / 'absent.pdf')
+
+
+def test_a_page_is_read_when_first_asked_for_and_kept(tmp_path, monkeypatch):
+    import document_lab.pdf as pdf_module  # noqa: PLC0415 -- the reading counted where it happens
+
+    read = []
+    page = pdf_module._page
+
+    def counted(reader, number, *rest):
+        read.append(number)
+        return page(reader, number, *rest)
+
+    monkeypatch.setattr(pdf_module, '_page', counted)
+    doc = read_pdf(mixed_pdf(tmp_path / 'mixed.pdf'))
+    assert (len(doc.pages), read) == (2, [])
+    assert doc.pages[-1].number == 2
+    assert doc.page(2) is doc.pages[1]
+    assert read == [2]
+    assert [p.number for p in doc.pages[:1]] == [1]
+    assert [p.number for p in doc.pages] == [1, 2]
+    assert read == [2, 1]
+
+
+def test_pages_read_after_the_file_is_gone_are_of_the_bytes_hashed(tmp_path):
+    path = mixed_pdf(tmp_path / 'mixed.pdf')
+    doc = read_pdf(path)
+    path.unlink()
+    assert [s.text for s in doc.page(1).spans if s.text == 'Hello document'] == ['Hello document']
+
+
+def test_a_page_past_the_last_is_refused(doc):
+    with pytest.raises(IndexError):
+        doc.pages[2]
+
+
+def test_a_repair_made_reading_a_page_is_said_once_the_page_is_read(tmp_path):
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), 'Moved', fontsize=12)
+    contents = doc[0].get_contents()[0]
+    data = bytearray(doc.tobytes(garbage=0, deflate=False, use_objstms=0))
+    first = data.index(b'\n', data.index(b'\nxref\n') + len(b'\nxref\n')) + 1  # past the subsection's `0 n` line
+    entry = first + 20 * contents  # a table entry is 20 bytes
+    offset = int(data[entry : entry + 10])
+    data[entry : entry + 10] = b'%010d' % (offset + 1)  # the table now points one byte into the object
+    (tmp_path / 'm.pdf').write_bytes(bytes(data))
+    read = read_pdf(tmp_path / 'm.pdf')
+    assert list(read.repairs) == []
+    assert [s.text for s in read.page(1).spans] == ['Moved']
+    assert len(read.repairs) == 1

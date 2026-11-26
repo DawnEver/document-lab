@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Iterable, Iterator, Sequence
 
     import numpy as np
 
@@ -221,13 +221,17 @@ class Page:
 
 @dataclass(frozen=True, slots=True)
 class Document:
-    """A source document by content hash and URI, and its pages."""
+    """A source document by content hash and URI, and its pages.
+
+    ``pages`` is any sequence of pages: a tuple, or ``read_pdf``'s, which reads each page when it is first asked for.
+    """
 
     sha256: str
     uri: str
-    pages: tuple[Page, ...] = field(default=())
-    #: What the reader repaired to read the file (a rebuilt cross-reference table, ...), in words.
-    repairs: tuple[str, ...] = ()
+    pages: Sequence[Page] = field(default=())
+    #: What the reader repaired to read the file (a rebuilt cross-reference table, ...), in words: a reader reading
+    #: pages when asked for adds what it repairs to read one as it reads it.
+    repairs: Sequence[str] = ()
 
     def page(self, number: int) -> Page:
         """The page with 1-based ``number``."""

@@ -1,8 +1,9 @@
 //! `CMap`s (ISO 32000-2 sections 9.7.5 and 9.10.3): how a string splits into character codes, which `CID` a code
-//! selects, and which Unicode text a code stands for.
+//! selects, which Unicode text a code stands for, and which text a `CID` of an Adobe character collection stands for.
 
 use std::collections::HashMap;
 
+use crate::cid2unicode::{COLLECTIONS, Collection};
 use crate::content::operations;
 use crate::object::Object;
 
@@ -220,6 +221,39 @@ impl CMap {
     #[must_use]
     pub fn single_byte(&self) -> bool {
         self.ranges.iter().all(|(lo, _)| lo.len() == 1)
+    }
+}
+
+impl Collection {
+    /// Adobe's table of the character collection a `/CIDSystemInfo` names -- `/Registry (Adobe)` and an `/Ordering`
+    /// it covers (`Japan1`, `GB1`, `CNS1`, `Korea1`, `KR`): the CID-to-Unicode `CMap` `Adobe-<Ordering>-UCS2` that
+    /// ISO 32000-2 section 9.10.2 names. None for any other collection.
+    #[must_use]
+    pub fn named(registry: &[u8], ordering: &[u8]) -> Option<&'static Self> {
+        if registry != b"Adobe" {
+            return None;
+        }
+        COLLECTIONS
+            .iter()
+            .find(|c| c.ordering.as_bytes() == ordering)
+    }
+
+    /// The text of `cid`, when the table gives it one.
+    #[must_use]
+    pub fn text(&self, cid: u32) -> Option<String> {
+        let at = usize::try_from(cid).ok()?.checked_mul(2)?;
+        let unit = self
+            .single
+            .get(at..at + 2)
+            .map_or(0, |b| u16::from_le_bytes([b[0], b[1]]));
+        if unit != 0 {
+            return char::from_u32(u32::from(unit)).map(String::from);
+        }
+        let cid = u16::try_from(cid).ok()?;
+        self.long
+            .binary_search_by_key(&cid, |&(c, _)| c)
+            .ok()
+            .map(|i| self.long[i].1.to_string())
     }
 }
 

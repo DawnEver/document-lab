@@ -10,6 +10,7 @@
 //! [`writer`] writes a PDF of image pages, or of pages copied from a [`File`].
 
 mod base14;
+mod cid2unicode;
 pub mod cmap;
 pub mod color;
 pub mod content;

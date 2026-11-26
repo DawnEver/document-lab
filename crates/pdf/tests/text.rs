@@ -143,3 +143,89 @@ fn win_ansi_names_a_hyphen_and_spaces_not_their_latin_1_twins() {
     let (events, _) = texts(r"BT /F1 10 Tf 0 50 Td (a\255b c\240d) Tj ET", font, &[]);
     assert_eq!(text(&events[0]), "a-b c d"); // the glyphs `hyphen` and `space`: U+002D and U+0020
 }
+
+/// A non-embedded CID font on the collection `Registry-Ordering`, its codes by `encoding`: the text of `codes` (hex).
+fn collection_text(collection: &str, encoding: &str, codes: &str, extra: &[&str]) -> String {
+    let (registry, ordering) = collection.split_once('-').unwrap();
+    let font = format!(
+        "<< /Type /Font /Subtype /Type0 /BaseFont /Ryumin-Light-Identity-H /Encoding {encoding} /DescendantFonts [6 0 R] >>"
+    );
+    let cid = format!(
+        "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /Ryumin-Light
+        /CIDSystemInfo << /Registry ({registry}) /Ordering ({ordering}) /Supplement 2 >> /DW 1000 >>"
+    );
+    let mut objects = vec![cid.as_str()];
+    objects.extend_from_slice(extra);
+    let (events, _) = texts(
+        &format!("BT /F1 10 Tf 0 50 Td <{codes}> Tj ET"),
+        &font,
+        &objects,
+    );
+    text(&events[0])
+}
+
+#[test]
+fn a_registry_collection_names_the_text_of_its_cids() {
+    // Each CID's character as Adobe's cid2code.txt states it (cmap-resources 20231115, the UTF-32 column).
+    for (collection, codes, expected) in [
+        ("Adobe-Japan1", "034B0CD40E8A", "\u{3042}\u{65E5}\u{672C}"),
+        ("Adobe-GB1", "11CF0ED3", "\u{4E2D}\u{6587}"),
+        ("Adobe-CNS1", "02950A3736B2", "\u{4E2D}\u{570B}\u{2008A}"),
+        ("Adobe-Korea1", "0CE004D6", "\u{D55C}\u{AE00}"),
+        ("Adobe-KR", "0B130188", "\u{D55C}\u{AE00}"),
+    ] {
+        assert_eq!(
+            collection_text(collection, "/Identity-H", codes, &[]),
+            expected,
+            "{collection}"
+        );
+    }
+}
+
+#[test]
+fn an_embedded_cmap_selects_the_cids_the_collection_names() {
+    let cmap = common::stream(
+        "/Type /CMap",
+        "1 begincodespacerange <00> <FF> endcodespacerange 1 begincidchar <41> 843 endcidchar",
+    );
+    assert_eq!(
+        collection_text("Adobe-Japan1", "7 0 R", "41", &[&cmap]),
+        "\u{3042}"
+    );
+}
+
+#[test]
+fn to_unicode_wins_over_the_collection() {
+    let font =
+        "<< /Type /Font /Subtype /Type0 /BaseFont /Ryumin-Light-Identity-H /Encoding /Identity-H
+        /DescendantFonts [6 0 R] /ToUnicode 7 0 R >>";
+    let cid = "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /Ryumin-Light
+        /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 6 >> >>";
+    let to_unicode = common::stream(
+        "",
+        "1 begincodespacerange <0000> <FFFF> endcodespacerange 1 beginbfchar <034B> <0041> endbfchar",
+    );
+    let (events, _) = texts(
+        "BT /F1 10 Tf 0 50 Td <034B0CD4> Tj ET",
+        font,
+        &[cid, &to_unicode],
+    );
+    assert_eq!(text(&events[0]), "A\u{65E5}"); // the code ToUnicode lacks falls to the collection
+}
+
+#[test]
+fn no_table_reads_cids_of_another_collection_or_unknown_cids() {
+    // An ordering without Adobe's table, a registry that is not Adobe's, and a predefined CMap this reader does not
+    // carry (its codes are not CIDs): no text, never a guess.
+    for (collection, encoding) in [
+        ("Adobe-Identity", "/Identity-H"),
+        ("Acme-Japan1", "/Identity-H"),
+        ("Adobe-Japan1", "/H"),
+    ] {
+        assert_eq!(
+            collection_text(collection, encoding, "034B", &[]),
+            "\u{FFFD}",
+            "{collection} {encoding}"
+        );
+    }
+}

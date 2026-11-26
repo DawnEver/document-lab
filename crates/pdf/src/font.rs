@@ -2,6 +2,7 @@
 //! width and Unicode text, and the font's ascent and descent. Glyph outlines are not read.
 
 use crate::base14::{FONTS, Metrics};
+use crate::cid2unicode::Collection;
 use crate::cmap::CMap;
 use crate::error::Result;
 use crate::file::File;
@@ -43,6 +44,12 @@ enum Kind {
         widths: Vec<(u32, u32, f64)>,
         default: f64,
         code_text: CodeText,
+        /// Adobe's text of the `CID`s, when the `CIDFont`'s `/CIDSystemInfo` names a collection Adobe's tables cover
+        /// and the `CMap` is one whose `CID`s this reader knows (Identity, or embedded). The ordering decides, not
+        /// the font's kind: a `CIDFontType2` declaring `Adobe-Identity` has `CID`s that are only glyph ids, and
+        /// none; one declaring `Adobe-Japan1` has that collection's `CID`s (its `/CIDToGIDMap` turns them into
+        /// glyphs).
+        collection: Option<&'static Collection>,
     },
 }
 
@@ -139,11 +146,14 @@ impl Font {
                 widths,
                 default,
                 code_text,
+                collection,
             } => cmap
                 .codes(bytes)
                 .into_iter()
                 .map(|(code, len)| {
                     let cid = cmap.cid(code);
+                    // The text: `ToUnicode`'s, else what the codes are, else the embedded program's glyph's (the
+                    // very glyph drawn), else the collection's for the `CID`, else none.
                     let text = self
                         .to_unicode
                         .as_ref()
@@ -156,7 +166,8 @@ impl Font {
                                 None => u16::try_from(cid).ok()?,
                             };
                             self.program.as_ref()?.text(gid)
-                        });
+                        })
+                        .or_else(|| collection.and_then(|c| c.text(cid)));
                     let width = widths
                         .iter()
                         .find(|(lo, hi, _)| (*lo..=*hi).contains(&cid))
@@ -506,7 +517,8 @@ impl File {
     }
 
     fn composite(&self, dict: &Dict) -> Result<(Option<Dict>, Kind, bool)> {
-        let (cmap, vertical, code_text) = match self.get(dict, b"Encoding")? {
+        // The `CMap`, and whether the `CID`s it selects are known (Identity's and an embedded one's are).
+        let (cmap, vertical, code_text, cids_known) = match self.get(dict, b"Encoding")? {
             Some(Object::Name(n)) => {
                 let name = String::from_utf8_lossy(&n).into_owned();
                 // A predefined `CMap`: Identity is read; a Unicode one (`Uni...-UCS2-` / `-UTF16-`) has the text as
@@ -514,13 +526,14 @@ impl File {
                 // registry's table this reader does not carry.
                 let vertical = name.ends_with("-V");
                 if let Some((cmap, encoding)) = CMap::legacy(&name) {
-                    (cmap, vertical, CodeText::Legacy(encoding))
+                    (cmap, vertical, CodeText::Legacy(encoding), false)
                 } else if name.starts_with("Uni")
                     && (name.contains("UCS2") || name.contains("UTF16"))
                 {
-                    (CMap::identity(), vertical, CodeText::Utf16)
+                    (CMap::identity(), vertical, CodeText::Utf16, false)
                 } else {
-                    (CMap::identity(), vertical, CodeText::Unknown)
+                    let identity = matches!(name.as_str(), "Identity-H" | "Identity-V");
+                    (CMap::identity(), vertical, CodeText::Unknown, identity)
                 }
             }
             Some(Object::Stream(s)) => {
@@ -529,9 +542,10 @@ impl File {
                     CMap::parse(&self.decode(&s)?.into_bytes()?),
                     vertical,
                     CodeText::Unknown,
+                    true,
                 )
             }
-            _ => (CMap::identity(), false, CodeText::Unknown),
+            _ => (CMap::identity(), false, CodeText::Unknown, false),
         };
         let descendant = match self.get(dict, b"DescendantFonts")? {
             Some(Object::Array(a)) => match a.first().map(|d| self.resolve(d)).transpose()? {
@@ -579,6 +593,11 @@ impl File {
                 }
             }
         }
+        let collection = if cids_known {
+            self.collection(&descendant)?
+        } else {
+            None
+        };
         Ok((
             self.descriptor(&descendant)?,
             Kind::Composite {
@@ -586,9 +605,25 @@ impl File {
                 widths,
                 default,
                 code_text,
+                collection,
             },
             vertical,
         ))
+    }
+
+    /// Adobe's table of the collection a `CIDFont`'s `/CIDSystemInfo` names, when there is one.
+    fn collection(&self, cid_font: &Dict) -> Result<Option<&'static Collection>> {
+        let Some(Object::Dict(info)) = self.get(cid_font, b"CIDSystemInfo")? else {
+            return Ok(None);
+        };
+        Ok(
+            match (self.get(&info, b"Registry")?, self.get(&info, b"Ordering")?) {
+                (Some(Object::String(registry)), Some(Object::String(ordering))) => {
+                    Collection::named(&registry, &ordering)
+                }
+                _ => None,
+            },
+        )
     }
 }
 

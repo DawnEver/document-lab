@@ -2,7 +2,8 @@
 name = "pdf"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+# The workspace's MIT, and BSD-3-Clause for Adobe's CID-to-Unicode tables (`src/cid2unicode`).
+license = "MIT AND BSD-3-Clause"
 
 # document-lab's own PDF reader and image-page writer: syntax, filters, encryption, fonts, the content-stream
 # interpreter. Pure Rust, no Python.

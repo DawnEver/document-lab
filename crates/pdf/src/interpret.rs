@@ -3,7 +3,9 @@
 //! The graphics state is tracked across `q`/`Q`, `cm`, colors, line style and Form `XObject`s; each painted path,
 //! each image placed, each string shown and each shading painted (`sh`) is an event, its geometry already in page
 //! space (points, y down). A fill or stroke with a pattern is a path event whose color names the pattern
-//! ([`crate::color::Pattern`]); a pattern's own content (a tiling cell, a shading's colors) is not interpreted.
+//! ([`crate::color::Pattern`]); a pattern's own content (a tiling cell, a shading's colors) is not interpreted. A
+//! fill or stroke in the colorant `None` marks nothing ([`crate::color::Space::paints`]): it is no paint of the event,
+//! and a path painted in it alone is no event.
 //!
 //! The clip is tracked as the box it lies in -- the page's crop box, narrowed by each clipping path's bounds, each
 //! Form's `/BBox` and, at `ET`, the union of the boxes of the glyphs shown in a clipping text mode (4-7) -- and a
@@ -27,7 +29,9 @@
 //! appearance draw nothing: no appearance is made up from an annotation's other entries.
 //!
 //! Not interpreted: a pattern's content and optional content usage ([`crate::optional`] says which). An operation
-//! that cannot be read is skipped and named in [`Content::warnings`], never silently.
+//! that cannot be read is skipped and named in [`Content::warnings`], never silently; a color whose space or tint
+//! transform does not read is set by its components alone, with no RGB, and named there too -- never left in the
+//! space set before.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -247,9 +251,9 @@ impl State {
         Self {
             ctm,
             clip,
-            stroke_color: Space::Gray.initial(),
+            stroke_color: Color::black(),
             stroke_space: Space::Gray,
-            fill_color: Space::Gray.initial(),
+            fill_color: Color::black(),
             fill_space: Space::Gray,
             line_width: 1.0,
             dashes: Vec::new(),
@@ -944,20 +948,32 @@ impl Interpreter<'_> {
     ) -> Result<bool> {
         let (space, color) = match operator {
             b"CS" | b"cs" => {
-                let space = self
-                    .file
-                    .color_space(operands.first().unwrap_or(&Object::Null), resources)?;
-                let color = space.initial();
+                let value = operands.first().unwrap_or(&Object::Null);
+                let space = match self.file.color_space(value, resources) {
+                    Ok(space) => space,
+                    Err(e) => {
+                        // Its colors are known by their components alone until another space is set.
+                        self.warn(operator, &format!("a color space that does not read: {e}"));
+                        let named = value.as_name().or_else(|| {
+                            value
+                                .as_array()
+                                .and_then(|a| a.first())
+                                .and_then(Object::as_name)
+                        });
+                        Space::Other(named.unwrap_or(b"Unknown").to_vec(), 1)
+                    }
+                };
+                let color = self.converted(operator, &space, space.initial_components());
                 (space, color)
             }
             b"SC" | b"SCN" => {
                 let space = self.state.stroke_space.clone();
-                let color = self.color(&space, operands, resources)?;
+                let color = self.color(operator, &space, operands, resources)?;
                 (space, color)
             }
             b"sc" | b"scn" => {
                 let space = self.state.fill_space.clone();
-                let color = self.color(&space, operands, resources)?;
+                let color = self.color(operator, &space, operands, resources)?;
                 (space, color)
             }
             b"G" | b"g" | b"RG" | b"rg" | b"K" | b"k" => {
@@ -966,7 +982,7 @@ impl Interpreter<'_> {
                     b"RG" | b"rg" => Space::Rgb,
                     _ => Space::Cmyk,
                 };
-                let color = space.color(last(operands, space.components())?);
+                let color = self.converted(operator, &space, last(operands, space.components())?);
                 (space, color)
             }
             _ => return Ok(false),
@@ -979,10 +995,37 @@ impl Interpreter<'_> {
         Ok(true)
     }
 
+    fn warn(&mut self, operator: &[u8], message: &str) {
+        self.out.warnings.push(format!(
+            "`{}`: {message}",
+            String::from_utf8_lossy(operator)
+        ));
+    }
+
+    /// The color of `components` in `space`; when the space gives them no RGB for a cause (a tint transform's
+    /// error), the components alone, the cause named in a warning.
+    fn converted(&mut self, operator: &[u8], space: &Space, components: Vec<f64>) -> Color {
+        space.color(components.clone()).unwrap_or_else(|e| {
+            self.warn(operator, &format!("its color has no RGB: {e}"));
+            Color {
+                space: space.family(),
+                components,
+                rgb: None,
+                pattern: None,
+            }
+        })
+    }
+
     /// The color `operands` set in `space`: in `Pattern`, the pattern the last operand names (after an uncolored
     /// pattern's tint).
-    fn color(&self, space: &Space, operands: &[Object], resources: &Dict) -> Result<Color> {
-        let mut color = space.color(numbers_in(operands));
+    fn color(
+        &mut self,
+        operator: &[u8],
+        space: &Space,
+        operands: &[Object],
+        resources: &Dict,
+    ) -> Result<Color> {
+        let mut color = self.converted(operator, space, numbers_in(operands));
         if *space == Space::Pattern {
             let name = operands
                 .last()
@@ -1022,7 +1065,10 @@ impl Interpreter<'_> {
 
     fn paint(&mut self, stroke: bool, fill: Option<bool>) {
         let bounds = bounds(&self.path);
-        if bounds.is_some_and(|b| b.meets(self.state.clip)) {
+        // A paint in the colorant `None` marks nothing: the path ends as `n` ends it.
+        let stroke = stroke && self.state.stroke_space.paints();
+        let fill = fill.filter(|_| self.state.fill_space.paints());
+        if (stroke || fill.is_some()) && bounds.is_some_and(|b| b.meets(self.state.clip)) {
             let layer = self.layer();
             let state = &self.state;
             let scale = state.ctm.scale();

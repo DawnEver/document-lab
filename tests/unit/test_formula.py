@@ -9,6 +9,7 @@ import pymupdf
 import pytest
 
 from document_lab import formula
+from document_lab.__main__ import main
 from document_lab.paper.ingest import ingest
 from document_lab.per_page import write_pages
 from tests.paper.support import LONG_BODY
@@ -57,7 +58,7 @@ def test_the_latex_is_written_beside_the_equation_crop_which_is_kept(tmp_path, s
     crop = tmp_path / 'out' / 'page-001-equation-3.png'
     md = (tmp_path / 'out' / 'page-001.md').read_text(encoding='utf-8')
     assert '![(3)](page-001-equation-3.png)\n\n$$\nU = R I\n$$' in md
-    assert stand_in.asked == [('latex', {})]  # loaded once for the document
+    assert stand_in.asked == [('latex', {'model': 'texteller'})]  # the default model, loaded once for the document
     (shown,) = stand_in.shown
     pix = pymupdf.Pixmap(str(crop))
     assert shown.shape == (pix.height, pix.width, 3)  # the model reads the very pixels the crop holds
@@ -118,3 +119,26 @@ def test_a_crop_the_model_gives_no_reading_of_says_so_beside_it(tmp_path, stand_
     write_pages(_standard(tmp_path / 'std.pdf'), tmp_path / 'out', formulas='latex')
     md = (tmp_path / 'out' / 'page-001.md').read_text(encoding='utf-8')
     assert f'![(3)](page-001-equation-3.png)\n\n{formula.UNREAD}' in md
+
+
+def test_the_command_line_names_the_model_and_refuses_one_named_without_formulas(tmp_path, stand_in):
+    pdf = _standard(tmp_path / 'std.pdf')
+    assert (
+        main(['pages', str(pdf), str(tmp_path / 'out'), '--formulas', 'latex', '--formula-model', 'codeformula-v2'])
+        == 0
+    )
+    assert stand_in.asked == [('latex', {'model': 'codeformula-v2'})]
+    with pytest.raises(SystemExit) as refused:
+        main(['pages', str(pdf), str(tmp_path / 'again'), '--formula-model', 'codeformula-v2'])
+    assert refused.value.code == 2
+    assert not (tmp_path / 'again').exists()
+
+
+def test_a_model_not_offered_is_refused_by_name():
+    with pytest.raises(ValueError, match='texteller, codeformula-v2'):
+        formula.transcriber('latex', model='pix2tex')
+
+
+def test_a_number_whose_digits_the_model_spaced_is_still_the_equation_s_own():
+    assert formula.beside(r'u = R i \quad ( 1 2 )', '12') == '$$\nu = R i\n$$'
+    assert formula.beside(r'u = R i \quad ( 1 2 )', '2') == '$$\nu = R i \\quad ( 1 2 )\n$$'  # not its number

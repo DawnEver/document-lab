@@ -35,7 +35,9 @@ ai = ["ai_lab @ git+https://github.com/DawnEver/ai-lab.git"]
 # the package's own writer (`document_lab._pdf`) writes the PDF.
 capture = ["python-xlib; sys_platform == 'linux'"]
 # `--formulas latex` on `paper` / `pages`: each equation crop transcribed to LaTeX in-process (`document_lab.formula`).
-formula = ["torch", "transformers"]
+# Pillow is CodeFormulaV2's: transformers' Idefics3 image processor runs on Pillow or torchvision, and torchvision has
+# no cp315 wheel on PyPI (measured 2026-11-27 on 0.29.2).
+formula = ["pillow", "torch", "transformers"]
 # The family's development kit: rules registry, rendered configs, shared test bodies, verify entry.
 dev = [
     # The build backend: this repo's own tool, not the test kit's.
@@ -125,7 +127,7 @@ max_idle = "24 h"  # a branch idle 24 h is pruned when merged, alarmed when not
 output = "output/logs"
 # No resource exists on a hosted runner: `gpu` needs a CUDA GPU and the gpu extra, `vendor` a vendor PDF and
 # `papers` the real papers and `reference` a corpus of real PDFs, none of which may be committed (the repo is
-# public), `ocr` Tesseract with English data, `formula` the formula extra (torch) and its model's weights (1.2 GB).
+# public), `ocr` Tesseract with English data, `formula` the formula extra (torch) and its models' weights (1.8 GB).
 # This repo's tests run on GitHub Actions alone (user ruling 2026-11-11), so no part here produces them: they stay
 # marked, and a consumer's unified run selects them by marker.
 unproduced = ["gpu", "vendor", "papers", "reference", "ocr", "formula"]

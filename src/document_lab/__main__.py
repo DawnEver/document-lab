@@ -15,6 +15,7 @@ from pathlib import Path
 from lab_commons.log import emit
 
 from document_lab.capture import cli as capture_cli
+from document_lab.formula import MODELS
 
 __all__ = ['main']
 
@@ -48,9 +49,22 @@ def _formulas_option(command: argparse.ArgumentParser) -> None:
     command.add_argument(
         '--formulas',
         choices=('latex',),
-        help="write each equation crop's LaTeX beside it, read in-process by TexTeller (the 'formula' extra; "
-        'default: the crop alone)',
+        help="write each equation crop's LaTeX beside it, read in-process ('formula' extra; default: the crop alone)",
     )
+    command.add_argument(
+        '--formula-model',
+        choices=tuple(MODELS),
+        help='the model --formulas reads with: texteller (the default; Apache-2.0, fastest on a GPU) or codeformula-v2 '
+        "(docling's CodeFormulaV2; CDLA-Permissive-2.0 weights)",
+    )
+
+
+def _formulas(args: argparse.Namespace) -> dict[str, str]:
+    """The formula keywords of ``write_pages`` / ``ingest`` the command line asked for."""
+    asked = {'formulas': args.formulas}
+    if args.formula_model is not None:
+        asked['formula_model'] = args.formula_model
+    return asked
 
 
 def _refused(error: Exception) -> int:
@@ -72,7 +86,7 @@ def _pages(args: argparse.Namespace) -> int:
     from document_lab.per_page import write_pages  # noqa: PLC0415
 
     try:
-        done = write_pages(args.pdf, args.out, formulas=args.formulas)
+        done = write_pages(args.pdf, args.out, **_formulas(args))
     except FormulaUnavailable as refused:
         return _refused(refused)
     emit(f'{done.out}: {done.pages} page(s)')
@@ -89,7 +103,7 @@ def _paper(args: argparse.Namespace) -> int:
     from document_lab.paper.ingest import ingest  # noqa: PLC0415
 
     try:
-        done = ingest(args.pdf, args.out, tool=args.tool, formulas=args.formulas)
+        done = ingest(args.pdf, args.out, tool=args.tool, **_formulas(args))
     except FormulaUnavailable as refused:
         return _refused(refused)
     emit(
@@ -111,7 +125,10 @@ _RUN = {
 
 def main(argv: list[str] | None = None) -> int:
     """Parse ``argv`` and run its subcommand; the exit status."""
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if getattr(args, 'formula_model', None) is not None and args.formulas is None:
+        parser.error('--formula-model names the model --formulas reads with: add --formulas latex')
     return _RUN[args.command](args)
 
 

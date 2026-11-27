@@ -31,7 +31,7 @@ consumer's vocabulary here -- schemas live in consumers. Modules and usage: `REA
   giving the runner's interpreter Tk, `linux`'s also starting Xvfb and openbox: `[tool.dev_lab.parts] hosted`). `gpu` (marker-pdf), `vendor` (`DOCUMENT_LAB_VENDOR_PDF=<pdf>`), `papers`
   (`DOCUMENT_LAB_PAPERS=<dir>`), `reference` (`DOCUMENT_LAB_REFERENCE_PDFS=<pdfs or dirs>`: the reader accepted
   against PyMuPDF, the previous implementation, within declared tolerances), `ocr` (Tesseract) and `formula` (the
-  `formula` extra and TexTeller's weights) are declared resource parts, unproduced on hosted runners: base never
+  `formula` extra and its models' weights) are declared resource parts, unproduced on hosted runners: base never
   selects them, and they FAIL where their resource is missing, never skip. `corpus` (`tests/corpus`) is produced on
   hosted runners: only CC BY 4.0 or US public-domain PDFs, fetched from their immutable public URLs, pinned by
   sha256, never committed (`tests/corpus/sources.py`).

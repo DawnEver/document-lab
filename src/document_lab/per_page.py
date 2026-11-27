@@ -238,13 +238,16 @@ def _placed(name: str, page: Page, found: list[Region], latex: dict[int, str]) -
     return out
 
 
-def write_pages(pdf: Path, out: Path, *, formulas: formula.Formulas | None = None) -> Paged:
+def write_pages(
+    pdf: Path, out: Path, *, formulas: formula.Formulas | None = None, formula_model: formula.Model = 'texteller'
+) -> Paged:
     """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive.
 
-    ``formulas``: ``latex`` writes each equation's LaTeX after its link (`document_lab.formula`); refused by
-    :class:`document_lab.formula.FormulaUnavailable` before anything is written when its model cannot run.
+    ``formulas``: ``latex`` writes each equation's LaTeX after its link, read by ``formula_model``
+    (`document_lab.formula`); refused by :class:`document_lab.formula.FormulaUnavailable` before anything is written
+    when that model cannot run.
     """
-    transcribe = None if formulas is None else formula.transcriber(formulas)
+    transcribe = None if formulas is None else formula.transcriber(formulas, model=formula_model)
     read = read_pdf(pdf)
     body = layout.body_size(read)
     width = max(3, len(str(len(read.pages))))

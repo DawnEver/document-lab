@@ -90,6 +90,16 @@ def test_a_bold_span_says_so(tmp_path):
     assert spans == {'Strong': True, 'plain': False}
 
 
+def test_a_span_says_which_way_its_baseline_runs(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), 'across', fontname='helv', fontsize=10)
+    page.insert_text((30, 400), 'up the margin', fontname='helv', fontsize=10, rotate=90)
+    doc.save(tmp_path / 'd.pdf')
+    directions = {s.text: tuple(round(c, 6) for c in s.direction) for s in read_pdf(tmp_path / 'd.pdf').spans()}
+    assert directions == {'across': (1, 0), 'up the margin': (0, -1)}  # page space: y grows down
+
+
 def test_a_span_says_its_render_mode(tmp_path):
     doc = pymupdf.open()
     page = doc.new_page()

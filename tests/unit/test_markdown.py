@@ -145,3 +145,189 @@ def test_a_table_row_led_by_a_year_heads_nothing(tmp_path):
     doc.save(tmp_path / 's.pdf')
     heads = [line for line in to_markdown(read_pdf(tmp_path / 's.pdf')).splitlines() if line[:1] == '#']
     assert heads == ['### 4.2 Duty types', '## 12 Tests']
+
+
+def _heads(md: str) -> list[str]:
+    return [line for line in md.splitlines() if line[:1] == '#']
+
+
+def test_a_bold_letter_in_a_data_sheets_table_heads_nothing(tmp_path):
+    """A ferrite handbook's tables head their columns with bold dimension letters (``A B``, ``C Dmin``) and a
+    material sheet letter-spaces its bold column heads (``U N I T``), all in the body size: none is an appendix
+    section, which is set larger than its body. A lettered clause (``A.1``) heads in the body size, as ``1.1`` does.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    _write(page, 57, 80, '1 Scope', font='tibo')
+    _write(page, 57, 100, 'The cores of this sheet are made of a ferrite material for power use.')
+    for x, label in ((57, 'A'), (90, 'B'), (123, 'C'), (156, 'Dmin'), (200, 'U'), (215, 'CORES')):
+        _write(page, x, 130, label, font='tibo')  # a table's head row, its cells a few ems apart
+    for i, letter in enumerate('UNIT'):
+        _write(page, 300 + 9 * i, 130, letter, font='tibo')
+    _write(page, 57, 150, '0.464 mm 71300 mm3 182 mm')
+    _write(page, 57, 180, 'A.1 Dimensions', font='tibo')
+    _write(page, 57, 200, 'The dimensions of the cores are given in the table above for each type.')
+    sheet = doc.new_page(width=595, height=842)
+    _write(sheet, 113, 190, 'C O N D I T I O N S', size=12, font='tibo')  # letter-spaced, larger: one span
+    _write(sheet, 113, 210, '25 C; 10 kHz; 0.25 mT')
+    doc.save(tmp_path / 's.pdf')
+    assert _heads(to_markdown(read_pdf(tmp_path / 's.pdf'))) == ['## 1 Scope', '### A.1 Dimensions']
+
+
+def test_a_stamp_set_sideways_in_the_margin_is_neither_title_nor_text(tmp_path):
+    """arXiv 2204.08094: the margin's sideways stamp, the largest text on page 1, was the title and joined the
+    abstract's line beside it. Text turned sideways outside the page's text frame is furniture; text turned sideways
+    inside it (a figure's axis label) stays.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    _write(page, 70, 70, 'A Title Set Larger Than Its Body', size=14)
+    for i in range(10):
+        _write(page, 55, 200 + 12 * i, f'the abstract runs on over line {i} of its column and', size=10)
+    for i in range(3):
+        _write(page, 55, 600 + 12 * i, f'the text after the figure runs on over line {i} and', size=10)
+    page.insert_text((40, 520), 'arXiv:0000.00000v1 [cs.XX] 1 Jan 2000', fontname='tiro', fontsize=20, rotate=90)
+    page.insert_text((150, 540), 'Amplitude', fontname='tiro', fontsize=8, rotate=90)  # inside the frame
+    doc.save(tmp_path / 's.pdf')
+    md = to_markdown(read_pdf(tmp_path / 's.pdf'))
+    assert _heads(md) == ['# A Title Set Larger Than Its Body']
+    assert 'arXiv' not in md
+    assert 'line 4 of its column and the abstract runs on over line 5' in md
+    assert 'Amplitude' in md
+
+
+def test_only_the_largest_text_of_page_one_is_a_title_below_the_title_scale(tmp_path):
+    doc = pymupdf.open()
+    first = doc.new_page(width=595, height=842)
+    _write(first, 70, 70, 'A Title Set Larger Than Its Body', size=14)
+    _write(first, 70, 100, 'A Subtitle Set Smaller Than The Title', size=12)
+    _write(first, 70, 140, 'The body text of the first page runs on here.', size=10)
+    later = doc.new_page(width=595, height=842)
+    _write(later, 70, 70, 'A Large Line On A Later Page', size=14)
+    _write(later, 70, 100, 'The body text of the later page runs on here.', size=10)
+    doc.save(tmp_path / 's.pdf')
+    assert _heads(to_markdown(read_pdf(tmp_path / 's.pdf'))) == ['# A Title Set Larger Than Its Body']
+
+
+def test_a_bold_number_set_apart_from_its_title_heads_with_it(tmp_path):
+    """arXiv 2608.20674 sets a section's number and its name an em apart, in bold larger than the body; an appendix
+    section is lettered so. A back-matter word heads in title case too, and in title size it is a section, no title.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    _write(page, 150, 60, 'A Preprint Title', size=17)
+    _write(page, 72, 90, 'Hitoshi KOSHIBA', font='tibo')  # a bold author: no number, no heading
+    _write(page, 72, 120, '1', size=12, font='tibo')
+    _write(page, 92, 120, 'Introduction', size=12, font='tibo')  # 1.2 em after its number
+    _write(page, 72, 140, 'The body of the introduction is set in the body size here.')
+    _write(page, 72, 170, '1.1 Premises and Hypotheses', font='tibo')
+    _write(page, 72, 190, 'The body of the subsection is set in the body size here.')
+    _write(page, 72, 210, '1')  # not bold: a list's number set apart stays text
+    _write(page, 92, 210, 'The motor shall be rated for its duty')
+    _write(page, 72, 240, 'References', size=12, font='tibo')
+    _write(page, 72, 260, '[1] A. Author. A paper on the subject. 2025.')
+    appendix = doc.new_page(width=612, height=792)
+    _write(appendix, 72, 80, 'Appendix', size=17, font='tibo')
+    _write(appendix, 72, 110, 'A', size=12, font='tibo')
+    _write(appendix, 93, 110, 'Sentence-Level Estimation', size=12, font='tibo')
+    _write(appendix, 72, 130, 'The body of the appendix is set in the body size here.')
+    _write(appendix, 72, 160, 'Fiscal Year', font='tibo')  # a table's bold head heads nothing
+    _write(appendix, 200, 160, 'Total', font='tibo')
+    doc.save(tmp_path / 's.pdf')
+    md = to_markdown(read_pdf(tmp_path / 's.pdf'))
+    assert _heads(md) == [
+        '# A Preprint Title',
+        '## 1 Introduction',
+        '### 1.1 Premises and Hypotheses',
+        '## References',
+        '# Appendix',
+        '## A Sentence-Level Estimation',
+    ]
+    assert 'The motor shall be rated for its duty' in md  # text, under no heading of its own
+
+
+def test_an_unweighted_paper_heads_its_capitalized_sections_and_no_footnote(tmp_path):
+    """arXiv 2204.08094 as this reader weighs it: no span bold, sections numbered in capitals, a footnote numbered
+    in a smaller size. A heading is never set smaller than the body.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    _write(page, 70, 70, 'A TITLE SET LARGER THAN ITS BODY', size=14)
+    _write(page, 120, 120, '1. INTRODUCTION')
+    _write(page, 55, 140, 'The body of the introduction is set in the body size here.')
+    _write(page, 55, 170, '2.1 Baseline Model')
+    _write(page, 55, 190, 'The body of the subsection is set in the body size here.')
+    _write(page, 55, 220, 'Acknowledgments')
+    _write(page, 55, 240, 'The body of the acknowledgments is set in the body size here.')
+    _write(page, 55, 700, '3 All code is available at https://example.org/code', size=8)
+    doc.save(tmp_path / 's.pdf')
+    md = to_markdown(read_pdf(tmp_path / 's.pdf'))
+    assert _heads(md) == [
+        '# A TITLE SET LARGER THAN ITS BODY',
+        '## 1. INTRODUCTION',
+        '### 2.1 Baseline Model',
+        '## Acknowledgments',
+    ]
+
+
+def test_a_capital_section_heads_in_small_capitals_below_the_floor_and_a_small_label_does_not(tmp_path):
+    """IEEE 10583296 sets 'IV. MATCH OF ...' at 0.815x the body, W4309593298 'REFERENCES' at 0.8x: small capitals.
+    A bold title-case 'References' as small, a table's label (W3213764655), stays under the floor.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    _write(page, 72, 80, 'IV. MATCH OF INTERPOLATION AND CALCULATION METHODS', size=8.15)
+    _write(page, 72, 100, 'The body of the section is set in the body size here and runs on.')
+    _write(page, 72, 130, 'References', size=8, font='tibo')
+    _write(page, 72, 150, 'The body after the label is set in the body size here and runs on.')
+    _write(page, 72, 180, 'REFERENCES', size=8)
+    _write(page, 72, 200, '[1] A. Author. A paper on the subject. 2025.')
+    doc.save(tmp_path / 's.pdf')
+    assert _heads(to_markdown(read_pdf(tmp_path / 's.pdf'))) == [
+        '## IV. MATCH OF INTERPOLATION AND CALCULATION METHODS',
+        '## REFERENCES',
+    ]
+
+
+def test_a_cover_sheet_set_large_throughout_has_no_title_and_a_url_is_never_one(tmp_path):
+    """W3213764655's repository cover sheet sets its eight lines at 12 pt over 10 pt text: no line of it is set apart
+    as a title is. The paper's own title follows on page 2.
+    """
+    doc = pymupdf.open()
+    cover = doc.new_page(width=595, height=842)
+    for i, text in enumerate(
+        (
+            'Deposited via The University of Sheffield.',
+            'White Rose Research Online URL for this paper:',
+            'https://eprints.example.org/id/eprint/180427/',
+            'Version: Published Version',
+            'Article:',
+            'Zhu, Z., Wang, S. et al. (2021) Advances in dual-three-phase machines.',
+            'Energies, 14 (22). 7508.',
+            'https://doi.org/10.3390/en14227508',
+        )
+    ):
+        _write(cover, 57, 120 + 14 * i, text, size=12)
+    for i in range(6):
+        _write(cover, 57, 600 + 12 * i, f'This article is distributed under the terms of the license, line {i} of it.')
+    paper = doc.new_page(width=595, height=842)
+    _write(paper, 57, 80, 'Advances in Dual-Three-Phase Machines', size=18)
+    _write(paper, 57, 120, 'https://www.example.org/a-url-set-as-large-as-a-title', size=18)
+    for i in range(20):
+        _write(paper, 57, 160 + 12 * i, f'The body of the paper is set in the body size and runs on, line {i}.')
+    doc.save(tmp_path / 's.pdf')
+    assert _heads(to_markdown(read_pdf(tmp_path / 's.pdf'))) == ['# Advances in Dual-Three-Phase Machines']
+
+
+def test_back_matter_set_as_large_as_the_chapters_takes_their_level(tmp_path):
+    """Thesis W7220810123 sets ACKNOWLEDGMENTS and REFERENCES at its chapters' 20.66 pt: they are chapters too, not
+    sections of the chapter before.
+    """
+    doc = pymupdf.open()
+    for heading in ('ACKNOWLEDGMENTS', 'CHAPTER 1', 'REFERENCES'):
+        page = doc.new_page(width=612, height=792)
+        _write(page, 72, 100, heading, size=20.66)
+        for i in range(20):
+            _write(page, 72, 140 + 14 * i, f'The body is set in the body size and runs on here, line {i}.', size=12)
+    doc.save(tmp_path / 's.pdf')
+    assert _heads(to_markdown(read_pdf(tmp_path / 's.pdf'))) == ['# ACKNOWLEDGMENTS', '# CHAPTER 1', '# REFERENCES']

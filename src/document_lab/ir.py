@@ -107,6 +107,9 @@ class TextSpan:
     #: text reads top to bottom, its box is the column's. Text turned sideways is not this: it is written
     #: horizontally along a turned baseline.
     vertical: bool = False
+    #: The unit vector its baseline runs along, in page space (y down): ``(1, 0)`` for text set left to right,
+    #: ``(0, -1)`` for text set bottom to top (a margin stamp turned sideways).
+    direction: tuple[float, float] = (1.0, 0.0)
 
     @property
     def center(self) -> tuple[float, float]:

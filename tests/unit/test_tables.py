@@ -22,6 +22,7 @@ from tests.synthetic import (
     double_border,
     draw_plot,
     draw_ruled_table,
+    draw_sideways_table,
     draw_table,
     mixed_pdf,
     scan_image,
@@ -399,3 +400,28 @@ def test_a_stroke_a_picture_rule_runs_through_is_that_rule_read_as_text_but_a_da
         rulings=_picture_grid(2),
     )
     assert kept.rows[0][:2] != ('a', '-')  # a letter on a rule is no rule read as text: a planted control
+
+
+def _sideways_differences(table, turn):
+    """How ``table`` differs from :func:`draw_sideways_table`'s drawn ``turn`` degrees: rows, then each cell's box."""
+    out = [] if table.rows == TABLE_ROWS else [f'rows {table.rows}']
+    for r, row in enumerate(TABLE_ROWS):
+        for c in range(len(row)):
+            drawn, box = table_cell_rect(r, c), table.cell_bboxes[r][c]
+            x, y = turned((drawn.x0 + drawn.x1) / 2, (drawn.y0 + drawn.y1) / 2, turn)
+            seen = ((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2, box.width, box.height)
+            if seen != pytest.approx((x, y, drawn.height, drawn.width), abs=0.5):
+                out.append(f'cell ({r}, {c}) at {seen}')
+    return out
+
+
+@pytest.mark.parametrize('turn', [-90, 90], ids=['read bottom to top', 'read top to bottom'])
+def test_a_table_printed_sideways_reads_in_the_frame_its_text_stands_upright_in(tmp_path, turn):
+    def head(page):
+        page.insert_text((72, 60), 'An upright running head', fontsize=10)
+
+    (table,) = tables(_page(tmp_path, head, lambda page: draw_sideways_table(page, turn=turn)))
+    assert _sideways_differences(table, turn) == []
+    assert _sideways_differences(table, -turn)  # a planted wrong truth: turned the other way
+    mirrored = dataclasses.replace(table, rows=tuple(row[::-1] for row in table.rows))
+    assert _sideways_differences(mirrored, turn)  # ... and its cells read in another order

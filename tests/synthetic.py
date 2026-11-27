@@ -646,3 +646,19 @@ def table_differences(
         if table.rows[r][c] != row[c]
     ]
     return structure, text
+
+
+def draw_sideways_table(page: pymupdf.Page, rows: Sequence[Sequence[str]] = TABLE_ROWS, turn: int = -90) -> None:
+    """:func:`draw_ruled_table`'s grid turned ``turn`` degrees clockwise about :data:`SCAN_PAGE`'s center, its text
+    with it: a landscape table printed sideways on a portrait page (-90: read bottom to top, as standards set them)."""
+    n_rows, n_cols = len(rows), len(rows[0])
+    outline = table_cell_rect(0, 0) | table_cell_rect(n_rows - 1, n_cols - 1)
+    for y in [outline.y0 + TABLE_CELL[1] * r for r in range(n_rows + 1)]:
+        page.draw_line(turned(outline.x0, y, turn), turned(outline.x1, y, turn), color=(0, 0, 0), width=0.5)
+    for x in [outline.x0 + TABLE_CELL[0] * c for c in range(n_cols + 1)]:
+        page.draw_line(turned(x, outline.y0, turn), turned(x, outline.y1, turn), color=(0, 0, 0), width=0.5)
+    for r, row in enumerate(rows):
+        for c, text in enumerate(row):
+            rect = table_cell_rect(r, c)
+            at = turned(rect.x0 + 4, rect.y1 - 6, turn)
+            page.insert_text(at, text, fontname='helv', fontsize=9, rotate=-turn % 360)

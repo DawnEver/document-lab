@@ -22,6 +22,11 @@ turns back: its words and paths are turned with the rules, and each box found is
 it. OCR's own reading of the picture is weighed too: a rule lying within one word's box is that word's ink, and a
 word reading only strokes that a rule runs through is the rule read as text.
 
+A table printed sideways -- a landscape table on a portrait page -- is read in the frame its text stands upright in:
+a grid whose text runs mostly (by characters) along one baseline direction other than left to right is assembled with
+the page turned a quarter (or half) turn to set that direction level, so its rows read as its rows, and each box
+found is turned back to where the page shows it.
+
 A table set without rules -- columns parted by white space alone -- is no grid here, scanned or not.
 """
 
@@ -109,10 +114,19 @@ def grids(page: Page, *, rulings: Rulings | None = None, tolerance: float = TOLE
         else:
             upright.append(((box.x0 + box.x1) / 2, box.y0, box.y1))
     found: list[Table | NotATable] = []
+    frames: dict[int, tuple[Page, list[VectorPath]]] = {0: (seen, drawings)}
     for touching_h, touching_v in _connected(_merge(level, tolerance), _merge(upright, tolerance), tolerance):
         h, v = _snap(touching_h, tolerance), _snap(touching_v, tolerance)
         if len({s[0] for s in h}) > 1 and len({s[0] for s in v}) > 1:
-            found.append(_grid(seen, h, v, drawings, tolerance))
+            box = BBox(min(s[1] for s in h), min(s[1] for s in v), max(s[2] for s in h), max(s[2] for s in v))
+            turn = _upright_turn(seen, box)
+            if turn not in frames:
+                turned = _quartered_page(seen, turn)
+                frames[turn] = (turned, _rules(turned.paths)[2])
+            framed, framed_drawings = frames[turn]
+            h, v = _quartered_rules(h, v, turn, seen)
+            grid = _grid(framed, h, v, framed_drawings, tolerance)
+            found.append(_quartered_grid(grid, -turn, seen) if turn else grid)
     found.sort(key=lambda g: (_bbox(g).y0, _bbox(g).x0))
     numbered: list[Table | NotATable] = []
     for grid in found:
@@ -121,6 +135,94 @@ def grids(page: Page, *, rulings: Rulings | None = None, tolerance: float = TOLE
             grid = Table(grid.rows, grid.cell_bboxes, grid.provenance.at(locator=f'table[{index}]'))  # noqa: PLW2901
         numbered.append(_turned_grid(grid, skew, page) if skew else grid)
     return tuple(numbered)
+
+
+def _upright_turn(page: Page, box: BBox) -> int:
+    """The quarter turns, in degrees clockwise, that set level the baseline most of the text in ``box`` runs along.
+
+    Most: more than half its characters run along one direction (each span's, to the nearest quarter turn); else 0.
+    """
+    counts: dict[int, int] = defaultdict(int)
+    for span in page.spans:
+        x, y = span.center
+        if span.text.strip() and box.x0 <= x <= box.x1 and box.y0 <= y <= box.y1:
+            dx, dy = span.direction
+            counts[round(math.degrees(math.atan2(dy, dx)) / 90) % 4 * 90] += len(span.text.strip())
+    if not counts:
+        return 0
+    angle, most = max(counts.items(), key=lambda item: item[1])
+    return (360 - angle) % 360 if most * 2 > sum(counts.values()) else 0
+
+
+def _quarter(x: float, y: float, turn: int, page: Page) -> tuple[float, float]:
+    """The point turned ``turn`` degrees clockwise (a multiple of 90) about the page's center, exactly."""
+    cx, cy = page.width / 2, page.height / 2
+    dx, dy = x - cx, y - cy
+    return {0: (x, y), 90: (cx - dy, cy + dx), 180: (cx - dx, cy - dy), 270: (cx + dy, cy - dx)}[turn % 360]
+
+
+def _quartered_box(box: BBox, turn: int, page: Page) -> BBox:
+    """``box`` turned ``turn`` degrees clockwise (a multiple of 90) about the page's center."""
+    (ax, ay), (bx, by) = _quarter(box.x0, box.y0, turn, page), _quarter(box.x1, box.y1, turn, page)
+    return BBox(min(ax, bx), min(ay, by), max(ax, bx), max(ay, by))
+
+
+def _quartered_page(page: Page, turn: int) -> Page:
+    """``page`` with its spans (boxes and baselines) and paths turned ``turn`` degrees clockwise about its center."""
+    sin, cos = {0: (0, 1), 90: (1, 0), 180: (0, -1), 270: (-1, 0)}[turn]
+    spans = tuple(
+        dataclasses.replace(
+            s,
+            provenance=s.provenance.at(bbox=_quartered_box(s.provenance.bbox, turn, page)),
+            direction=(s.direction[0] * cos - s.direction[1] * sin, s.direction[0] * sin + s.direction[1] * cos),
+        )
+        for s in page.spans
+        if s.provenance.bbox is not None
+    )
+    paths = tuple(
+        dataclasses.replace(
+            p,
+            points=tuple(_quarter(float(x), float(y), turn, page) for x, y in p.points),
+            provenance=p.provenance.at(bbox=_quartered_box(p.provenance.bbox, turn, page)),
+        )
+        if p.provenance.bbox is not None
+        else p
+        for p in page.paths
+    )
+    return dataclasses.replace(page, spans=spans, paths=paths)
+
+
+def _quartered_rules(
+    h: list[_Segment], v: list[_Segment], turn: int, page: Page
+) -> tuple[list[_Segment], list[_Segment]]:
+    """A grid's level and upright rules turned ``turn`` degrees clockwise about the page's center.
+
+    Level and upright still: a quarter turn trades one for the other.
+    """
+    if not turn:
+        return h, v
+    boxes = [BBox(lo, at, hi, at) for at, lo, hi in h] + [BBox(at, lo, at, hi) for at, lo, hi in v]
+    level, upright = [], []
+    for box in (_quartered_box(b, turn, page) for b in boxes):
+        if box.height == 0:
+            level.append((box.y0, box.x0, box.x1))
+        else:
+            upright.append((box.x0, box.y0, box.y1))
+    return level, upright
+
+
+def _quartered_grid(grid: Table | NotATable, turn: int, page: Page) -> Table | NotATable:
+    """``grid``'s boxes turned ``turn`` degrees clockwise about the page's center: from its text's frame to the page."""
+    if isinstance(grid, NotATable):
+        return NotATable(_quartered_box(grid.bbox, turn, page), grid.reason)
+    cells = None
+    if grid.cell_bboxes is not None:
+        cells = tuple(
+            tuple(None if b is None else _quartered_box(b, turn, page) for b in row) for row in grid.cell_bboxes
+        )
+    box = grid.provenance.bbox
+    here = grid.provenance.at(bbox=None if box is None else _quartered_box(box, turn, page))
+    return Table(grid.rows, cells, here)
 
 
 def _reads_as_rule(span: TextSpan, rules: list[BBox]) -> bool:

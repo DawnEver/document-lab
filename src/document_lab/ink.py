@@ -17,6 +17,11 @@ skew from them (:class:`Rulings`): a sheet fed askew is never turned pixel by pi
 back instead, and the table turns its words with them. Here pixels end; from the boxes on, a scan's table is
 assembled exactly as a vector page's is. Every threshold is an option of :func:`rulings`, its default measured on
 synthetic scans (``tests/unit/test_tables.py``, the ``ocr`` part) and on scanned standards.
+
+A page's skew is told by its lines -- of text and rules alike -- as a whole: :func:`skew` finds the angle along which
+its ink lines up sharpest (`document_lab.ocr` turns the picture it hands Tesseract back by it), or says no angle
+does (a blank page, a photograph), never a guessed 0. :func:`rulings` alone cannot tell it on a page of prose: a
+line of words, read along a row, runs on like a rule.
 """
 
 from __future__ import annotations
@@ -47,6 +52,7 @@ __all__ = [
     'Rulings',
     'drawings',
     'rulings',
+    'skew',
 ]
 
 #: A pixel darker than this grey level (0 black .. 255 white) is ink.
@@ -486,3 +492,53 @@ def _grouped(
     for i, piece in enumerate(straight):
         rules[root(i)].append(piece)
     return list(rules.values())
+
+
+#: Degrees either way a page's skew is looked for among its text lines.
+SKEW_RANGE: Final = 10.0
+#: Degrees between the angles tried first; the best is refined to a tenth of this.
+SKEW_STEP: Final = 0.2
+#: Text lines tell a skew only when their ink, projected across the best angle, is this much sharper than across the
+#: median angle tried (squared profile, less one): noise, a photograph or a page of a few words tell none.
+LINES_CONTRAST: Final = 0.25
+#: Dark pixels a projection weighs at most: a page's ink is sampled evenly down to this many.
+_PROJECTED: Final = 400_000
+
+
+def skew(
+    pixels: np.ndarray,
+    *,
+    dark: int = DARK,
+    search: float = SKEW_RANGE,
+    step: float = SKEW_STEP,
+    contrast: float = LINES_CONTRAST,
+) -> float | None:
+    """The degrees the picture ``pixels`` (rows top-down, grey, RGB or RGBA) stands turned, clockwise as seen.
+
+    Its dark pixels (below ``dark``) are projected along every angle within ``search`` degrees, ``step`` apart, then a
+    tenth of that round the best -- along rows for level lines, along columns for lines set sideways, both at once --
+    and the angle whose projections are sharpest is the skew. None when it is not ``contrast`` sharper than the
+    median angle's: no lines tell it.
+    """
+    grey = pixels if pixels.ndim == 2 else pixels[..., :3].mean(axis=2)  # noqa: PLR2004 -- rows by columns
+    ys, xs = np.nonzero(grey < dark)
+    if not ys.size:
+        return None
+    every = -(-ys.size // _PROJECTED)
+    ys, xs = ys[::every].astype(np.float64), xs[::every].astype(np.float64)
+
+    def sharpness(degrees: float) -> float:
+        slope = math.tan(math.radians(degrees))
+        total = 0.0
+        for along in (ys - xs * slope, xs + ys * slope):  # a level line's rows; an upright line's columns
+            counts = np.bincount(np.round(along - along.min()).astype(np.int64))
+            total += float(np.dot(counts, counts))
+        return total
+
+    coarse = np.arange(-search, search + step / 2, step)
+    scores = [sharpness(a) for a in coarse]
+    best = int(np.argmax(scores))
+    if scores[best] < (1 + contrast) * float(np.median(scores)):
+        return None
+    fine = np.linspace(coarse[best] - step, coarse[best] + step, 21)
+    return round(float(max(fine, key=sharpness)), 3)

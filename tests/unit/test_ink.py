@@ -3,8 +3,9 @@
 import numpy as np
 import pytest
 
-from document_lab.ink import Rulings, drawings, rulings
+from document_lab.ink import Rulings, drawings, rulings, skew
 from document_lab.ir import BBox
+from tests.synthetic import draw_ruled_table, scan_image
 
 
 def _page(h=200, w=300):
@@ -175,3 +176,36 @@ def test_rgb_and_grey_pictures_read_the_same():
     px = _sheet()
     _grid(px, 1.0)
     assert rulings(np.repeat(px[..., None], 3, axis=2), _SCALE) == rulings(px, _SCALE)
+
+
+# Skew: the angle a picture's lines -- of text and rules alike -- stand turned, from synthetic scans of known angle.
+
+
+def _prose(page):
+    for i in range(14):
+        page.insert_text(
+            (72, 90 + 18 * i), 'The rated output of a machine is the value included in its rating', fontsize=10
+        )
+
+
+def _sideways(page):
+    for i in range(10):
+        page.insert_text((300 + 16 * i, 700), 'The rated output of a machine is its rating', fontsize=10, rotate=90)
+
+
+@pytest.mark.parametrize('degrees', [0.0, 1.0, 3.0, -5.0, 8.0])
+@pytest.mark.parametrize(
+    'draws', [(_prose,), (_prose, draw_ruled_table), (_sideways,)], ids=['prose', 'ruled', 'sideways']
+)
+def test_a_pictures_skew_is_told_by_its_lines_of_text_and_rules_level_or_sideways(draws, degrees):
+    found = skew(scan_image(*draws, dpi=100, angle=degrees, noise=0.5, seed=4))
+    assert found == pytest.approx(degrees, abs=0.15)  # a pixel across a short line's length at 100 dpi
+    assert degrees == 0 or abs(found + degrees) > 1  # a planted wrong truth: the skew the other way
+
+
+def test_no_lines_tell_no_skew_and_the_search_is_an_option():
+    assert skew(np.full((300, 400), 255, dtype=np.uint8)) is None  # blank
+    assert skew(np.random.default_rng(0).integers(0, 256, (300, 400), dtype=np.uint8)) is None  # noise
+    steep = scan_image(_prose, dpi=100, angle=12.0)
+    assert skew(steep) != pytest.approx(12.0, abs=0.5)  # beyond the search
+    assert skew(steep, search=15.0) == pytest.approx(12.0, abs=0.05)

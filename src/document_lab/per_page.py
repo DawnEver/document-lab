@@ -12,8 +12,15 @@ drawings by `document_lab.ink`, less those half the pages repeat: a logo, a runn
 picture as ``page-NNN-<kind>-<label>.png`` and linked in the markdown after the paragraph holding its caption or
 number -- where OCR'd text cannot be trusted (a formula, a table's numbers), the picture beside it can. A region
 reaching the page's foot is marked as continuing on the next page. ``INDEX.md`` lists the pages with the clause
-headings each opens and the regions it holds. A page without text is written all the same, its markdown empty, and
-named in :attr:`Paged.textless` -- never silently dropped.
+headings each opens and the regions it holds.
+
+Each ruled table on a page (`document_lab.tables`) is written as a pipe table (`document_lab.markdown.table_markdown`)
+in place of its words in the running text: after its region's picture when a region holds it, else at the page's
+end. A page one image covers -- a scan -- has its rules in its pixels: `document_lab.ink.rulings` finds them there
+and its text layer (its own invisible OCR text, or ours) fills the cells, so a scanned table reads like a text one;
+one set sideways reads in its text's frame. A page without text is written all the same and named in
+:attr:`Paged.textless` -- never silently dropped; a scan without a text layer says so in its markdown, and that
+`document-lab ocr` lays one (:attr:`Paged.unread`).
 
 The PDF itself goes with them, so the layout stands alone. ``out`` is a directory, or -- ending ``.zip`` -- one
 archive holding the same files (written beside as ``<out>.part`` and moved into place when whole): a document is
@@ -22,6 +29,7 @@ one file to keep, send or index.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import zipfile
 from contextlib import contextmanager
@@ -31,17 +39,18 @@ from typing import TYPE_CHECKING, Final
 import numpy as np
 
 from document_lab import layout, png
-from document_lab.ink import Drawing, drawings
-from document_lab.ir import BBox
-from document_lab.markdown import page_markdowns
+from document_lab.ink import Drawing, drawings, rulings
+from document_lab.ir import BBox, Document
+from document_lab.markdown import page_markdowns, table_markdown
 from document_lab.pdf import read_pdf, read_raster
 from document_lab.regions import Region, regions
+from document_lab.tables import tables
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from pathlib import Path
 
-    from document_lab.ir import Page
+    from document_lab.ir import Page, Table
 
 __all__ = ['RENDER_DPI', 'Paged', 'write_pages']
 
@@ -54,21 +63,51 @@ DRAWING_REACH: Final = 0.5
 FURNITURE_SHARE: Final = 0.5
 
 
+#: What the markdown of a scan without a text layer says in place of its text.
+UNREAD: Final = (
+    '*This page is a picture without a text layer, so no text of it reads here: `document-lab ocr` lays one over it.*'
+)
+
+
 @dataclass(frozen=True)
 class Paged:
-    """What :func:`write_pages` wrote: ``pages`` pages to ``out``; ``textless`` the 1-based numbers without text."""
+    """What :func:`write_pages` wrote: ``pages`` pages to ``out``.
+
+    ``textless``: the 1-based numbers of the pages without text; ``unread``: those of them one image covers (a scan
+    or capture without a text layer: `document-lab ocr` lays one).
+    """
 
     out: Path
     pages: int
     textless: tuple[int, ...]
+    unread: tuple[int, ...]
+
+
+def _scanned(page: Page) -> bool:
+    """Whether one image covers the page: a scan, a capture."""
+    return len(page.figures) == 1 and _covers(page.figures[0].provenance.bbox, BBox(0, 0, page.width, page.height))
 
 
 def _picture(pdf: Path, page: Page) -> tuple[np.ndarray, float]:
     """The page as seen, RGB rows, and its pixels per point: a page one image covers at that image's resolution."""
     whole = BBox(0, 0, page.width, page.height)
-    covered = len(page.figures) == 1 and _covers(page.figures[0].provenance.bbox, whole)
-    pixels = read_raster(pdf, page.number, whole, dpi=None if covered else RENDER_DPI).pixels
+    pixels = read_raster(pdf, page.number, whole, dpi=None if _scanned(page) else RENDER_DPI).pixels
     return pixels, pixels.shape[1] / page.width
+
+
+def _tables(page: Page, pixels: np.ndarray, scale: float) -> tuple[Table, ...]:
+    """The page's ruled tables; a scan's from the rules in its pixels (`document_lab.ink.rulings`)."""
+    return tables(page, rulings=rulings(pixels, scale) if _scanned(page) else None)
+
+
+def _without_tables(page: Page, found: tuple[Table, ...]) -> Page:
+    """``page`` less the spans standing in its tables: their text is written as the tables."""
+    boxes = [t.provenance.bbox for t in found if t.provenance.bbox is not None]
+
+    def inside(x: float, y: float) -> bool:
+        return any(b.x0 <= x <= b.x1 and b.y0 <= y <= b.y1 for b in boxes)
+
+    return dataclasses.replace(page, spans=tuple(s for s in page.spans if not inside(*s.center)))
 
 
 def _covers(box: BBox | None, page: BBox) -> bool:
@@ -120,12 +159,12 @@ def _file(name: str, region: Region) -> str:
     return f'{name}-{region.kind}-{re.sub(r"[^A-Za-z0-9]+", "-", label).strip("-").lower()}.png'
 
 
-def _linked(text: str, links: list[tuple[str, str]]) -> str:
-    """``text`` with each ``(label, link)`` after the first paragraph holding the label, else at its end."""
+def _linked(text: str, links: list[tuple[str | None, str]]) -> str:
+    """``text`` with each ``(label, link)`` after the first paragraph holding the label, else (or None) at its end."""
     blocks = text.rstrip('\n').split('\n\n') if text.strip() else []
     tail: list[str] = []
     for label, link in links:
-        at = next((i for i, block in enumerate(blocks) if label in block), None)
+        at = None if label is None else next((i for i, block in enumerate(blocks) if label in block), None)
         if at is None:
             tail.append(link)
         else:
@@ -165,11 +204,17 @@ def write_pages(pdf: Path, out: Path) -> Paged:
     """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive."""
     read = read_pdf(pdf)
     body = layout.body_size(read)
-    texts = page_markdowns(read)
+    drawn, found = [], []
+    for page in read.pages:
+        pixels, scale = _picture(pdf, page)
+        drawn.append(_drawings(pixels, scale, page, body))
+        found.append(_tables(page, pixels, scale))
+    drawn = _without_furniture(drawn, body)
+    prose = Document(read.sha256, read.uri, tuple(map(_without_tables, read.pages, found)), read.repairs)
+    texts = page_markdowns(prose)
     width = max(3, len(str(len(texts))))
     index = [f'# {pdf.stem}', '']
-    textless = []
-    drawn = _without_furniture([_drawings(*_picture(pdf, page), page, body) for page in read.pages], body)
+    textless, unread = [], []
     with _files(out) as put:
         if out / pdf.name != pdf:  # the layout stands alone; a PDF already where it goes is not copied onto itself
             put(pdf.name, pdf.read_bytes())
@@ -177,16 +222,34 @@ def write_pages(pdf: Path, out: Path) -> Paged:
             name = f'page-{number:0{width}d}'
             pixels, scale = _picture(pdf, page)
             put(f'{name}.png', png.encode(pixels))
-            links = []
-            for region in (found := regions(page, body, drawn[number - 1])):
+            links: list[tuple[str | None, str]] = []
+            held = list(found[number - 1])
+            for region in (located := regions(page, body, drawn[number - 1])):
                 file = _file(name, region)
                 put(file, png.encode(_cut(pixels, scale, region)))
                 more = ' (continues on the next page)' if region.bbox.y1 >= page.height - _FOOT else ''
-                links.append((region.label, f'![{region.label}]({file}){more}'))
-            put(f'{name}.md', f'[{pdf.name}, page {number}]({name}.png)\n\n{_linked(text, links)}'.encode())
-            if not text.strip():
+                inside = [t for t in held if _holds(region.bbox, t)]
+                held = [t for t in held if t not in inside]
+                links.append(
+                    (region.label, '\n\n'.join([f'![{region.label}]({file}){more}', *map(table_markdown, inside)]))
+                )
+            links += [(None, table_markdown(t)) for t in held]
+            if not any(s.text.strip() for s in page.spans):
                 textless.append(number)
-            notes = [part for part in (_clauses(text), ', '.join(r.label for r in found)) if part]
+                if _scanned(page):
+                    unread.append(number)
+                    links.append((None, UNREAD))
+            put(f'{name}.md', f'[{pdf.name}, page {number}]({name}.png)\n\n{_linked(text, links)}'.encode())
+            notes = [part for part in (_clauses(text), ', '.join(r.label for r in located)) if part]
             index.append(f'- [page {number}]({name}.md)' + (f' -- {" | ".join(notes)}' if notes else ''))
         put('INDEX.md', ('\n'.join(index) + '\n').encode())
-    return Paged(out, len(texts), tuple(textless))
+    return Paged(out, len(texts), tuple(textless), tuple(unread))
+
+
+def _holds(box: BBox, table: Table) -> bool:
+    """Whether the region ``box`` holds ``table``'s center: its picture and its pipe table go together."""
+    held = table.provenance.bbox
+    if held is None:
+        return False
+    x, y = (held.x0 + held.x1) / 2, (held.y0 + held.y1) / 2
+    return box.x0 <= x <= box.x1 and box.y0 <= y <= box.y1

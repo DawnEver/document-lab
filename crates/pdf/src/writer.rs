@@ -8,7 +8,8 @@
 //! drawing, a text layer, its font's `/ToUnicode` -- it compresses (`FlateDecode`, zlib) at the [`Writer`]'s level. <!-- spelling-ignore-line: the PDF name -->
 //!
 //! A text layer ([`Writer::copy_page_with_text`]) shows each word in render mode 3 -- invisible -- stretched over
-//! the box it is seen in, so selecting and reading the page find it there. Its font draws nothing and embeds
+//! the box it is seen in, along the baseline it is seen on (a table set sideways, a scan fed askew), so selecting and
+//! reading the page find it there. Its font draws nothing and embeds
 //! nothing: a `Type0` font, `Identity-H`, whose every glyph is half an em wide (Tesseract's `GlyphLessFont`); each
 //! character met is given the next CID, and the font's `/ToUnicode` maps the CIDs back, so Latin, CJK and any other
 //! script are laid alike. One font serves the whole document, written when it is finished.
@@ -40,14 +41,18 @@ const BFCHAR_BLOCK: usize = 100;
 /// 6 leaves 24% and 25% for 1-2 ms more a page, and 9 or 10 save at most 2.3% more for 3 to 5 times 6's time.
 pub const LEVEL: u8 = 6;
 
-/// A word of a text layer: its text and the box it is seen in, in page space (points, y down, origin at the top
-/// left of the page as displayed).
+/// A word of a text layer: its text, its box and the angle its baseline runs at, in page space (points, y down,
+/// origin at the top left of the page as displayed).
 #[derive(Debug, Clone, Copy)]
 pub struct Word<'a> {
     /// The text.
     pub text: &'a str,
-    /// The box, in page space.
+    /// The box, in page space, as the word stands turned back level by `angle` about the box's center: as long as
+    /// the word along its baseline, as high as it across.
     pub bbox: Rect,
+    /// Degrees its baseline is turned from left to right, clockwise as seen: 0 level, -90 set bottom to top (a
+    /// table printed sideways), a few degrees on a scan fed askew.
+    pub angle: f64,
 }
 
 /// The text layers' font: its object number, reserved when first used, and each character's CID (its place + 1).
@@ -197,11 +202,11 @@ impl<W: Write> Writer<W> {
         for word in words {
             let Rect { x0, y0, x1, y1 } = word.bbox;
             if word.text.is_empty()
-                || !([x0, y0, x1, y1].iter().all(|v| v.is_finite()) && x1 > x0 && y1 > y0)
+                || !([x0, y0, x1, y1, word.angle].iter().all(|v| v.is_finite()) && x1 > x0 && y1 > y0)
             {
                 return Err(Error::invalid(format!(
-                    "a word of a text layer has text and a box of positive size, not {:?} at [{x0} {y0} {x1} {y1}]",
-                    word.text
+                    "a word of a text layer has text, a box of positive size and a finite angle, not {:?} at                      [{x0} {y0} {x1} {y1}] turned {}",
+                    word.text, word.angle
                 )));
             }
         }
@@ -310,8 +315,21 @@ impl<W: Write> Writer<W> {
             #[expect(clippy::cast_precision_loss, reason = "a word's length is small")]
             let advance = cids.len() as f64 * ADVANCE / 1000.0;
             let Rect { x0, y0, x1, y1 } = word.bbox;
-            // Text space, font size 1, onto the box: the baseline along its bottom, an em its height.
-            let Matrix(m) = Matrix([(x1 - x0) / advance, 0.0, 0.0, y0 - y1, x0, y1]).then(to_user);
+            // Text space, font size 1, onto the box: the baseline along its bottom, an em its height; then the box
+            // turned by the word's angle about its center.
+            let (sin, cos) = word.angle.to_radians().sin_cos();
+            let (cx, cy) = (f64::midpoint(x0, x1), f64::midpoint(y0, y1));
+            let turned = Matrix([
+                cos,
+                sin,
+                -sin,
+                cos,
+                sin.mul_add(cy, cos.mul_add(-cx, cx)),
+                cos.mul_add(-cy, sin.mul_add(-cx, cy)),
+            ]);
+            let Matrix(m) = Matrix([(x1 - x0) / advance, 0.0, 0.0, y0 - y1, x0, y1])
+                .then(turned)
+                .then(to_user);
             let m: Vec<String> = m.iter().map(|&v| real(v)).collect();
             let _ = write!(shows, "{} Tm <", m.join(" "));
             for cid in cids {

@@ -3,7 +3,8 @@
 import pymupdf
 import pytest
 
-from document_lab.markdown import page_markdowns, to_markdown
+from document_lab.ir import BBox, Provenance, Table
+from document_lab.markdown import page_markdowns, table_markdown, to_markdown
 from document_lab.pdf import read_pdf
 
 LEFT, RIGHT, WIDTH = 50, 320, 240
@@ -145,3 +146,19 @@ def test_a_table_row_led_by_a_year_heads_nothing(tmp_path):
     doc.save(tmp_path / 's.pdf')
     heads = [line for line in to_markdown(read_pdf(tmp_path / 's.pdf')).splitlines() if line[:1] == '#']
     assert heads == ['### 4.2 Duty types', '## 12 Tests']
+
+
+def test_a_table_is_a_pipe_table_its_merged_cells_written_once_and_its_bars_escaped():
+    box = BBox(0, 0, 10, 10)
+    here = Provenance('0' * 64, 'file:///t.pdf', page=1)
+    rows = (('Parameter', 'Limits', 'Limits'), ('Parameter', 'min', 'max'), ('a|b', '1', '2'))
+    merged, wide = BBox(0, 0, 10, 20), BBox(10, 0, 30, 10)
+    boxes = (
+        (merged, wide, wide),
+        (merged, BBox(10, 10, 20, 20), BBox(20, 10, 30, 20)),
+        (BBox(0, 20, 10, 30), BBox(10, 20, 20, 30), BBox(20, 20, 30, 30)),
+    )
+    assert table_markdown(Table(rows, boxes, here.at(bbox=box))) == (
+        '| Parameter | Limits |  |\n| --- | --- | --- |\n|  | min | max |\n| a\\|b | 1 | 2 |\n'
+    )
+    assert table_markdown(Table(rows, None, here)).count('Limits') == 2  # without boxes no merge is known

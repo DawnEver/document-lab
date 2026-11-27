@@ -12,6 +12,8 @@ Lines and their reading order are `document_lab.layout`'s.
   page (:data:`TOC_LINES` such entries): it names the sections, it does not open them.
 - Paragraphs: lines of one column closer than :data:`PARAGRAPH_GAP` line heights join with a space (a hyphen at a
   line end joins the word); a larger gap, a heading or a column change starts a new paragraph.
+- Tables (:func:`table_markdown`): a `document_lab.ir.Table` as a pipe table, its first row the header; a merged
+  cell's text stands once, in its first slot, its other slots left empty.
 """
 
 from __future__ import annotations
@@ -22,9 +24,9 @@ from typing import TYPE_CHECKING, Final
 from document_lab import layout
 
 if TYPE_CHECKING:
-    from document_lab.ir import Document, Page
+    from document_lab.ir import Document, Page, Table
 
-__all__ = ['page_markdowns', 'to_markdown']
+__all__ = ['page_markdowns', 'table_markdown', 'to_markdown']
 
 #: A gap between lines larger than this many line heights starts a paragraph.
 PARAGRAPH_GAP: Final = 0.6
@@ -59,6 +61,26 @@ def page_markdowns(doc: Document) -> list[str]:
     Body size and title are judged over the whole document; nothing is joined across a page break: a page stands alone.
     """
     return ['\n\n'.join(_rejoin(page)) + '\n' if page else '' for page in _blocks(doc)]
+
+
+def table_markdown(table: Table) -> str:
+    """``table`` as a markdown pipe table, its first row the header.
+
+    A cell merged over several slots (``table.cell_bboxes`` repeats its box) is written once, in its first slot -- the
+    leftmost of its top row -- and its other slots left empty, as a reader sees a merged cell; a ``|`` in a cell is
+    escaped.
+    """
+    boxes = table.cell_bboxes or tuple((None,) * len(row) for row in table.rows)
+    rows = []
+    for r, row in enumerate(table.rows):
+        cells = []
+        for c, text in enumerate(row):
+            box = boxes[r][c]
+            repeated = box is not None and ((c > 0 and boxes[r][c - 1] == box) or (r > 0 and boxes[r - 1][c] == box))
+            cells.append('' if repeated else ' '.join(text.split()).replace('|', ESCAPE + '|'))
+        rows.append('| ' + ' | '.join(cells) + ' |')
+    rows.insert(1, '|' + ' --- |' * len(table.rows[0]))
+    return '\n'.join(rows) + '\n'
 
 
 def _blocks(doc: Document) -> list[list[str]]:

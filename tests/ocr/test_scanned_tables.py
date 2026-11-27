@@ -58,7 +58,7 @@ def _read(tmp_path, draws, options):
     """The scanned page read back after OCR, its tables, and its measured skew."""
     check('eng', PLACES)
     scan = scan_pdf(tmp_path / 'scan.pdf', scan_image(*draws, **options))
-    assert text_layer(scan, tmp_path / 'ocr.pdf', places=PLACES) == 1
+    assert len(text_layer(scan, tmp_path / 'ocr.pdf', places=PLACES).readings) == 1
     page = read_pdf(tmp_path / 'ocr.pdf').page(1)
     pixels = read_raster(tmp_path / 'ocr.pdf', 1, BBox(0, 0, page.width, page.height), dpi=None).pixels
     found = rulings(pixels, pixels.shape[1] / SCAN_PAGE.width)

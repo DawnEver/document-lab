@@ -6,7 +6,8 @@ import numpy as np
 import pymupdf
 
 from document_lab.capture.export import to_pdf
-from document_lab.per_page import RENDER_DPI, write_pages
+from document_lab.per_page import RENDER_DPI, UNREAD, write_pages
+from tests.synthetic import draw_ruled_table
 
 
 def test_each_page_gets_its_markdown_and_image_and_the_index_names_them(tmp_path):
@@ -38,6 +39,8 @@ def test_a_page_that_is_one_image_keeps_its_own_pixels(tmp_path, monkeypatch):
     monkeypatch.setattr(pymupdf.Page, 'get_pixmap', None)  # taken from the reader's samples, never rendered
     done = write_pages(capture, tmp_path / 'out')
     assert done.textless == (1,)
+    assert done.unread == (1,)  # a picture without a text layer, said so in its markdown
+    assert UNREAD in (tmp_path / 'out' / 'page-001.md').read_text(encoding='utf-8')
     pix = pymupdf.Pixmap(str(tmp_path / 'out' / 'page-001.png'))
     assert np.array_equal(np.frombuffer(pix.samples, dtype=np.uint8).reshape(90, 70, 3), image)
 
@@ -139,3 +142,36 @@ def test_a_drawing_every_page_repeats_is_furniture_and_one_page_s_table_is_still
     with zipfile.ZipFile(tmp_path / 'out.zip') as archive:
         cut = sorted(n for n in archive.namelist() if '-table-' in n)
     assert cut == ['page-001-table-untitled-1.png']
+
+
+def test_a_ruled_table_is_written_as_a_pipe_table_in_place_of_its_words(tmp_path):
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 300), 'The limits are given below.', fontsize=10)
+        draw_ruled_table(page)
+        doc.save(tmp_path / 'std.pdf')
+    write_pages(tmp_path / 'std.pdf', tmp_path / 'out')
+    page1 = (tmp_path / 'out' / 'page-001.md').read_text(encoding='utf-8')
+    assert '| Parameter | Value | Unit |\n| --- | --- | --- |\n| alpha | 1.25 | mm |' in page1
+    assert page1.count('alpha') == 1  # its words are the table's, not the running text's
+    assert page1.index('The limits are given below.') < page1.index('| Parameter')
+
+
+def test_a_scanned_table_reads_from_its_rules_in_pixels_and_its_text_layer(tmp_path):
+    from document_lab import _pdf  # noqa: PLC0415
+    from tests.synthetic import scan_image, scan_pdf  # noqa: PLC0415
+
+    with pymupdf.open() as doc:
+        drawn = doc.new_page(width=612, height=792)
+        draw_ruled_table(drawn)
+        words = [(w[4], tuple(w[:4]), 0.0) for w in drawn.get_text('words')]  # where the scan shows them
+    scan = scan_pdf(tmp_path / 'scan.pdf', scan_image(draw_ruled_table, dpi=150))
+    reader = _pdf.open(scan.read_bytes(), b'')
+    writer = _pdf.create(tmp_path / 'ocr.pdf')
+    writer.copy_page_with_text(reader, 1, words)
+    writer.close()
+    done = write_pages(tmp_path / 'ocr.pdf', tmp_path / 'out')
+    assert done.unread == ()
+    page1 = (tmp_path / 'out' / 'page-001.md').read_text(encoding='utf-8')
+    assert '| Parameter | Value | Unit |\n| --- | --- | --- |\n| alpha | 1.25 | mm |' in page1
+    assert '| gamma | 4.5e2 | s |' in page1

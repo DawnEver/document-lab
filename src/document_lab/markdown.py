@@ -6,7 +6,11 @@ Lines and their reading order are `document_lab.layout`'s.
   capitals or title case (``REFERENCES``, ``Acknowledgments``, ``Appendix``, ``Conclusion``) is a section (``##``),
   or a chapter (``#``) when set at least :data:`TITLE_SCALE` times the body as a thesis sets its chapters; else a
   line at least :data:`TITLE_SCALE` times the body size is a title (``#``: a paper bound in after the first opens
-  with one); else an all-bold line numbered ``2`` / ``2.1`` is a section (``##``, ``###`` per depth); else page 1's
+  with one); else an all-bold line numbered ``2`` / ``2.1`` is a section (``##``, ``###`` per depth), and so is a
+  numbered line set wholly in a face other than the body's (`document_lab.layout.body_face`: an italic, another font,
+  another size) whose parent number already heads, read in order across pages -- ``2.1`` after a heading ``2``: a
+  subsection set in italic heads, a data sheet's row in another face (``09 August 2018``, ``13.56 MHz``) is
+  top-level or continues nothing; else page 1's
   largest text is its title when at least :data:`PAGE_TITLE_SCALE` times the body and set in at most
   :data:`PAGE_TITLE_LINES` lines (a repository's cover sheet set at one size throughout has none); else an all-bold
   line lettered as an appendix's ``A.1`` is a section, and one lettered ``A`` alone when set at least
@@ -87,11 +91,16 @@ def page_markdowns(doc: Document) -> list[str]:
 def _blocks(doc: Document) -> list[list[str]]:
     weighted = any(span.bold for span in doc.spans())
     body = layout.body_size(doc)
+    face = layout.body_face(doc)
+    headed: set[str] = set()  # the clause numbers headed so far, page after page
     first = layout.lines(doc.pages[0], weighted=weighted) if doc.pages else []
     largest = max((ln.size for ln in first), default=0.0)
     at_largest = sum(ln.size >= largest for ln in first)
     title = largest if largest >= PAGE_TITLE_SCALE * body and at_largest <= PAGE_TITLE_LINES else None
-    return [_page_blocks(page, body, title if i == 0 else None, weighted=weighted) for i, page in enumerate(doc.pages)]
+    return [
+        _page_blocks(page, body, title if i == 0 else None, weighted=weighted, face=face, headed=headed)
+        for i, page in enumerate(doc.pages)
+    ]
 
 
 def back_matter(text: str) -> bool:
@@ -123,10 +132,19 @@ def _rejoin(blocks: list[str]) -> list[str]:
     return out
 
 
-def _heading(line: layout.Line, body: float, title: float | None, *, weighted: bool) -> str | None:
+def _heading(
+    line: layout.Line,
+    body: float,
+    title: float | None,
+    *,
+    weighted: bool,
+    face: tuple[str, float],
+    headed: set[str],
+) -> str | None:
     """The line as a heading (``#`` a title, ``##`` a section, deeper per clause depth), else None.
 
     ``title``: the size page 1 sets its title in, on page 1 (None elsewhere, or when page 1 sets none apart).
+    ``face``: the body's font and size; ``headed``: the clause numbers headed before this line.
     """
     text = line.text
     if not any(c.isalpha() for c in text) or _TOC_ENTRY.match(text) or '....' in text:
@@ -143,7 +161,7 @@ def _heading(line: layout.Line, body: float, title: float | None, *, weighted: b
     unsentenced = len(text.split()) <= HEADING_WORDS and not text.endswith(('.', ',', ';', ':'))
     clause = len(text) <= 80 and (line.bold if weighted else unsentenced)
     numbered = _NUMBERED.match(text)
-    if numbered and clause:
+    if numbered and (clause or (weighted and len(text) <= 80 and _continues(numbered.group(1), line, face, headed))):
         return f'{"#" * (numbered.group(1).count(".") + 2)} {text}'
     if title is not None and line.size >= title and not _URL.search(text):
         return f'# {text}'
@@ -155,7 +173,23 @@ def _heading(line: layout.Line, body: float, title: float | None, *, weighted: b
     return None
 
 
-def _page_blocks(page: Page, body: float, title_size: float | None, *, weighted: bool) -> list[str]:
+def _continues(number: str, line: layout.Line, face: tuple[str, float], headed: set[str]) -> bool:
+    """Is the numbered line set wholly in a face other than the body's ``face``, its parent number ``headed``?"""
+    parent, dot, _ = number.rpartition('.')
+    other = all((s.font, round(s.size, 1)) != face for s in line.spans if s.text.strip())
+    return bool(dot) and parent in headed and other
+
+
+def _page_blocks(
+    page: Page,
+    body: float,
+    title_size: float | None,
+    *,
+    weighted: bool,
+    face: tuple[str, float],
+    headed: set[str],
+) -> list[str]:
+    """The page's blocks; ``headed`` gains the clause number of each numbered heading it states."""
     blocks: list[str] = []
     paragraph: list[str] = []
     previous: layout.Line | None = None
@@ -169,7 +203,9 @@ def _page_blocks(page: Page, body: float, title_size: float | None, *, weighted:
     lines = layout.ordered(layout.lines(page, weighted=weighted))
     contents = sum(bool(_TOC_ENTRY.match(line.text)) for line in lines) >= TOC_LINES
     for line in lines:
-        heading = None if contents else _heading(line, body, title_size, weighted=weighted)
+        heading = None if contents else _heading(line, body, title_size, weighted=weighted, face=face, headed=headed)
+        if heading and (number := _NUMBERED.match(line.text)):
+            headed.add(number.group(1))
         if heading and heading.startswith('# '):
             title.append(line.text)  # a title wraps over several lines
             previous = line

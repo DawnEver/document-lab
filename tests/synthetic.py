@@ -1349,3 +1349,27 @@ def turned_text_pdf(path: Path, runs: Sequence[TurnedRun]) -> Path:
             page.insert_text((x, y), text, fontname='helv', fontsize=9, rotate=rotate)
         doc.save(path)
     return path
+
+
+def landscape_text_pdf(path: Path, runs: Sequence[Run], bars: Sequence[pymupdf.Rect] = (), *, sideways: bool) -> Path:
+    """One landscape page of ``runs`` and filled ``bars``, each placed in the page's own frame (792 by 612 points).
+
+    ``sideways``: printed on a portrait Letter page turned a quarter, read bottom to top, as a standard prints a
+    landscape page -- the frame's point (x, y) at the page's (y, 792 - x), every box known; else set upright on a
+    landscape page.
+    """
+    with pymupdf.open() as doc:
+        if not sideways:
+            page = doc.new_page(width=792, height=612)
+            for x, y, text, font, size in runs:
+                page.insert_text((x, y), text, fontname=font, fontsize=size)
+            for bar in bars:
+                page.draw_rect(bar, color=None, fill=(0, 0, 0))
+        else:
+            page = doc.new_page(width=612, height=792)
+            for x, y, text, font, size in runs:
+                page.insert_text((y, 792 - x), text, fontname=font, fontsize=size, rotate=90)
+            for bar in bars:
+                page.draw_rect(pymupdf.Rect(bar.y0, 792 - bar.x1, bar.y1, 792 - bar.x0), color=None, fill=(0, 0, 0))
+        doc.save(path)
+    return path

@@ -84,6 +84,7 @@ __all__ = [
     'NotATable',
     'aligned',
     'grids',
+    'level_rules',
     'tables',
 ]
 
@@ -144,6 +145,15 @@ def tables(page: Page, *, rulings: Rulings | None = None, tolerance: float = TOL
     them.
     """
     return tuple(g for g in grids(page, rulings=rulings, tolerance=tolerance) if isinstance(g, Table))
+
+
+def level_rules(page: Page, *, tolerance: float = TOLERANCE) -> list[BBox]:
+    """The level rules ``page`` paints, as its grids read them, each the box of its line (no height).
+
+    A stroked level side or a thin bar; those along one line are joined across gaps no wider than ``tolerance`` (a
+    table's rule drawn in pieces between its columns).
+    """
+    return [BBox(lo, at, hi, at) for at, lo, hi in _merge(_rules(page.paths)[0], tolerance)]
 
 
 def grids(page: Page, *, rulings: Rulings | None = None, tolerance: float = TOLERANCE) -> tuple[Table | NotATable, ...]:

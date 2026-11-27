@@ -17,7 +17,7 @@ from document_lab import layout
 from document_lab.ir import BBox
 from document_lab.pdf import read_pdf
 from document_lab.regions import equations, regions
-from tests.synthetic import Run, text_pdf
+from tests.synthetic import Run, landscape_text_pdf, text_pdf
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -623,3 +623,148 @@ def test_a_glyph_box_taller_than_its_ink_takes_no_prose_into_the_crop(tmp_path):
     assert box.y0 >= last  # no word of it in the crop
     assert faults(doc.pages[0], box, [*formula, bar]) == ["'-' cut"]  # its ink is in, its box's top cut off
     assert without(box, top=tall.y0 - box.y0).y0 < last  # planted: grown to the bar's box, it takes words
+
+
+def pieces(x: float, y: float, *parts: tuple[str, str]) -> list[Run]:
+    """Runs set one after another on one baseline from ``x``, each ``(text, font)`` at 10 pt: a line of mixed fonts."""
+    out: list[Run] = []
+    for text, font in parts:
+        out.append((x, y, text, font, 10))
+        x += pymupdf.get_text_length(text, fontname=font, fontsize=10)
+    return out
+
+
+def test_a_denominator_set_flush_beside_its_formula_is_no_paragraph_s_tail(tmp_path):
+    """A formula opens at its column's edge with ``A00`` over ``2``: the ``2`` -- no word, no math, in the body's font,
+    flush with the column -- stands level with the formula's row beside it, so it is no paragraph's tail
+    (``[55]:``, alone on its band). The row below, reached only through it, is the formula's too."""
+    formula = [
+        math(80, 207, 'A00'),
+        (82, 217, '2', 'helv', 10),
+        math(100, 213, '+ sum A cos m x + B sin m x'),
+        math(100, 235, '+ sum C cos n y'),
+        number(525, 213, 1),
+    ]
+    doc = read(tmp_path, [*column(72, 468, range(100, 190, 12)), *formula, *column(72, 468, range(262, 330, 12))])
+    box = crop(doc, 1)
+    assert faults(doc.pages[0], box, formula) == []
+    assert faults(doc.pages[0], without(box, bottom=20), formula)  # planted: the second row cut off, as before
+
+
+def test_a_system_s_first_row_set_near_its_column_s_edge_is_no_prose(tmp_path):
+    """A system's wide first row starts within a paragraph's indent of the column's edge, its centered rows below.
+    It reads as no words: an operator's name (``curl``) is none, nor Latin letters run into Greek ones (``iωμHh``)."""
+    names = [math(80, 210, 'r curl H . curl w dV + k H . w dV = f w dV')]
+    greek = pieces(
+        80, 210, ('i', 'tiit'), ('wm', 'symb'), ('Hh . w dV + i', 'tiit'), ('wm', 'symb'), ('Hs = 0', 'tiit')
+    )
+    rows = [math(150, 226, 'm (p + H) . w dV = g'), math(150, 242, 'm (p + H) . h dV = 0'), number(525, 226, 5)]
+    read_as = [(x, y, 'ωμ' if font == 'symb' else text, font, size) for x, y, text, font, size in greek]  # Symbol's
+    for first, shown in ((names, names), (greek, read_as)):
+        formula = [*shown, *rows]
+        doc = read(
+            tmp_path, [*column(72, 468, range(100, 196, 12)), *first, *rows, *column(72, 468, range(266, 330, 12))]
+        )
+        box = crop(doc, 5)
+        assert faults(doc.pages[0], box, formula) == []
+        assert faults(doc.pages[0], without(box, top=12), formula)  # planted: the first row cut off, as before
+
+
+def test_a_number_at_its_own_column_s_right_is_its_column_s(tmp_path):
+    """The right column's ``(9)``, at its column's right between its system's two rows, stands level with the left
+    column's formula ``(7)``: it is its own column's number, never one set past the left column's edge."""
+    rows = [math(352, 296, 'v1 = L1 i1 + L12 i2'), math(352, 314, 'v2 = L2 i2 + L12 i1'), number(545, 305, 9)]
+    left = [math(110, 314, 'L = a - b'), number(282, 314, 7)]
+    page = [
+        *column(50, 250, range(100, 290, 12)),
+        *left,
+        *column(50, 250, range(340, 500, 12)),
+        *column(312, 250, range(100, 282, 12)),
+        *rows,
+        *column(312, 250, range(340, 500, 12)),
+    ]
+    doc = read(tmp_path, page)
+    box = crop(doc, 9)
+    assert faults(doc.pages[0], box, rows) == []
+    assert faults(doc.pages[0], without(box, left=190), rows)  # planted: the number alone, as before
+
+
+def test_strict_measures_apart_by_a_double_spaced_page_s_own_line_gap(tmp_path):
+    """A thesis set double-spaced (lines 24 pt apart, 15 pt of white between them): a sentence's ``= (1 + k) n``
+    that the reader parts from its line, 4 pt under it, stands closer to its text than the text's lines stand to one
+    another -- no display at strict; set apart by more than that gap, it is one."""
+    above = column(72, 468, range(100, 200, 24))
+    near = [*above, math(300, 210, '= (1 + k) n'), *column(72, 468, range(236, 330, 24))]
+    doc = read(tmp_path, near)
+    assert kinds(doc, 'strict') == []
+    assert kinds(doc, 'loose') == ['Untitled equation 1']  # planted: what strict leaves out
+    apart = [*above, math(300, 226, '= (1 + k) n'), *column(72, 468, range(260, 330, 24))]
+    assert kinds(read(tmp_path, apart), 'strict') == ['Untitled equation 1']  # planted: a display
+
+
+def test_strict_leaves_out_a_label_set_on_a_figure_s_edge(tmp_path):
+    """A figure's label ``A = 0 + k`` set just above its frame -- its middle outside the figure, its box touching it --
+    is the figure's at strict; the same formula set two body sizes clear of the figure is a display."""
+    figure = [
+        pymupdf.Rect(200, 260, 400, 261),
+        pymupdf.Rect(200, 340, 400, 341),
+        pymupdf.Rect(200, 260, 201, 341),
+        pymupdf.Rect(399, 260, 400, 341),
+        pymupdf.Rect(250, 300, 350, 301),
+    ]
+    above, below = column(72, 468, range(100, 200, 12)), column(72, 468, range(380, 450, 12))
+    doc = read(tmp_path, [*above, math(330, 257, 'A = 0 + k'), *below], bars=(figure,))
+    assert kinds(doc, 'strict') == []
+    assert kinds(doc, 'loose') == ['Untitled equation 1']  # planted: what strict leaves out
+    doc = read(tmp_path, [*above, math(330, 237, 'A = 0 + k'), *below], bars=(figure,))
+    assert kinds(doc, 'strict') == ['Untitled equation 1']  # planted: clear of the figure, a display
+
+
+def test_a_number_in_a_table_s_row_takes_its_row_alone(tmp_path):
+    """A table of formulas: a header row (``Ref.``, ``Heaviside Function``) ruled off across the text, then rows of a
+    reference cell, a cases formula and its number. ``(19)`` takes its row -- its reference cell level with it among
+    them -- never the header above the rule, nor the next row's first case, nearer ``(20)``: the next row's
+    reference ``[10``/``0]``, level with its own formula, is no paragraph's tail bounding (19) short of (20)."""
+    header = [(76, 206, 'Ref.', 'hebo', 10), (250, 206, 'Heaviside Function', 'hebo', 10)]
+    rules = [pymupdf.Rect(72, 196, 540, 196.5), pymupdf.Rect(72, 211, 540, 211.5), pymupdf.Rect(72, 300, 540, 300.5)]
+    first = [(80, 236, '[99]', 'helv', 10), math(150, 222, '1'), math(130, 236, 'p = { 1/2 + 1/2 p/b')]
+    first += [math(150, 250, '0'), math(330, 222, 'b < p'), math(320, 236, '-b <= p <= b')]
+    first += [math(330, 250, 'p < -b'), number(510, 236, 19)]
+    second = [(80, 276, '[10', 'helv', 10), (82, 289, '0]', 'helv', 10), math(150, 264, '1')]
+    second += [math(130, 278, 'p = { 1/2 + 3/4 p/b'), math(150, 292, '0'), math(330, 264, 'b < p')]
+    second += [math(320, 278, '-b <= p <= b'), math(330, 292, 'p < -b'), number(510, 278, 20)]
+    page = [*column(72, 468, range(100, 190, 12)), *header, *first, *second, *column(72, 468, range(320, 380, 12))]
+    doc = read(tmp_path, page, bars=(rules,))
+    box = crop(doc, 19)
+    assert faults(doc.pages[0], box, first) == []
+    assert faults(doc.pages[0], without(box, top=-25), first)  # planted: grown over the header, as before
+    assert faults(doc.pages[0], without(box, bottom=-10), first)  # planted: grown into the next row's first case
+
+
+def test_an_equation_printed_sideways_is_found_in_its_page_s_frame(tmp_path):
+    """A landscape page printed sideways on a portrait one, read bottom to top: its equations are found in its frame
+    -- columns along its lines, numbers at their columns' right -- each box where the page shows it, as the same
+    page set upright finds them; `document_lab.regions.regions` finds them alike."""
+    left = [*column(50, 330, range(80, 250, 12)), math(150, 264, 'E = m c2 + k'), *column(50, 330, range(300, 540, 12))]
+    right = [*column(410, 330, range(80, 250, 12)), math(480, 276, 'P = T w + c'), number(720, 276, 4)]
+    runs = [*left, *right, *column(410, 330, range(300, 540, 12))]
+
+    def found(*, sideways: bool) -> tuple[list[tuple[str, BBox]], list[tuple[str, BBox]]]:
+        doc = read_pdf(landscape_text_pdf(tmp_path / f'{sideways}.pdf', runs, sideways=sideways))
+        face = layout.body_face(doc)
+        told = [(r.label, r.bbox) for r in regions(doc.pages[0], face) if r.kind == 'equation']
+        return [(r.label, r.bbox) for r in equations(doc.pages[0], face)], told
+
+    (upright, _), (sideways, told) = found(sideways=False), found(sideways=True)
+    assert [label for label, _ in upright] == ['Untitled equation 1', '(4)']
+
+    def shown(box: BBox) -> BBox:  # the landscape frame's box where the portrait page shows it
+        return BBox(box.y0, 792 - box.x1, box.y1, 792 - box.x0)
+
+    def near(a: BBox, b: BBox) -> bool:
+        return all(abs(p - q) < 0.5 for p, q in zip(a, b, strict=True))  # float rounding of the turn
+
+    assert [label for label, _ in sideways] == [label for label, _ in upright]
+    assert all(near(s, shown(u)) for (_, s), (_, u) in zip(sideways, upright, strict=True))
+    assert not any(near(s, u) for (_, s), (_, u) in zip(sideways, upright, strict=True))  # planted: left unturned
+    assert sorted(told) == sorted(sideways)  # in the page's order, top to bottom as it shows them

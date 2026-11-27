@@ -236,3 +236,78 @@ fn an_annotation_without_an_appearance_draws_nothing() {
         (Vec::new(), Vec::<String>::new())
     );
 }
+
+/// The text of each text event and the annotation it is drawn for.
+fn texts(content: &Content) -> Vec<(String, Option<String>)> {
+    content
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Text(t) => Some((
+                t.glyphs.iter().filter_map(|g| g.text.clone()).collect(),
+                t.layer.annotation.clone(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn an_appearance_without_resources_draws_with_the_form_s_default_resources() {
+    let acro_form =
+        "/AcroForm << /Fields [6 0 R] /DR << /Font << /Helv 5 0 R >> >> /DA (/Helv 0 Tf 0 g) >>";
+    let field = "<< /Type /Annot /Subtype /Widget /FT /Tx /Rect [0 0 100 20] /AP << /N 7 0 R >> >>";
+    let ap = common::stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 100 20]",
+        "BT /Helv 10 Tf 2 5 Td (filled) Tj ET",
+    );
+    let content = drawn(acro_form, "6 0 R", "", &[field, &ap], true);
+    assert_eq!(
+        (texts(&content), content.warnings),
+        (
+            vec![("filled".to_string(), Some("Widget".to_string()))],
+            Vec::<String>::new()
+        )
+    );
+}
+
+#[test]
+fn a_font_an_appearance_s_resources_lack_is_the_form_s_default() {
+    let acro_form = "/AcroForm << /Fields [6 0 R] /DR << /Font << /Helv 5 0 R >> >> >>";
+    let field = "<< /Type /Annot /Subtype /Widget /FT /Tx /Rect [0 0 100 20] /AP << /N 7 0 R >> >>";
+    let ap = common::stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 100 20] /Resources << /ProcSet [/PDF /Text] >>",
+        "BT /Helv 10 Tf 2 5 Td (filled) Tj ET",
+    );
+    let content = drawn(acro_form, "6 0 R", "", &[field, &ap], true);
+    assert_eq!(texts(&content).len(), 1, "{:?}", content.warnings);
+}
+
+#[test]
+fn without_default_resources_an_appearance_s_missing_font_is_a_warning() {
+    let field = "<< /Type /Annot /Subtype /Widget /FT /Tx /Rect [0 0 100 20] /AP << /N 7 0 R >> >>";
+    let ap = common::stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 100 20]",
+        "BT /Helv 10 Tf 2 5 Td (filled) Tj ET",
+    );
+    let content = drawn("", "6 0 R", "", &[field, &ap], true);
+    assert_eq!(texts(&content), Vec::new());
+    assert!(
+        content.warnings.iter().any(|w| w.contains("/Helv")),
+        "{:?}",
+        content.warnings
+    );
+}
+
+#[test]
+fn the_page_s_content_does_not_reach_the_form_s_default_resources() {
+    let acro_form = "/AcroForm << /Fields [] /DR << /Font << /Helv 5 0 R >> >> >>";
+    let content = drawn(
+        acro_form,
+        "",
+        "BT /Helv 10 Tf 2 5 Td (page) Tj ET",
+        &[],
+        true,
+    );
+    assert_eq!(texts(&content), Vec::new());
+}

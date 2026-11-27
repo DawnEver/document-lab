@@ -4,9 +4,11 @@ import zipfile
 
 import numpy as np
 import pymupdf
+import pytest
 
 from document_lab.capture.export import to_pdf
-from document_lab.per_page import RENDER_DPI, write_pages
+from document_lab.per_page import RENDER_DPI, UNREAD, write_pages
+from tests.synthetic import draw_ruled_table
 
 
 def test_each_page_gets_its_markdown_and_image_and_the_index_names_them(tmp_path):
@@ -38,6 +40,8 @@ def test_a_page_that_is_one_image_keeps_its_own_pixels(tmp_path, monkeypatch):
     monkeypatch.setattr(pymupdf.Page, 'get_pixmap', None)  # taken from the reader's samples, never rendered
     done = write_pages(capture, tmp_path / 'out')
     assert done.textless == (1,)
+    assert done.unread == (1,)  # a picture without a text layer, said so in its markdown
+    assert UNREAD in (tmp_path / 'out' / 'page-001.md').read_text(encoding='utf-8')
     pix = pymupdf.Pixmap(str(tmp_path / 'out' / 'page-001.png'))
     assert np.array_equal(np.frombuffer(pix.samples, dtype=np.uint8).reshape(90, 70, 3), image)
 
@@ -139,3 +143,240 @@ def test_a_drawing_every_page_repeats_is_furniture_and_one_page_s_table_is_still
     with zipfile.ZipFile(tmp_path / 'out.zip') as archive:
         cut = sorted(n for n in archive.namelist() if '-table-' in n)
     assert cut == ['page-001-table-untitled-1.png']
+
+
+def test_a_ruled_table_is_written_as_a_pipe_table_in_place_of_its_words(tmp_path):
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 300), 'The limits are given below.', fontsize=10)
+        draw_ruled_table(page)
+        doc.save(tmp_path / 'std.pdf')
+    write_pages(tmp_path / 'std.pdf', tmp_path / 'out')
+    page1 = (tmp_path / 'out' / 'page-001.md').read_text(encoding='utf-8')
+    assert '| Parameter | Value | Unit |\n| --- | --- | --- |\n| alpha | 1.25 | mm |' in page1
+    assert page1.count('alpha') == 1  # its words are the table's, not the running text's
+    assert page1.index('The limits are given below.') < page1.index('| Parameter')
+
+
+def test_a_scanned_table_reads_from_its_rules_in_pixels_and_its_text_layer(tmp_path):
+    from document_lab import _pdf  # noqa: PLC0415
+    from tests.synthetic import scan_image, scan_pdf  # noqa: PLC0415
+
+    with pymupdf.open() as doc:
+        drawn = doc.new_page(width=612, height=792)
+        draw_ruled_table(drawn)
+        words = [(w[4], tuple(w[:4]), 0.0) for w in drawn.get_text('words')]  # where the scan shows them
+    scan = scan_pdf(tmp_path / 'scan.pdf', scan_image(draw_ruled_table, dpi=150))
+    reader = _pdf.open(scan.read_bytes(), b'')
+    writer = _pdf.create(tmp_path / 'ocr.pdf')
+    writer.copy_page_with_text(reader, 1, words)
+    writer.close()
+    done = write_pages(tmp_path / 'ocr.pdf', tmp_path / 'out')
+    assert done.unread == ()
+    page1 = (tmp_path / 'out' / 'page-001.md').read_text(encoding='utf-8')
+    assert '| Parameter | Value | Unit |\n| --- | --- | --- |\n| alpha | 1.25 | mm |' in page1
+    assert '| gamma | 4.5e2 | s |' in page1
+
+
+def _one_image_page(path, colorspace, samples, *, extra=None):
+    """A 200 x 150 pt page that is one 8 x 6 image in ``colorspace`` (a PDF object), every sample ``samples``."""
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=200, height=150)
+        if extra is not None:  # an object the color space refers to (an ICC profile's stream)
+            ref = doc.get_new_xref()
+            doc.update_object(ref, extra[0])
+            doc.update_stream(ref, extra[1])
+            colorspace = colorspace.replace('REF', f'{ref} 0 R')
+        image = doc.get_new_xref()
+        doc.update_object(
+            image,
+            f'<< /Type /XObject /Subtype /Image /Width 8 /Height 6 /ColorSpace {colorspace} /BitsPerComponent 8 >>',
+        )
+        doc.update_stream(image, bytes(samples) * 48)
+        doc.xref_set_key(page.xref, 'Resources', f'<< /XObject << /Im0 {image} 0 R >> >>')
+        content = doc.get_new_xref()
+        doc.update_object(content, '<< >>')
+        doc.update_stream(content, b'q 200 0 0 150 0 0 cm /Im0 Do Q')
+        doc.xref_set_key(page.xref, 'Contents', f'{content} 0 R')
+        doc.save(path)
+    return path
+
+
+@pytest.mark.parametrize(
+    ('colorspace', 'samples', 'extra', 'seen'),
+    [
+        ('/DeviceCMYK', (0, 255, 255, 0), None, 'red'),  # magenta and yellow ink
+        ('[/Indexed /DeviceRGB 1 <FF000000C000>]', (1,), None, 'green'),  # palette entry 1
+        ('[/Lab << /WhitePoint [0.9505 1 1.089] >>]', (128, 128, 128), None, 'gray'),  # L* 50, neutral
+        # a CMYK ICC profile no reader can use: its /Alternate, DeviceCMYK, stands for it
+        ('[/ICCBased REF]', (0, 255, 255, 0), ('<< /N 4 /Alternate /DeviceCMYK >>', b'not a profile'), 'red'),
+    ],
+)
+def test_a_page_that_is_one_image_in_any_color_space_is_written_in_its_colors(
+    tmp_path, colorspace, samples, extra, seen
+):
+    """JMAG manuals and data sheets: a page that is one CMYK picture once crashed the PNG writer."""
+    pdf = _one_image_page(tmp_path / 'scan.pdf', colorspace, samples, extra=extra)
+    write_pages(pdf, tmp_path / 'out')
+    pix = pymupdf.Pixmap(str(tmp_path / 'out' / 'page-001.png'))
+    assert pix.n == 3
+    r, g, b = (
+        int(v) for v in np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)[pix.h // 2, pix.w // 2]
+    )
+    if seen == 'red':
+        assert r > 180 and g < 90 and b < 90, (r, g, b)
+    elif seen == 'green':
+        assert g > 150 and r < 60 and b < 60, (r, g, b)
+    else:
+        assert 90 < r < 150 and abs(r - g) < 12 and abs(r - b) < 12, (r, g, b)
+
+
+def test_a_caption_across_the_page_foot_cuts_no_empty_region(tmp_path):
+    """A caption the page's foot cuts, prose right above it: its figure has no room on the page, and is no region."""
+    prose = 'The rated output is the mechanical power available at the shaft and shall be expressed in watts.'
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=600, height=300)
+        page.insert_text((50, 296), prose, fontsize=10)
+        page.insert_text((50, 307), 'Figure 3 - At the foot', fontsize=10)
+        doc.save(tmp_path / 'foot.pdf')
+    write_pages(tmp_path / 'foot.pdf', tmp_path / 'out')
+    assert not list((tmp_path / 'out').glob('page-001-figure-*.png'))
+
+
+def test_running_heads_and_feet_leave_the_body_and_are_listed_in_the_page_s_front_matter(tmp_path):
+    """ACT1210: its running head and its page numbers were read into the body of every page."""
+    with pymupdf.open() as doc:
+        for number in range(1, 4):
+            page = doc.new_page(width=595, height=842)
+            page.insert_text((42, 60), 'Data and Signal Line Chokes', fontsize=11)
+            page.insert_text((499, 60), 'ACT1210', fontsize=11)
+            page.insert_text((37, 120), f'Clause {number} states the rated current of the part.', fontsize=11)
+            page.insert_text((291, 822), str(number), fontsize=11)
+        doc.save(tmp_path / 'sheet.pdf')
+    write_pages(tmp_path / 'sheet.pdf', tmp_path / 'out')
+    md = (tmp_path / 'out' / 'page-002.md').read_text(encoding='utf-8')
+    assert md.startswith(
+        '---\nheader: ["Data and Signal Line Chokes", "ACT1210"]\nfooter: ["2"]\n---\n\n[sheet.pdf, page 2]'
+    )
+    body = md.split('(page-002.png)', 1)[1]
+    assert body.strip() == 'Clause 2 states the rated current of the part.'
+
+
+_COLUMNS = (37, 86, 132, 179, 225, 271, 317, 425)
+_CODES = (
+    ('11', '0.05', '300', '0.4', '300', '550', 'B82786C0113H002', 'ACT1210-110-2P-TL00'),
+    ('22', '0.06', '250', '0.5', '500', '1100', 'B82786C0223H002', 'ACT1210-220-2P-TL00'),
+    ('51', '0.09', '200', '0.7', '1000', '2600', 'B82786C0513H002', 'ACT1210-510-2P-TL00'),
+    ('100', '0.13', '150', '1.5', '2200', '5100', 'B82786C0104H002', 'ACT1210-101-2P-TL00'),
+)
+
+
+def _data_sheet_tables(path):
+    """ACT1210 page 4: names and values, rows ruled apart, one rule down between the columns and no frame; then the
+    ordering codes: two header rows (symbols set with subscripts, units) over a rule, columns ruled, open at the sides.
+    """
+
+    def text(x, y, s, size=11, font='helv'):
+        page.insert_text((x, y), s, fontsize=size, fontname=font)
+
+    def rule(x0, y0, x1, y1):
+        page.draw_line((x0, y0), (x1, y1), width=0.5)
+
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=595, height=842)
+        text(42, 60, 'Data and Signal Line Chokes')
+        text(499, 60, 'ACT1210')
+        text(37, 108, 'Technical data and measuring conditions', font='hebo')
+        values = (
+            ('Rated voltage', ('80 V DC',)),
+            (
+                'Rated inductance',
+                (
+                    'Measured with Keysight E4990A (or equivalent) at 100 kHz, 100 mV,',
+                    '+20 C, inductance is specified in common-mode',
+                ),
+            ),
+            ('Inductance tolerance', ('-30/+50% at +20 C',)),
+            ('DC resistance', ('Measured at +20 C, specified per winding',)),
+            ('Climatic category', ('55/150/56 (to IEC 60068-1)',)),
+        )
+        y = top = 117
+        for name, lines in values:
+            rule(37, y, 550, y)
+            text(37, y + 13, name)
+            for k, line in enumerate(lines):
+                text(207, y + 13 + 13 * k, line)
+            y += 6 + 13 * len(lines)
+        rule(37, y, 550, y)
+        rule(204, top, 204, y)
+        text(37, y + 30, 'Characteristics and ordering codes', font='hebo')
+        t = y + 40
+        bottom = _ordering_codes(text, rule, t)
+        text(37, 806, 'Please read Cautions and warnings and', size=9)
+        text(291, 822, '4')
+        doc.save(path)
+    return path, t, bottom
+
+
+def _ordering_codes(text, rule, t):
+    """The ordering codes table from ``t`` down, drawn by ``text`` and ``rule``; its bottom rule's height."""
+    symbols = (('L', 'R'), ('L', 'stray'), ('I', 'R'), ('R', 'max'), ('Z', 'min'), ('Z', 'typ'))
+    for x, (symbol, sub) in zip(_COLUMNS, symbols, strict=False):
+        text(x, t + 12, symbol)
+        text(x + pymupdf.get_text_length(symbol, fontsize=11), t + 14, sub, size=7)
+    text(317, t + 12, 'Internal code')
+    text(425, t + 12, 'Ordering code')
+    for x, unit in zip(_COLUMNS, ('uH', 'uH', 'mA'), strict=False):
+        text(x, t + 29, unit)
+    for x in _COLUMNS[3:6]:
+        text(x, t + 29, 'W', font='symb')  # an ohm sign alone
+    rule(37, t + 36, 550, t + 36)
+    for k, row in enumerate(_CODES):
+        for x, cell in zip(_COLUMNS, row, strict=True):
+            text(x, t + 49 + 17 * k, cell)
+    bottom = t + 36 + 4 * 17 + 4
+    rule(37, t, 550, t)
+    rule(37, bottom, 550, bottom)
+    for x in _COLUMNS[1:]:
+        rule(x - 3, t, x - 3, bottom)
+    return bottom
+
+
+def test_a_ruled_two_column_table_and_an_ordering_table_are_cut_whole_and_written_row_by_row(tmp_path):
+    """ACT1210 page 4: the names-and-values table was no region and its markdown paired names with values one row out
+    of step; the ordering table's crop left out its two header rows and its code columns landed after the footer."""
+    pdf, top, bottom = _data_sheet_tables(tmp_path / 'sheet.pdf')
+    write_pages(pdf, tmp_path / 'out')
+    out = tmp_path / 'out'
+    assert (out / 'page-001-table-untitled-1.png').is_file()
+    codes = pymupdf.Pixmap(str(out / 'page-001-table-untitled-2.png'))
+    assert codes.height >= (bottom - top - 6) * RENDER_DPI / 72  # its header rows inside it
+    md = (out / 'page-001.md').read_text(encoding='utf-8')
+    assert '| Rated voltage | 80 V DC |' in md
+    measured = 'Measured with Keysight E4990A (or equivalent) at 100 kHz, 100 mV, +20 C, inductance is specified in'
+    assert f'| Rated inductance | {measured} common-mode |' in md
+    assert '| Inductance tolerance | -30/+50% at +20 C |' in md
+    rows = [md.index('| ' + ' | '.join(row) + ' |') for row in _CODES]
+    assert rows == sorted(rows)
+    assert md.index('Internal code | Ordering code |') < rows[0] < rows[-1] < md.index('Please read Cautions')
+    assert md.index('| Climatic category') < md.index('Characteristics and ordering codes') < rows[0]
+
+
+def test_text_drawn_inside_an_untitled_figure_goes_with_it_not_into_the_body(tmp_path):
+    prose = 'The rated output is the mechanical power available at the shaft and shall be expressed in watts.'
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=600, height=840)
+        page.insert_text((50, 100), prose, fontsize=10)
+        page.draw_rect(pymupdf.Rect(150, 140, 450, 320), color=(0, 0, 0))
+        page.draw_line((150, 320), (450, 140), width=2)  # a characteristic, drawn
+        page.draw_circle((300, 200), 40, color=(0, 0, 0), width=2)
+        page.insert_text((290, 280), 'N', fontsize=10)  # a pole's letter in the drawing
+        page.insert_text((50, 420), prose, fontsize=10)
+        doc.save(tmp_path / 'std.pdf')
+    write_pages(tmp_path / 'std.pdf', tmp_path / 'out')
+    md = (tmp_path / 'out' / 'page-001.md').read_text(encoding='utf-8')
+    blocks = md.split('\n\n')
+    assert 'N' not in blocks
+    figure = blocks.index('![Untitled figure 1](page-001-figure-untitled-1.png)')
+    assert blocks[figure + 1] == '*Text in the figure:* N'
+    assert blocks[figure - 1].endswith(prose) and blocks[figure + 2].startswith(prose)

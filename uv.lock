@@ -18,8 +18,8 @@ overrides = [
 
 [[package]]
 name = "ai-lab"
-version = "0.0.1.dev450+gab2ffe240"
-source = { git = "https://github.com/DawnEver/ai-lab.git#ab2ffe24087c19ba0942be2cd4ac0082f1a69f79" }
+version = "0.0.1.dev452+geaf8b9578"
+source = { git = "https://github.com/DawnEver/ai-lab.git#eaf8b9578926f875d29190ab6275f46056bf6152" }
 dependencies = [
     { name = "lab-commons", extra = ["paths"] },
 ]
@@ -591,8 +591,8 @@ nvtx = [
 
 [[package]]
 name = "dev-lab"
-version = "0.0.1.dev5154+g1b5408987"
-source = { git = "https://github.com/DawnEver/dev-lab.git#1b5408987c359cb0af07c39031ebd340e623dccc" }
+version = "0.0.1.dev5215+g96b7cc6fd"
+source = { git = "https://github.com/DawnEver/dev-lab.git#96b7cc6fdab9acf4ba17a3788533c9051133b0fc" }
 dependencies = [
     { name = "cryptography" },
     { name = "lab-commons", extra = ["io", "paths", "structured", "units"] },
@@ -647,11 +647,15 @@ dependencies = [
 ai = [
     { name = "ai-lab" },
 ]
+capture = [
+    { name = "python-xlib", marker = "sys_platform == 'linux'" },
+]
 dev = [
     { name = "ai-lab" },
     { name = "dev-lab", extra = ["test"] },
     { name = "maturin" },
     { name = "pytest" },
+    { name = "python-xlib", marker = "sys_platform == 'linux'" },
     { name = "ruff" },
 ]
 gpu = [
@@ -662,13 +666,14 @@ gpu = [
 requires-dist = [
     { name = "ai-lab", marker = "extra == 'ai'", git = "https://github.com/DawnEver/ai-lab.git" },
     { name = "dev-lab", extras = ["test"], marker = "extra == 'dev'", git = "https://github.com/DawnEver/dev-lab.git" },
-    { name = "document-lab", extras = ["ai"], marker = "extra == 'dev'" },
+    { name = "document-lab", extras = ["ai", "capture"], marker = "extra == 'dev'" },
     { name = "lab-commons", extras = ["paths"], git = "https://github.com/DawnEver/lab-commons.git" },
     { name = "marker-pdf", marker = "extra == 'gpu'" },
     { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.7" },
     { name = "numpy" },
     { name = "pymupdf", specifier = "<2" },
     { name = "pytest", marker = "extra == 'dev'" },
+    { name = "python-xlib", marker = "sys_platform == 'linux' and extra == 'capture'" },
     { name = "ruff", marker = "extra == 'dev'" },
 ]
 provides-extras = ["ai", "capture", "dev", "gpu"]
@@ -856,7 +861,7 @@ wheels = [
 
 [[package]]
 name = "httpx"
-version = "0.28.1"
+version = "0.29.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -864,9 +869,9 @@ dependencies = [
     { name = "httpcore" },
     { name = "idna" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b1/df/48c586a5fe32a0f01324ee087459e112ebb7224f646c0b5023f5e79e9956/httpx-0.28.1.tar.gz", hash = "sha256:75e98c5f16b0f35b567856f597f06ff2270a374470a5c2392242528e3e3e42fc", size = 141406, upload-time = "2024-12-06T15:37:23.222Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9a/d5/b4d2c4d397b7c0222635cd069098f232fb5cba31f6749e77b339e263b52c/httpx-0.29.0.tar.gz", hash = "sha256:700928ee6c1f4213795e67c47eba8f8553639069fea89199f71d654e38edc593", size = 141642, upload-time = "2026-11-26T15:58:37.028Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl", hash = "sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad", size = 73517, upload-time = "2024-12-06T15:37:21.509Z" },
+    { url = "https://files.pythonhosted.org/packages/82/c6/dddba524648da23345e446e6413530474e19e44122dba752d34ae7c4ae57/httpx-0.29.0-py3-none-any.whl", hash = "sha256:6734dcf742ced6e8018e45d3f9f7728975b6b3e1085a24f3e2c056069d858bd1", size = 73532, upload-time = "2026-11-26T15:58:35.703Z" },
 ]
 
 [[package]]
@@ -1128,8 +1133,8 @@ wheels = [
 
 [[package]]
 name = "lab-commons"
-version = "0.3.1.dev1800+g0162c851e"
-source = { git = "https://github.com/DawnEver/lab-commons.git#0162c851e948c2bfb49866687256475f7db7e933" }
+version = "0.3.1.dev1807+gd6ecec1a1"
+source = { git = "https://github.com/DawnEver/lab-commons.git#d6ecec1a1f96e5c09869b9286e4e5a4ce7aae935" }
 
 [package.optional-dependencies]
 io = [
@@ -1145,7 +1150,6 @@ structured = [
 units = [
     { name = "numpy" },
     { name = "pint" },
-    { name = "pydantic" },
 ]
 
 [[package]]
@@ -2208,6 +2212,18 @@ wheels = [
 ]
 
 [[package]]
+name = "python-xlib"
+version = "0.33"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "six" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/86/f5/8c0653e5bb54e0cbdfe27bf32d41f27bc4e12faa8742778c17f2a71be2c0/python-xlib-0.33.tar.gz", hash = "sha256:55af7906a2c75ce6cb280a584776080602444f75815a7aff4d287bb2d7018b32", size = 269068, upload-time = "2022-12-25T18:53:00.824Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fc/b8/ff33610932e0ee81ae7f1269c890f697d56ff74b9f5b2ee5d9b7fa2c5355/python_xlib-0.33-py2.py3-none-any.whl", hash = "sha256:c3534038d42e0df2f1392a1b30a15a4ff5fdc2b86cfa94f072bf11b10a164398", size = 182185, upload-time = "2022-12-25T18:52:58.662Z" },
+]
+
+[[package]]
 name = "pyyaml"
 version = "6.0.4"
 source = { registry = "https://pypi.org/simple" }
@@ -2689,6 +2705,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/58/15/8b3609fd3830ef7b27b655beb4b4e9c62313a4e8da8c676e142cc210d58e/shellingham-1.5.4.tar.gz", hash = "sha256:8dbca0739d487e5bd35ab3ca4b36e11c4078f3a234bfce294b0a0291363404de", size = 10310, upload-time = "2023-10-24T04:13:40.426Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e0/f9/0595336914c5619e5f28a1fb793285925a8cd4b432c9da0a987836c7f822/shellingham-1.5.4-py2.py3-none-any.whl", hash = "sha256:7ecfff8f2fd72616f7481040475a65b2bf8af90a56c89140852d1120324e8686", size = 9755, upload-time = "2023-10-24T04:13:38.866Z" },
+]
+
+[[package]]
+name = "six"
+version = "1.17.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
 ]
 
 [[package]]

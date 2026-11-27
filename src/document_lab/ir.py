@@ -11,16 +11,25 @@ view hides (a layer turned off), and ``inkless``, painted in the colorant ``None
 (a path, an image or a shading; text is text whatever its color, as an invisible OCR layer's is). Both are False
 by default because what neither flags is seen. A module judging a page's content leaves both out unless its
 ``include_hidden`` or ``include_inkless`` says otherwise.
+
+A span's text is what its document states, a replacement (``/ActualText``) too: a no-break or zero-width space
+stays one. A module that joins, splits or matches text reads it through :func:`spaced`.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import os
+import re
+import sys
+import unicodedata
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Final, NamedTuple
+from urllib.parse import quote
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Iterable, Iterator, Sequence
+    from pathlib import Path
 
     import numpy as np
 
@@ -35,8 +44,29 @@ __all__ = [
     'Table',
     'TextSpan',
     'VectorPath',
+    'file_uri',
+    'spaced',
     'union',
 ]
+
+#: Every space separator (Unicode category Zs: the no-break, en, em, thin, ideographic ... spaces) is a space, and so
+#: is the zero-width space (U+200B), a word break unseen; a word joiner (U+2060, and U+FEFF read as one) forbids a
+#: break and is dropped.
+_SPACES: Final = {
+    **{c: ' ' for c in range(sys.maxunicode + 1) if unicodedata.category(chr(c)) == 'Zs'},
+    0x200B: ' ',
+    0x2060: None,
+    0xFEFF: None,
+}
+_RUN: Final = re.compile(' {2,}')
+
+
+def spaced(text: str) -> str:
+    """``text`` with every space a plain one and a run of them one, word joiners dropped (see :data:`_SPACES`).
+
+    Tabs and line breaks are no space separators: they stay.
+    """
+    return _RUN.sub(' ', text.translate(_SPACES))
 
 
 class BBox(NamedTuple):
@@ -68,6 +98,36 @@ def union(boxes: Iterable[BBox]) -> BBox:
     return BBox(min(xs0), min(ys0), max(xs1), max(ys1))
 
 
+def file_uri(path: Path) -> str:
+    """The ``file:`` URI of the absolute ``path``, a :class:`Provenance`'s ``uri`` for a local file: ``path.as_uri()``.
+
+    Made here because ``as_uri`` imports ``urllib.request`` (``http.client``, ``email``, ``tempfile``) the first
+    time a process calls it, about 0.1 s (Python 3.15) -- more than reading a short PDF takes. The steps are
+    ``urllib.request.pathname2url``'s, which ``tests/unit/test_ir.py`` holds this to.
+
+    Raises:
+        ValueError: ``path`` is relative.
+
+    """
+    if not path.is_absolute():
+        msg = f"{path}: relative paths can't be expressed as file URIs"
+        raise ValueError(msg)
+    encoding, errors = sys.getfilesystemencoding(), sys.getfilesystemencodeerrors()
+    text = str(path).replace('\\', '/') if os.name == 'nt' else str(path)
+    drive, root, tail = os.path.splitroot(text)
+    if drive:
+        if drive[:4] == '//?/':  # a verbatim path: its drive, or its share
+            drive = drive[4:]
+            if drive[:4].upper() == 'UNC/':
+                drive = '//' + drive[4:]
+        if drive[1:] == ':':  # a drive letter: an empty authority, then the path
+            drive = '///' + drive
+        drive = quote(drive, encoding=encoding, errors=errors, safe='/:')
+    elif root:
+        root = '//' + root  # an empty authority, so a path starting // is no authority
+    return 'file:' + drive + root + quote(tail, encoding=encoding, errors=errors)
+
+
 @dataclass(frozen=True, slots=True)
 class Provenance:
     """Where a value came from: the source's content hash and URI, then a page and box, or a locator."""
@@ -97,7 +157,10 @@ class Provenance:
 
 @dataclass(frozen=True, slots=True)
 class TextSpan:
-    """A run of text in one font and size."""
+    """A run of text in one font, size and fill: along a baseline, or down a column when written vertically.
+
+    Its fill is a color as in :class:`VectorPath`.
+    """
 
     text: str
     size: float
@@ -108,10 +171,23 @@ class TextSpan:
     #: change of font, size or baseline inside a word (the ``2`` of ``H2O``). None: it continues none and none
     #: continues it. Its source decides where a word gap is; a reader setting spans into lines spaces them by it.
     unspaced: int | None = None
+    #: How its glyphs are painted, the PDF text render mode: 0 fill, 1 stroke, 2 both, 3 invisible (an OCR layer),
+    #: 4-7 those adding the glyphs to the clip. None: its source has no render modes.
+    render_mode: int | None = None
+    #: Written vertically (its font's writing mode, WMode 1): its glyphs stand upright and advance down a column, its
+    #: text reads top to bottom, its box is the column's. Text turned sideways is not this: it is written
+    #: horizontally along a turned baseline.
+    vertical: bool = False
+    #: The unit vector its baseline runs along, in page space (y down): ``(1, 0)`` for text set left to right,
+    #: ``(0, -1)`` for text set bottom to top (a margin stamp turned sideways).
+    direction: tuple[float, float] = (1.0, 0.0)
     #: Drawn by optional content the default view hides (see the module).
     hidden: bool = False
     #: The subtype of the annotation whose appearance draws it; None for the page's content.
     annotation: str | None = None
+    #: The color its glyphs are filled with; None when they are not filled (stroked or invisible text) or the source
+    #: states no fill.
+    fill: tuple[float, ...] | None = None
 
     @property
     def center(self) -> tuple[float, float]:
@@ -123,9 +199,9 @@ class TextSpan:
         return ((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class VectorPath:
-    """One subpath of a page's vector drawing, curves flattened to points (``read_pdf``'s ``curve_samples`` each).
+    """One subpath of a page's vector drawing, curves flattened to points (as ``read_pdf`` says).
 
     A color is sRGB in 0..1 -- an ICC-based color through its profile, a separation's or DeviceN's through its
     tint transform, a calibrated or Lab color by the CIE formulas, a device color by the standard's own (the reader's
@@ -134,9 +210,14 @@ class VectorPath:
     ``inkless``, its color its tint's components; one whose fill marks and whose stroke does not (or the reverse) is
     two paintings, one ``inkless``. A shading painted over the clip (``sh``) is the closed rectangle of the box it
     may cover, filled with a ``'shading'`` pattern.
+
+    A path is compared and hashed by identity (``eq=False``): it is one mark drawn on its page -- two drawn alike
+    are still two -- and its points, an array, have no single truth value to compare by.
     """
 
-    points: tuple[tuple[float, float], ...]
+    #: Its points in drawing order: an ``(n, 2)`` float64 array of ``(x, y)`` rows, n >= 2, read-only (the
+    #: reader's are views of one array per page).
+    points: np.ndarray
     #: The stroking color; None when the path is not stroked.
     stroke: tuple[float, ...] | None
     #: The stroke's line width (points); 0 when not stroked.
@@ -268,13 +349,17 @@ class Page:
 
 @dataclass(frozen=True, slots=True)
 class Document:
-    """A source document by content hash and URI, and its pages."""
+    """A source document by content hash and URI, and its pages.
+
+    ``pages`` is any sequence of pages: a tuple, or ``read_pdf``'s, which reads each page when it is first asked for.
+    """
 
     sha256: str
     uri: str
-    pages: tuple[Page, ...] = field(default=())
-    #: What the reader repaired to read the file (a rebuilt cross-reference table, ...), in words.
-    repairs: tuple[str, ...] = ()
+    pages: Sequence[Page] = field(default=())
+    #: What the reader repaired to read the file (a rebuilt cross-reference table, ...), in words: a reader reading
+    #: pages when asked for adds what it repairs to read one as it reads it.
+    repairs: Sequence[str] = ()
 
     def page(self, number: int) -> Page:
         """The page with 1-based ``number``."""

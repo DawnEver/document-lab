@@ -565,7 +565,7 @@ def text_layer(
     page to recognize: a document already read needs none. ``out`` may be ``pdf`` itself: it is written beside as
     ``<out>.part`` and moved into place when whole; nothing is written when a page cannot be recognized.
     """
-    reader = _pdf.open(pdf.read_bytes(), b'')
+    reader = _pdf.open(pdf, b'')
     asked = _Asked(orientation_confidence, deskew_above)
     layers: dict[int, list[_Word]] = {}
     readings = []

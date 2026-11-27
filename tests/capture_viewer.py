@@ -1,10 +1,11 @@
 """A real scrollable window for the OS parts (``windows``, ``macos``, ``linux``): a known tall image in a Tk canvas.
 
-``python capture_viewer.py <title> <seed>`` says its own pid on stdout first (the window's owner), then shows
-:func:`picture` ``(seed)`` one pixel a pixel (on Windows the process is made per-monitor DPI aware, so Windows does not
-rescale it). Each wheel event scrolls :data:`NOTCH` pixels a notch -- Windows' and Tk 9's ``<MouseWheel>`` count 120 a
-notch, Tk 8.6 on macOS one event a notch, X11's are ``<Button-4>``/``<Button-5>`` -- and the Down arrow :data:`ARROW`
-pixels, both stopping at the end, as a document viewer does.
+``python capture_viewer.py <title> <seed>`` says its own pid on stdout first (the window's owner), then -- once the
+window is up -- where on the screen its view starts (``x y``); it shows :func:`picture` ``(seed)`` one pixel a pixel
+(on Windows the process is made per-monitor DPI aware, so Windows does not rescale it). Each wheel event scrolls
+:data:`NOTCH` pixels a notch -- Windows' and Tk 9's ``<MouseWheel>`` count 120 a notch, Tk 8.6 on macOS one event a
+notch, X11's are ``<Button-4>``/``<Button-5>`` -- and the Down arrow :data:`ARROW` pixels, both stopping at the end, as
+a document viewer does.
 """
 
 import ctypes
@@ -16,6 +17,7 @@ import numpy as np
 WIDTH, HEIGHT, VIEW = 360, 1900, 300
 NOTCH, ARROW = 40, 37
 _WHEEL_DELTA = 120
+_SHOWN_MS = 300  # after this the window is up, and its view is drawn again
 
 
 def picture(seed: int) -> np.ndarray:
@@ -47,13 +49,32 @@ def main(title: str, seed: int) -> None:
     photo = tk.PhotoImage(data=header + picture(seed).tobytes(), format='ppm')
     canvas.create_image(0, 0, image=photo, anchor='nw')
     canvas.configure(scrollregion=(0, 0, WIDTH, HEIGHT))
-    root.bind_all('<MouseWheel>', lambda e: canvas.yview_scroll(NOTCH * notches(e.delta), 'units'))
-    root.bind_all('<Button-4>', lambda _: canvas.yview_scroll(-NOTCH, 'units'))
-    root.bind_all('<Button-5>', lambda _: canvas.yview_scroll(NOTCH, 'units'))
-    root.bind_all('<Down>', lambda _: canvas.yview_scroll(ARROW, 'units'))
+
+    def scrolled(event: object, units: int) -> None:
+        """Scroll ``units`` pixels, and say on stderr what came and where the view now starts (shown on a failure)."""
+        canvas.yview_scroll(units, 'units')
+        top = round(canvas.canvasy(0))
+        sys.stderr.write(f'viewer: {event.type} {getattr(event, "delta", "")} {event.keysym}: {units:+d} -> {top}\n')
+        sys.stderr.flush()
+
+    root.bind_all('<MouseWheel>', lambda e: scrolled(e, NOTCH * notches(e.delta)))
+    root.bind_all('<Button-4>', lambda e: scrolled(e, -NOTCH))
+    root.bind_all('<Button-5>', lambda e: scrolled(e, NOTCH))
+    root.bind_all('<Down>', lambda e: scrolled(e, ARROW))
     root.geometry('+200+200')
     root.focus_force()
+    root.after(_SHOWN_MS, _redrawn, root, canvas)
     root.mainloop()
+
+
+def _redrawn(root: object, canvas: object) -> None:
+    """Draw the view again once the window is up -- Tk 9 on macOS may leave a window blank until it is next drawn --
+    and say on stdout where on the screen the view starts."""
+    root.focus_force()
+    canvas.yview_scroll(1, 'units')
+    canvas.yview_scroll(-1, 'units')
+    sys.stdout.write(f'{canvas.winfo_rootx()} {canvas.winfo_rooty()}\n')
+    sys.stdout.flush()
 
 
 if __name__ == '__main__':

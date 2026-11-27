@@ -153,7 +153,8 @@ def _clean_section_clutter(section_file: Path) -> int:
     # Collapse 3+ consecutive blank lines into 2
     content = re.sub(r'\n{4,}', '\n\n\n', content)
 
-    # Remove orphaned "Authorized licensed use..." IEEE copyright lines
+    # Remove orphaned "Authorized licensed use..." IEEE download stamps from marker's markdown (the IR path writes
+    # none: it is a running foot, left out by `document_lab.layout.without_running`)
     content = re.sub(
         r'\nAuthorized licensed use limited to:.*?Restrictions apply\.\s*\n',
         '\n',

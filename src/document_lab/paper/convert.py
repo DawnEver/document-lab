@@ -1,4 +1,8 @@
-"""A paper PDF to markdown: marker-pdf on a GPU (the ``gpu`` extra), else document_lab's own IR on CPU."""
+"""A paper PDF to markdown: marker-pdf on a GPU (the ``gpu`` extra), else document_lab's own IR on CPU.
+
+The IR path writes the paper without its running heads and feet (`document_lab.layout.without_running`): a journal's
+name and a page number repeated at every page's edge are no part of its text.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +12,7 @@ import sys
 from pathlib import Path
 from typing import Final, Literal
 
+from document_lab import layout
 from document_lab.markdown import Headings, headings, to_markdown
 from document_lab.pdf import read_pdf
 
@@ -78,7 +83,7 @@ def convert(
     flat.mkdir(parents=True, exist_ok=True)
     if used == 'marker':
         return _run_marker(pdf, out_dir), used, None
-    doc = read_pdf(pdf)
+    doc = layout.without_running(read_pdf(pdf))
     sections = headings(doc, outline=outline)
     return to_markdown(doc, sections=sections), used, sections
 

@@ -2026,7 +2026,13 @@ impl Interpreter<'_> {
     /// The Form `stream` (object `number`) drawn in the current state (8.10): through its `/Matrix`, clipped to its
     /// `/BBox`, with its own resources (else `resources`, its caller's); the state, the path and its marked content
     /// end with it.
-    fn form(&mut self, stream: &Stream, number: Option<u32>, resources: &Dict, depth: usize) -> Result<()> {
+    fn form(
+        &mut self,
+        stream: &Stream,
+        number: Option<u32>,
+        resources: &Dict,
+        depth: usize,
+    ) -> Result<()> {
         let matrix = self.form_matrix(&stream.dict)?;
         self.form_under(stream, number, matrix, resources, depth)
     }

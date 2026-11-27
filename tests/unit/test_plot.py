@@ -15,6 +15,7 @@ from tests.synthetic import (
     FRAME,
     MARK_SIZE,
     RED,
+    TICK_BAR,
     Axis,
     PlotSpec,
     draw_mark,
@@ -501,6 +502,34 @@ def test_an_outlined_unit_letter_in_place_of_a_tick_label_is_no_label(tmp_path):
     spec = PlotSpec(Axis([0, 50, 100], labels=['0', 'C', '100']), Axis([0, 50, 100]), [(lambda x: x, XS, RED)])
     (plot,) = plots(read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1))
     assert sorted(v for _, v in plot.x.ticks) == [0, 100]
+
+
+def test_a_tick_drawn_as_a_bar_beside_the_corner_label_is_the_axis_not_the_labels_glyph(tmp_path):
+    """Ticks drawn as filled bars: the x axis's first one stands beside the y axis's ``0`` as close as a glyph would,
+    and read with it as a mark it made the ``0`` no number, refusing the frame."""
+    spec = PlotSpec(
+        Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], filled_ticks=True, y_label_gap=2.0
+    )
+    (plot,) = plots(read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1))
+    assert sorted(v for _, v in plot.y.ticks) == [0, 50, 100]
+    assert sorted(v for _, v in plot.x.ticks) == [0, 50, 100]
+
+
+def test_a_bar_beside_the_corner_label_off_the_frame_is_still_the_labels_and_refuses(tmp_path):
+    """The planted wrong truth: a bar the size of a tick but standing off the frame's side is no tick of it."""
+    thick, long = TICK_BAR
+    left = FRAME.x0 - 2.0  # beyond EDGE_TOL of the frame's side, between it and the label
+    bar = (left - thick / 2, FRAME.y1 - long, left + thick / 2, FRAME.y1)
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([0, 50, 100]),
+        [(lambda x: x, XS, RED)],
+        tick_marks=False,
+        y_label_gap=3.2,
+        bars=[bar],
+    )
+    with pytest.raises(UnrecognizedFrame, match='unrecognized frame'):
+        plots(read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1))
 
 
 def test_a_recognized_outlined_frame_still_reads_beside_an_outlined_axis_title(tmp_path):

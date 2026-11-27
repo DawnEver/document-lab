@@ -74,7 +74,7 @@ fn operand(parser: &mut Parser<'_>) -> Result<Object> {
     ) {
         let word = parser.token();
         return crate::parser::number(word)
-            .ok_or_else(|| Error::at(at, "not a number in a content stream"));
+            .ok_or_else(|| Error::malformed_at(at, "not a number in a content stream"));
     }
     parser.object()
 }
@@ -97,7 +97,7 @@ fn inline_image(parser: &mut Parser<'_>) -> Result<(Dict, Vec<u8>)> {
         if parser.token() == b"ID" {
             break;
         }
-        return Err(Error::at(
+        return Err(Error::malformed_at(
             at,
             "an inline image's dictionary does not end in `ID`",
         ));
@@ -119,7 +119,7 @@ fn inline_image(parser: &mut Parser<'_>) -> Result<(Dict, Vec<u8>)> {
         }
         i += 1;
     }
-    Err(Error::at(start, "an inline image without `EI`"))
+    Err(Error::malformed_at(start, "an inline image without `EI`"))
 }
 
 #[cfg(test)]

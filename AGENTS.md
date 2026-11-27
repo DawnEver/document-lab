@@ -10,9 +10,10 @@ consumer's vocabulary here -- schemas live in consumers. Modules and usage: `REA
 
 ## Rules here
 
-- Dependency arrow: `paper`, `ai` -> `extract`; `paper` -> `markdown`, `regions`, `pdf`, `formula`; `per_page` -> `markdown`,
-  `regions`, `tables`, `ink`, `pdf`, `png`, `formula`; `formula` imports nothing of ours (torch and transformers only
-  when asked); `regions` -> `tables`; `markdown`, `regions`, `tables` -> `layout` -> `ir`; `ink` -> `ir` (`regions` takes its drawings, `tables` a scan's rulings, as boxes, never pixels);
+- Dependency arrow: `paper`, `ai` -> `extract`; `paper` -> `agreement`, `markdown`, `regions`, `pdf`, `formula`;
+  `per_page` -> `agreement`, `markdown`, `regions`, `tables`, `ink`, `pdf`, `png`, `formula`; `formula` imports nothing
+  of ours (torch and transformers only when asked); `agreement` -> `markdown`, `regions`; `regions` -> `tables`;
+  `markdown`, `regions` -> `tags` -> `layout` -> `ir`; `tables` -> `layout`; `ink` -> `ir` (`regions` takes its drawings, `tables` a scan's rulings, as boxes, never pixels);
   `extract` -> `plot`, `pdf`, `html` -> `numbers` -> `ir`; `plot` -> `glyphs` -> `strokefont`, `fonts`; `pdf` -> `fonts`
   (fonts fetched on first use, the one module that downloads them; imports nothing of ours); `strokes` -> `plot`, `ir`; `ocr` -> `ink`, `pdf`
   (a picture measured: its skew; a codec decoded to be turned); `capture` is apart (`cli` -> `session` -> `stitch`; `cli` -> `desktop`, `export`, `ocr`, `files` ->

@@ -6,7 +6,9 @@ is a known function sampled at known points, so a digitizer that is wrong cannot
 
 from __future__ import annotations
 
+import functools
 import math
+import re
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
@@ -19,12 +21,16 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from pathlib import Path
 
-    from document_lab.ir import Page
+    from document_lab.ir import Page, Table
 
 FRAME = pymupdf.Rect(100, 100, 400, 300)
 RED = (1, 0, 0)
 BLUE = (0, 0, 1)
 FONT_SIZE = 8
+#: The size (points) of a marker glyph, as small as the sheets' marks.
+MARK_SIZE = 5
+#: The PDF font name the marker glyphs are set in (PyMuPDF's CJK font, which holds the geometric shapes).
+MARK_FONT = 'mark'
 
 
 @dataclass
@@ -83,6 +89,12 @@ class PlotSpec:
     legend: Sequence[tuple[str, tuple[float, float, float], str | None]] = ()
     #: Tick labels drawn in the stroke font (:func:`stroke_text`): polylines only, no text, as TDK SIFERRIT N72 does.
     stroke_font: bool = False
+    #: The frame is a filled, unstroked rectangle with grid lines inside it only, as sheets drawn in a design tool are.
+    filled_frame: bool = False
+    #: Data points drawn as a text glyph centered on each: (glyph, [(x, y), ...], color).
+    markers: Sequence[tuple[str, Sequence[tuple[float, float]], tuple[float, float, float]]] = ()
+    #: Legend entries inside the frame's top left: (glyph, label, color), the glyph with its label just right of it.
+    marker_legend: Sequence[tuple[str, str, tuple[float, float, float]]] = ()
 
 
 def to_page(spec: PlotSpec, x: float, y: float) -> tuple[float, float]:
@@ -234,6 +246,8 @@ def _draw_frame(page: pymupdf.Page, spec: PlotSpec) -> None:
         lines = ((f.tl, f.tr), ((f.x0 - o, f.y1), f.br), (f.tl, (f.x0, f.y1 + o)), (f.tr, f.br))
         for a, b in lines:
             page.draw_line(a, b, color=(0, 0, 0), width=0.8)
+    elif spec.filled_frame:
+        page.draw_rect(f, color=None, fill=(0.95, 0.95, 0.95), width=0)
     elif spec.frame_as_lines:
         for a, b in ((f.tl, f.tr), (f.bl, f.br), (f.tl, f.bl), (f.tr, f.br)):
             page.draw_line(a, b, color=(0, 0, 0), width=0.8)
@@ -287,7 +301,7 @@ def _y_axis(page: pymupdf.Page, spec: PlotSpec) -> None:
         _, py = to_page(spec, spec.x.ticks[0], v)
         if spec.tick_marks:
             page.draw_line((f.x0, py), (f.x0 + 4, py), color=(0, 0, 0), width=0.5)
-        if spec.grid:
+        if spec.grid and not (spec.filled_frame and i in (0, len(spec.y.ticks) - 1)):
             page.draw_line((f.x0, py), (f.x0 + spec.grid_reach * f.width, py), color=(spec.grid_grey,) * 3, width=0.3)
         py += spec.y.label_drop
         text = spec.y.labels[i] if spec.y.labels else _label(v)
@@ -323,7 +337,7 @@ def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
         px, _ = to_page(spec, v, spec.y.ticks[0])
         if spec.tick_marks:
             page.draw_line((px, f.y1), (px, f.y1 - 4), color=(0, 0, 0), width=0.5)
-        if spec.grid:
+        if spec.grid and not (spec.filled_frame and i in (0, len(spec.x.ticks) - 1)):
             page.draw_line((px, f.y0), (px, f.y1), color=(spec.grid_grey,) * 3, width=0.3)
         _x_label(page, spec, spec.x.labels[i] if spec.x.labels else _label(v), px)
     _y_axis(page, spec)
@@ -343,6 +357,49 @@ def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
         x = spec.frame.x1 - 80
         page.draw_line((x, y), (x + 20, y), color=color, width=1.0, dashes=dashes)
         page.insert_text((x + 24, y + FONT_SIZE * 0.35), text, fontname='helv', fontsize=FONT_SIZE)
+    _draw_marks(page, spec)
+
+
+@functools.cache
+def _ink(glyph: str) -> tuple[float, float]:
+    """The center of ``glyph``'s ink at `MARK_SIZE` relative to its text origin, measured on a rendered pixmap.
+
+    Rendering measures the drawn shape without the reader, so a planted center is not the reader's own answer.
+    """
+    zoom, origin = 40, (10.0, 20.0)
+    doc = pymupdf.open()
+    page = doc.new_page(width=30, height=30)
+    page.insert_font(fontname=MARK_FONT, fontbuffer=pymupdf.Font('cjk').buffer)
+    page.insert_text(origin, glyph, fontname=MARK_FONT, fontsize=MARK_SIZE)
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), colorspace=pymupdf.csGRAY)
+    ink = np.frombuffer(pix.samples, np.uint8).reshape(pix.h, pix.w) < 128  # mid-gray
+    rows, cols = np.nonzero(ink)
+    center = ((cols.min() + cols.max() + 1) / 2 / zoom, (rows.min() + rows.max() + 1) / 2 / zoom)
+    return (center[0] - origin[0], center[1] - origin[1])
+
+
+def mark_box_height() -> float:
+    """The height (points) of a marker glyph's font box at `MARK_SIZE`: its font's descent to its ascent."""
+    font = pymupdf.Font('cjk')
+    return MARK_SIZE * (font.ascender - font.descender)
+
+
+def draw_mark(page: pymupdf.Page, glyph: str, cx: float, cy: float, color: tuple[float, float, float]) -> None:
+    """``glyph`` set as text with its ink centered on (``cx``, ``cy``)."""
+    dx, dy = _ink(glyph)
+    page.insert_font(fontname=MARK_FONT, fontbuffer=pymupdf.Font('cjk').buffer)
+    page.insert_text((cx - dx, cy - dy), glyph, fontname=MARK_FONT, fontsize=MARK_SIZE, color=color)
+
+
+def _draw_marks(page: pymupdf.Page, spec: PlotSpec) -> None:
+    for glyph, points, color in spec.markers:
+        for x, y in points:
+            draw_mark(page, glyph, *to_page(spec, x, y), color)
+    for k, (glyph, text, color) in enumerate(spec.marker_legend):
+        y = spec.frame.y0 + 12 + 12 * k
+        x = spec.frame.x0 + 20
+        draw_mark(page, glyph, x, y, color)
+        page.insert_text((x + 5, y + FONT_SIZE * 0.35), text, fontname='helv', fontsize=FONT_SIZE)
 
 
 def plot_pdf(path: Path, *specs: PlotSpec, outlined: bool = False) -> Path:
@@ -362,7 +419,7 @@ def plot_pdf(path: Path, *specs: PlotSpec, outlined: bool = False) -> Path:
     return path
 
 
-#: Points around the frame a rasterised plot keeps, so its tick labels are inside the image.
+#: Points around the frame a rasterized plot keeps, so its tick labels are inside the image.
 RASTER_MARGIN = 40.0
 
 
@@ -387,6 +444,63 @@ def raster_pdf(
     return path, clip
 
 
+def image_pdf(
+    path: Path,
+    stored: bytes,
+    image: str,
+    *,
+    size: tuple[float, float],
+    matrix: Sequence[float] | None = None,
+    deflate: bool = True,
+    rotate: int = 0,
+    soft_mask: bytes | None = None,
+    over: Callable[[pymupdf.Page], object] | None = None,
+) -> Path:
+    """A one-page PDF of ``size`` points placing one image XObject, saved to ``path``.
+
+    ``image`` is the image dictionary's own entries (``/Width 4 /Height 2 /ColorSpace /DeviceGray ...``), ``stored``
+    its stream: deflated when ``deflate``, else stored as given (a codec's ``/Filter`` stated in ``image``).
+    ``matrix`` is the ``cm`` placing it (PDF space, y up; default the whole page, upright); ``rotate`` the page's
+    ``/Rotate``; ``soft_mask`` the 8-bit gray samples of an ``/SMask`` its size; ``over`` draws on the page after.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=size[0], height=size[1])
+    if soft_mask is not None:
+        mask = doc.get_new_xref()
+        width, height = (re.search(rf'/{k} (\d+)', image)[1] for k in ('Width', 'Height'))  # type: ignore[index]
+        entries = f'/Width {width} /Height {height} /ColorSpace /DeviceGray /BitsPerComponent 8'
+        doc.update_object(mask, f'<< /Type /XObject /Subtype /Image {entries} >>')
+        doc.update_stream(mask, soft_mask)
+        image += f' /SMask {mask} 0 R'
+    xobject = doc.get_new_xref()
+    doc.update_object(xobject, f'<< /Type /XObject /Subtype /Image {image} >>')
+    doc.update_stream(xobject, stored, compress=deflate)
+    if not deflate:  # storing it as given drops the dictionary's /Filter and its parameters: state them again
+        doc.update_object(xobject, f'<< /Type /XObject /Subtype /Image {image} /Length {len(stored)} >>')
+    content = doc.get_new_xref()
+    doc.update_object(content, '<< >>')
+    cm = ' '.join(f'{v:g}' for v in (matrix or (size[0], 0, 0, size[1], 0, 0)))
+    doc.update_stream(content, f'q {cm} cm /Im1 Do Q\n'.encode())
+    doc.xref_set_key(page.xref, 'Resources', f'<< /XObject << /Im1 {xobject} 0 R >> >>')
+    doc.xref_set_key(page.xref, 'Contents', f'{content} 0 R')
+    if rotate:
+        page.set_rotation(rotate)
+    if over is not None:
+        over(page)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def fax_g4(white: np.ndarray) -> bytes:
+    """``white`` -- rows of 1 white, 0 black, as CCITT fax decodes by default -- coded Group 4 by MuPDF."""
+    rows, columns = white.shape
+    packed = np.packbits(white.astype(np.uint8), axis=1).tobytes()
+    stride = len(packed) // rows
+    coded = pymupdf.mupdf.fz_compress_ccitt_fax_g4(pymupdf.mupdf.python_buffer_data(packed), columns, rows, stride)
+    return bytes(coded.fz_buffer_extract())
+
+
 TABLE_ROWS = (('Parameter', 'Value', 'Unit'), ('alpha', '1.25', 'mm'), ('beta', '-3', 'kg'), ('gamma', '4.5e2', 's'))
 TABLE_ORIGIN = (72.0, 400.0)
 TABLE_CELL = (120.0, 20.0)
@@ -406,6 +520,63 @@ def draw_table(page: pymupdf.Page, rows: Sequence[Sequence[str]] = TABLE_ROWS) -
             page.insert_text((rect.x0 + 4, rect.y1 - 6), text, fontname='helv', fontsize=9)
 
 
+#: A table with merged cells: ``Parameter`` spans rows 0-1, ``Limits`` columns 1-2 -- each slot it covers repeats it.
+MERGED_ROWS = (
+    ('Parameter', 'Limits', 'Limits'),
+    ('Parameter', 'min', 'max'),
+    ('alpha', '1.0', '2.5'),
+    ('beta', '-3', '4'),
+)
+#: ``MERGED_ROWS``' merged blocks: (first row, first column, last row, last column).
+MERGED = ((0, 0, 1, 0), (0, 1, 0, 2))
+
+
+def _merged_block(merged: Sequence[tuple[int, int, int, int]], r: int, c: int) -> tuple[int, int, int, int]:
+    return next((b for b in merged if b[0] <= r <= b[2] and b[1] <= c <= b[3]), (r, c, r, c))
+
+
+def _rule(page: pymupdf.Page, a: pymupdf.Point, b: pymupdf.Point, *, filled: bool, width: float) -> None:
+    if filled:
+        half = width / 2
+        box = pymupdf.Rect(min(a.x, b.x) - half, min(a.y, b.y) - half, max(a.x, b.x) + half, max(a.y, b.y) + half)
+        page.draw_rect(box, color=None, fill=(0, 0, 0), width=0)
+    else:
+        page.draw_line(a, b, color=(0, 0, 0), width=width)
+
+
+def draw_ruled_table(
+    page: pymupdf.Page,
+    rows: Sequence[Sequence[str]] = TABLE_ROWS,
+    *,
+    merged: Sequence[tuple[int, int, int, int]] = (),
+    filled: bool = False,
+    width: float = 0.5,
+) -> None:
+    """``rows`` as one grid of rules, each cell side drawn once: a stroked line or (``filled``) a thin filled bar.
+
+    No rule is drawn inside a ``merged`` block (first row, first column, last row, last column); its text is set once,
+    in its top-left slot.
+    """
+    n_rows, n_cols = len(rows), len(rows[0])
+    for r in range(n_rows + 1):
+        for c in range(n_cols):
+            if r in {0, n_rows} or _merged_block(merged, r - 1, c) != _merged_block(merged, r, c):
+                cell = table_cell_rect(min(r, n_rows - 1), c)
+                y = cell.y1 if r == n_rows else cell.y0
+                _rule(page, pymupdf.Point(cell.x0, y), pymupdf.Point(cell.x1, y), filled=filled, width=width)
+    for r in range(n_rows):
+        for c in range(n_cols + 1):
+            if c in {0, n_cols} or _merged_block(merged, r, c - 1) != _merged_block(merged, r, c):
+                cell = table_cell_rect(r, min(c, n_cols - 1))
+                x = cell.x1 if c == n_cols else cell.x0
+                _rule(page, pymupdf.Point(x, cell.y0), pymupdf.Point(x, cell.y1), filled=filled, width=width)
+    for r, row in enumerate(rows):
+        for c, text in enumerate(row):
+            if _merged_block(merged, r, c)[:2] == (r, c) and text:
+                rect = table_cell_rect(r, c)
+                page.insert_text((rect.x0 + 4, rect.y1 - 6), text, fontname='helv', fontsize=9)
+
+
 def mixed_pdf(path: Path) -> Path:
     """Page 1: a heading, a table and a raster image with a caption; page 2: one red polyline."""
     doc = pymupdf.open()
@@ -423,6 +594,38 @@ def mixed_pdf(path: Path) -> Path:
     return path
 
 
+#: Lines top to bottom, each ``(before, drawn, actual, after)``: ``drawn`` is shown, marked with ``/ActualText``
+#: ``actual``. A drawn space stated a zero-width space, a no-break space, a word joiner; the control: ``XY`` stated
+#: the letters ``fi`` of its ligature, a replacement that is no space.
+ACTUAL_TEXT_LINES = (
+    ('80', ' ', '\u200b', 'V'),
+    ('80', ' ', '\u00a0', 'V'),
+    ('80', ' ', '\u2060', 'V'),
+    ('Ex', 'XY', 'fi', 'nal'),
+)
+
+
+def actual_text_pdf(path: Path) -> Path:
+    """One page of :data:`ACTUAL_TEXT_LINES`, 30 points apart, set in Helvetica 10."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=200)
+    font = doc.get_new_xref()
+    doc.update_object(font, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>')
+    doc.xref_set_key(page.xref, 'Resources', f'<< /Font << /F1 {font} 0 R >> >>')
+    content = '\n'.join(
+        f'BT /F1 10 Tf 20 {160 - 30 * i} Td ({before}) Tj '
+        f'/Span << /ActualText <FEFF{actual.encode("utf-16-be").hex()}> >> BDC ({drawn}) Tj EMC ({after}) Tj ET'
+        for i, (before, drawn, actual, after) in enumerate(ACTUAL_TEXT_LINES)
+    )
+    stream = doc.get_new_xref()
+    doc.update_object(stream, '<< >>')
+    doc.update_stream(stream, content.encode('ascii'))
+    doc.xref_set_key(page.xref, 'Contents', f'{stream} 0 R')
+    doc.save(path)
+    doc.close()
+    return path
+
+
 def hidden_layer(page: Page) -> Page:
     """``page`` with everything it draws in a hidden layer: what a layer turned off in the default view reads as."""
     return replace(
@@ -431,3 +634,129 @@ def hidden_layer(page: Page) -> Page:
         paths=tuple(replace(p, hidden=True) for p in page.paths),
         figures=tuple(replace(f, hidden=True) for f in page.figures),
     )
+
+
+#: The page a synthetic scan is of (Letter, as the tables above draw on); it is turned about its center.
+SCAN_PAGE = pymupdf.Rect(0, 0, 612, 792)
+
+
+def turned(x: float, y: float, degrees: float) -> tuple[float, float]:
+    """The point of :data:`SCAN_PAGE` turned ``degrees`` clockwise as seen (y down) about its center."""
+    cx, cy = SCAN_PAGE.width / 2, SCAN_PAGE.height / 2
+    a = math.radians(degrees)
+    return cx + (x - cx) * math.cos(a) - (y - cy) * math.sin(a), cy + (x - cx) * math.sin(a) + (y - cy) * math.cos(a)
+
+
+def scan_image(
+    *draws: Callable[[pymupdf.Page], object], dpi: float = 300, angle: float = 0.0, noise: float = 0.0, seed: int = 0
+) -> np.ndarray:
+    """:data:`SCAN_PAGE` with each of ``draws`` drawn on it, as a scanner gives it: grey rows at ``dpi``.
+
+    The page is turned ``angle`` degrees clockwise (:func:`turned`), as a sheet fed askew; ``noise`` scales the
+    scanner's grain (Gaussian, 25 grey levels at 1), black specks (0.2 %) and white dropouts (3 %), from ``seed``.
+    Rules broken on paper are drawn by ``draws`` (white boxes over them), so they turn with the page.
+    """
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=SCAN_PAGE.width, height=SCAN_PAGE.height)
+        for draw in draws:
+            draw(page)
+        matrix = pymupdf.Matrix(dpi / 72, dpi / 72).prerotate(angle)
+        pix = page.get_pixmap(matrix=matrix, colorspace=pymupdf.csGRAY, alpha=False)
+    whole = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.stride)[:, : pix.width]
+    rows, columns = round(SCAN_PAGE.height * dpi / 72), round(SCAN_PAGE.width * dpi / 72)
+    top, left = (whole.shape[0] - rows) // 2, (whole.shape[1] - columns) // 2  # the turned page's center kept
+    grey = whole[top : top + rows, left : left + columns].astype(np.float64)
+    if noise:
+        rng = np.random.default_rng(seed)
+        grey += rng.normal(0, 25 * noise, grey.shape)
+        grey[rng.random(grey.shape) < 0.002 * noise] = 0
+        grey[rng.random(grey.shape) < 0.03 * noise] = 255
+    return np.clip(grey, 0, 255).astype(np.uint8)
+
+
+def scan_pdf(path: Path, grey: np.ndarray) -> Path:
+    """A page of :data:`SCAN_PAGE`'s size that is the one 8-bit grey image ``grey`` (:func:`scan_image`)."""
+    rows, columns = grey.shape
+    image = f'/Width {columns} /Height {rows} /ColorSpace /DeviceGray /BitsPerComponent 8'
+    return image_pdf(path, grey.tobytes(), image, size=(SCAN_PAGE.width, SCAN_PAGE.height))
+
+
+def broken_rules(page: pymupdf.Page, cut: float = 1.5) -> None:
+    """White cuts ``cut`` points long across :func:`draw_ruled_table`'s rules, away from where rules cross."""
+    x0, y0 = TABLE_ORIGIN
+    for r in range(len(TABLE_ROWS) + 1):
+        for x in (13, 58, 88, 158, 198, 268, 308, 338):
+            page.draw_rect(
+                pymupdf.Rect(x0 + x, y0 + 20 * r - 1, x0 + x + cut, y0 + 20 * r + 1), color=None, fill=(1, 1, 1)
+            )
+    for c in range(len(TABLE_ROWS[0]) + 1):
+        for y in (5, 28, 51, 70):
+            page.draw_rect(
+                pymupdf.Rect(x0 + 120 * c - 1, y0 + y, x0 + 120 * c + 1, y0 + y + cut), color=None, fill=(1, 1, 1)
+            )
+
+
+def double_border(page: pymupdf.Page, apart: float = 2.5) -> None:
+    """A second rule ``apart`` points round :func:`draw_ruled_table`'s outline: a double rule."""
+    outline = table_cell_rect(0, 0) | table_cell_rect(len(TABLE_ROWS) - 1, len(TABLE_ROWS[0]) - 1)
+    page.draw_rect(
+        pymupdf.Rect(outline.x0 - apart, outline.y0 - apart, outline.x1 + apart, outline.y1 + apart),
+        color=(0, 0, 0),
+        width=0.5,
+    )
+
+
+def table_differences(
+    table: Table,
+    rows: Sequence[Sequence[str]],
+    *,
+    merged: Sequence[tuple[int, int, int, int]] = (),
+    angle: float = 0.0,
+    within: float = 0.5,
+) -> tuple[list[str], list[str]]:
+    """How a table found on a scan differs from the one :func:`draw_ruled_table` drew: ``(structure, text)``.
+
+    Structure: its shape, which slots share a cell (``merged``), and each cell's box -- its center where
+    :func:`turned` by ``angle`` puts the drawn cell's and its size the drawn cell's, each ``within`` points. Text:
+    each cell whose text is not the drawn one's.
+    """
+    structure: list[str] = []
+    if [len(r) for r in table.rows] != [len(r) for r in rows]:
+        return [f'shape {[len(r) for r in table.rows]}, drawn {[len(r) for r in rows]}'], []
+    boxes = table.cell_bboxes or ()
+    for r, row in enumerate(rows):
+        for c in range(len(row)):
+            r0, c0, r1, c1 = _merged_block(merged, r, c)
+            drawn = table_cell_rect(r0, c0) | table_cell_rect(r1, c1)
+            x, y = turned((drawn.x0 + drawn.x1) / 2, (drawn.y0 + drawn.y1) / 2, angle)
+            box = boxes[r][c]
+            if box is None:
+                structure.append(f'cell ({r}, {c}) has no box')
+                continue
+            off = max(abs((box.x0 + box.x1) / 2 - x), abs((box.y0 + box.y1) / 2 - y))
+            size = max(abs(box.width - drawn.width), abs(box.height - drawn.height))
+            if off > within or size > within:
+                structure.append(f'cell ({r}, {c}) box {tuple(round(v, 1) for v in box)} off by {off:.1f} pt')
+    text = [
+        f'cell ({r}, {c}) reads {table.rows[r][c]!r}, drawn {row[c]!r}'
+        for r, row in enumerate(rows)
+        for c in range(len(row))
+        if table.rows[r][c] != row[c]
+    ]
+    return structure, text
+
+
+def draw_sideways_table(page: pymupdf.Page, rows: Sequence[Sequence[str]] = TABLE_ROWS, turn: int = -90) -> None:
+    """:func:`draw_ruled_table`'s grid turned ``turn`` degrees clockwise about :data:`SCAN_PAGE`'s center, its text
+    with it: a landscape table printed sideways on a portrait page (-90: read bottom to top, as standards set them)."""
+    n_rows, n_cols = len(rows), len(rows[0])
+    outline = table_cell_rect(0, 0) | table_cell_rect(n_rows - 1, n_cols - 1)
+    for y in [outline.y0 + TABLE_CELL[1] * r for r in range(n_rows + 1)]:
+        page.draw_line(turned(outline.x0, y, turn), turned(outline.x1, y, turn), color=(0, 0, 0), width=0.5)
+    for x in [outline.x0 + TABLE_CELL[0] * c for c in range(n_cols + 1)]:
+        page.draw_line(turned(x, outline.y0, turn), turned(x, outline.y1, turn), color=(0, 0, 0), width=0.5)
+    for r, row in enumerate(rows):
+        for c, text in enumerate(row):
+            rect = table_cell_rect(r, c)
+            at = turned(rect.x0 + 4, rect.y1 - 6, turn)
+            page.insert_text(at, text, fontname='helv', fontsize=9, rotate=-turn % 360)

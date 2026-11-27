@@ -33,7 +33,6 @@
 //! transform does not read is set by its components alone, with no RGB, and named there too -- never left in the
 //! space set before.
 
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::color::{Color, Space};
@@ -48,6 +47,10 @@ use crate::page::Page;
 
 /// How deep Form `XObject`s may nest before one is refused as a loop.
 const MAX_FORM_DEPTH: usize = 32;
+
+/// Half an em in text space units of one font size (500 units of a composite font's 1000-unit glyph space): half a
+/// vertical column's width across.
+const HALF_EM: f64 = 0.5;
 
 /// One piece of a path, in page space.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -139,11 +142,13 @@ pub struct Glyph {
     /// Its text: the font's for it, when the font says; inside an `/ActualText` sequence, the replacement on the
     /// sequence's first glyph seen and the empty text on every later one.
     pub text: Option<String>,
-    /// Where its baseline starts, in page space.
+    /// Where it starts along its line, in page space: its origin on the baseline, or its vertical origin (the top
+    /// of its place in a column) when its font writes vertically.
     pub origin: Point,
-    /// Where its baseline ends (its origin plus its width, before spacing), in page space.
+    /// Where it ends along its line (its origin plus its advance, before spacing), in page space.
     pub end: Point,
-    /// The box from the font's descent to its ascent across the glyph's advance, in page space.
+    /// Its box in page space: across its advance from the font's descent to its ascent, or when its font writes
+    /// vertically, down its advance and an em across, centered on its origin.
     pub bbox: Rect,
 }
 
@@ -161,7 +166,7 @@ pub struct TextEvent {
     pub fill: Color,
     /// The stroke color.
     pub stroke: Color,
-    /// Whether the font writes vertically (its glyphs are still placed along the baseline).
+    /// Whether the font writes vertically: its glyphs step down a column, each from its vertical origin.
     pub vertical: bool,
     /// The glyphs, in showing order.
     pub glyphs: Vec<Glyph>,
@@ -288,8 +293,6 @@ struct Interpreter<'a> {
     line_matrix: Matrix,
     /// The union of the boxes of the glyphs shown in a clipping mode in this text object: the clip at `ET`.
     text_clip: Option<Rect>,
-    /// Fonts read, by the font dictionary's object number.
-    fonts: HashMap<u32, Rc<Font>>,
     /// The default view of the file's optional content.
     optional: OptionalContent,
     /// The open marked-content sequences, outermost first.
@@ -352,7 +355,6 @@ impl File {
             text_matrix: Matrix::IDENTITY,
             line_matrix: Matrix::IDENTITY,
             text_clip: None,
-            fonts: HashMap::new(),
             optional: self.optional_content()?,
             marked: Vec::new(),
             marked_floor: 0,
@@ -370,8 +372,20 @@ impl File {
     }
 }
 
-/// The last `count` operands, which must be numbers.
-fn last(operands: &[Object], count: usize) -> Result<Vec<f64>> {
+/// The last `N` operands, which must be numbers.
+fn last<const N: usize>(operands: &[Object]) -> Result<[f64; N]> {
+    let mut out = [0.0; N];
+    let from = operands.len().checked_sub(N);
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = from
+            .and_then(|from| operands[from + i].as_number())
+            .ok_or_else(|| Error::malformed(format!("needs {N} numbers")))?;
+    }
+    Ok(out)
+}
+
+/// The last `count` operands, which must be numbers: as many as a color space has components.
+fn numbers(operands: &[Object], count: usize) -> Result<Vec<f64>> {
     operands
         .len()
         .checked_sub(count)
@@ -402,15 +416,14 @@ fn integer(operands: &[Object]) -> Result<i64> {
 
 impl Interpreter<'_> {
     fn run(&mut self, data: &[u8], resources: &Dict, depth: usize) {
-        let (ops, err) = operations(data);
-        for op in &ops {
+        let err = operations(data, |op| {
             if let Err(e) = self.operation(op, resources, depth) {
                 self.out.warnings.push(format!(
                     "`{}` skipped: {e}",
-                    String::from_utf8_lossy(&op.operator)
+                    String::from_utf8_lossy(op.operator)
                 ));
             }
-        }
+        });
         if let Some(e) = err {
             self.out
                 .warnings
@@ -423,8 +436,7 @@ impl Interpreter<'_> {
     }
 
     fn operation(&mut self, op: &Operation, resources: &Dict, depth: usize) -> Result<()> {
-        let operator = op.operator.as_slice();
-        let operands = &op.operands;
+        let (operator, operands) = (op.operator, op.operands);
         if self.state_operation(operator, operands, resources)?
             || self.path_operation(operator, operands)?
             || self.paint_operation(operator)
@@ -446,7 +458,7 @@ impl Interpreter<'_> {
                         int(b"Width", b"W").unwrap_or(0),
                         int(b"Height", b"H").unwrap_or(0),
                         None,
-                        Some((dict.clone(), data.clone())),
+                        Some((dict.clone(), data.to_vec())),
                     );
                 }
             }
@@ -616,11 +628,11 @@ impl Interpreter<'_> {
                 }
             }
             b"cm" => {
-                let matrix = Matrix::from_numbers(&last(operands, 6)?)
+                let matrix = Matrix::from_numbers(&last::<6>(operands)?)
                     .ok_or_else(|| Error::malformed("needs 6 numbers"))?;
                 self.state.ctm = matrix.then(self.state.ctm);
             }
-            b"w" => self.state.line_width = last(operands, 1)?[0],
+            b"w" => self.state.line_width = last::<1>(operands)?[0],
             b"J" => self.state.cap = integer(operands)?,
             b"j" => self.state.join = integer(operands)?,
             b"d" => {
@@ -641,18 +653,18 @@ impl Interpreter<'_> {
     fn path_operation(&mut self, operator: &[u8], operands: &[Object]) -> Result<bool> {
         match operator {
             b"m" => {
-                let v = last(operands, 2)?;
+                let v = last::<2>(operands)?;
                 let to = self.point(v[0], v[1]);
                 self.path.push(Segment::MoveTo(to));
                 (self.current, self.start) = (Some(to), Some(to));
             }
             b"l" => {
-                let v = last(operands, 2)?;
+                let v = last::<2>(operands)?;
                 let to = self.point(v[0], v[1]);
                 self.extend(Segment::LineTo(to), to);
             }
             b"c" => {
-                let v = last(operands, 6)?;
+                let v = last::<6>(operands)?;
                 let (c1, c2, to) = (
                     self.point(v[0], v[1]),
                     self.point(v[2], v[3]),
@@ -661,7 +673,7 @@ impl Interpreter<'_> {
                 self.extend(Segment::CurveTo(c1, c2, to), to);
             }
             b"v" => {
-                let v = last(operands, 4)?;
+                let v = last::<4>(operands)?;
                 let c1 = self
                     .current
                     .ok_or_else(|| Error::malformed("no current point"))?;
@@ -669,7 +681,7 @@ impl Interpreter<'_> {
                 self.extend(Segment::CurveTo(c1, c2, to), to);
             }
             b"y" => {
-                let v = last(operands, 4)?;
+                let v = last::<4>(operands)?;
                 let (c1, to) = (self.point(v[0], v[1]), self.point(v[2], v[3]));
                 self.extend(Segment::CurveTo(c1, to, to), to);
             }
@@ -678,7 +690,7 @@ impl Interpreter<'_> {
                 self.current = self.start;
             }
             b"re" => {
-                let v = last(operands, 4)?;
+                let v = last::<4>(operands)?;
                 let (left, bottom, right, top) = (v[0], v[1], v[0] + v[2], v[1] + v[3]);
                 let corners = [
                     self.point(left, bottom),
@@ -740,14 +752,14 @@ impl Interpreter<'_> {
                     self.state.clip = self.state.clip.intersect(glyphs);
                 }
             }
-            b"Tc" => text.char_spacing = last(operands, 1)?[0],
-            b"Tw" => text.word_spacing = last(operands, 1)?[0],
-            b"Tz" => text.scale = last(operands, 1)?[0] / 100.0,
-            b"TL" => text.leading = last(operands, 1)?[0],
-            b"Ts" => text.rise = last(operands, 1)?[0],
+            b"Tc" => text.char_spacing = last::<1>(operands)?[0],
+            b"Tw" => text.word_spacing = last::<1>(operands)?[0],
+            b"Tz" => text.scale = last::<1>(operands)?[0] / 100.0,
+            b"TL" => text.leading = last::<1>(operands)?[0],
+            b"Ts" => text.rise = last::<1>(operands)?[0],
             b"Tr" => text.render_mode = integer(operands)?,
             b"Tf" => {
-                text.size = last(operands, 1)?[0];
+                text.size = last::<1>(operands)?[0];
                 let name = operands
                     .first()
                     .and_then(Object::as_name)
@@ -756,16 +768,16 @@ impl Interpreter<'_> {
                 self.state.text.font = Some(font);
             }
             b"Td" => {
-                let v = last(operands, 2)?;
+                let v = last::<2>(operands)?;
                 self.next_line(v[0], v[1]);
             }
             b"TD" => {
-                let v = last(operands, 2)?;
+                let v = last::<2>(operands)?;
                 text.leading = -v[1];
                 self.next_line(v[0], v[1]);
             }
             b"Tm" => {
-                let m = Matrix::from_numbers(&last(operands, 6)?)
+                let m = Matrix::from_numbers(&last::<6>(operands)?)
                     .ok_or_else(|| Error::malformed("needs 6 numbers"))?;
                 (self.text_matrix, self.line_matrix) = (m, m);
             }
@@ -780,7 +792,7 @@ impl Interpreter<'_> {
                 self.show(string(operands)?);
             }
             b"\"" => {
-                let v = last(&operands[..operands.len().saturating_sub(1)], 2)?;
+                let v = last::<2>(&operands[..operands.len().saturating_sub(1)])?;
                 (text.word_spacing, text.char_spacing) = (v[0], v[1]);
                 let leading = text.leading;
                 self.next_line(0.0, -leading);
@@ -796,9 +808,15 @@ impl Interpreter<'_> {
                     match item {
                         Object::String(s) => glyphs.extend(self.glyphs(s)),
                         other => {
-                            let adjust = other.as_number().unwrap_or(0.0);
+                            // A number is taken off the coordinate along the writing mode (9.4.3): a
+                            // positive one moves the next glyph left, or down a column.
+                            let adjust = other.as_number().unwrap_or(0.0) / 1000.0;
                             let text = &self.state.text;
-                            self.advance(-adjust / 1000.0 * text.size * text.scale);
+                            if text.font.as_ref().is_some_and(|f| f.vertical()) {
+                                self.advance(0.0, -adjust * text.size);
+                            } else {
+                                self.advance(-adjust * text.size * text.scale, 0.0);
+                            }
                         }
                     }
                 }
@@ -814,8 +832,8 @@ impl Interpreter<'_> {
         self.text_matrix = self.line_matrix;
     }
 
-    fn advance(&mut self, tx: f64) {
-        self.text_matrix = Matrix([1.0, 0.0, 0.0, 1.0, tx, 0.0]).then(self.text_matrix);
+    fn advance(&mut self, tx: f64, ty: f64) {
+        self.text_matrix = Matrix([1.0, 0.0, 0.0, 1.0, tx, ty]).then(self.text_matrix);
     }
 
     fn load_font(&mut self, name: &[u8], resources: &Dict) -> Result<Rc<Font>> {
@@ -826,8 +844,8 @@ impl Interpreter<'_> {
             Error::malformed(format!("no font /{}", String::from_utf8_lossy(name)))
         })?;
         let number = reference.as_reference().map(|r| r.num);
-        if let Some(font) = number.and_then(|n| self.fonts.get(&n)) {
-            return Ok(Rc::clone(font));
+        if let Some(font) = number.and_then(|n| self.file.fonts.borrow().get(&n).cloned()) {
+            return Ok(font);
         }
         let Object::Dict(dict) = self.file.resolve(reference)? else {
             return Err(Error::malformed(format!(
@@ -837,7 +855,7 @@ impl Interpreter<'_> {
         };
         let font = Rc::new(self.file.font(&dict)?);
         if let Some(n) = number {
-            self.fonts.insert(n, Rc::clone(&font));
+            self.file.fonts.borrow_mut().insert(n, Rc::clone(&font));
         }
         Ok(font)
     }
@@ -861,39 +879,49 @@ impl Interpreter<'_> {
             let render = Matrix([text.size * text.scale, 0.0, 0.0, text.size, 0.0, text.rise])
                 .then(self.text_matrix)
                 .then(self.state.ctm);
-            let (ascent, descent) = (
-                font.ascent * font.matrix.0[3],
-                font.descent * font.matrix.0[3],
-            );
-            let corners = [
-                render.apply(Point { x: 0.0, y: descent }),
-                render.apply(Point {
-                    x: code.width,
-                    y: descent,
-                }),
-                render.apply(Point {
-                    x: code.width,
-                    y: ascent,
-                }),
-                render.apply(Point { x: 0.0, y: ascent }),
-            ];
             let space = if code.bytes == 1 && code.code == 32 {
                 text.word_spacing
             } else {
                 0.0
             };
-            let advance = (code.width * text.size + text.char_spacing + space) * text.scale;
+            // Horizontally: the box spans the advance w0 along the baseline, from the font's descent to its ascent
+            // across it. Vertically (9.7.4.3, 9.4.4): the origin is the vertical one; the box spans the advance w1y
+            // down the column and an em across it, centered on the origin; Tc and Tw step down unscaled by Tz.
+            let (end, corners, step) = match code.vertical_advance {
+                None => {
+                    let (ascent, descent) = (
+                        font.ascent * font.matrix.0[3],
+                        font.descent * font.matrix.0[3],
+                    );
+                    let corners = [
+                        (0.0, descent),
+                        (code.width, descent),
+                        (code.width, ascent),
+                        (0.0, ascent),
+                    ];
+                    let advance = (code.width * text.size + text.char_spacing + space) * text.scale;
+                    ((code.width, 0.0), corners, (advance, 0.0))
+                }
+                Some(down) => {
+                    let corners = [
+                        (-HALF_EM, 0.0),
+                        (HALF_EM, 0.0),
+                        (HALF_EM, down),
+                        (-HALF_EM, down),
+                    ];
+                    let advance = down * text.size + text.char_spacing + space;
+                    ((0.0, down), corners, (0.0, advance))
+                }
+            };
+            let at = |(x, y): (f64, f64)| render.apply(Point { x, y });
             out.push(Glyph {
                 code: code.code,
                 text: code.text,
-                origin: render.apply(Point { x: 0.0, y: 0.0 }),
-                end: render.apply(Point {
-                    x: code.width,
-                    y: 0.0,
-                }),
-                bbox: Rect::around(&corners).expect("four corners"),
+                origin: at((0.0, 0.0)),
+                end: at(end),
+                bbox: Rect::around(&corners.map(at)).expect("four corners"),
             });
-            self.advance(advance);
+            self.advance(step.0, step.1);
         }
         out
     }
@@ -932,7 +960,7 @@ impl Interpreter<'_> {
             render_mode: text.render_mode,
             fill: self.state.fill_color.clone(),
             stroke: self.state.stroke_color.clone(),
-            vertical: font.vertical,
+            vertical: font.vertical(),
             glyphs,
             layer: self.layer(),
         };
@@ -982,7 +1010,7 @@ impl Interpreter<'_> {
                     b"RG" | b"rg" => Space::Rgb,
                     _ => Space::Cmyk,
                 };
-                let color = self.converted(operator, &space, last(operands, space.components())?);
+                let color = self.converted(operator, &space, numbers(operands, space.components())?);
                 (space, color)
             }
             _ => return Ok(false),

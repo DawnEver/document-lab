@@ -1,8 +1,9 @@
 //! `document_lab._pdf`: the `pdf` crate, exposed to Python as plain values -- no PDF logic of its own.
 //!
-//! `open(data, password)` reads a file; its `page(number, curve_samples, annotations)` returns what the page draws
-//! as tuples, which `document_lab.pdf` turns into the IR, and its `image(object)` an image's samples. `create(path)`
-//! writes a PDF of image pages, or of pages copied from a `Reader` (`document_lab.capture`).
+//! `open(data, password)` reads a file; its `page(number, annotations=, curve_samples=, flatness=)` returns what
+//! the page draws as tuples and columns, which `document_lab.pdf` turns into the IR, and its `image(object)` an
+//! image's samples. `create(path, level)` writes a PDF of image pages, or of pages copied from a `Reader`
+//! (`document_lab.capture`), perhaps with a text layer laid over them (`document_lab.ocr`).
 //!
 //! A refusal raises by its kind: [`Refused`] and its kinds when the reader refuses the input, `ValueError` for a
 //! request it cannot honor, `OSError` when writing fails.
@@ -13,12 +14,15 @@ use std::path::PathBuf;
 
 use pdf::color::Pattern;
 use pdf::error::Kind;
-use pdf::geometry::Rect;
-use pdf::interpret::{Event, Layer, PathEvent};
+use pdf::geometry::{Point, Rect};
+use pdf::image::Placement;
+use pdf::interpret::{Event, Layer, PathEvent, Segment};
+use pdf::paths::{Flattening, Polylines};
 use pdf::writer::Image;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
 create_exception!(
     document_lab._pdf,
@@ -56,7 +60,8 @@ type Box4 = (f64, f64, f64, f64);
 /// The layer an event is drawn in: hidden by optional content, and the subtype of the annotation drawing it.
 type LayerRow = (bool, Option<String>);
 /// A span: text, font name (no subset tag), size, bold, box, render mode, the number it shares with the spans its
-/// words run on into with no space between (None: none), and its layer.
+/// words run on into with no space between (None: none), whether it is written vertically, the unit vector its
+/// baseline runs along (page space, y down), its layer, and its fill color (None: not filled).
 type SpanRow = (
     String,
     String,
@@ -65,14 +70,34 @@ type SpanRow = (
     Box4,
     i64,
     Option<usize>,
-    LayerRow,
-);
-/// A path (one subpath): points, closed, stroke color, line width, dashes, dash phase, fill color, even-odd, the
-/// fill's pattern (`tiling`, `shading`; None: one color), the index of the painted path it belongs to on its
-/// page, and its layer. A shading painted with `sh` is the closed rectangle of its box, filled with a `shading`.
-type PathRow = (
-    Vec<(f64, f64)>,
     bool,
+    (f64, f64),
+    LayerRow,
+    Option<Vec<f64>>,
+);
+/// What a page paints as paths, as columns -- `document_lab.pdf` takes each buffer whole with `numpy.frombuffer`,
+/// no Python object per point. Buffers are native-endian; an entry per subpath (`pdf::paths::Polylines`) unless
+/// said:
+/// - points: `float64` (x, y) pairs, every subpath's points one after another, curves flattened;
+/// - bounds: `int64`, the pair where each subpath starts, then where the last ends (one entry more);
+/// - boxes: `float64` (x0, y0, x1, y1), the bounds of its points;
+/// - closed: `uint8`, 1 when closed back to its start;
+/// - group: `int64`, the painted path it is a subpath of: its index in the styles;
+/// - styles: a [`StyleRow`] per painted path, in drawing order -- what its subpaths share.
+///
+/// A shading painted with `sh` is a painted path of one closed subpath, the rectangle of its box, filled with a
+/// `shading`.
+type PathColumns<'py> = (
+    Bound<'py, PyBytes>,
+    Bound<'py, PyBytes>,
+    Bound<'py, PyBytes>,
+    Bound<'py, PyBytes>,
+    Bound<'py, PyBytes>,
+    Vec<StyleRow>,
+);
+/// How a painted path is painted: stroke color, line width, dashes, dash phase, fill color, even-odd, the fill's
+/// pattern (`tiling`, `shading`; None: one color), and its layer.
+type StyleRow = (
     Option<Vec<f64>>,
     f64,
     Vec<f64>,
@@ -80,15 +105,27 @@ type PathRow = (
     Option<Vec<f64>>,
     bool,
     Option<&'static str>,
-    usize,
     LayerRow,
 );
-/// An image: box, sample width and height, object number (None inline), layer.
-type ImageRow = (Box4, i64, i64, Option<u32>, LayerRow);
-/// What a page draws: spans, paths, images, warnings.
-type PageRows = (Vec<SpanRow>, Vec<PathRow>, Vec<ImageRow>, Vec<String>);
+/// An image: box, sample width and height, object number (None inline), the matrix `(a, b, c, d, e, f)` from its
+/// unit square to page space, how it shows its samples (`pdf::image::Placement`: turned, rows reversed, columns
+/// reversed; None when it is skewed), and its layer.
+type ImageRow = (
+    Box4,
+    i64,
+    i64,
+    Option<u32>,
+    [f64; 6],
+    Option<PlacementRow>,
+    LayerRow,
+);
+/// An image placed square to the page: whether its rows run down the page, and its rows and columns shown reversed.
+type PlacementRow = (bool, bool, bool);
+/// What a page draws: spans, paths (as columns), images, warnings.
+type PageRows<'py> = (Vec<SpanRow>, PathColumns<'py>, Vec<ImageRow>, Vec<String>);
 /// An image's samples: width, height, color space family (None: a stencil mask), components, bits per component,
-/// the data after every lossless filter, and the image codec it is still in (None: raw samples).
+/// the data after every lossless filter, the image codec it is still in (None: raw samples), its `/Decode` array
+/// (None: not stated), whether it states a mask, and its fax coding when its codec is `CCITTFaxDecode`.
 type SamplesRow = (
     i64,
     i64,
@@ -97,7 +134,12 @@ type SamplesRow = (
     i64,
     Vec<u8>,
     Option<String>,
+    Option<Vec<f64>>,
+    bool,
+    Option<FaxRow>,
 );
+/// A `CCITTFaxDecode` image's coding: K, columns, end-of-line codes, rows byte-aligned, 1 bits black.
+type FaxRow = (i64, i64, bool, bool, bool);
 
 /// A PDF opened.
 #[pyclass(unsendable)]
@@ -132,14 +174,33 @@ impl Reader {
     }
 
     /// What page `number` (1-based) draws, its annotations' appearances too when `annotations`: (spans, paths,
-    /// images, warnings); each curve flattened to `curve_samples` points.
-    fn page(&self, number: usize, curve_samples: usize, annotations: bool) -> PyResult<PageRows> {
+    /// images, warnings); each curve flattened into `curve_samples` segments, or into as few as keep within
+    /// `flatness` points of it -- one of the two (`pdf::paths::Flattening`).
+    #[pyo3(signature = (number, *, annotations, curve_samples = None, flatness = None))]
+    fn page<'py>(
+        &self,
+        py: Python<'py>,
+        number: usize,
+        annotations: bool,
+        curve_samples: Option<usize>,
+        flatness: Option<f64>,
+    ) -> PyResult<PageRows<'py>> {
+        let flattening = match (curve_samples, flatness) {
+            (Some(n), None) if n > 0 => Flattening::Samples(n),
+            (None, Some(d)) if d > 0.0 => Flattening::Flatness(d),
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "a curve is flattened by a curve_samples above 0 or by a flatness above 0, one of the two; \
+                     given {curve_samples:?} and {flatness:?}"
+                )));
+            }
+        };
         let page = self.at(number)?;
-        let content = self
+        let pdf::Content { events, warnings } = self
             .file
             .interpret(page, annotations)
             .map_err(|e| refused(&e))?;
-        let spans = pdf::spans::spans(&content.events)
+        let spans = pdf::spans::spans(&events)
             .into_iter()
             .map(|s| {
                 let (font, bold) = (s.font.name_without_subset().to_string(), s.font.bold());
@@ -151,18 +212,23 @@ impl Reader {
                     box4(s.bbox),
                     s.render_mode,
                     s.unspaced,
+                    s.vertical,
+                    s.direction,
                     layer(&s.layer),
+                    s.fill.as_ref().map(pdf::color::Color::rgb_or_components),
                 )
             })
             .collect();
-        let mut paths = Vec::new();
+        let mut lines = Polylines::new();
+        let (mut groups, mut styles) = (Vec::new(), Vec::new());
         let mut images = Vec::new();
-        let mut painted = 0;
-        for event in &content.events {
+        // Each event is let go once read: a page's drawing is held as segments or as points, never both at once.
+        for event in events {
             match event {
                 Event::Path(path) => {
-                    paths.extend(subpaths(path, curve_samples, painted));
-                    painted += 1;
+                    lines.add(&path.segments, flattening);
+                    groups.resize(lines.len(), styles.len());
+                    styles.push(style(&path));
                 }
                 Event::Image(image) => {
                     images.push((
@@ -170,15 +236,16 @@ impl Reader {
                         image.width,
                         image.height,
                         image.object,
+                        image.matrix.0,
+                        Placement::of(&image.matrix)
+                            .map(|p| (p.turned, p.rows_reversed, p.columns_reversed)),
                         layer(&image.layer),
                     ));
                 }
                 Event::Shading(shading) => {
-                    let r = shading.bbox;
-                    let corners = vec![(r.x0, r.y0), (r.x1, r.y0), (r.x1, r.y1), (r.x0, r.y1)];
-                    paths.push((
-                        corners,
-                        true,
+                    lines.add(&rectangle(shading.bbox), flattening);
+                    groups.resize(lines.len(), styles.len());
+                    styles.push((
                         None,
                         0.0,
                         Vec::new(),
@@ -186,20 +253,23 @@ impl Reader {
                         Some(Vec::new()),
                         false,
                         Some(pattern(Pattern::Shading)),
-                        painted,
                         layer(&shading.layer),
                     ));
-                    painted += 1;
                 }
                 Event::Text(_) => {}
             }
         }
-        Ok((spans, paths, images, content.warnings))
+        let paths = columns(py, &lines, &groups, styles);
+        Ok((spans, paths, images, warnings))
     }
 
     /// The samples of the image `XObject` `object`.
     fn image(&self, object: u32) -> PyResult<SamplesRow> {
         let samples = self.file.image(object).map_err(|e| refused(&e))?;
+        let fax = match &samples.codec {
+            Some(codec) => codec.fax().map_err(|e| refused(&e))?,
+            None => None,
+        };
         let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
         Ok((
             samples.width,
@@ -212,6 +282,9 @@ impl Reader {
             samples.bits,
             samples.data,
             samples.codec.map(|c| text(&c.name)),
+            samples.decode,
+            samples.masked,
+            fax.map(|f| (f.k, f.columns, f.end_of_line, f.byte_align, f.black_is_1)),
         ))
     }
 }
@@ -223,16 +296,22 @@ struct Writer {
     inner: Option<pdf::writer::Writer<BufWriter<fs::File>>>,
 }
 
-/// Start a PDF at `path` (created, or emptied).
+/// Start a PDF at `path` (created, or emptied), the streams it builds compressed at zlib `level` (0-10).
 #[pyfunction]
+#[pyo3(signature = (path, level = pdf::writer::LEVEL))]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "pyo3 hands a path over owned"
 )]
-fn create(path: PathBuf) -> PyResult<Writer> {
+fn create(path: PathBuf, level: u8) -> PyResult<Writer> {
+    if level > 10 {
+        return Err(PyValueError::new_err(format!(
+            "a compression level is 0 to 10, not {level}"
+        )));
+    }
     let file = fs::File::create(&path)
         .map_err(|e| PyOSError::new_err(format!("{}: {e}", path.display())))?;
-    let inner = pdf::writer::Writer::new(BufWriter::new(file)).map_err(|e| refused(&e))?;
+    let inner = pdf::writer::Writer::new(BufWriter::new(file), level).map_err(|e| refused(&e))?;
     Ok(Writer { inner: Some(inner) })
 }
 
@@ -297,6 +376,38 @@ impl Writer {
             .map_err(|e| refused(&e))
     }
 
+    /// Add page `number` (1-based) of `reader` as the next page, with `words` -- `(text, (x0, y0, x1, y1), angle)`,
+    /// each box in page space as the word stands turned back level, `angle` the degrees its baseline is turned,
+    /// clockwise as seen -- laid over it as an invisible text layer.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "pyo3 hands a list over owned"
+    )]
+    fn copy_page_with_text(
+        &mut self,
+        reader: &Reader,
+        number: usize,
+        words: Vec<(String, Box4, f64)>,
+    ) -> PyResult<()> {
+        let page = reader.at(number)?;
+        let words: Vec<pdf::writer::Word> = words
+            .iter()
+            .map(|(text, (x0, y0, x1, y1), angle)| pdf::writer::Word {
+                text,
+                bbox: Rect {
+                    x0: *x0,
+                    y0: *y0,
+                    x1: *x1,
+                    y1: *y1,
+                },
+                angle: *angle,
+            })
+            .collect();
+        self.open()?
+            .copy_page_with_text(&reader.file, page, &words)
+            .map_err(|e| refused(&e))
+    }
+
     /// Finish the file: its page tree and cross-reference table; the pages written. Closing twice is refused.
     fn close(&mut self) -> PyResult<usize> {
         let writer = self
@@ -344,30 +455,122 @@ fn pattern(p: Pattern) -> &'static str {
     }
 }
 
-/// A painted path as one row per subpath, its curves flattened to `samples` points.
-fn subpaths(path: &PathEvent, samples: usize, group: usize) -> Vec<PathRow> {
+/// How `path` is painted.
+fn style(path: &PathEvent) -> StyleRow {
     let stroke = path.stroke.as_ref();
-    pdf::paths::subpaths(&path.segments, samples)
-        .into_iter()
-        .map(|sub| {
-            (
-                sub.points.iter().map(|p| (p.x, p.y)).collect(),
-                sub.closed,
-                stroke.map(|s| s.color.rgb_or_components()),
-                stroke.map_or(0.0, |s| s.width),
-                stroke.map_or_else(Vec::new, |s| s.dashes.clone()),
-                stroke.map_or(0.0, |s| s.dash_phase),
-                path.fill.as_ref().map(|f| f.color.rgb_or_components()),
-                path.fill.as_ref().is_some_and(|f| f.even_odd),
-                path.fill
-                    .as_ref()
-                    .and_then(|f| f.color.pattern)
-                    .map(pattern),
-                group,
-                layer(&path.layer),
-            )
-        })
-        .collect()
+    (
+        stroke.map(|s| s.color.rgb_or_components()),
+        stroke.map_or(0.0, |s| s.width),
+        stroke.map_or_else(Vec::new, |s| s.dashes.clone()),
+        stroke.map_or(0.0, |s| s.dash_phase),
+        path.fill.as_ref().map(|f| f.color.rgb_or_components()),
+        path.fill.as_ref().is_some_and(|f| f.even_odd),
+        path.fill
+            .as_ref()
+            .and_then(|f| f.color.pattern)
+            .map(pattern),
+        layer(&path.layer),
+    )
+}
+
+/// The closed rectangle of `r`, as a path's segments.
+fn rectangle(r: Rect) -> [Segment; 5] {
+    let corner = |x, y| Point { x, y };
+    [
+        Segment::MoveTo(corner(r.x0, r.y0)),
+        Segment::LineTo(corner(r.x1, r.y0)),
+        Segment::LineTo(corner(r.x1, r.y1)),
+        Segment::LineTo(corner(r.x0, r.y1)),
+        Segment::Close,
+    ]
+}
+
+/// `lines` as [`PathColumns`], subpath `i` of the painted path `groups[i]`.
+fn columns<'py>(
+    py: Python<'py>,
+    lines: &Polylines,
+    groups: &[usize],
+    styles: Vec<StyleRow>,
+) -> PathColumns<'py> {
+    let boxes = (0..lines.len()).flat_map(|i| {
+        let (first, rest) = lines
+            .subpath(i)
+            .split_first()
+            .expect("a subpath has two points or more");
+        rest.iter().fold(
+            [first.x, first.y, first.x, first.y],
+            |[x0, y0, x1, y1], p| [x0.min(p.x), y0.min(p.y), x1.max(p.x), y1.max(p.y)],
+        )
+    });
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "an index into a page's points fits an int64"
+    )]
+    let index = |i: &usize| *i as i64;
+    (
+        packed(
+            py,
+            2 * lines.points.len(),
+            lines.points.iter().flat_map(|p| [p.x, p.y]),
+        ),
+        packed(py, lines.bounds.len(), lines.bounds.iter().map(index)),
+        packed(py, 4 * lines.len(), boxes),
+        packed(py, lines.len(), lines.closed.iter().map(|c| u8::from(*c))),
+        packed(py, groups.len(), groups.iter().map(index)),
+        styles,
+    )
+}
+
+/// A number a column holds.
+trait Packed: Copy {
+    /// Its native-endian bytes.
+    type Bytes: AsRef<[u8]>;
+    /// Its size in bytes.
+    const SIZE: usize;
+    /// Its native-endian bytes.
+    fn bytes(self) -> Self::Bytes;
+}
+
+impl Packed for f64 {
+    type Bytes = [u8; 8];
+    const SIZE: usize = 8;
+    fn bytes(self) -> [u8; 8] {
+        self.to_ne_bytes()
+    }
+}
+
+impl Packed for i64 {
+    type Bytes = [u8; 8];
+    const SIZE: usize = 8;
+    fn bytes(self) -> [u8; 8] {
+        self.to_ne_bytes()
+    }
+}
+
+impl Packed for u8 {
+    type Bytes = [u8; 1];
+    const SIZE: usize = 1;
+    fn bytes(self) -> [u8; 1] {
+        [self]
+    }
+}
+
+/// The `count` `values` as one `bytes`, each native-endian -- a column `numpy.frombuffer` takes without a copy --
+/// written straight into it.
+fn packed<T: Packed>(
+    py: Python<'_>,
+    count: usize,
+    values: impl Iterator<Item = T>,
+) -> Bound<'_, PyBytes> {
+    PyBytes::new_with(py, count * T::SIZE, |out| {
+        let mut chunks = out.chunks_exact_mut(T::SIZE);
+        for (chunk, value) in chunks.by_ref().zip(values) {
+            chunk.copy_from_slice(value.bytes().as_ref());
+        }
+        assert!(chunks.next().is_none(), "fewer values than counted");
+        Ok(())
+    })
+    .expect("filling a new bytes object cannot fail")
 }
 
 #[pymodule]

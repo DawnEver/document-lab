@@ -424,3 +424,13 @@ def test_a_formula_set_in_a_paragraph_or_a_listing_is_no_display(tmp_path):
         assert displays(read(tmp_path, [*above, *inline, *below])) == []
     apart = [prose(72, 208, 468), math(250, 230, 'e = 99 %'), *column(72, 468, range(256, 300, 12))]
     assert [label for label, _ in displays(read(tmp_path, [*above, *apart]))] == ['Untitled equation 1']  # planted
+
+
+def test_a_number_in_a_plots_legend_box_is_no_equations(tmp_path):
+    """A plot's legend lists ``(1)`` .. ``(3)`` in a tall, narrow box at the right of its column: no equation's
+    numbers, though each stands alone at the column's right; the same numbers set without the box are taken."""
+    legend = [(540, y, f'({n})', 'helv', 10) for n, y in ((1, 250), (2, 270), (3, 290))]
+    page = [*column(50, 250, range(100, 500, 12)), *column(312, 200, range(100, 230, 12)), *legend]
+    box = [pymupdf.Rect(532, 236, 562, 300)]
+    assert displays(read(tmp_path, page, bars=(box,))) == []
+    assert [label for label, _ in displays(read(tmp_path, page))] == ['(1)', '(2)', '(3)']  # planted: no box

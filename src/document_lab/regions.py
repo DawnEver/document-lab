@@ -111,6 +111,8 @@ FRAME_FILL: Final = 0.8
 #: A drawing at most this many body sizes high whose text reads as no word, and as math, is a formula drawn; ink
 #: at most so high is a piece an equation may take, and a drawing taller and wider is a figure.
 EQUATION_HEIGHT: Final = 4.0
+#: A plot's legend box is at most this many body sizes wide (and taller than EQUATION_HEIGHT).
+LEGEND_WIDTH: Final = 6.0
 #: An image covering this share of the page is the page's own picture (a scan, a capture), no figure.
 PAGE_PICTURE: Final = 0.9
 #: Math: a relation or operator sign, a Greek letter, or a math font (TeX's, a Unicode math font).
@@ -471,7 +473,7 @@ def _equations(page: Page, face: tuple[str, float], drawings: Sequence[Drawing])
     body = face[1]
     lines = layout.lines(page, weighted=True)
     ink = [d.box for d in drawings if d.box.height <= EQUATION_HEIGHT * body]
-    figures = _figures(page, drawings, body)
+    figures, legends = _figures(page, drawings, body), _legends(page, body)
     labels: list[str] = []
     for line in lines:
         label = _Around(page, lines, _middle(line), face).number(line) if _numbered(line, face) else None
@@ -479,7 +481,7 @@ def _equations(page: Page, face: tuple[str, float], drawings: Sequence[Drawing])
             labels.append(label)
     found: list[Region] = []
     for label in labels:
-        if (line := _number(page, lines, label, face, figures)) is not None:
+        if (line := _number(page, lines, label, face, legends)) is not None:
             box = _equation_box(page, lines, _spans_box(line), line, face=face, ink=ink, ocr=_ocr(line))
             found.append(Region('equation', f'({label})', box))
     seeds: list[tuple[BBox, layout.Line | None, bool]] = [(_spans_box(ln), ln, _ocr(ln)) for ln in lines if _states(ln)]
@@ -620,18 +622,31 @@ def _drawn_formula(drawing: Drawing, lines: list[layout.Line], body: float) -> l
 def _figures(page: Page, drawings: Sequence[Drawing], body: float) -> list[BBox]:
     """The boxes of the page's figures and ruled tables, which no equation is set inside.
 
-    A plot's legend states ``k = 1`` and repeats ``(1)``, a table's row ``Ldev -> MSE``. An image taller than
-    :data:`EQUATION_IMAGE` body sizes that is not the page's own picture (a scan's, covering :data:`PAGE_PICTURE` of
-    the page), a painted path or a drawing (``drawings``) taller than :data:`EQUATION_HEIGHT` body sizes and wider than
-    :data:`DRAWN_MIN` (a plot's frame, a legend's box, a block diagram -- a big bracket drawn is thinner, a fraction's
-    bar or a box round a formula lower), and a table its rules make (`document_lab.tables.tables`).
+    A plot's legend states ``k = 1``, a table's row ``Ldev -> MSE``. An image taller than :data:`EQUATION_IMAGE` body
+    sizes, a painted path or a drawing (``drawings``) taller and wider than :data:`EQUATION_HEIGHT` body sizes (a
+    plot's frame, a block diagram) -- none the page's own picture or ground, covering :data:`PAGE_PICTURE` of it --
+    and a table its rules make (`document_lab.tables.tables`).
     """
     area = page.width * page.height
-    images = [b for b in _images(page) if b.height > EQUATION_IMAGE * body and b.width * b.height < PAGE_PICTURE * area]
-    drawn = [*_painted(page), *(d.box for d in drawings)]
+    images = [b for b in _images(page) if b.height > EQUATION_IMAGE * body]
+    drawn = [
+        b for b in [*_painted(page), *(d.box for d in drawings)] if min(b.width, b.height) > EQUATION_HEIGHT * body
+    ]
     ruled = [t.provenance.bbox for t in tables(page) if t.provenance.bbox is not None]
-    tall = [b for b in drawn if b.height > EQUATION_HEIGHT * body and b.width > DRAWN_MIN * body]
-    return images + tall + ruled
+    return [b for b in images + drawn if b.width * b.height < PAGE_PICTURE * area] + ruled
+
+
+def _legends(page: Page, body: float) -> list[BBox]:
+    """The boxes of a plot's legends on ``page``, whose entries' numbers (``(1)`` .. ``(8)``) are no equation's.
+
+    A painted path taller than :data:`EQUATION_HEIGHT` body sizes, from :data:`DRAWN_MIN` to :data:`LEGEND_WIDTH` wide:
+    a frame round a group of displays is as wide as their column, a big bracket drawn thinner.
+    """
+    return [
+        b
+        for b in _painted(page)
+        if b.height > EQUATION_HEIGHT * body and DRAWN_MIN * body < b.width <= LEGEND_WIDTH * body
+    ]
 
 
 def _spans_box(line: layout.Line) -> BBox:
@@ -667,12 +682,12 @@ def _numbered(line: layout.Line, face: tuple[str, float]) -> str | None:
 
 
 def _number(
-    page: Page, lines: list[layout.Line], number: str, face: tuple[str, float], figures: list[BBox]
+    page: Page, lines: list[layout.Line], number: str, face: tuple[str, float], legends: list[BBox]
 ) -> layout.Line | None:
     """The line that ends in equation number ``(number)``, or None.
 
     A line ending in it (:func:`_numbered`) at the right of its column (:meth:`_Around.number`; ``V (1)`` in a line of
-    a formula is a citation) and in no figure (``figures``: a plot's legend ``(1)``). Of several, the one a formula
+    a formula is a citation) and in no plot's legend (``legends``, :func:`_legends`). Of several, the one a formula
     stands level with (:func:`_level_formula`) -- of several so, the one alone on its line, else none; of none so,
     the one alone on its line, else none.
     """
@@ -680,7 +695,7 @@ def _number(
         ln
         for ln in lines
         if _Around(page, lines, _middle(ln), face).number(ln) == number
-        and not any(f.contains((ln.x0 + ln.x1) / 2, _middle(ln)) for f in figures)
+        and not any(f.contains((ln.x0 + ln.x1) / 2, _middle(ln)) for f in legends)
     ]
     if len(found) <= 1:
         return found[0] if found else None

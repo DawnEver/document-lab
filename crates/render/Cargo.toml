@@ -10,7 +10,14 @@ pdf.workspace = true
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
 zune-jpeg = "0.5"
 hayro-ccitt = "0.5"
+# JPEG 2000 and JBIG2 (MIT/Apache, safe Rust): without their `image` integration, which pulls the `image` crate.
+hayro-jpeg2000 = { version = "0.5", default-features = false, features = ["std", "simd"] }
+hayro-jbig2 = { version = "0.4", default-features = false, features = ["std", "simd"] }
 zune-core = "0.5"
+
+# The truth of the JBIG2 tests: an encoder independent of the decoder, encoding known pixels at test time.
+[dev-dependencies]
+jbig2enc-rust = { version = "0.6", default-features = false, features = ["encode", "symboldict", "refine"] }
 
 [lints]
 workspace = true

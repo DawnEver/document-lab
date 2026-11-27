@@ -1,14 +1,16 @@
-//! An image `XObject`'s samples (ISO 32000-2 section 8.9.5): its size, color space and depth, and its data through
-//! every lossless filter -- still in its image codec (`DCTDecode`, `JPXDecode`, ...) when it has one, for whoever
-//! turns it into pixels -- where they show as they stand, their sRGB ([`Samples::rgb`]), and how a placement shows
-//! them ([`Placement`]).
+//! An image `XObject`'s samples (ISO 32000-2 section 8.9.5): its size, color space (a JPEG 2000's own when its
+//! dictionary states none, [`jpx_space`]) and depth, and its data through every lossless filter -- still in its image
+//! codec (`DCTDecode`, `JPXDecode`, ...) when it has one, for whoever turns it into pixels -- where they show as they
+//! stand, their sRGB ([`Samples::rgb`]), and how a placement shows them ([`Placement`]).
+
+use std::rc::Rc;
 
 use crate::color::Space;
 use crate::error::{Error, Result};
 use crate::file::File;
 use crate::filter::Codec;
 use crate::geometry::Matrix;
-use crate::icc::Intent;
+use crate::icc::{Icc, Intent};
 use crate::object::{Dict, Object};
 
 /// An image's samples.
@@ -84,6 +86,39 @@ impl Samples {
     }
 }
 
+/// The color space a JPEG 2000's own data states, for an image whose dictionary states none (7.4.9, Table 87): its
+/// JP2 `colr` box's -- gray, RGB (sYCC too, its samples being converted to RGB), CMYK, or the ICC profile it embeds --
+/// else its components' count (1 gray, 3 RGB, 4 CMYK), an opacity channel apart. Read off the header by
+/// `hayro-jpeg2000`, which decodes the samples alike; nothing is decoded here.
+///
+/// # Errors
+///
+/// Refuses data whose header does not read, and data that states no space this reader reads.
+pub fn jpx_space(data: &[u8]) -> Result<Space> {
+    use hayro_jpeg2000::{ColorSpace, DecodeSettings, Image};
+    let image = Image::new(data, &DecodeSettings::default()).map_err(|e| {
+        Error::malformed(format!("JPXDecode image whose header does not read: {e:?}"))
+    })?;
+    Ok(match image.color_space() {
+        ColorSpace::Gray => Space::Gray,
+        ColorSpace::RGB => Space::Rgb,
+        ColorSpace::CMYK => Space::Cmyk,
+        ColorSpace::Icc {
+            profile,
+            num_channels,
+        } => Space::Icc(Rc::new(Icc::read(
+            profile,
+            Some(usize::from(*num_channels)),
+        ))),
+        ColorSpace::Unknown { num_channels } => {
+            return Err(Error::unsupported(format!(
+                "JPXDecode image of {num_channels} components in a color space neither its dictionary nor its \
+                 data states"
+            )));
+        }
+    })
+}
+
 /// A placement matrix entry at most this (points) is zero: the image is square to the page.
 const SQUARE: f64 = 1e-6;
 
@@ -144,13 +179,22 @@ impl File {
             Ok(self.get(dict, key)?.and_then(|v| v.as_integer()))
         };
         let mask = matches!(self.get(dict, b"ImageMask")?, Some(Object::Bool(true)));
-        let space = if mask {
-            None
-        } else {
-            let value = self
-                .get(dict, b"ColorSpace")?
-                .ok_or_else(|| Error::malformed(format!("image {num} states no /ColorSpace")))?;
-            Some(self.color_space(&value, &Dict::new())?)
+        let decoded = self.decode(&stream)?;
+        let space = match self.get(dict, b"ColorSpace")? {
+            _ if mask => None,
+            Some(value) => Some(self.color_space(&value, &Dict::new())?),
+            None if decoded
+                .codec
+                .as_ref()
+                .is_some_and(|c| c.name == b"JPXDecode") =>
+            {
+                Some(jpx_space(&decoded.data)?)
+            }
+            None => {
+                return Err(Error::malformed(format!(
+                    "image {num} states no /ColorSpace"
+                )));
+            }
         };
         let decode = self.get(dict, b"Decode")?.and_then(|v| {
             v.as_array()
@@ -161,7 +205,6 @@ impl File {
             Some(Object::Name(name)) => Intent::named(&name).unwrap_or_default(),
             _ => Intent::default(),
         };
-        let decoded = self.decode(&stream)?;
         Ok(Samples {
             width: int(b"Width")?.unwrap_or(0),
             height: int(b"Height")?.unwrap_or(0),

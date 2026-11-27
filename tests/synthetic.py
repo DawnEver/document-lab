@@ -589,6 +589,38 @@ def icc_profile(*, primaries: Sequence[tuple[float, float]], white: tuple[float,
     return header + len(tags).to_bytes(4, 'big') + table + data
 
 
+def jpx(samples: np.ndarray, *, codestream: bool = False, profile: bytes | None = None) -> bytes:
+    """``samples`` -- rows x columns (gray, or 16-bit gray as ``uint16``), or rows x columns x 2, 3 or 4 (gray and
+    alpha, RGB, RGB and alpha) -- coded JPEG 2000 losslessly (the reversible 5/3 wavelet) by OpenJPEG, through
+    Pillow's plugin: a JP2 file (its color space enumerated, gray or sRGB), or the bare ``codestream``, or -- with
+    ``profile`` -- that codestream in a JP2 whose ``colr`` box embeds the ICC profile (T.800 I.5.3.3, method 2).
+    """
+    from io import BytesIO  # noqa: PLC0415 -- only the JPEG 2000 cases need it
+
+    from PIL import Image  # noqa: PLC0415 -- Pillow is the dev extra's, the truth of these cases alone
+
+    image = Image.fromarray(samples)  # its mode by its shape and type: L, LA, RGB, RGBA or I;16
+    out = BytesIO()
+    image.save(out, 'JPEG2000', irreversible=False, no_jp2=codestream or profile is not None)
+    coded = out.getvalue()
+    if profile is None:
+        return coded
+
+    def box(kind: bytes, body: bytes) -> bytes:
+        return (8 + len(body)).to_bytes(4, 'big') + kind + body
+
+    rows, columns = samples.shape[:2]
+    components = 1 if samples.ndim == 2 else samples.shape[2]
+    header = rows.to_bytes(4, 'big') + columns.to_bytes(4, 'big') + components.to_bytes(2, 'big') + bytes([7, 7, 0, 0])
+    colr = bytes([2, 0, 0]) + profile
+    return (
+        box(b'jP  ', b'\r\n\x87\n')
+        + box(b'ftyp', b'jp2 ' + bytes(4) + b'jp2 ')
+        + box(b'jp2h', box(b'ihdr', header) + box(b'colr', colr))
+        + box(b'jp2c', coded)
+    )
+
+
 def fax_g4(white: np.ndarray) -> bytes:
     """``white`` -- rows of 1 white, 0 black, as CCITT fax decodes by default -- coded Group 4 by MuPDF."""
     rows, columns = white.shape

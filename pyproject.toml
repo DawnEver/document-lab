@@ -48,6 +48,9 @@ dev = [
     "maturin>=1.7",
     "dev-lab[test] @ git+https://github.com/DawnEver/dev-lab.git",
     "document_lab[ai,capture]",
+    # The truth of the JPEG 2000 tests: OpenJPEG, through Pillow's JPEG 2000 plugin, encodes known pixels at test
+    # time -- an encoder independent of the renderer's decoder (hayro-jpeg2000).
+    "pillow",
     "pytest",
     "ruff",
 ]

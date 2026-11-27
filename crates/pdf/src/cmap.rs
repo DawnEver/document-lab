@@ -62,10 +62,9 @@ impl CMap {
     #[must_use]
     pub fn parse(data: &[u8]) -> Self {
         let mut cmap = Self::default();
-        let (ops, _) = operations(data);
-        for op in ops {
-            let items = &op.operands;
-            match op.operator.as_slice() {
+        operations(data, |op| {
+            let items = op.operands;
+            match op.operator {
                 b"endcodespacerange" => {
                     for pair in items.as_chunks::<2>().0 {
                         if let (Object::String(lo), Object::String(hi)) = (&pair[0], &pair[1])
@@ -98,7 +97,7 @@ impl CMap {
                     }
                 }
                 b"def" => {
-                    if let [.., Object::Name(key), Object::Integer(mode)] = items.as_slice()
+                    if let [.., Object::Name(key), Object::Integer(mode)] = items
                         && key == b"WMode"
                     {
                         cmap.wmode = Some(*mode);
@@ -119,7 +118,7 @@ impl CMap {
                 }
                 _ => {}
             }
-        }
+        });
         cmap
     }
 

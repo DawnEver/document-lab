@@ -49,23 +49,47 @@ def _census() -> str:
 
 _SHIFT: Final = (40, 8)  # the rows and columns the report searches for a shift of the whole picture
 _LEVELS: Final = 8  # the bands of 0..255 the report gives the mean picture value of
+_BAND: Final = (4, 30)  # the rows or columns from an edge, and from the bottom edge, the report counts one by one
+#: The levels a grab may differ from the program's own pixels by. macOS keeps a window in the display's color space
+#: (the runner's: 'Apple Virtual') in 8 bits, so the program's sRGB drawn there and matched back loses up to 1 level
+#: (measured on macos-latest, 2026-11-27: at most 1, red, in 0.4% of pixels, the same read with no conversion at
+#: all). Exact elsewhere.
+LOST: Final = 1 if sys.platform == 'darwin' else 0
+
+
+def alike(got: np.ndarray, want: np.ndarray) -> bool:
+    """Whether ``got`` is ``want``, up to the :data:`LOST` levels of this desktop."""
+    return got.shape == want.shape and int(np.abs(got.astype(int) - want.astype(int)).max(initial=0)) <= LOST
 
 
 def differences(got: np.ndarray, want: np.ndarray, target: Window | Region | None = None) -> str:
     """How ``got`` differs from ``want``, for an assertion's message.
 
     Shapes; then, over the part both cover, the share of differing pixels, the largest and mean difference per
-    channel, where they lie and a few of them, the shift of the whole picture that matches best, and what ``got``
-    holds for each band of ``want``'s values (a color conversion shows as a curve). On macOS, the same of ``target``
-    as macOS tagged it, before ``quartz.grab`` color-matched it; and the census.
+    channel, where they lie and a few of them, how many differ by more than :data:`LOST` row by row and column by
+    column near each edge, the shift of the whole picture that matches best, and what ``got`` holds for each band of
+    ``want``'s values (a color conversion shows as a curve). On macOS, the same of ``target`` as macOS tagged it,
+    before ``quartz.grab`` color-matched it, with the window's shape (its pixels short of opaque); and the census.
     """
     lines = _compared(got, want)
     if sys.platform == 'darwin' and target is not None:
         from document_lab.capture import quartz  # noqa: PLC0415 -- macOS alone color-matches a grab
 
         tagged, space = quartz._tagged(target)
-        lines += [f'as macOS tagged it, in {space}:', *_compared(tagged, want)]
+        lines += [f'as macOS tagged it, in {space}:', *_compared(tagged[..., :3], want)]
+        lines.append('  short of opaque, ' + _edges(tagged[..., 3] < 255))
     return '\n'.join(lines) + _census()
+
+
+def _edges(mask: np.ndarray) -> str:
+    """How many of ``mask`` are set in each row and column near the edges, and in the rest."""
+    edge, bottom = _BAND
+    inner = mask[edge : len(mask) - bottom, edge : mask.shape[1] - edge]
+    return (
+        f'per row from the top {mask[:edge].sum(axis=1).tolist()}, from the bottom up '
+        f'{mask[::-1][:bottom].sum(axis=1).tolist()}; per column from the left {mask[:, :edge].sum(axis=0).tolist()}, '
+        f'from the right {mask[:, ::-1][:, :edge].sum(axis=0).tolist()}; inside {int(inner.sum())}'
+    )
 
 
 def _compared(got: np.ndarray, want: np.ndarray) -> list[str]:
@@ -85,6 +109,7 @@ def _compared(got: np.ndarray, want: np.ndarray) -> list[str]:
         lines.append(f'  differing pixels lie in rows {y0}..{y1} ({rows} rows), columns {x0}..{x1}')
         picks = off[np.linspace(0, len(off) - 1, min(len(off), 6)).astype(int)]
         lines.append('  e.g. ' + '; '.join(f'({y},{x}) {a[y, x].tolist()} vs {b[y, x].tolist()}' for y, x in picks))
+        lines.append(f'  off by more than {LOST}, ' + _edges((np.abs(diff) > LOST).any(axis=2)))
         lines.append('  ' + _best_shift(got, want))
         lines.append('  got (R/G/B) by want band: ' + _curve(a, b))
     return lines
@@ -234,7 +259,7 @@ def test_a_scrolled_window_is_captured_whole(viewer, method):
     source = desktop.Source(window, notches=3, method=method)
     rows = Rows()
     done = capture(source.grab, source.scroll, rows)
-    assert np.array_equal(rows.image(), image), f'{done}\n{differences(rows.image(), image)}'
+    assert alike(rows.image(), image), f'{done}\n{differences(rows.image(), image)}'
 
 
 def test_a_posted_wheel_places_every_row_it_captures(viewer):
@@ -246,13 +271,13 @@ def test_a_posted_wheel_places_every_row_it_captures(viewer):
     done = capture(source.grab, source.scroll, rows)
     got = rows.image()
     assert VIEW <= len(got) <= len(image), done
-    assert np.array_equal(got, image[: len(got)]), f'{done}\n{differences(got, image[: len(got)])}'
+    assert alike(got, image[: len(got)]), f'{done}\n{differences(got, image[: len(got)])}'
 
 
 def test_the_first_frame_is_the_view(viewer):
     window, image = viewer
     got = desktop.system().grab(window)
-    assert np.array_equal(got, image[:VIEW]), differences(got, image[:VIEW], window)
+    assert alike(got, image[:VIEW]), differences(got, image[:VIEW], window)
 
 
 def test_a_region_is_the_screen_under_it(viewer):
@@ -260,7 +285,7 @@ def test_a_region_is_the_screen_under_it(viewer):
     area = desktop.area(window)
     inner = Region(area.left + 10, area.top + 20, 100, 50)
     got = desktop.system().grab(inner)
-    assert np.array_equal(got, image[20:70, 10:110]), differences(got, image[20:70, 10:110], inner)
+    assert alike(got, image[20:70, 10:110]), differences(got, image[20:70, 10:110], inner)
 
 
 _MAIN = """
@@ -297,7 +322,7 @@ def test_the_cli_writes_the_pdf(viewer, tmp_path):
         ((xref, *_),) = doc[0].get_images()
         pix = pymupdf.Pixmap(doc, xref)
     got = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3)
-    assert np.array_equal(got, image), differences(got, image)
+    assert alike(got, image), differences(got, image)
 
 
 def test_max_height_stops_early(viewer):
@@ -307,7 +332,7 @@ def test_max_height_stops_early(viewer):
     done = capture(source.grab, source.scroll, rows, limits=Limits(max_height=700))
     got = rows.image()
     assert 700 <= len(got) < HEIGHT, done
-    assert np.array_equal(got, image[: len(got)]), f'{done}\n{differences(got, image[: len(got)])}'
+    assert alike(got, image[: len(got)]), f'{done}\n{differences(got, image[: len(got)])}'
 
 
 def test_a_wheel_onto_a_covered_window_refuses(viewer):

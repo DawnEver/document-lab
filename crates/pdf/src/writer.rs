@@ -214,7 +214,8 @@ impl<W: Write> Writer<W> {
                     && y1 > y0)
             {
                 return Err(Error::invalid(format!(
-                    "a word of a text layer has text, a box of positive size and a finite angle, not {:?} at                      [{x0} {y0} {x1} {y1}] turned {}",
+                    "a word of a text layer has text, a box of positive size and a finite angle, not {:?} at \
+                     [{x0} {y0} {x1} {y1}] turned {}",
                     word.text, word.angle
                 )));
             }

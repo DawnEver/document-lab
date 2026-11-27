@@ -246,9 +246,15 @@ fn a_word_turned_lies_along_its_baseline_over_where_it_is_seen() {
         assert_eq!(found.len(), 1, "{found:?}");
         let b = found[0].bbox;
         assert_eq!(found[0].text, "sideways");
-        assert!(near([b.x0, b.y0, b.x1, b.y1], expected), "{b:?} turned {angle}");
+        assert!(
+            near([b.x0, b.y0, b.x1, b.y1], expected),
+            "{b:?} turned {angle}"
+        );
         let (dx, dy) = found[0].direction;
-        assert!((dx - direction.0).abs() + (dy - direction.1).abs() < 1e-9, "{dx} {dy} turned {angle}");
+        assert!(
+            (dx - direction.0).abs() + (dy - direction.1).abs() < 1e-9,
+            "{dx} {dy} turned {angle}"
+        );
     }
 }
 

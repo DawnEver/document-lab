@@ -88,17 +88,26 @@ def _scanned_pages(pdf: Path, out_dir: Path, renderer: Renderer) -> int:
 
 
 def ingest(
-    pdf: Path, out_dir: Path, *, tool: Tool | None = None, renderer: Renderer = 'pymupdf', outline: bool = True
+    pdf: Path,
+    out_dir: Path,
+    *,
+    tool: Tool | None = None,
+    renderer: Renderer = 'pymupdf',
+    outline: bool = True,
+    include_in_background_color: bool = False,
 ) -> Ingested:
     """Convert ``pdf`` (with ``tool``, else the IR path) and write its paper layout into ``out_dir``.
 
     Its figures, equations and scanned pages are rendered by ``renderer`` (`document_lab.pdf.read_raster`).
     ``outline``: the PDF's stated outline names the sections when it matches the pages; False infers them all the
-    same (`document_lab.paper.convert.convert`).
+    same (`document_lab.paper.convert.convert`). ``include_in_background_color``: the text filled in the color under
+    it is read too, by the markdown and the regions a picture page's text locates (see `document_lab.ir`).
     """
     pdf = pdf.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    md_text, choice, structure = convert(pdf, out_dir, tool=tool, outline=outline)
+    md_text, choice, structure = convert(
+        pdf, out_dir, tool=tool, outline=outline, include_in_background_color=include_in_background_color
+    )
     stated = frozenset(structure.named) if structure is not None else frozenset()
     main, appended = clean_sections(split_sections(md_text), stated=stated)
     if not main and md_text.strip():
@@ -111,7 +120,9 @@ def ingest(
             return Ingested(choice, scanned, scanned, 0, (), structure)
         msg = f'{pdf.name}: the converted markdown has no section'
         raise NoSections(msg)
-    n_sec, n_fig, n_tbl = write_paper_output(main, out_dir, md_text, pdf_path=pdf, renderer=renderer)
+    n_sec, n_fig, n_tbl = write_paper_output(
+        main, out_dir, md_text, pdf_path=pdf, renderer=renderer, include_in_background_color=include_in_background_color
+    )
 
     appended_root = out_dir / 'appended'
     shutil.rmtree(appended_root, ignore_errors=True)
@@ -123,7 +134,15 @@ def ingest(
         for img in (out_dir / 'img' / 'flat').iterdir():
             if img.is_file():
                 shutil.copy2(img, flat / img.name)
-        write_paper_output(sections, target, sections[0][1], title_override=title, pdf_path=pdf, renderer=renderer)
+        write_paper_output(
+            sections,
+            target,
+            sections[0][1],
+            title_override=title,
+            pdf_path=pdf,
+            renderer=renderer,
+            include_in_background_color=include_in_background_color,
+        )
         shutil.rmtree(flat, ignore_errors=True)
         written.append(target)
 

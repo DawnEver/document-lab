@@ -268,12 +268,20 @@ def _placed(name: str, page: Page, found: list[Region], ruled: tuple[Table, ...]
     return out
 
 
-def write_pages(pdf: Path, out: Path, *, renderer: Renderer = 'pymupdf', outline: bool = True) -> Paged:
+def write_pages(
+    pdf: Path,
+    out: Path,
+    *,
+    renderer: Renderer = 'pymupdf',
+    outline: bool = True,
+    include_in_background_color: bool = False,
+) -> Paged:
     """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive.
 
     Each page's picture is drawn by ``renderer`` (`document_lab.pdf.read_raster`). ``outline``: the PDF's stated
     outline names the clause headings when it matches the pages; False infers them all the same
-    (`document_lab.markdown.headings`).
+    (`document_lab.markdown.headings`). ``include_in_background_color``: the text filled in the color under it is
+    read too, by the regions, the headings and the markdown (see `document_lab.ir`).
     """
     read = read_pdf(pdf)
     face = layout.body_face(read)
@@ -286,12 +294,15 @@ def write_pages(pdf: Path, out: Path, *, renderer: Renderer = 'pymupdf', outline
         drawn.append(_drawings(pixels, scale, page, body))
         ruled.append(_tables(page, pixels, scale))
     drawn = _without_furniture(drawn, body)
-    found = [regions(page, face, drawings) for page, drawings in zip(read.pages, drawn, strict=True)]
+    found = [
+        regions(page, face, drawings, include_in_background_color=include_in_background_color)
+        for page, drawings in zip(read.pages, drawn, strict=True)
+    ]
     furniture = layout.running(read)
     text = layout.without_running(read, furniture)
     placed = [_placed(*part) for part in zip(names, text.pages, found, ruled, strict=True)]
-    structure = headings(text, outline=outline)
-    texts = page_markdowns(text, placed, sections=structure)
+    structure = headings(text, outline=outline, include_in_background_color=include_in_background_color)
+    texts = page_markdowns(text, placed, sections=structure, include_in_background_color=include_in_background_color)
     index = [f'# {pdf.stem}', '']
     textless, unread = [], []
     with _files(out) as put:

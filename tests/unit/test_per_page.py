@@ -6,6 +6,7 @@ import numpy as np
 import pymupdf
 import pytest
 
+from document_lab.__main__ import main
 from document_lab.capture.export import to_pdf
 from document_lab.per_page import RENDER_DPI, UNREAD, write_pages
 from tests.synthetic import draw_booktabs, draw_ruled_table
@@ -412,3 +413,18 @@ def test_text_drawn_inside_an_untitled_figure_goes_with_it_not_into_the_body(tmp
     figure = blocks.index('![Untitled figure 1](page-001-figure-untitled-1.png)')
     assert blocks[figure + 1] == '*Text in the figure:* N'
     assert blocks[figure - 1].endswith(prose) and blocks[figure + 2].startswith(prose)
+
+
+def test_text_filled_in_the_color_under_it_is_written_only_when_the_command_asks(tmp_path):
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=400, height=300)
+        page.insert_text((40, 60), 'Words the page shows.', fontsize=10)
+        page.insert_text((40, 100), 'Words white on the white page.', fontsize=10, color=(1, 1, 1))
+        doc.save(tmp_path / 'std.pdf')
+    for asked in (False, True):
+        out = tmp_path / f'asked-{asked}'
+        flag = ['--include-in-background-color'] if asked else []
+        assert main(['pages', str(tmp_path / 'std.pdf'), str(out), *flag]) == 0
+        text = (out / 'page-001.md').read_text(encoding='utf-8')
+        assert 'Words the page shows.' in text
+        assert ('white on the white page' in text) is asked

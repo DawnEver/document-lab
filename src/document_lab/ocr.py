@@ -5,12 +5,9 @@ for (its ``-l``: ``eng``, ``chi_sim+eng``, ``jpn_vert``), run on the image at th
 page shows it -- upright, though its samples be placed turned or mirrored by quarter turns (a scan on a ``/Rotate``
 page); a placement at another angle is refused. Lossless samples are handed over as a PGM/PPM, turned upright and,
 under a ``/Decode`` of ``[1 0]``, inverted exactly; any other ``/Decode`` is refused. An image still in a codec is
-never decoded here: its data goes as stored, packaged so that Leptonica, Tesseract's image reader, shows it as the
-page does. JPEG and JPEG 2000 placed upright go as files of their own; JPEG placed turned or mirrored inside a TIFF
-(:func:`_jpeg_tiff`) whose Orientation says the placement; CCITT fax data always inside a TIFF (:func:`_fax_tiff`)
-whose tags say its coding, its black and its placement. Refused by name, as showing them so needs their pixels
-decoded: JPEG or JPEG 2000 inverted by its ``/Decode``, JPEG 2000 placed turned or mirrored (its file says no
-placement, and no TIFF holds it for Leptonica), and any other codec.
+never decoded here: JPEG and JPEG 2000 go as their encoded data, untouched, and are refused placed turned or
+inverted; CCITT fax data goes, as stored, inside a TIFF (:func:`_fax_tiff`) whose tags say its coding, its black and
+its placement; any other codec is refused by name.
 
 Tesseract reports each word (its PAGE XML at word level) with its pixel box on the upright image and the direction
 it reads in; each is laid invisible over where it is seen by `document_lab._pdf`'s writer
@@ -67,20 +64,12 @@ _TIFF_HEADER: Final = 8  # bytes before the one image directory
 _TIFF_G4: Final = 4  # Compression: CCITT T.6
 _TIFF_G3: Final = 3  # Compression: CCITT T.4, each row behind an end-of-line code
 _TIFF_RLE: Final = 2  # Compression: CCITT modified Huffman, rows byte-aligned, no end-of-line codes
-_TIFF_JPEG: Final = 7  # Compression: JPEG, each strip a whole JPEG stream
 _T4_2D: Final = 1  # T4Options: rows coded two-dimensionally too
 _T4_FILL: Final = 4  # T4Options: fill bits end each end-of-line code on a byte boundary
-_JPEG_BITS: Final = 8  # the only JPEG precision Leptonica reads
-_RGB: Final = 3  # components
-#: The Orientation (rows run up the page, first column at its bottom) Leptonica shows turned half round when the JPEG
-#: in a TIFF has three components: it reads them through libtiff's RGBA path and completes the part of the placement
-#: libtiff applies wrongly for this one (Leptonica 1.84.1, libtiff 4.6.0; the ocr part shows it still does).
-_COLOR_JPEG_SHOWN_WRONG: Final = 8
 
 type Box = tuple[float, float, float, float]
 type Placement = tuple[bool, bool, bool]
 type Words = list[tuple[str, Box, bool]]
-type Tags = dict[int, tuple[int, tuple[int, ...]]]
 
 
 @dataclass(frozen=True)
@@ -183,38 +172,6 @@ def _inverted(decode: list[float] | None, components: int, name: str) -> bool:
     raise ValueError(msg)
 
 
-def _tiff(width: int, height: int, data: bytes, tags: Tags) -> bytes:
-    """``data`` as the one strip of a little-endian TIFF of ``width`` x ``height`` samples, described by ``tags``.
-
-    Each tag is its field type and its values; the TIFF's size and where its strip is are added to them.
-    """
-    tags = {
-        256: (_TIFF_LONG, (width,)),  # ImageWidth
-        257: (_TIFF_LONG, (height,)),  # ImageLength
-        273: (_TIFF_LONG, (0,)),  # StripOffsets: the data's, once the values before it are laid out
-        278: (_TIFF_LONG, (height,)),  # RowsPerStrip: one strip
-        279: (_TIFF_LONG, (len(data),)),  # StripByteCounts
-        **tags,
-    }
-    packed = {
-        tag: b''.join(struct.pack('<H' if kind == _TIFF_SHORT else '<I', v) for v in values)
-        for tag, (kind, values) in tags.items()
-    }
-    beyond, offsets = b'', {}  # values longer than an entry holds, each at an even offset after the directory
-    start = _TIFF_HEADER + 2 + 12 * len(tags) + 4
-    for tag in sorted(t for t, raw in packed.items() if len(raw) > 4):  # noqa: PLR2004 -- an entry's value bytes
-        offsets[tag] = start + len(beyond)
-        beyond += packed[tag] + b'\0' * (len(packed[tag]) % 2)
-    packed[273] = struct.pack('<I', start + len(beyond))
-    entries = b''.join(
-        struct.pack('<HHI', tag, kind, len(values))
-        + (struct.pack('<I', offsets[tag]) if tag in offsets else packed[tag].ljust(4, b'\0'))
-        for tag, (kind, values) in sorted(tags.items())
-    )
-    directory = struct.pack('<H', len(tags)) + entries + struct.pack('<I', 0)  # no next directory
-    return struct.pack('<2sHI', b'II', 42, _TIFF_HEADER) + directory + beyond + data
-
-
 def _fax_tiff(
     width: int, height: int, data: bytes, fax: tuple, *, inverted: bool, orientation: int, name: str
 ) -> bytes:
@@ -229,12 +186,12 @@ def _fax_tiff(
     if columns != width:
         msg = f'{name} is CCITT fax of {columns} columns on an image {width} samples wide'
         raise ValueError(msg)
-    options: Tags = {}
+    options = {}
     if k < 0 and not (end_of_line or byte_align):
         compression = _TIFF_G4
     elif k >= 0 and end_of_line:
         compression = _TIFF_G3
-        options[292] = (_TIFF_LONG, ((_T4_2D if k > 0 else 0) | (_T4_FILL if byte_align else 0),))  # T4Options
+        options[292] = (_TIFF_LONG, (_T4_2D if k > 0 else 0) | (_T4_FILL if byte_align else 0))  # T4Options
     elif k == 0 and byte_align:
         compression = _TIFF_RLE
     else:
@@ -243,99 +200,57 @@ def _fax_tiff(
         raise ValueError(msg)
     # Decoded, a black run is 1 bits: WhiteIsZero (0) shows them black, as BlackIs1 false does; BlackIsZero (1) white.
     photometric = int(black_is_1 != inverted)
-    tags: Tags = {
-        258: (_TIFF_SHORT, (1,)),  # BitsPerSample
-        259: (_TIFF_SHORT, (compression,)),
-        262: (_TIFF_SHORT, (photometric,)),
-        274: (_TIFF_SHORT, (orientation,)),
-        277: (_TIFF_SHORT, (1,)),  # SamplesPerPixel
+    tags = {
+        256: (_TIFF_LONG, width),  # ImageWidth
+        257: (_TIFF_LONG, height),  # ImageLength
+        258: (_TIFF_SHORT, 1),  # BitsPerSample
+        259: (_TIFF_SHORT, compression),
+        262: (_TIFF_SHORT, photometric),
+        273: (_TIFF_LONG, 0),  # StripOffsets: the data's, once the directory's size is known
+        274: (_TIFF_SHORT, orientation),
+        277: (_TIFF_SHORT, 1),  # SamplesPerPixel
+        278: (_TIFF_LONG, height),  # RowsPerStrip: one strip
+        279: (_TIFF_LONG, len(data)),  # StripByteCounts
         **options,
     }
-    return _tiff(width, height, data, tags)
-
-
-def _jpeg_tiff(width: int, height: int, data: bytes, dct: tuple, *, orientation: int, name: str) -> bytes:
-    """JPEG ``data``, as stored, in a TIFF of one strip (Compression 7): packaging, never decoding.
-
-    Its tags say what the JPEG's own headers do (``dct``, ``Reader.image``) -- gray (BlackIsZero), or three components
-    coded YCbCr (their luminance's sampling its YCbCrSubSampling) or RGB -- and how the page places it as its
-    Orientation. Refused by name: a JPEG of other than 8-bit gray or three components, and one of three components
-    at :data:`_COLOR_JPEG_SHOWN_WRONG`, which Leptonica shows wrongly.
-    """
-    precision, components, sampling, transform = dct
-    if precision != _JPEG_BITS or components not in {1, _RGB}:
-        msg = (
-            f'{name} is a JPEG of {components} {precision}-bit components placed turned or mirrored: Tesseract is '
-            'handed one in a TIFF as 8-bit gray or three components only'
-        )
-        raise ValueError(msg)
-    if components == _RGB and orientation == _COLOR_JPEG_SHOWN_WRONG:
-        msg = (
-            f'{name} is a color JPEG placed turned a quarter with its rows reversed (TIFF Orientation 8), which '
-            'Leptonica shows turned half round from that; showing it upright needs its pixels decoded, which is not '
-            'done here'
-        )
-        raise ValueError(msg)
-    photometric = 1 if components == 1 else 6 if transform else 2  # BlackIsZero, YCbCr, RGB
-    tags: Tags = {
-        258: (_TIFF_SHORT, (_JPEG_BITS,) * components),  # BitsPerSample
-        259: (_TIFF_SHORT, (_TIFF_JPEG,)),
-        262: (_TIFF_SHORT, (photometric,)),
-        274: (_TIFF_SHORT, (orientation,)),
-        277: (_TIFF_SHORT, (components,)),  # SamplesPerPixel
-        284: (_TIFF_SHORT, (1,)),  # PlanarConfiguration: components interleaved
-    }
-    if photometric == 6:  # noqa: PLR2004 -- YCbCr
-        tags[530] = (_TIFF_SHORT, sampling)  # YCbCrSubSampling
-    return _tiff(width, height, data, tags)
-
-
-def _codec_file(samples: tuple, placement: Placement, inverted: bool, folder: Path, name: str) -> Path:  # noqa: FBT001
-    """The image ``samples`` still in a codec, as a file in ``folder`` Leptonica shows as ``placement`` says.
-
-    Refused, by name, when it could not be shown so without its pixels decoded.
-    """
-    width, height, _space, _components, _bits, data, codec, _decode, _masked, fax, dct = samples
-    if codec == 'CCITTFaxDecode':
-        path = folder / 'page.tif'
-        orientation = _tiff_orientation(placement)
-        path.write_bytes(_fax_tiff(width, height, data, fax, inverted=inverted, orientation=orientation, name=name))
-        return path
-    if codec not in _CODEC_FILES:
-        msg = f'{name} is in {codec}, which Tesseract does not read'
-        raise ValueError(msg)
-    if inverted:
-        msg = f'{name} is in {codec}, inverted by its /Decode: showing it so needs its pixels decoded, not done here'
-        raise ValueError(msg)
-    if placement == _UPRIGHT:
-        path = folder / f'page{".j2k" if data.startswith(_J2K_CODESTREAM) else _CODEC_FILES[codec]}'
-        path.write_bytes(data)
-        return path
-    if codec == 'JPXDecode':
-        msg = (
-            f'{name} is in JPXDecode, placed turned or mirrored: a JPEG 2000 file says no placement and no TIFF holds '
-            'one for Leptonica, so showing it so needs its pixels decoded, which is not done here'
-        )
-        raise ValueError(msg)
-    path = folder / 'page.tif'
-    path.write_bytes(_jpeg_tiff(width, height, data, dct, orientation=_tiff_orientation(placement), name=name))
-    return path
+    tags[273] = (_TIFF_LONG, _TIFF_HEADER + 2 + 12 * len(tags) + 4)
+    entries = b''.join(
+        struct.pack('<HHI', tag, kind, 1)
+        + (struct.pack('<HH', value, 0) if kind == _TIFF_SHORT else struct.pack('<I', value))
+        for tag, (kind, value) in sorted(tags.items())
+    )
+    directory = struct.pack('<H', len(tags)) + entries + struct.pack('<I', 0)  # no next directory
+    return struct.pack('<2sHI', b'II', 42, _TIFF_HEADER) + directory + data
 
 
 def _image_file(samples: tuple, placement: Placement, folder: Path, name: str) -> Path:
     """The image ``samples`` (``Reader.image``), shown as ``placement`` says, as a file Tesseract reads upright.
 
     Written in ``folder``: lossless samples as an 8-bit PGM/PPM, turned upright and inverted as their ``/Decode``
-    says; a codec's data as stored (:func:`_codec_file`). Refused, by name, when Tesseract could not read it, or not
-    as the page shows it.
+    says; a codec's data as stored, CCITT fax's inside a TIFF. Refused, by name, when Tesseract could not read it,
+    or not as the page shows it.
     """
-    width, height, space, components, bits, data, codec, decode, *_ = samples
-    if codec is None and (components not in {1, _RGB} or space == 'Indexed'):
+    width, height, space, components, bits, data, codec, decode, _masked, fax = samples
+    if codec is None and (components not in {1, 3} or space == 'Indexed'):
         msg = f'{name} is {space} ({components} components): Tesseract is handed gray or RGB samples only'
         raise ValueError(msg)
     inverted = _inverted(decode, components, name)
+    if codec == 'CCITTFaxDecode':
+        path = folder / 'page.tif'
+        orientation = _tiff_orientation(placement)
+        path.write_bytes(_fax_tiff(width, height, data, fax, inverted=inverted, orientation=orientation, name=name))
+        return path
     if codec is not None:
-        return _codec_file(samples, placement, inverted, folder, name)
+        if codec not in _CODEC_FILES:
+            msg = f'{name} is in {codec}, which Tesseract does not read'
+            raise ValueError(msg)
+        for wrong, how in ((placement != _UPRIGHT, 'placed turned or mirrored'), (inverted, 'inverted by its /Decode')):
+            if wrong:
+                msg = f'{name} is in {codec}, {how}: showing it so needs its pixels decoded, which is not done here'
+                raise ValueError(msg)
+        path = folder / f'page{".j2k" if data.startswith(_J2K_CODESTREAM) else _CODEC_FILES[codec]}'
+        path.write_bytes(data)
+        return path
     row = (width * components * bits + 7) // 8
     stored = np.frombuffer(data, dtype=np.uint8)[: row * height].reshape(height, row)
     if bits == 16:  # noqa: PLR2004 -- the high byte of each big-endian sample

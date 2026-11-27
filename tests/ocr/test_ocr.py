@@ -1,19 +1,17 @@
 """The ``ocr`` part: a captured image of known words, given a Tesseract text layer, reads back as those words, its
-pixels and page size unchanged; so does a fax scan of them, and a JPEG scan, each handed over in a TIFF, upright on a
-page turned or not; so do Chinese and Japanese, set in lines or in columns, the columns as vertical writing.
+pixels and page size unchanged; so does a fax scan of them, handed over in a TIFF, upright on a page turned or not;
+so do Chinese and Japanese, set in lines or in columns, the columns as vertical writing.
 Its own part, never tests/base: it needs Tesseract 5.3 or later with English, simplified Chinese and Japanese data
 (``eng``, ``chi_sim``, ``chi_sim_vert``, ``jpn``, ``jpn_vert``), and FAILS naming what is missing where there is
 none; it is never skipped."""
 
 import difflib
 import os
-import subprocess
 
 import numpy as np
 import pymupdf
 import pytest
 
-from document_lab import ocr
 from document_lab.capture.export import to_pdf
 from document_lab.ocr import TesseractPlaces, check, text_layer
 from document_lab.pdf import read_pdf
@@ -75,51 +73,6 @@ def test_a_fax_scan_reads_back_upright_on_a_page_turned_or_not(tmp_path, rotate)
     with pymupdf.open(tmp_path / 'ocr.pdf') as after:
         assert all(word in after[0].get_text().casefold() for word in WORDS)  # an independent reader reads them
     drawn_where_they_are(tmp_path / 'ocr.pdf')
-
-
-def scanned(words: tuple[str, ...], rotate: int, components: int) -> tuple[bytes, tuple[int, int]]:
-    """:func:`rendered` ``words`` as a JPEG of ``components`` (1: gray, 3: RGB), stored turned back as far as a page
-    turned ``rotate`` turns it, so the page shows it upright; and its samples across and down."""
-    shown = rendered(words)[..., :components]
-    stored = np.ascontiguousarray(np.rot90(shown, rotate // 90))
-    rows, columns = stored.shape[:2]
-    space = pymupdf.csGRAY if components == 1 else pymupdf.csRGB
-    return pymupdf.Pixmap(space, columns, rows, stored.tobytes(), False).tobytes('jpg', jpg_quality=90), (columns, rows)
-
-
-@pytest.mark.parametrize(('rotate', 'components'), [(90, 3), (180, 3), (270, 1), (90, 1)])
-def test_a_jpeg_scan_reads_back_upright_on_a_page_turned(tmp_path, rotate, components):
-    check('eng', PLACES)
-    data, (columns, rows) = scanned(WORDS, rotate, components)
-    space = 'DeviceGray' if components == 1 else 'DeviceRGB'
-    image = f'/Width {columns} /Height {rows} /ColorSpace /{space} /BitsPerComponent 8 /Filter /DCTDecode'
-    size = (columns * 72 / 96, rows * 72 / 96)
-    pdf = image_pdf(tmp_path / 'scan.pdf', data, image, size=size, deflate=False, rotate=rotate)
-    assert text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES) == 1
-    with pymupdf.open(tmp_path / 'ocr.pdf') as after:
-        assert all(word in after[0].get_text().casefold() for word in WORDS)  # an independent reader reads them
-    drawn_where_they_are(tmp_path / 'ocr.pdf')
-
-
-def test_leptonica_still_shows_a_color_jpeg_at_tiff_orientation_8_turned_half_round(tmp_path):
-    """The evidence behind ``ocr``'s one refused JPEG placement: should Leptonica show it upright, this fails, and
-    the refusal (``_COLOR_JPEG_SHOWN_WRONG``) is to go."""
-    executable = check('eng', PLACES)
-    data, (columns, rows) = scanned(WORDS, 270, 3)  # stored so Orientation 8 shows it upright
-    tags = {
-        258: (3, (8, 8, 8)),
-        259: (3, (7,)),
-        262: (3, (6,)),
-        274: (3, (ocr._COLOR_JPEG_SHOWN_WRONG,)),
-        277: (3, (3,)),
-        284: (3, (1,)),
-        530: (3, (1, 1)),
-    }
-    tiff = tmp_path / 'scan.tif'
-    tiff.write_bytes(ocr._tiff(columns, rows, data, tags))
-    done = subprocess.run([executable, str(tiff), 'stdout', '--dpi', '96'], capture_output=True, check=True)
-    read = done.stdout.decode('utf-8').casefold()
-    assert not any(word in read for word in WORDS), read  # shown half round: none reads
 
 
 #: Chinese (simplified): the stator winding of a hydro generator heats and vibrates in service, so its insulation is

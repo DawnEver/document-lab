@@ -91,8 +91,7 @@ type PlacementRow = (bool, bool, bool);
 type PageRows = (Vec<SpanRow>, Vec<PathRow>, Vec<ImageRow>, Vec<String>);
 /// An image's samples: width, height, color space family (None: a stencil mask), components, bits per component,
 /// the data after every lossless filter, the image codec it is still in (None: raw samples), its `/Decode` array
-/// (None: not stated), whether it states a mask, its fax coding when its codec is `CCITTFaxDecode`, and its JPEG
-/// coding when it is `DCTDecode`.
+/// (None: not stated), whether it states a mask, and its fax coding when its codec is `CCITTFaxDecode`.
 type SamplesRow = (
     i64,
     i64,
@@ -104,13 +103,9 @@ type SamplesRow = (
     Option<Vec<f64>>,
     bool,
     Option<FaxRow>,
-    Option<DctRow>,
 );
 /// A `CCITTFaxDecode` image's coding: K, columns, end-of-line codes, rows byte-aligned, 1 bits black.
 type FaxRow = (i64, i64, bool, bool, bool);
-/// A `DCTDecode` image's coding: bits per sample, components, the first component's sampling (across, down), and
-/// whether its colors are transformed (YCbCr).
-type DctRow = (u8, u8, (u8, u8), bool);
 
 /// A PDF opened.
 #[pyclass(unsendable)]
@@ -195,12 +190,9 @@ impl Reader {
     /// The samples of the image `XObject` `object`.
     fn image(&self, object: u32) -> PyResult<SamplesRow> {
         let samples = self.file.image(object).map_err(|e| refused(&e))?;
-        let (fax, dct) = match &samples.codec {
-            Some(codec) => (
-                codec.fax().map_err(|e| refused(&e))?,
-                codec.dct(&samples.data).map_err(|e| refused(&e))?,
-            ),
-            None => (None, None),
+        let fax = match &samples.codec {
+            Some(codec) => codec.fax().map_err(|e| refused(&e))?,
+            None => None,
         };
         let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
         Ok((
@@ -217,7 +209,6 @@ impl Reader {
             samples.decode,
             samples.masked,
             fax.map(|f| (f.k, f.columns, f.end_of_line, f.byte_align, f.black_is_1)),
-            dct.map(|d| (d.precision, d.components, d.sampling, d.transform)),
         ))
     }
 }

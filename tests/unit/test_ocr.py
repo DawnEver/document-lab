@@ -317,20 +317,15 @@ def test_the_layer_replaces_the_pdf_it_was_laid_on(tmp_path, tesseract):
     assert sorted(p.name for p in tmp_path.iterdir()) == ['capture.pdf']
 
 
-def tiff_tags(tiff: bytes) -> dict[int, int | tuple[int, ...]]:
-    """Each tag of the one-strip TIFF ``tiff`` (little-endian) and its value, or its values when it has several."""
+def tiff_tags(tiff: bytes) -> dict[int, int]:
+    """Each tag of the one-strip TIFF ``tiff`` (little-endian, one value a tag) and its value."""
     assert tiff[:4] == b'II*\x00'
     (directory,) = struct.unpack_from('<I', tiff, 4)
     (count,) = struct.unpack_from('<H', tiff, directory)
     tags = {}
     for i in range(count):
-        tag, kind, many = struct.unpack_from('<HHI', tiff, directory + 2 + 12 * i)
-        size = 2 if kind == 3 else 4
-        at = directory + 2 + 12 * i + 8
-        if many * size > 4:
-            (at,) = struct.unpack_from('<I', tiff, at)
-        values = struct.unpack_from(f'<{many}{"H" if kind == 3 else "I"}', tiff, at)
-        tags[tag] = values[0] if many == 1 else values
+        tag, kind, _, value = struct.unpack_from('<HHII', tiff, directory + 2 + 12 * i)
+        tags[tag] = value & 0xFFFF if kind == 3 else value
     return tags
 
 
@@ -447,72 +442,16 @@ def test_a_decode_that_neither_keeps_nor_inverts_the_samples_is_refused_by_name(
         text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES)
 
 
-def jpeg(rows: int, columns: int, components: int) -> bytes:
-    """A JPEG of ``rows`` x ``columns`` samples of ``components`` (1: gray, 3: RGB), each its own value."""
-    space = pymupdf.csGRAY if components == 1 else pymupdf.csRGB
-    samples = np.arange(rows * columns * components, dtype=np.uint8).tobytes()
-    return pymupdf.Pixmap(space, columns, rows, samples, False).tobytes('jpg')
-
-
-def jpeg_pdf(path: Path, data: bytes, components: int, *, decode: str = '', rotate: int = 0, matrix=None) -> Path:
-    """A 30 x 20 point page of one 30 x 20 JPEG ``data`` of ``components``, placed by ``rotate`` and ``matrix``."""
-    space = 'DeviceGray' if components == 1 else 'DeviceRGB'
-    image = f'/Width 30 /Height 20 /ColorSpace /{space} /BitsPerComponent 8 /Filter /DCTDecode{decode}'
-    size = (20, 30) if matrix and matrix[0] == 0 else (30, 20)
-    return image_pdf(path, data, image, size=size, deflate=False, rotate=rotate, matrix=matrix)
-
-
-@pytest.mark.parametrize(('codec', 'refusal'), [('DCTDecode', 'inverted'), ('JPXDecode', 'inverted')])
-def test_a_jpeg_or_jpeg_2000_shown_inverted_is_refused_by_name(tmp_path, tesseract, codec, refusal):
-    image = f'/Width 30 /Height 20 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /{codec} /Decode [1 0 1 0 1 0]'
-    pdf = image_pdf(tmp_path / 'scan.pdf', jpeg(20, 30, 3), image, size=(30, 20), deflate=False)
-    tesseract()
-    with pytest.raises(ValueError, match=f'{codec}, {refusal}.*decoded'):
-        text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES)
-
-
 @pytest.mark.parametrize(
-    ('components', 'placement', 'orientation'),
-    [
-        (3, (90, None), 6),  # a color scan on a page turned a quarter clockwise
-        (3, (180, None), 3),
-        (1, (270, None), 8),  # gray: every orientation, this one too
-        (3, (0, (0, -30, -20, 0, 20, 30)), 5),  # drawn transposed: turned a quarter and mirrored
-        (3, (0, (0, 30, 20, 0, 0, 0)), 7),  # drawn transposed the other way
-    ],
+    ('decode', 'rotate', 'refusal'), [(' /Decode [1 0 1 0 1 0]', 0, 'inverted'), ('', 90, 'placed turned')]
 )
-def test_a_jpeg_placed_turned_is_handed_as_stored_in_a_tiff_whose_orientation_places_it(
-    tmp_path, tesseract, components, placement, orientation
-):
-    rotate, matrix = placement
-    data = jpeg(20, 30, components)
-    pdf = jpeg_pdf(tmp_path / 'scan.pdf', data, components, rotate=rotate, matrix=matrix)
-    fake = tesseract(page(('turned', 2, 3, 10, 4)))
-    assert text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES) == 1
-    ((suffix, handed),) = fake.images
-    assert suffix == '.tif'
-    assert handed.endswith(data)  # packaged, never decoded
-    tags = tiff_tags(handed)
-    assert (tags[256], tags[257], tags[259], tags[274], tags[277]) == (30, 20, 7, orientation, components)
-    if components == 1:
-        assert (tags[258], tags[262]) == (8, 1)  # BlackIsZero
-    else:  # YCbCr, its luminance sampled as the JPEG says (PyMuPDF writes 4:4:4)
-        assert (tags[258], tags[262], tags[530]) == ((8, 8, 8), 6, (1, 1))
-    assert words(tmp_path / 'ocr.pdf')[0][0] == 'turned'
-
-
-def test_a_color_jpeg_leptonica_would_show_wrongly_and_a_jpeg_2000_placed_turned_are_refused_by_name(
-    tmp_path, tesseract
-):
+def test_a_jpeg_shown_inverted_or_turned_is_refused_by_name(tmp_path, tesseract, decode, rotate, refusal):
+    jpeg = pymupdf.Pixmap(pymupdf.csRGB, 30, 20, bytes([200]) * 30 * 20 * 3, False).tobytes('jpg')
+    image = f'/Width 30 /Height 20 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode{decode}'
+    pdf = image_pdf(tmp_path / 'scan.pdf', jpeg, image, size=(30, 20), deflate=False, rotate=rotate)
     tesseract()
-    pdf = jpeg_pdf(tmp_path / 'scan.pdf', jpeg(20, 30, 3), 3, rotate=270)  # TIFF Orientation 8
-    with pytest.raises(ValueError, match=r'Orientation 8.*Leptonica'):
+    with pytest.raises(ValueError, match=f'DCTDecode, {refusal}.*decoded'):
         text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES)
-    image = '/Width 30 /Height 20 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /JPXDecode'
-    pdf = image_pdf(tmp_path / 'jpx.pdf', b'\x00\x00\x00\x0cjP  ', image, size=(30, 20), deflate=False, rotate=90)
-    with pytest.raises(ValueError, match=r'JPXDecode, placed turned or mirrored.*no TIFF'):
-        text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES)
-    assert sorted(p.name for p in tmp_path.iterdir()) == ['jpx.pdf', 'scan.pdf']
 
 
 #: 8 x 6 gray samples, each its own value, so any turn or mirror shows.

@@ -32,21 +32,47 @@ def require(platform: str) -> None:
 
 
 def launched(title: str, seed: int) -> subprocess.Popen:
-    return subprocess.Popen([sys.executable, str(VIEWER), title, str(seed)])
+    """The viewer, saying its own pid first on its stdout: on Windows a venv's python.exe is a launcher that runs the
+    interpreter as its child, so the Popen's pid owns no window."""
+    return subprocess.Popen([sys.executable, str(VIEWER), title, str(seed)], stdout=subprocess.PIPE, text=True)
 
 
-def shown(title: str) -> Window:
+def _census() -> str:
+    """macOS's own account of its permissions and its windows; empty elsewhere, where no window name is withheld."""
+    if sys.platform != 'darwin':
+        return ''
+    from document_lab.capture import quartz  # noqa: PLC0415 -- macOS alone withholds names
+
+    return '\n' + quartz.census()
+
+
+def shown(title: str, process: subprocess.Popen) -> Window:
+    """The viewer's window once it shows its whole view: the one its process owns, else the one titled ``title``.
+
+    By owner first: macOS names another program's windows only to a process granted Screen Recording.
+    """
+    pid = int(process.stdout.readline() or 0)
+    system = desktop.system()
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
-        try:
-            window = desktop.find_window(title)
-            if desktop.area(window).height == VIEW:
+        with contextlib.suppress(OSError):  # a window closing while it is read
+            found = system.owned(pid) or [w for w in system.windows() if w.title == title]
+            whole = [w for w in found if desktop.area(w).height == VIEW]
+            if len(whole) == 1:
                 time.sleep(0.5)
-                return window
-        except LookupError:
-            pass
+                return whole[0]
         time.sleep(0.1)
-    pytest.fail(f'the viewer window {title!r} never appeared: is there an interactive desktop?')
+    code = process.poll()
+    state = 'running' if code is None else f'exited with {code}'
+    why = system.problem(sends_input=True) or 'the desktop names no missing permission'
+    pytest.fail(f'the viewer window {title!r} (pid {pid}, {state}) never appeared: {why}{_census()}')
+
+
+def test_the_desktop_lets_a_capture_run():
+    """This desktop lets a capture grab and scroll -- on macOS, Screen Recording and Accessibility granted to the
+    program running Python -- else every window test below fails for that one reason, which this names."""
+    why = desktop.system().problem(sends_input=True)
+    assert why is None, f'{why}{_census()}'
 
 
 @contextlib.contextmanager
@@ -92,7 +118,7 @@ def viewer():
     with the_desktop():
         process = launched(title, seed)
         try:
-            yield shown(title), picture(seed)
+            yield shown(title, process), picture(seed)
         finally:
             process.kill()
             process.wait()
@@ -176,7 +202,7 @@ def test_a_wheel_onto_a_covered_window_refuses(viewer):
     title = f'document-lab capture cover {os.getpid()}'
     cover = launched(title, 8)  # opens at the same place, above the first
     try:
-        shown(title)
+        shown(title, cover)
         with pytest.raises(OSError, match='covers'):
             desktop.Source(window).scroll()
     finally:
@@ -318,6 +344,7 @@ __all__ = [
     'test_max_height_stops_early',
     'test_nothing_is_taken_before_it_is_confirmed',
     'test_the_cli_writes_the_pdf',
+    'test_the_desktop_lets_a_capture_run',
     'test_the_first_frame_is_the_view',
     'test_the_panel_waits_for_a_start_adjust_or_cancel_and_begin_turns_it_into_finish_and_pause',
     'viewer',

@@ -1,13 +1,14 @@
 """A real scrollable window for the OS parts (``windows``, ``macos``, ``linux``): a known tall image in a Tk canvas.
 
-``python capture_viewer.py <title> <seed>`` shows :func:`picture` ``(seed)`` one pixel a pixel (on Windows the
-process is made per-monitor DPI aware, so Windows does not rescale it). Each wheel event scrolls :data:`NOTCH`
-pixels a notch -- Windows' and Tk 9's ``<MouseWheel>`` count 120 a notch, Tk 8.6 on macOS one event a notch, X11's
-are ``<Button-4>``/``<Button-5>`` -- and the Down arrow :data:`ARROW` pixels, both stopping at the end, as a document
-viewer does.
+``python capture_viewer.py <title> <seed>`` says its own pid on stdout first (the window's owner), then shows
+:func:`picture` ``(seed)`` one pixel a pixel (on Windows the process is made per-monitor DPI aware, so Windows does not
+rescale it). Each wheel event scrolls :data:`NOTCH` pixels a notch -- Windows' and Tk 9's ``<MouseWheel>`` count 120 a
+notch, Tk 8.6 on macOS one event a notch, X11's are ``<Button-4>``/``<Button-5>`` -- and the Down arrow :data:`ARROW`
+pixels, both stopping at the end, as a document viewer does.
 """
 
 import ctypes
+import os
 import sys
 
 import numpy as np
@@ -30,6 +31,8 @@ def notches(delta: int) -> int:
 
 
 def main(title: str, seed: int) -> None:
+    sys.stdout.write(f'{os.getpid()}\n')  # the window's owner: on Windows a venv launcher's child
+    sys.stdout.flush()
     import tkinter as tk  # noqa: PLC0415 -- only the window needs Tk; a runner without one collects this module
 
     if sys.platform == 'win32':

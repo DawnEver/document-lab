@@ -4,7 +4,7 @@ import pymupdf
 import pytest
 
 from document_lab.ir import BBox
-from document_lab.pdf import read_pdf, read_raster
+from document_lab.pdf import Locked, Malformed, NotPdf, Refused, Unsupported, read_pdf, read_raster
 from tests.synthetic import RED, mixed_pdf, table_cell_rect
 
 
@@ -105,8 +105,25 @@ def test_an_encrypted_file_opens_with_its_password_and_refuses_without(tmp_path)
     doc.save(tmp_path / 'e.pdf', encryption=pymupdf.PDF_ENCRYPT_AES_256, user_pw='u', owner_pw='o')
     opened = read_pdf(tmp_path / 'e.pdf', password='u')  # noqa: S106 -- the test file's own password
     assert [s.text for s in opened.spans()] == ['secret']
-    with pytest.raises(ValueError, match='password'):
+    with pytest.raises(Locked):
         read_pdf(tmp_path / 'e.pdf')
+    with pytest.raises(Locked):
+        read_pdf(tmp_path / 'e.pdf', password='wrong')  # noqa: S106 -- a wrong password, planted
+
+
+def test_each_kind_of_refusal_is_its_own_exception(tmp_path):
+    (tmp_path / 'text.pdf').write_bytes(b'hello, no PDF')
+    with pytest.raises(NotPdf):
+        read_pdf(tmp_path / 'text.pdf')
+    handler = b'%PDF-1.7\n1 0 obj << /Filter /Adobe.PubSec /R 4 >> endobj\ntrailer << /Encrypt 1 0 R /Root 2 0 R >>\n'
+    (tmp_path / 'pubsec.pdf').write_bytes(handler)
+    with pytest.raises(Unsupported):
+        read_pdf(tmp_path / 'pubsec.pdf')
+    (tmp_path / 'empty.pdf').write_bytes(b'%PDF-1.7\n')
+    with pytest.raises(Malformed):
+        read_pdf(tmp_path / 'empty.pdf')
+    assert all(issubclass(kind, Refused) for kind in (NotPdf, Locked, Unsupported, Malformed))
+    assert issubclass(Refused, ValueError)
 
 
 def test_a_raster_renders_at_the_native_resolution_of_the_image_under_it(doc, tmp_path):

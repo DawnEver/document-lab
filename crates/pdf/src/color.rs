@@ -35,6 +35,16 @@ pub struct Color {
     pub rgb: Option<[f64; 3]>,
 }
 
+impl Color {
+    /// Its RGB when its space defines one, else its own components (a separation's tint): the most a reader can
+    /// say of it without a profile or a tint function.
+    #[must_use]
+    pub fn rgb_or_components(&self) -> Vec<f64> {
+        self.rgb
+            .map_or_else(|| self.components.clone(), |rgb| rgb.to_vec())
+    }
+}
+
 impl Space {
     /// How many components a color of this space has.
     #[must_use]
@@ -216,5 +226,13 @@ mod tests {
     fn a_separation_keeps_its_tint_and_gives_no_rgb() {
         let c = Space::Other(b"Separation".to_vec(), 1).color(vec![0.3]);
         assert_eq!((c.components, c.rgb), (vec![0.3], None));
+    }
+
+    #[test]
+    fn a_color_reads_as_its_rgb_else_its_components() {
+        let rgb = Space::Cmyk.color(vec![0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(rgb.rgb_or_components(), [0.0; 3]);
+        let tint = Space::Other(b"Separation".to_vec(), 1).color(vec![0.3]);
+        assert_eq!(tint.rgb_or_components(), [0.3]);
     }
 }

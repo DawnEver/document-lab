@@ -4,11 +4,12 @@
   arXiv stamp up the margin -- is :func:`furniture` and makes no line; turned text inside that box (a figure's axis
   label) stays. A page without upright text has no furniture.
 - Lines: spans on one baseline running one way, each starting within :data:`LINE_GAP` font sizes of the line's
-  right end; a column gutter is wider, so two columns' lines at one height stay two lines. A bare clause number
-  takes the text set apart beside it, within :data:`CLAUSE_GAP` font sizes, as a standard sets ``4.1    General``
-  and a paper ``1    Introduction``: in an unweighted document (no bold span: OCR'd text carries no weight) any
-  clause number or bullet; in a weighted one a bold number or appendix letter (``A``), and only bold text of its
-  size.
+  right end; a column gutter is wider, so two columns' lines at one height stay two lines. A line's text spaces two
+  neighboring spans apart unless they share an ``unspaced`` number (:class:`~document_lab.ir.TextSpan`): where a
+  word gap is, is the spans' source's to say, never measured here. A bare clause number takes the text set apart
+  beside it, within :data:`CLAUSE_GAP` font sizes, as a standard sets ``4.1    General`` and a paper
+  ``1    Introduction``: in an unweighted document (no bold span: OCR'd text carries no weight) any clause number or
+  bullet; in a weighted one a bold number or appendix letter (``A``), and only bold text of its size.
 - Columns: a line is FULL width (crossing the page middle) or in the LEFT or RIGHT column; :func:`ordered` reads the
   bands between full-width lines, each its left column, then its right.
 - Blocks: :func:`blocks` sets lines into paragraphs -- each next line within :data:`BLOCK_GAP` font sizes below
@@ -37,7 +38,6 @@ __all__ = [
     'LINE_GAP',
     'SAME_WAY',
     'UPRIGHT',
-    'WORD_GAP',
     'Block',
     'Line',
     'blocks',
@@ -49,8 +49,6 @@ __all__ = [
     'wordy',
 ]
 
-#: A gap between spans wider than this many font sizes is a space.
-WORD_GAP: Final = 0.15
 #: A span further right of a line than this many font sizes starts another line (a column gutter).
 LINE_GAP: Final = 1.0
 #: A bare clause number (``4.1``) takes the text beside it within this many font sizes.
@@ -79,15 +77,14 @@ class Line:
 
     @property
     def text(self) -> str:
-        """The spans' text left to right, a space where they stand apart."""
+        """The spans' text left to right, a space between two unless they share an ``unspaced`` number."""
         parts: list[str] = []
-        right = None
+        before = None
         for span in sorted(self.spans, key=lambda s: s.provenance.bbox.x0):
-            box = span.provenance.bbox
-            if right is not None and box.x0 - right > WORD_GAP * span.size:
+            if before is not None and (span.unspaced is None or span.unspaced != before.unspaced):
                 parts.append(' ')
             parts.append(span.text)
-            right = box.x1
+            before = span
         return ' '.join(''.join(parts).split())
 
     @property

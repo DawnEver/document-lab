@@ -33,11 +33,11 @@ impl File {
     /// Refuses an object that is no image `XObject`, and data that does not decode.
     pub fn image(&self, num: u32) -> Result<Samples> {
         let Object::Stream(stream) = self.object(num)? else {
-            return Err(Error::new(format!("object {num} is no stream")));
+            return Err(Error::invalid(format!("object {num} is no stream")));
         };
         let dict = &stream.dict;
         if dict.get(b"Subtype").and_then(Object::as_name) != Some(b"Image") {
-            return Err(Error::new(format!("object {num} is no image")));
+            return Err(Error::invalid(format!("object {num} is no image")));
         }
         let int = |key: &[u8]| -> Result<Option<i64>> {
             Ok(self.get(dict, key)?.and_then(|v| v.as_integer()))
@@ -48,7 +48,7 @@ impl File {
         } else {
             let value = self
                 .get(dict, b"ColorSpace")?
-                .ok_or_else(|| Error::new(format!("image {num} states no /ColorSpace")))?;
+                .ok_or_else(|| Error::malformed(format!("image {num} states no /ColorSpace")))?;
             Some(self.color_space(&value, &Dict::new())?)
         };
         let decoded = self.decode(&stream)?;

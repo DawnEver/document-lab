@@ -80,3 +80,47 @@ fn a_span_carries_the_direction_its_baseline_runs_in_page_space() {
         ]
     );
 }
+
+/// Each span's text, and whether it shares its unspaced number with the one before.
+fn joined(content: &str) -> Vec<(String, bool)> {
+    let found = page_spans(content);
+    let after: Vec<bool> = std::iter::once(false)
+        .chain(
+            found
+                .windows(2)
+                .map(|w| w[0].unspaced.is_some() && w[0].unspaced == w[1].unspaced),
+        )
+        .collect();
+    found.into_iter().map(|s| s.text).zip(after).collect()
+}
+
+#[test]
+fn spans_continuing_one_word_share_a_number() {
+    let pair = |a: &str, b: &str, glued: bool| vec![(a.to_string(), false), (b.to_string(), glued)];
+    // A change of font inside a word, and one at a word gap: a positioned gap, or a space glyph on either side.
+    assert_eq!(
+        joined("BT /F1 10 Tf 10 50 Td (Head) Tj /F2 10 Tf (line) Tj ET"),
+        pair("Head", "line", true)
+    );
+    assert_eq!(
+        joined("BT /F1 10 Tf 10 50 Td [(plain) -300] TJ /F2 10 Tf (bold) Tj ET"),
+        pair("plain", "bold", false)
+    );
+    assert_eq!(
+        joined("BT /F1 10 Tf 10 50 Td (plain ) Tj /F2 10 Tf (bold) Tj ET"),
+        pair("plain", "bold", false)
+    );
+    assert_eq!(
+        joined("BT /F1 10 Tf 10 50 Td (plain) Tj /F2 10 Tf ( bold) Tj ET"),
+        pair("plain", " bold", false)
+    );
+    // A subscript set lower in a smaller size continues its word; the next line does not.
+    assert_eq!(
+        joined("BT /F1 10 Tf 10 50 Td (H) Tj /F1 7 Tf -3 Ts (2) Tj ET"),
+        pair("H", "2", true)
+    );
+    assert_eq!(
+        joined("BT /F1 10 Tf 10 50 Td (up) Tj /F2 10 Tf 0 -12 Td (down) Tj ET"),
+        pair("up", "down", false)
+    );
+}

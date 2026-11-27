@@ -567,3 +567,59 @@ def test_strict_wants_a_display_apart_above_below_and_across_and_a_formula_beyon
     doc = read(tmp_path, [*above, *captioned, *column(72, 468, range(270, 330, 12))])
     assert kinds(doc, 'strict') == []  # a paper's table under its caption, one row, no rule drawn
     assert kinds(doc, 'loose') == ['Untitled equation 1']  # planted
+
+
+#: A ToUnicode CMap reading the code ``~`` as a big brace's middle piece, as a TeX font's extension glyph reads.
+_BRACE_PIECE = (
+    b'/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapName /Brace def '
+    b'1 begincodespacerange <00> <FF> endcodespacerange 1 beginbfchar <7E> <23A8> endbfchar '
+    b'endcmap CMapName currentdict /CMap defineresource pop end end'
+)
+
+
+def with_brace_pieces(path: Path) -> Path:
+    """``path`` with its formulas' ``~`` read as a big brace's piece (U+23A8): the math font (``tiit``) maps it."""
+    with pymupdf.open(path) as doc:
+        page = doc[0]
+        (font,) = [f[0] for f in page.get_fonts() if f[3] == 'Times-Italic']
+        cmap = doc.get_new_xref()
+        doc.update_object(cmap, '<<>>')
+        doc.update_stream(cmap, _BRACE_PIECE)
+        doc.xref_set_key(font, 'ToUnicode', f'{cmap} 0 R')
+        doc.saveIncr()
+    return path
+
+
+def test_a_cases_display_set_flush_across_its_column_is_its_number_s(tmp_path):
+    """A cases display whose rows start at its column's left and reach its right, its number on the line below: a
+    line reading as no word, flush and justified, is prose -- unless it holds a big brace's piece, drawn only in a
+    display (``uz1 = C12[...]`` of a two-column journal)."""
+    rows = [
+        math(312, 436, '~ ua = C cos(2 p f t) + cos(2 p f t + 2 q) + k cos(2 p f t + 3 q)'),
+        math(312, 451, '~ ub = C sin(2 p f t) + sin(2 p f t + 2 q) + k sin(2 p f t + 3 q)'),
+    ]
+    left = column(50, 250, range(100, 600, 12))
+    right = [*column(312, 250, range(100, 425, 12)), *column(312, 250, range(490, 600, 12))]
+    doc = read_pdf(with_brace_pieces(text_pdf(tmp_path / 'page.pdf', [[*left, *right, *rows, number(545, 466, 15)]])))
+    formula = [(x, y, text.replace('~', '\N{LEFT CURLY BRACKET MIDDLE PIECE}'), *rest) for x, y, text, *rest in rows]
+    formula.append(number(545, 466, 15))
+    box = crop(doc, 15)
+    assert faults(doc.pages[0], box, formula) == []
+    assert faults(doc.pages[0], without(box, top=25), formula)  # planted: its rows left out, the number alone
+
+
+def test_a_glyph_box_taller_than_its_ink_takes_no_prose_into_the_crop(tmp_path):
+    """A formula's big glyph (a bar set at 60 pt) whose box reaches up over the paragraph's last line, as a math
+    font's ascent does: the crop stops at that line, never takes its words."""
+    above = column(72, 468, range(100, 200, 12))
+    formula = [math(250, 236, 'x = a + b'), number(525, 236, 1)]
+    bar = math(330, 236, '-', size=60)
+    doc = read(tmp_path, [*above, *formula, bar, *column(72, 468, range(270, 330, 12))])
+    box = crop(doc, 1)
+    assert box is not None
+    last = max(s.provenance.bbox.y1 for s in doc.pages[0].spans if s.provenance.bbox.y1 < 205)  # its last line
+    tall = next(s.provenance.bbox for s in doc.pages[0].spans if s.text == '-')
+    assert tall.y0 < last  # the bar's box does reach over the paragraph's last line
+    assert box.y0 >= last  # no word of it in the crop
+    assert faults(doc.pages[0], box, [*formula, bar]) == ["'-' cut"]  # its ink is in, its box's top cut off
+    assert without(box, top=tall.y0 - box.y0).y0 < last  # planted: grown to the bar's box, it takes words

@@ -126,6 +126,8 @@ _MATH_SIGNS: Final = frozenset(
     '\N{GREATER-THAN OR EQUAL TO}\N{PROPORTIONAL TO}'
 )
 _MATH_FONT: Final = re.compile(r'(?i)math|cmmi|cmsy|cmex|stix|msbm|msam|eufm|rsfs|mtmi|mtsy|txmi|txsy|pxmi|lmmi')
+#: The pieces a big bracket, brace or parenthesis is drawn of (U+239B..U+23AD), which only a display sets.
+_BRACKET_PIECES: Final = frozenset(map(chr, range(0x239B, 0x23AE)))
 #: A typewriter font: a code listing's, whose ``x = 1;`` is no formula.
 _CODE_FONT: Final = re.compile(r'(?i)mono|courier|cmtt|typewriter|consolas|lmtt')
 #: A caption's opening: ``Fig. 3.``, ``FIGURE 21.``, ``Table II``, a subfigure's ``(b) ``.
@@ -585,7 +587,7 @@ def _equation_box(
       what is taken (:data:`OCR_REACH` where the seed is OCR'd), until none is left; never past the prose above or
       below the seed, and never a piece nearer another equation's number between them (:meth:`_Around.number`: a mark
       ``(1)`` inside a matrix is none). A piece's box is its spans' whole boxes (a sum's limits, a big bracket), not a
-      line's median.
+      line's median -- cut at the prose bounding it, where a math font's glyph boxes stand taller than its ink.
     - The drawings whose middle lies in what is taken (a fraction's bar, a root's) are taken too; the box stands
       :data:`EQUATION_PAD` body sizes clear of it all, inside the page -- but never into text it leaves out
       (:func:`_padded`: the next equation set a point below).
@@ -620,7 +622,8 @@ def _equation_box(
         while near := [p for p in pieces if p.y0 <= box.y1 + reach and p.y1 >= box.y0 - reach]:
             pieces = [p for p in pieces if p not in near]
             box = union([box, *near])
-        return box
+        # a math font's glyph boxes stand taller than its ink: never past the prose bounding it
+        return BBox(box.x0, max(box.y0, min(top, seed.y0)), box.x1, min(box.y1, max(bottom, seed.y1)))
 
     box = take(across=False)
     if around.two and not left and box.x0 < around.mid - layout.GUTTER:
@@ -999,10 +1002,13 @@ class _Around:
         only at the edge -- reaching across the column (a justified line of inline math) or as a paragraph's tail, in
         the body's font, no math (``[55]:``). A line holding :data:`TEXT_WORDS` words of four letters is prose
         wherever it starts (a list item's second line). A formula's letters (``cos hweTs`` flush left, ``Lvsd =``,
-        ``Ie5jwet``) and its short words set inside it (``with``, ``otherwise``) are no prose.
+        ``Ie5jwet``) and its short words set inside it (``with``, ``otherwise``) are no prose, nor a line holding a
+        big bracket's piece (:data:`_BRACKET_PIECES`: a cases display set flush across its column).
         """
         if _words(line.text) >= TEXT_WORDS:  # words a formula never holds so many of: a list item's second line
             return True
+        if any(c in _BRACKET_PIECES for c in line.text):  # a big bracket's piece: drawn only in a display
+            return False
         left, width = self.edge(line)
         flush = line.x0 - left <= PROSE_INDENT * self.body
         full = left + width - line.x1 <= self.body  # it reaches its column's right edge: a justified line

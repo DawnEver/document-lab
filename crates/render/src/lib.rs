@@ -383,6 +383,13 @@ impl<'a> Canvas<'a> {
         self.grid.rect(bbox).meets(self.grid.bounds())
     }
 
+    /// How far past its path (page space) `stroke` may paint pixels: as far as its caps and joins reach
+    /// ([`Stroke::reach`]), and a pixel more -- a line under a tenth of a pixel is drawn one pixel wide, and
+    /// anti-aliasing shades a pixel the paint only nears.
+    fn reach(&self, stroke: &Stroke) -> f64 {
+        stroke.reach() + 1.0 / self.grid.scale
+    }
+
     /// What of the canvas a mark shows on: what the chain of clips `clip` leaves, times the soft mask `soft` (one
     /// that cannot be made is counted, and the mark drawn without it).
     fn coverage(&mut self, clip: Option<&Rc<Clip>>, soft: Option<&Rc<SoftMask>>) -> Left {
@@ -404,16 +411,8 @@ impl<'a> Canvas<'a> {
         let Some(bounds) = bounds(&path.segments) else {
             return;
         };
-        let reach = path
-            .stroke
-            .as_ref()
-            .map_or(0.0, |s| s.width * s.miter_limit.max(1.0) + s.width);
-        let reach_box = Rect {
-            x0: bounds.x0 - reach,
-            y0: bounds.y0 - reach,
-            x1: bounds.x1 + reach,
-            y1: bounds.y1 + reach,
-        };
+        let reach = path.stroke.as_ref().map_or(0.0, |s| self.reach(s));
+        let reach_box = bounds.grown(reach);
         if !self.meets(reach_box) {
             return;
         }
@@ -678,16 +677,11 @@ impl<'a> Canvas<'a> {
             return;
         };
         let reach = if strokes {
-            text.stroke.width * text.stroke.miter_limit.max(1.0) + text.stroke.width
+            self.reach(&text.stroke)
         } else {
             0.0
         };
-        let reach_box = Rect {
-            x0: around.x0 - reach,
-            y0: around.y0 - reach,
-            x1: around.x1 + reach,
-            y1: around.y1 + reach,
-        };
+        let reach_box = around.grown(reach);
         if !self.meets(reach_box) {
             return;
         }

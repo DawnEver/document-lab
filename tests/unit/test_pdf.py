@@ -8,7 +8,17 @@ import pytest
 from document_lab import _pdf
 from document_lab.ir import BBox
 from document_lab.pdf import CURVE_SAMPLES, Locked, Malformed, NotPdf, Refused, Unsupported, read_pdf, read_raster
-from tests.synthetic import RED, cid_font_pdf, icc_profile, image_pdf, mixed_pdf, rgb_in_srgb, table_cell_rect
+from tests.synthetic import (
+    PAGE,
+    RED,
+    cid_font_pdf,
+    content_pdf,
+    icc_profile,
+    image_pdf,
+    mixed_pdf,
+    rgb_in_srgb,
+    table_cell_rect,
+)
 
 
 @pytest.fixture
@@ -190,6 +200,68 @@ def test_text_filled_in_the_color_under_it_shows_nothing_and_the_shown_page_leav
     }
     assert [s.text for s in page.shown().spans] == ['white on black', 'black on white']
     assert len(page.shown(include_in_background_color=True).spans) == 4
+
+
+#: White text, its baseline at (150, 150) in user space, on a :data:`tests.synthetic.PAGE`-sized page.
+WHITE = 'BT 1 g /F1 10 Tf 150 150 Td (white) Tj ET'
+
+
+def _framed(margin: float, x0: float, b: float, x1: float, t: float) -> str:
+    """The rectangle ``margin`` round the text's box (user space: left, bottom, right, top), as ``re`` draws it."""
+    return f'{x0 - margin} {b - margin} {x1 - x0 + 2 * margin} {t - b + 2 * margin} re'
+
+
+def _across(x0: float, b: float, x1: float, t: float) -> str:
+    """A line through the middle of the text's box, past both its ends."""
+    return f'{x0 - 5} {(b + t) / 2} m {x1 + 5} {(b + t) / 2} l'
+
+
+def _short(x0: float, b: float, x1: float, t: float) -> str:
+    """A line along the text's middle ending 2 left of it."""
+    return f'{x0 - 40} {(b + t) / 2} m {x0 - 2} {(b + t) / 2} l'
+
+
+def _corner(x0: float, b: float, x1: float, t: float) -> str:
+    """A sharp corner 3 below the text pointing up at it: 4 wide, mitered, its tip 9.4 from it."""
+    mid = (x0 + x1) / 2
+    return f'{mid - 10} {b - 49} m {mid} {b - 3} l {mid + 10} {b - 49} l'
+
+
+#: Strokes drawn in black (unless they say otherwise) under white text, each with whether the text then shows
+#: nothing; each case is followed by its planted wrong truth, the same strokes but painting into the text.
+STROKES_UNDER_WHITE = {
+    'a table cell frame round it': (lambda *box: f'1 w {_framed(3, *box)} S', True),
+    'the frame, its band reaching in': (lambda *box: f'8 w {_framed(3, *box)} S', False),
+    'a dashed frame round it': (lambda *box: f'1 w [3 2] 0 d {_framed(3, *box)} S', True),
+    'the dashed frame, its dashes reaching in': (lambda *box: f'8 w [3 2] 0 d {_framed(3, *box)} S', False),
+    'a white cell framed black': (lambda *box: f'1 g 1 w {_framed(3, *box)} B', True),
+    'a black cell framed black': (lambda *box: f'0 g 1 w {_framed(3, *box)} B', False),
+    'a thick white stroke across it': (lambda *box: f'1 G 30 w {_across(*box)} S', True),
+    'a thick black stroke across it': (lambda *box: f'30 w {_across(*box)} S', False),
+    'a butt cap short of it': (lambda *box: f'6 w 0 J {_short(*box)} S', True),
+    'a square cap reaching in': (lambda *box: f'6 w 2 J {_short(*box)} S', False),
+    'a round cap reaching in': (lambda *box: f'6 w 1 J {_short(*box)} S', False),
+    'a beveled corner below it': (lambda *box: f'4 w 2 j {_corner(*box)} S', True),
+    'a mitered corner reaching in': (lambda *box: f'4 w 0 j 10 M {_corner(*box)} S', False),
+}
+
+
+@pytest.mark.parametrize('case', STROKES_UNDER_WHITE)
+def test_white_text_is_judged_by_what_strokes_paint_in_its_box_not_by_their_paths_box(tmp_path, case):
+    strokes, unseen = STROKES_UNDER_WHITE[case]
+    (alone,) = read_pdf(content_pdf(tmp_path / 'alone.pdf', [WHITE])).spans()
+    x0, top, x1, bottom = alone.provenance.bbox
+    height = PAGE[1]
+    path = content_pdf(tmp_path / 'stroked.pdf', [f'0 G {strokes(x0, height - bottom, x1, height - top)} {WHITE}'])
+    (span,) = read_pdf(path).spans()
+    assert span.in_background_color is unseen
+    # The truth, from another renderer: whether anything but white shows in the text's box (4 pixels a point, a
+    # pixel in from its edges, where anti-aliasing shades them).
+    with pymupdf.open(path) as doc:
+        pixmap = doc[0].get_pixmap(matrix=pymupdf.Matrix(4, 4), colorspace=pymupdf.csGRAY, alpha=False)
+    grey = np.frombuffer(pixmap.samples, np.uint8).reshape(pixmap.height, pixmap.width)
+    inside = grey[round(top * 4) + 1 : round(bottom * 4) - 1, round(x0 * 4) + 1 : round(x1 * 4) - 1]
+    assert bool(inside.min() == 255) is unseen
 
 
 def test_an_encrypted_file_opens_with_its_password_and_refuses_without(tmp_path):

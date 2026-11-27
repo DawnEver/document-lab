@@ -667,6 +667,43 @@ fn embedded_text(base: &str, program: &str, codes: &str) -> String {
     text(&events[0])
 }
 
+/// The text of `(aW)` in a simple font of `subtype` named `name`, under `/Encoding /WinAnsiEncoding`, embedding a
+/// TrueType program that names itself `name` when `embedded`.
+fn win_ansi_text(name: &str, subtype: &str, embedded: bool) -> String {
+    let font = format!(
+        "<< /Type /Font /Subtype /{subtype} /BaseFont /{name} /Encoding /WinAnsiEncoding /FontDescriptor 6 0 R >>"
+    );
+    let file = if embedded { "/FontFile2 7 0 R" } else { "" };
+    let descriptor = format!("<< /Type /FontDescriptor /FontName /{name} /Flags 4 {file} >>");
+    let program = common::stream("/Filter /ASCIIHexDecode", &sfnt_named(name));
+    let (events, _) = texts(
+        "BT /F1 10 Tf 0 50 Td (aW) Tj ET",
+        &font,
+        &[&descriptor, &program],
+    );
+    text(&events[0])
+}
+
+#[test]
+fn a_symbol_font_not_embedded_reads_as_the_glyphs_it_draws_whatever_base_encoding_is_named() {
+    // D121: a Symbol embedding no program is drawn by its built-in encoding, as viewers draw it, and its text
+    // follows: alpha and Omega, not the Latin `aW` that WinAnsiEncoding names. So for Zapf Dingbats.
+    for (name, subtype) in [("Symbol", "Type1"), ("SymbolMT", "TrueType")] {
+        assert_eq!(
+            win_ansi_text(name, subtype, false),
+            "\u{3B1}\u{2126}",
+            "{name}"
+        );
+    }
+    assert_eq!(
+        win_ansi_text("ZapfDingbats", "Type1", false),
+        "\u{2741}\u{2737}"
+    );
+    // The planted control: one that embeds its program is drawn by the encoding named, and reads as it.
+    assert_eq!(win_ansi_text("SymbolMT", "TrueType", true), "aW");
+    assert_eq!(win_ansi_text("Symbol", "Type1", true), "aW");
+}
+
 #[test]
 fn a_symbol_font_under_a_generic_name_is_known_by_its_programs_own_name() {
     // A producer's `CIDFont+F7` whose program names itself SymbolMT: Omega and greaterequal.

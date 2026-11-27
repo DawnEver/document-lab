@@ -1001,7 +1001,8 @@ impl File {
         // The glyph names: the base encoding's characters' names; with no base named, none where the program's own
         // encoding is the base (a symbolic TrueType font, an embedded Type 1 or CFF program). Symbol and Zapf
         // Dingbats embedding no program are drawn by their built-in encodings (Annex D.5, D.6) whatever base is
-        // named, as viewers draw them: a base named for one (`WinAnsiEncoding`) names glyphs it does not have.
+        // named, as viewers draw them: a base named for one (`WinAnsiEncoding`) names glyphs it does not have. One
+        // that embeds its program is drawn, and read, by the encoding named.
         let own_base = base_name.is_none()
             && ((subtype == "TrueType" && symbolic)
                 || matches!(program, Some(Program::Type1(_) | Program::Cff(_))));
@@ -1025,6 +1026,13 @@ impl File {
             None if own_base => vec![None; 256],
             None => encoding.iter().cloned().map(name_of).collect(),
         };
+        // Its text follows the glyphs drawn (D121): Symbol's Greek and Zapf Dingbats' dingbats, as viewers show them,
+        // not the Latin of a base encoding named for it.
+        if let Some(symbols) = built_in {
+            encoding = (0..=255u8)
+                .map(|b| symbols.character(b).map(String::from))
+                .collect();
+        }
         // An embedded Type 1 program with no base encoding named: the program's own encoding is the base.
         if base_name.is_none()
             && matches!(subtype, "Type1" | "MMType1")

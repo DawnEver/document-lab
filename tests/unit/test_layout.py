@@ -109,6 +109,21 @@ def test_running_heads_and_feet_repeat_at_the_page_edges_page_numbers_varying(tm
     assert [[ln.text for ln in page.foot] for page in found] == [[str(n), '6/25'] for n in range(1, 5)]
 
 
+def test_an_equation_number_closing_pages_at_one_place_is_no_running_foot(tmp_path):
+    """A paper's text block ends at one baseline on every page: pages ending in a numbered equation set its number at
+    the same place, ``(7)``, ``(12)``, ``(19)`` -- each its own equation, never a page number repeating."""
+    doc = pymupdf.open()
+    for number, equation in enumerate((7, 12, 19, 23), start=1):
+        page = doc.new_page(width=595, height=842)
+        page.insert_text((37, 120), f'Section {number} opens the page with its own words', fontsize=11)
+        page.insert_text((200, 780), f'x{number} = a + b', fontsize=11)
+        page.insert_text((520, 780), f'({equation})', fontsize=11)
+        page.insert_text((291, 822), str(number), fontsize=11)
+    doc.save(tmp_path / 'paper.pdf')
+    found = layout.running(read_pdf(tmp_path / 'paper.pdf'))
+    assert [[ln.text for ln in page.foot] for page in found] == [[str(n)] for n in range(1, 5)]  # the page numbers
+
+
 def test_a_page_alone_and_a_line_on_too_few_pages_run_nowhere(tmp_path):
     assert [(p.head, p.foot) for p in layout.running(read_pdf(_running_pdf(tmp_path / 'one.pdf', pages=1)))] == [
         ((), ())

@@ -4,18 +4,21 @@ Lines and their reading order are `document_lab.layout`'s.
 
 - Headings: a line that is a Roman-numbered upper-case heading (``II. METHOD``) or a standalone back-matter word in
   capitals or title case (``REFERENCES``, ``Acknowledgments``, ``Appendix``, ``Conclusion``) is a section (``##``),
-  whatever its size; else a line at least :data:`TITLE_SCALE` times the body size is a title (``#``: a paper bound in
-  after the first opens with one); else an all-bold line numbered ``2`` / ``2.1`` is a section (``##``, ``###`` per
-  depth); else page 1's largest text is its title when at least :data:`PAGE_TITLE_SCALE` times the body; else an
-  all-bold line lettered as an appendix's ``A.1`` is a section, and one lettered ``A`` alone when set at least
+  or a chapter (``#``) when set at least :data:`TITLE_SCALE` times the body as a thesis sets its chapters; else a
+  line at least :data:`TITLE_SCALE` times the body size is a title (``#``: a paper bound in after the first opens
+  with one); else an all-bold line numbered ``2`` / ``2.1`` is a section (``##``, ``###`` per depth); else page 1's
+  largest text is its title when at least :data:`PAGE_TITLE_SCALE` times the body and set in at most
+  :data:`PAGE_TITLE_LINES` lines (a repository's cover sheet set at one size throughout has none); else an all-bold
+  line lettered as an appendix's ``A.1`` is a section, and one lettered ``A`` alone when set at least
   :data:`LETTER_SCALE` times the body (in the body size a bold letter is a table's label), its title read as words
-  (not a letter-spaced ``C O N D I T I O N S``). No heading is set smaller than :data:`HEADING_FLOOR` times the
-  body (a footnote's number is). A document with no bold text at all (OCR'd: it carries no weight) cannot be judged
-  by weight: there a short numbered line that is no sentence heads its clause,
-  and any heading must read as words (`document_lab.layout.wordy`) -- a figure's labels, OCR'd, do not. A line
-  without a letter (a page number), a run of four dots (a contents leader, however garbled) or a contents entry (a
-  leader then a page number) never heads, nor does any line of a table-of-contents page (:data:`TOC_LINES` such
-  entries): it names the sections, it does not open them.
+  (not a letter-spaced ``C O N D I T I O N S``). A web address is never a title. No heading is set smaller than
+  :data:`HEADING_FLOOR` times the body (a footnote's number is), but for a capital Roman-numbered or back-matter
+  heading, which small capitals set below it (a bold title-case ``References`` as small is a table's label). A
+  document with no bold text at all (OCR'd: it carries no weight) cannot be judged by weight: there a short numbered
+  line that is no sentence heads its clause, and any heading must read as words (`document_lab.layout.wordy`) -- a
+  figure's labels, OCR'd, do not. A line without a letter (a page number), a run of four dots (a contents leader,
+  however garbled) or a contents entry (a leader then a page number) never heads, nor does any line of a
+  table-of-contents page (:data:`TOC_LINES` such entries): it names the sections, it does not open them.
 - Paragraphs: lines of one column closer than :data:`PARAGRAPH_GAP` line heights join with a space (a hyphen at a
   line end joins the word); a larger gap, a heading or a column change starts a new paragraph.
 """
@@ -42,7 +45,10 @@ OVERLAP: Final = 0.3
 TITLE_SCALE: Final = 1.6
 #: Page 1's largest text is its title when at least this many times the body size (a title set smaller).
 PAGE_TITLE_SCALE: Final = 1.2
-#: A heading is set at least this many times the body size: a footnote, set smaller, heads nothing.
+#: ... and set in at most this many lines: a title is a short block, a cover sheet set at one size throughout is none.
+PAGE_TITLE_LINES: Final = 4
+#: A heading is set at least this many times the body size: a footnote, set smaller, heads nothing -- but a capital
+#: Roman-numbered or back-matter heading may be set in small capitals below it.
 HEADING_FLOOR: Final = 0.9
 #: An appendix lettered alone (``A``) is set at least this many times the body: a table's bold label is not.
 LETTER_SCALE: Final = 1.1
@@ -57,6 +63,8 @@ _STANDALONE: Final = re.compile(r'^(?:ACKNOWLEDG(?:E)?MENTS?|REFERENCES|APPENDIX
 _NUMBERED: Final = re.compile(r'^(\d{1,2}(?:\.\d+)*)\.?\s+[A-Z]')
 #: An appendix's number: a letter, then ``.N`` parts; weighted documents only (``A`` starts sentences too).
 _LETTERED: Final = re.compile(r'^([A-Z](?:\.\d+)*)\.?\s+[A-Z]')
+#: A web address: never a title, however large.
+_URL: Final = re.compile(r'://|\bwww\.', re.IGNORECASE)
 #: A table-of-contents entry: words, a leader (dots, ellipses, middle dots, rules), a page number at the end.
 _TOC_ENTRY: Final = re.compile(r'^(?=.*[A-Za-z]).*?(?:(?:\.\s?){4,}|\u2026{2,}|\u00b7{3,}|_{4,})\s*[\dixvIXV]{1,5}$')
 #: Lines of a page that are contents entries for the page to be a table of contents.
@@ -81,7 +89,8 @@ def _blocks(doc: Document) -> list[list[str]]:
     body = layout.body_size(doc)
     first = layout.lines(doc.pages[0], weighted=weighted) if doc.pages else []
     largest = max((ln.size for ln in first), default=0.0)
-    title = largest if largest >= PAGE_TITLE_SCALE * body else None
+    at_largest = sum(ln.size >= largest for ln in first)
+    title = largest if largest >= PAGE_TITLE_SCALE * body and at_largest <= PAGE_TITLE_LINES else None
     return [_page_blocks(page, body, title if i == 0 else None, weighted=weighted) for i, page in enumerate(doc.pages)]
 
 
@@ -122,11 +131,13 @@ def _heading(line: layout.Line, body: float, title: float | None, *, weighted: b
     text = line.text
     if not any(c.isalpha() for c in text) or _TOC_ENTRY.match(text) or '....' in text:
         return None
-    if line.size < HEADING_FLOOR * body or (not weighted and not layout.wordy(text)):
+    capital = bool(_ROMAN.match(text)) or (back_matter(text) and text.isupper())
+    if (line.size < HEADING_FLOOR * body and not capital) or (not weighted and not layout.wordy(text)):
         return None  # a footnote; OCR noise: a figure's labels, a garbled leader
+    titled = line.size >= TITLE_SCALE * body and not _URL.search(text)
     if _ROMAN.match(text) or back_matter(text):
-        return f'## {text}'
-    if line.size >= TITLE_SCALE * body:
+        return f'{"#" if titled else "##"} {text}'  # the level of the headings of its size: a chapter's, a section's
+    if titled:
         return f'# {text}'
     # A clause number states a section more surely than page 1's size states a title; an initial letter less surely.
     unsentenced = len(text.split()) <= HEADING_WORDS and not text.endswith(('.', ',', ';', ':'))
@@ -134,7 +145,7 @@ def _heading(line: layout.Line, body: float, title: float | None, *, weighted: b
     numbered = _NUMBERED.match(text)
     if numbered and clause:
         return f'{"#" * (numbered.group(1).count(".") + 2)} {text}'
-    if title is not None and line.size >= title:
+    if title is not None and line.size >= title and not _URL.search(text):
         return f'# {text}'
     lettered = _LETTERED.match(text) if weighted else None
     # Its title reads as words: a letter-spaced word (``C O N``) is no title.

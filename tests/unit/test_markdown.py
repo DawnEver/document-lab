@@ -240,7 +240,7 @@ def test_a_bold_number_set_apart_from_its_title_heads_with_it(tmp_path):
         '## 1 Introduction',
         '### 1.1 Premises and Hypotheses',
         '## References',
-        '## Appendix',
+        '# Appendix',
         '## A Sentence-Level Estimation',
     ]
     assert 'The motor shall be rated for its duty' in md  # text, under no heading of its own
@@ -268,3 +268,66 @@ def test_an_unweighted_paper_heads_its_capitalized_sections_and_no_footnote(tmp_
         '### 2.1 Baseline Model',
         '## Acknowledgments',
     ]
+
+
+def test_a_capital_section_heads_in_small_capitals_below_the_floor_and_a_small_label_does_not(tmp_path):
+    """IEEE 10583296 sets 'IV. MATCH OF ...' at 0.815x the body, W4309593298 'REFERENCES' at 0.8x: small capitals.
+    A bold title-case 'References' as small, a table's label (W3213764655), stays under the floor.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    _write(page, 72, 80, 'IV. MATCH OF INTERPOLATION AND CALCULATION METHODS', size=8.15)
+    _write(page, 72, 100, 'The body of the section is set in the body size here and runs on.')
+    _write(page, 72, 130, 'References', size=8, font='tibo')
+    _write(page, 72, 150, 'The body after the label is set in the body size here and runs on.')
+    _write(page, 72, 180, 'REFERENCES', size=8)
+    _write(page, 72, 200, '[1] A. Author. A paper on the subject. 2025.')
+    doc.save(tmp_path / 's.pdf')
+    assert _heads(to_markdown(read_pdf(tmp_path / 's.pdf'))) == [
+        '## IV. MATCH OF INTERPOLATION AND CALCULATION METHODS',
+        '## REFERENCES',
+    ]
+
+
+def test_a_cover_sheet_set_large_throughout_has_no_title_and_a_url_is_never_one(tmp_path):
+    """W3213764655's repository cover sheet sets its eight lines at 12 pt over 10 pt text: no line of it is set apart
+    as a title is. The paper's own title follows on page 2.
+    """
+    doc = pymupdf.open()
+    cover = doc.new_page(width=595, height=842)
+    for i, text in enumerate(
+        (
+            'Deposited via The University of Sheffield.',
+            'White Rose Research Online URL for this paper:',
+            'https://eprints.example.org/id/eprint/180427/',
+            'Version: Published Version',
+            'Article:',
+            'Zhu, Z., Wang, S. et al. (2021) Advances in dual-three-phase machines.',
+            'Energies, 14 (22). 7508.',
+            'https://doi.org/10.3390/en14227508',
+        )
+    ):
+        _write(cover, 57, 120 + 14 * i, text, size=12)
+    for i in range(6):
+        _write(cover, 57, 600 + 12 * i, f'This article is distributed under the terms of the licence, line {i} of it.')
+    paper = doc.new_page(width=595, height=842)
+    _write(paper, 57, 80, 'Advances in Dual-Three-Phase Machines', size=18)
+    _write(paper, 57, 120, 'https://www.example.org/a-url-set-as-large-as-a-title', size=18)
+    for i in range(20):
+        _write(paper, 57, 160 + 12 * i, f'The body of the paper is set in the body size and runs on, line {i}.')
+    doc.save(tmp_path / 's.pdf')
+    assert _heads(to_markdown(read_pdf(tmp_path / 's.pdf'))) == ['# Advances in Dual-Three-Phase Machines']
+
+
+def test_back_matter_set_as_large_as_the_chapters_takes_their_level(tmp_path):
+    """Thesis W7220810123 sets ACKNOWLEDGMENTS and REFERENCES at its chapters' 20.66 pt: they are chapters too, not
+    sections of the chapter before.
+    """
+    doc = pymupdf.open()
+    for heading in ('ACKNOWLEDGMENTS', 'CHAPTER 1', 'REFERENCES'):
+        page = doc.new_page(width=612, height=792)
+        _write(page, 72, 100, heading, size=20.66)
+        for i in range(20):
+            _write(page, 72, 140 + 14 * i, f'The body is set in the body size and runs on here, line {i}.', size=12)
+    doc.save(tmp_path / 's.pdf')
+    assert _heads(to_markdown(read_pdf(tmp_path / 's.pdf'))) == ['# ACKNOWLEDGMENTS', '# CHAPTER 1', '# REFERENCES']

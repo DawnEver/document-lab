@@ -266,7 +266,8 @@ def _placed(name: str, page: Page, found: list[Region], ruled: tuple[Table, ...]
 def write_pages(pdf: Path, out: Path) -> Paged:
     """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive."""
     read = read_pdf(pdf)
-    body = layout.body_size(read)
+    face = layout.body_face(read)
+    body = face[1]
     width = max(3, len(str(len(read.pages))))
     names = [f'page-{number:0{width}d}' for number in range(1, len(read.pages) + 1)]
     drawn, ruled = [], []
@@ -275,7 +276,7 @@ def write_pages(pdf: Path, out: Path) -> Paged:
         drawn.append(_drawings(pixels, scale, page, body))
         ruled.append(_tables(page, pixels, scale))
     drawn = _without_furniture(drawn, body)
-    found = [regions(page, body, drawings) for page, drawings in zip(read.pages, drawn, strict=True)]
+    found = [regions(page, face, drawings) for page, drawings in zip(read.pages, drawn, strict=True)]
     furniture = layout.running(read)
     text = layout.without_running(read, furniture)
     placed = [_placed(*part) for part in zip(names, text.pages, found, ruled, strict=True)]

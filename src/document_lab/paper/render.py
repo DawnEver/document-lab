@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import pymupdf
 
 from document_lab import layout
-from document_lab.paper.crop import crop_equation, crop_figure, get_equation_context
+from document_lab.paper.crop import crop_figure, get_equation_context
 from document_lab.paper.pagemap import (
     FIG_TABLE_RE,
     build_equation_page_map,
@@ -19,7 +19,7 @@ from document_lab.paper.pagemap import (
 from document_lab.paper.text import RN_PATTERN as _RN
 from document_lab.paper.text import slug
 from document_lab.pdf import read_pdf
-from document_lab.regions import regions
+from document_lab.regions import equation, regions
 
 if TYPE_CHECKING:
     from document_lab.ir import BBox, Document, Page
@@ -55,11 +55,11 @@ class _Located:
 
     def __init__(self, read: Document) -> None:
         self.read = read
-        self.body = layout.body_size(read)
+        self.face = layout.body_face(read)
 
     def crop(self, page_num: int, label: str) -> BBox | None:
         """The region labeled ``label`` (``Figure 2``, ``Table 1``, ``(3)``) on the page, or None."""
-        found = [r for r in regions(self.read.pages[page_num], self.body) if r.label == label]
+        found = [r for r in regions(self.read.pages[page_num], self.face) if r.label == label]
         return found[0].bbox if len(found) == 1 else None
 
 
@@ -90,7 +90,7 @@ def _render_one_equation(
     if is_full_page_image(page):  # a picture page: where its text locates the number, if it does
         crop = located.crop(page_num, f'({eq_num})') if located is not None else None
     else:
-        crop = crop_equation(page, eq_num, face)
+        crop = equation(page, eq_num, face)
     if crop is None:
         return  # equation position not found on page; skip
     _render(pdf, page_num, img_path, crop)

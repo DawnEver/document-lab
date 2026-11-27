@@ -11,6 +11,9 @@
 //! A span's text is what its glyphs state: an `/ActualText`'s replacement where one is stated. The text the glyphs'
 //! fonts give is kept beside it ([`Span::drawn`]) whenever a replacement changed it, so neither is lost.
 //!
+//! A span states the box of each of its words ([`Span::words`]): its inked glyphs between spaces -- a space glyph or
+//! a gap read as one -- so a reader can part words this module joined (two columns set closer than [`BREAK`]).
+//!
 //! Where a word gap is, is this module's alone. A span continues the word of another that ends at most [`SPACE`]
 //! sizes before its start, raised or lowered by no more than [`RISE`] sizes, no space glyph between -- a change
 //! of font, size or baseline inside a word -- whenever either was drawn (a subscript is often drawn after the
@@ -94,6 +97,10 @@ pub struct Span {
     /// Whether its glyphs are filled (and only filled: render mode 0 or 4) in the color of what is painted under its
     /// box, so it shows nothing (see the module).
     pub in_background_color: bool,
+    /// The box of each of its words, in order -- its text split at white space, word for word: the union of each
+    /// word's inked glyphs. Empty when they do not match one to one: an `/ActualText` replaced its text, or a glyph's
+    /// own text holds a space between letters.
+    pub words: Vec<Rect>,
 }
 
 /// The fill of glyphs shown in `text`: its fill color when its rendering mode fills (0, 2, 4, 6).
@@ -116,6 +123,53 @@ struct Open {
     end: Point,
     /// Whether a glyph with ink (not white-space) is in it yet: only those make its box.
     inked: bool,
+    /// Its words so far.
+    words: Words,
+}
+
+/// A span's words as its glyphs come: their boxes, whether the next inked glyph starts a word, and whether they still
+/// match its text word for word.
+struct Words {
+    boxes: Vec<Rect>,
+    ended: bool,
+    matched: bool,
+}
+
+impl Words {
+    fn new() -> Self {
+        Self {
+            boxes: Vec::new(),
+            ended: true,
+            matched: true,
+        }
+    }
+
+    /// Takes `piece`, a glyph's text, boxed `bbox`: a space (a gap read as one, `gap`, or white-space in the piece)
+    /// ends the word, an inked glyph starts the next or goes on with the last.
+    fn take(&mut self, piece: &str, bbox: Rect, gap: bool) {
+        self.ended |= gap;
+        if !inks(piece) {
+            self.ended = true;
+            return;
+        }
+        self.matched &= !piece.trim().contains(char::is_whitespace);
+        self.ended |= piece.starts_with(char::is_whitespace);
+        match self.boxes.last_mut() {
+            Some(last) if !self.ended => *last = last.union(bbox),
+            _ => self.boxes.push(bbox),
+        }
+        self.ended = piece.ends_with(char::is_whitespace);
+    }
+
+    /// The words' boxes, none when they do not match the text: an `/ActualText` replaced it (`replaced`), or a glyph's
+    /// own text holds a space between letters.
+    fn finished(self, replaced: bool) -> Vec<Rect> {
+        if replaced || !self.matched {
+            Vec::new()
+        } else {
+            self.boxes
+        }
+    }
 }
 
 /// A glyph as spans read it: its text event and that event's index in the page's events, its text (U+FFFD when no
@@ -182,6 +236,7 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
                 };
                 o.inked = true;
             }
+            o.words.take(piece, glyph.bbox, gap);
             o.end = glyph.end;
             continue;
         }
@@ -202,6 +257,7 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
                 fill: fill_of(text),
                 continues_run: step.is_some(),
                 in_background_color: false,
+                words: Vec::new(),
             },
             drawn: glyph.drawn.to_string(),
             replaced: glyph.replaced,
@@ -210,7 +266,11 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
             origin: glyph.origin,
             end: glyph.end,
             inked: inks(piece),
+            words: Words::new(),
         });
+        if let Some(o) = open.as_mut() {
+            o.words.take(piece, glyph.bbox, false);
+        }
     }
     out.extend(open);
     finished(out, events)
@@ -234,6 +294,7 @@ fn finished(out: Vec<Open>, events: &[Event]) -> Vec<Span> {
             runs_on = true;
             let in_background_color =
                 in_background_color(&o, &events[..o.first], &marks[..o.first]);
+            let words = o.words.finished(o.replaced);
             let mut span = o.span;
             let trimmed = span.text.trim_end().len();
             span.text.truncate(trimmed);
@@ -243,6 +304,7 @@ fn finished(out: Vec<Open>, events: &[Event]) -> Vec<Span> {
                 unspaced,
                 continues_run,
                 in_background_color,
+                words,
                 ..span
             })
         })

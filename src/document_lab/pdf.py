@@ -210,7 +210,10 @@ def _actual_texts(tree: tuple, pages: tuple[Page, ...]) -> tuple[Page, ...]:
         spans = [v for key in _marks(tree, index) for v in drawn.get(key, ()) if isinstance(v, TextSpan)]
         for i, span in enumerate(spans):
             replaced[id(span)] = dataclasses.replace(
-                span, text=actual if i == 0 else '', drawn=span.drawn if span.drawn is not None else span.text
+                span,
+                text=actual if i == 0 else '',
+                drawn=span.drawn if span.drawn is not None else span.text,
+                words=(),  # the replacement's words are not its glyphs'
             )
 
     for root in roots:
@@ -462,7 +465,7 @@ def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
     text, font, size, bold, box, mode, unspaced, vertical, direction, layer, paint, run_and_mark = row
     hidden, _, annotation = layer
     fill, in_background_color = paint
-    continues_run, drawn, marked = run_and_mark
+    continues_run, drawn, marked, words = run_and_mark
     return TextSpan(
         text,
         size,
@@ -481,6 +484,7 @@ def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
         artifact=marked[2],
         continues_run=continues_run,
         in_background_color=in_background_color,
+        words=tuple(BBox(*word) for word in words),
     )
 
 

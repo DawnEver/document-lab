@@ -668,3 +668,57 @@ def test_a_table_ruled_by_its_rows_printed_sideways_reads_in_the_frame_its_text_
     assert _sideways_stack_differences(table, page, -turn)  # a planted wrong truth: turned the other way
     mirrored = dataclasses.replace(table, rows=tuple(row[::-1] for row in table.rows))
     assert _sideways_stack_differences(mirrored, page, turn)  # ... and its cells read in another order
+
+
+#: Columns set close: each value of the second column flush right, the value of the third a set gap after it.
+CLOSE_ROWS = (
+    ('Parameter', 'Min', 'Max'),
+    ('Rated speed', '1.25', '2.50'),
+    ('beta', '-3', '4'),
+    ('gamma', '450', '600'),
+)
+
+
+def _close_columns(rows=CLOSE_ROWS, *, apart, font='helv'):
+    """``rows`` between booktabs' rules, the third column ``apart`` text sizes after the second, row by row: closer
+    than the reader's word break (a text size), each row's two values are one span, its words apart."""
+
+    def draw(page):
+        for y in (400, 420, 500):
+            page.draw_rect(pymupdf.Rect(72, y - 0.4, 432, y + 0.4), color=None, fill=(0, 0, 0))
+        for r, (name, low, high) in enumerate(rows):
+            y = 414 + (r and 20 * r + 6)
+            page.insert_text((76, y), name, fontname=font, fontsize=9)
+            page.insert_text((240 - pymupdf.get_text_length(low, font, 9), y), low, fontname=font, fontsize=9)
+            page.insert_text((240 + apart * 9, y), high, fontname=font, fontsize=9)
+
+    return draw
+
+
+@pytest.mark.parametrize(
+    ('apart', 'font'),
+    [(0.7, 'helv'), (0.42, 'tiro')],
+    ids=['closer than the reader s word break', 'closer than COLUMN_GAP, wider than the table s word spaces'],
+)
+def test_columns_set_close_part_where_the_words_of_a_span_stand_apart(tmp_path, apart, font):
+    """Two values under a text size apart, drawn one after the other, are one span (a gap under a text size reads as a
+    space): its words, as the reader places them, stand in two columns, so the span parts between them. Two columns
+    0.42 text sizes apart stand closer than :data:`COLUMN_GAP`, but wider than one and a half of the table's own word
+    space (Times' 0.25 em, between ``Rated`` and ``speed``, ``Parameter`` across it): its columns all the same."""
+    page = _page(tmp_path, _close_columns(apart=apart, font=font))
+    assert '1.25 2.50' in {s.text for s in page.spans}  # the reader joined them: one span, two words
+    (table,) = tables(page)
+    assert _cell_differences(table, CLOSE_ROWS) == []
+    joined = tuple((row[0], f'{row[1]} {row[2]}') for row in CLOSE_ROWS)
+    assert _cell_differences(table, joined)  # a planted wrong truth: each pair read as one cell
+    words = next(s for s in page.spans if s.text == '1.25 2.50').words
+    assert (table.cell_bboxes[1][1], table.cell_bboxes[1][2]) == words  # each cell's box its word's, as placed
+
+
+def test_a_table_stating_no_word_space_parts_its_columns_at_column_gap(tmp_path):
+    """No cell of two words, no word space of its own: columns 0.42 text sizes apart stand closer than
+    :data:`COLUMN_GAP`, and nothing the table states says they are columns (a value it does not state is no guess)."""
+    rows = tuple((('alpha' if row[0] == 'Rated speed' else row[0]), *row[1:]) for row in CLOSE_ROWS)
+    (table,) = tables(_page(tmp_path, _close_columns(rows, apart=0.42, font='tiro')))
+    assert _cell_differences(table, tuple((row[0], f'{row[1]} {row[2]}') for row in rows)) == []
+    assert _cell_differences(table, rows)  # a planted wrong truth: the columns parted without a measure

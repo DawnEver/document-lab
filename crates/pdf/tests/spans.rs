@@ -37,6 +37,35 @@ fn a_gap_without_a_space_glyph_reads_as_a_space() {
 }
 
 #[test]
+fn a_span_states_each_word_s_box_its_glyphs_between_spaces() {
+    // `one` and `two` 20 points apart (a gap read as a space), `three` after a space glyph: one span, three words.
+    let found = page_spans("BT /F1 10 Tf 10 50 Td (one) Tj 20 0 Td (two three) Tj ET");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].text, "one two three");
+    let words: Vec<(f64, f64)> = found[0].words.iter().map(|w| (w.x0, w.x1)).collect();
+    // Helvetica at 10 points: o, n, e, h 5.56, t 2.78, w 7.22, r 3.33, the space glyph 2.78.
+    let expected = [(10.0, 26.68), (30.0, 45.56), (48.34, 71.13)];
+    assert_eq!(words.len(), expected.len(), "{words:?}");
+    for ((x0, x1), (e0, e1)) in words.iter().zip(expected) {
+        assert!(
+            (x0 - e0).abs() < 0.01 && (x1 - e1).abs() < 0.01,
+            "{words:?}"
+        );
+    }
+    // A planted wrong truth: the words read as one, the span's own box.
+    let bbox = found[0].bbox;
+    assert_ne!(words, [(bbox.x0, bbox.x1)]);
+}
+
+#[test]
+fn a_span_whose_text_an_actual_text_replaced_states_no_words() {
+    let found =
+        page_spans("BT /F1 10 Tf 10 50 Td /Span << /ActualText (fi) >> BDC (f i) Tj EMC ET");
+    assert_eq!(found[0].text, "fi");
+    assert!(found[0].words.is_empty(), "{:?}", found[0].words);
+}
+
+#[test]
 fn a_font_change_a_new_line_or_a_far_jump_starts_a_span() {
     assert_eq!(
         texts("BT /F1 10 Tf 10 50 Td (plain) Tj /F2 10 Tf (bold) Tj ET"),

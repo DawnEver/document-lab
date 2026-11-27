@@ -80,6 +80,7 @@ __all__ = [
     'THIN',
     'TOLERANCE',
     'WORD_INK',
+    'WORD_SPACES',
     'NotATable',
     'aligned',
     'grids',
@@ -101,9 +102,17 @@ WORD_INK: Final = 1.0
 STROKES: Final = frozenset('|!Il1[]_-\N{EN DASH}\N{EM DASH}')
 #: Touch tests between level and upright rules are made this many level rules at a time (memory, not results).
 _CHUNK: Final = 512
-#: A table's columns set by white space stand at least this many of its text sizes apart: wider than a word space, as
-#: no cell's words are.
+#: Points within which two coordinates computed apart are one: float rounding, no measure of the page.
+_ROUNDING: Final = 1e-6
+#: A table's columns set by white space stand this many of its text sizes apart, or :data:`WORD_SPACES` of its own word
+#: spaces where that is less: wider than a word space, as no cell's words are. Measured on 147 tables ruled by their
+#: rows (111 papers), the white between words of one cell reaches 0.42 text sizes and between columns starts at 0.59
+#: but for one pair at 0.44, its table's word spaces 0.21.
 COLUMN_GAP: Final = 0.5
+#: ...or this many of the table's widest word space -- the white between two words of one span that a word of another
+#: row stands across, so inside a cell -- where it states one: on the same tables a word space aligned down the rows
+#: stands 1.1 of it at most, the closest columns 2.07.
+WORD_SPACES: Final = 1.5
 #: Level rules of one extent, at least this many stacked and none down, rule a table by its rows (booktabs)...
 STACK_RULES: Final = 3
 #: ...each at least this many of its text sizes long: a formula's fraction bars, stacked alike, are shorter.
@@ -282,6 +291,7 @@ def _quartered_page(page: Page, turn: int) -> Page:
         dataclasses.replace(
             s,
             provenance=s.provenance.at(bbox=_quartered_box(s.provenance.bbox, turn, page)),
+            words=tuple(_quartered_box(w, turn, page) for w in s.words),
             direction=(s.direction[0] * cos - s.direction[1] * sin, s.direction[0] * sin + s.direction[1] * cos),
         )
         for s in page.spans
@@ -381,9 +391,13 @@ def _turned_box(box: BBox, degrees: float, page: Page) -> BBox:
 
 
 def _turned_page(page: Page, degrees: float) -> Page:
-    """``page`` with its spans' boxes and its paths' points turned by ``degrees`` about its center."""
+    """``page`` with its spans' and their words' boxes and its paths' points turned by ``degrees`` about its center."""
     spans = tuple(
-        dataclasses.replace(s, provenance=s.provenance.at(bbox=_turned_box(s.provenance.bbox, degrees, page)))
+        dataclasses.replace(
+            s,
+            provenance=s.provenance.at(bbox=_turned_box(s.provenance.bbox, degrees, page)),
+            words=tuple(_turned_box(w, degrees, page) for w in s.words),
+        )
         for s in page.spans
         if s.provenance.bbox is not None
     )
@@ -781,9 +795,13 @@ def aligned(
     """The table ``spans`` set by white space alone: columns apart by white space, rows by baseline.
 
     Its text size is the spans' median size. A column is a run across ``body`` -- the spans that part the columns: a
-    ruled table's rows below its header, whose cells may span columns; by default all ``spans`` -- that some span
-    covers, apart from the next by :data:`COLUMN_GAP` text sizes that no span of it crosses; a span stands in the column
-    it overlaps most (a header wider than its column, or over two), else the nearest.
+    ruled table's rows below its header, whose cells may span columns; by default all ``spans`` -- that some word of
+    them covers (a span's words where its source states them, else the span), apart from the next by
+    :data:`COLUMN_GAP` text sizes -- or :data:`WORD_SPACES` of its widest word space, where that is less: the white
+    between two words of one span that a word of another row stands across -- that no word of it crosses; a span
+    stands in the column it overlaps most (a header wider than its column, or over two), else the nearest. A span
+    whose words stand in two columns, the gap between two of them holding the gap between the columns whole, is
+    parted there: two columns set closer than its source's word break.
 
     ``rules``: the heights of the level rules across it, top to bottom (a stack's), the first band -- above the
     second -- its header. No row runs across one: each band between two is read alone. Without them the spans are one
@@ -806,9 +824,9 @@ def aligned(
     if not spans:
         return None
     size = statistics.median(s.size for s in spans)
-    columns = _runs(
-        [s for s in body if spaced(s.text).strip() and not s.vertical] if body else spans, COLUMN_GAP * size
-    )
+    parting = [s for s in body if spaced(s.text).strip() and not s.vertical] if body else spans
+    columns = _runs([w for s in parting for w in _words(s)], _column_gap(parting, size))
+    spans = [part for s in spans for part in _parted(s, columns)]
     bands = _bands(spans, rules)
     read = [_Band.of(band, columns, size) for band in bands]
     ruled = len(read) > 2 and any(band.wraps for band in read[1:])  # noqa: PLR2004 -- a header and two bands
@@ -961,11 +979,62 @@ def _column(box: BBox, columns: list[tuple[float, float]]) -> int:
     return max(range(len(columns)), key=lambda i: overlap[i])
 
 
-def _runs(spans: list[TextSpan], gap: float) -> list[tuple[float, float]]:
-    """The runs across the page ``spans`` cover, left to right, each apart from the next by ``gap`` points or more."""
+def _words(span: TextSpan) -> tuple[BBox, ...]:
+    """``span``'s words' boxes where its source states them, word for word with its text; else its own box."""
+    return span.words if len(span.words) == len(span.text.split()) else (span.provenance.bbox,)
+
+
+def _column_gap(spans: list[TextSpan], size: float) -> float:
+    """The white that parts ``spans``' columns: :data:`COLUMN_GAP` ``size``, or less, their own word spaces wider.
+
+    :data:`WORD_SPACES` of their widest word space, where that is less: the white between two words of one span that
+    a word of another row stands across (inside a cell, then).
+    """
+    words = [(s, _words(s)) for s in spans]
+    spaces = [
+        b.x0 - a.x1
+        for s, own in words
+        for a, b in itertools.pairwise(own)
+        if b.x0 > a.x1
+        and any(
+            abs(o.center[1] - s.center[1]) > size / 2 and any(w.x0 <= a.x1 and b.x0 <= w.x1 for w in theirs)
+            for o, theirs in words
+        )
+    ]
+    return min(COLUMN_GAP * size, WORD_SPACES * max(spaces)) if spaces else COLUMN_GAP * size
+
+
+def _parted(span: TextSpan, columns: list[tuple[float, float]]) -> list[TextSpan]:
+    """``span`` parted where the gap between two of its words holds the gap between two ``columns`` whole."""
+    words = _words(span)
+    if len(words) < 2:  # noqa: PLR2004 -- two words to part
+        return [span]
+    at = [_column(w, columns) for w in words]
+    cuts = [
+        i
+        for i in range(1, len(words))
+        if at[i] != at[i - 1]
+        and words[i - 1].x1 <= columns[at[i - 1]][1] + _ROUNDING
+        and words[i].x0 >= columns[at[i]][0] - _ROUNDING
+    ]
+    if not cuts:
+        return [span]
+    texts = span.text.split()
+    return [
+        dataclasses.replace(
+            span,
+            text=' '.join(texts[a:b]),
+            provenance=span.provenance.at(bbox=union(list(words[a:b]))),
+            words=words[a:b],
+        )
+        for a, b in itertools.pairwise([0, *cuts, len(words)])
+    ]
+
+
+def _runs(boxes: list[BBox], gap: float) -> list[tuple[float, float]]:
+    """The runs across the page ``boxes`` cover, left to right, each apart from the next by ``gap`` points or more."""
     runs: list[list[float]] = []
-    for s in sorted(spans, key=lambda s: s.provenance.bbox.x0):
-        b = s.provenance.bbox
+    for b in sorted(boxes, key=lambda b: b.x0):
         if runs and b.x0 - runs[-1][1] < gap:
             runs[-1][1] = max(runs[-1][1], b.x1)
         else:

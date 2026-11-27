@@ -61,8 +61,6 @@ _CAPTION: Final = re.compile(
 _NUMBERED: Final = re.compile(r'\(\s*((?:[A-Z]\.?)?[1-9]\d*(?:\.\d+)*[a-z]?)\s*\)$')
 #: A number found on a page ends right of this share of its column's width (a list's ``(1)`` stands at its left).
 NUMBER_RIGHT: Final = 0.6
-#: A number is set at least this share of the body size: a plot's legend ``(1)`` and a matrix's mark are smaller.
-NUMBER_SIZE: Final = 0.8
 #: Prose is set within this factor of the body size; it spans at least PROSE_WIDTH of the width it is set across --
 #: the text's (around a caption), its column's (around an equation).
 PROSE_SIZE: Final = 1.4
@@ -473,6 +471,7 @@ def _equations(page: Page, face: tuple[str, float], drawings: Sequence[Drawing])
     body = face[1]
     lines = layout.lines(page, weighted=True)
     ink = [d.box for d in drawings if d.box.height <= EQUATION_HEIGHT * body]
+    figures = _figures(page, drawings, body)
     labels: list[str] = []
     for line in lines:
         label = _Around(page, lines, _middle(line), face).number(line) if _numbered(line, face) else None
@@ -480,12 +479,11 @@ def _equations(page: Page, face: tuple[str, float], drawings: Sequence[Drawing])
             labels.append(label)
     found: list[Region] = []
     for label in labels:
-        if (line := _number(page, lines, label, face)) is not None:
+        if (line := _number(page, lines, label, face, figures)) is not None:
             box = _equation_box(page, lines, _spans_box(line), line, face=face, ink=ink, ocr=_ocr(line))
             found.append(Region('equation', f'({label})', box))
     seeds: list[tuple[BBox, layout.Line | None, bool]] = [(_spans_box(ln), ln, _ocr(ln)) for ln in lines if _states(ln)]
     seeds += [(d.box, None, any(map(_ocr, inside))) for d in drawings if (inside := _drawn_formula(d, lines, body))]
-    figures = _figures(page, drawings, body)
     for box, line, ocr in sorted(seeds, key=lambda seed: seed[0].y0):
         cx, cy = (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2
         if any(f.contains(cx, cy) for f in [*figures, *(r.bbox for r in found)]):
@@ -622,16 +620,18 @@ def _drawn_formula(drawing: Drawing, lines: list[layout.Line], body: float) -> l
 def _figures(page: Page, drawings: Sequence[Drawing], body: float) -> list[BBox]:
     """The boxes of the page's figures and ruled tables, which no equation is set inside.
 
-    A plot's legend states ``k = 1``, a table's row ``Ldev -> MSE``. An image taller than :data:`EQUATION_IMAGE`
-    body sizes that is not the page's own picture (a scan's, covering :data:`PAGE_PICTURE` of the page), a painted
-    path or a drawing (``drawings``) taller and wider than :data:`EQUATION_HEIGHT` body sizes (a plot's frame, a block
-    diagram), and a table its rules make (`document_lab.tables.tables`).
+    A plot's legend states ``k = 1`` and repeats ``(1)``, a table's row ``Ldev -> MSE``. An image taller than
+    :data:`EQUATION_IMAGE` body sizes that is not the page's own picture (a scan's, covering :data:`PAGE_PICTURE` of
+    the page), a painted path or a drawing (``drawings``) taller than :data:`EQUATION_HEIGHT` body sizes and wider than
+    :data:`DRAWN_MIN` (a plot's frame, a legend's box, a block diagram -- a big bracket drawn is thinner, a fraction's
+    bar or a box round a formula lower), and a table its rules make (`document_lab.tables.tables`).
     """
     area = page.width * page.height
     images = [b for b in _images(page) if b.height > EQUATION_IMAGE * body and b.width * b.height < PAGE_PICTURE * area]
     drawn = [*_painted(page), *(d.box for d in drawings)]
     ruled = [t.provenance.bbox for t in tables(page) if t.provenance.bbox is not None]
-    return images + [b for b in drawn if min(b.width, b.height) > EQUATION_HEIGHT * body] + ruled
+    tall = [b for b in drawn if b.height > EQUATION_HEIGHT * body and b.width > DRAWN_MIN * body]
+    return images + tall + ruled
 
 
 def _spans_box(line: layout.Line) -> BBox:
@@ -659,32 +659,36 @@ def _reads(spans: list[TextSpan], text: str, face: tuple[str, float]) -> bool:
 
 
 def _numbered(line: layout.Line, face: tuple[str, float]) -> str | None:
-    """The equation number ``line`` ends in -- alone, or after a formula, not after words -- else None.
-
-    A line set smaller than :data:`NUMBER_SIZE` of the body size ends in none: a plot's legend ``(1)``, a matrix's
-    mark.
-    """
+    """The equation number ``line`` ends in -- alone, or after a formula, not after words -- else None."""
     found = _NUMBERED.search(line.text)
-    if found is None or line.size < NUMBER_SIZE * face[1] or _reads(line.spans, line.text[: found.start()], face):
+    if found is None or _reads(line.spans, line.text[: found.start()], face):
         return None
     return found.group(1)
 
 
-def _number(page: Page, lines: list[layout.Line], number: str, face: tuple[str, float]) -> layout.Line | None:
-    """The line that ends in equation number ``(number)`` (:func:`_numbered`), or None.
+def _number(
+    page: Page, lines: list[layout.Line], number: str, face: tuple[str, float], figures: list[BBox]
+) -> layout.Line | None:
+    """The line that ends in equation number ``(number)``, or None.
 
-    Of several, the one a formula stands level with (:func:`_level_formula`): a figure's legend repeats ``(1)`` alone,
-    its formula nowhere. Of several so, none; of none so, the one line that is the number alone (``as (11)`` ends a
-    short line of prose), else none.
+    A line ending in it (:func:`_numbered`) at the right of its column (:meth:`_Around.number`; ``V (1)`` in a line of
+    a formula is a citation) and in no figure (``figures``: a plot's legend ``(1)``). Of several, the one a formula
+    stands level with (:func:`_level_formula`) -- of several so, the one alone on its line, else none; of none so,
+    the one alone on its line, else none.
     """
-    found = [ln for ln in lines if _numbered(ln, face) == number]
+    found = [
+        ln
+        for ln in lines
+        if _Around(page, lines, _middle(ln), face).number(ln) == number
+        and not any(f.contains((ln.x0 + ln.x1) / 2, _middle(ln)) for f in figures)
+    ]
     if len(found) <= 1:
         return found[0] if found else None
     level = [ln for ln in found if _level_formula(page, lines, ln, face)]
     if len(level) == 1:
         return level[0]
-    alone = [ln for ln in found if _NUMBERED.fullmatch(ln.text.strip())]
-    return alone[0] if not level and len(alone) == 1 else None
+    alone = [ln for ln in level or found if _NUMBERED.fullmatch(ln.text.strip())]
+    return alone[0] if len(alone) == 1 else None
 
 
 def _level_formula(page: Page, lines: list[layout.Line], number: layout.Line, face: tuple[str, float]) -> bool:

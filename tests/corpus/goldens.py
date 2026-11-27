@@ -132,14 +132,14 @@ GOLDENS: dict[str, tuple[Page, ...]] = {
         Page(15, 565.0, 747.0, '54c9810d7355a1096c2cfb189aed3059ddec67735b7d8f98072e4357a28182c8', 109, 0, 1),
     ),
     'separation-usgs-fs20213010': (
-        Page(1, 612.0, 792.0, 'ed053874fe68d6b6ef2212305542d69c76f9df5f546abf5f76ee8cb4a3f90452', 293, 16450, 0),
+        Page(1, 612.0, 792.0, 'ed053874fe68d6b6ef2212305542d69c76f9df5f546abf5f76ee8cb4a3f90452', 293, 16451, 0),
         Page(2, 612.0, 792.0, 'c4457185a43ab153a019140dba95d58e997c6390e0ca8ec900f6602fc3e4ec89', 83, 26, 0),
         Page(3, 612.0, 792.0, '317cf376fcbdd5c5dc6687a676b2159bccb5582ee3bd921d4a734eb40f1ba7a0', 93, 48, 0),
         Page(4, 612.0, 792.0, '0416fe710293ef8d46aa9f0c8e1ed0175f429c395b15e6bc027ae04859e7ed59', 197, 562, 0),
     ),
     'devicen-jpx-usgs-fs20213001': (
         Page(1, 612.0, 792.0, '5ea4f0a56ae6278452adc59ddadcff877cc81bab951783225d1d878a1b1e78a2', 102, 51, 4),
-        Page(2, 612.0, 792.0, 'ec79711e7c6544d7a33ae10c4b65cd084b869d7e16f4c24f93a8eb224dc2ae2e', 147, 1630, 0),
+        Page(2, 612.0, 792.0, 'c8233453d6a91c85371e600cab1fecb6463ba78a8aec7a44332c56d753497f52', 147, 1630, 0),
     ),
     'form-irs-f1040-2025': (
         Page(1, 612.0, 792.0, 'b9abe257411fda83626e280fe04d2b7524d334e670dff7cb65c78ae46983ae73', 498, 502, 0),

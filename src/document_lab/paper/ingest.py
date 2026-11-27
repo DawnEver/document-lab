@@ -26,7 +26,7 @@ from document_lab.pdf import read_pdf, read_raster
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from document_lab.formula import Formulas
+    from document_lab.formula import Formulas, Model
     from document_lab.markdown import Headings
     from document_lab.paper.convert import Tool, ToolChoice
     from document_lab.pdf import Renderer
@@ -96,16 +96,17 @@ def ingest(
     renderer: Renderer = 'pymupdf',
     outline: bool = True,
     formulas: Formulas | None = None,
+    formula_model: Model = 'texteller',
 ) -> Ingested:
     """Convert ``pdf`` (with ``tool``, else the IR path) and write its paper layout into ``out_dir``.
 
     Its figures, equations and scanned pages are rendered by ``renderer`` (`document_lab.pdf.read_raster`).
     ``outline``: the PDF's stated outline names the sections when it matches the pages; False infers them all the
     same (`document_lab.paper.convert.convert`). ``formulas``: ``latex`` writes each equation crop's LaTeX under its
-    image (`document_lab.formula`); refused by :class:`document_lab.formula.FormulaUnavailable` before anything is
-    written when its model cannot run.
+    image, read by ``formula_model`` (`document_lab.formula`); refused by
+    :class:`document_lab.formula.FormulaUnavailable` before anything is written when that model cannot run.
     """
-    transcribe = None if formulas is None else formula.transcriber(formulas)
+    transcribe = None if formulas is None else formula.transcriber(formulas, model=formula_model)
     pdf = pdf.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     md_text, choice, structure = convert(pdf, out_dir, tool=tool, outline=outline)

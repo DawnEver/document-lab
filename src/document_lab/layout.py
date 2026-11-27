@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from statistics import median
 from typing import TYPE_CHECKING, Final
 
-from document_lab.ir import BBox
+from document_lab.ir import BBox, spaced
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -98,7 +98,10 @@ class Line:
 
     @property
     def text(self) -> str:
-        """The spans' text left to right (vertically, top to bottom), spaced but where they share ``unspaced``."""
+        """The spans' text left to right (vertically, top to bottom), spaced but where they share ``unspaced``.
+
+        Every space it states is a plain one, a run of them one, a word joiner none (:func:`~document_lab.ir.spaced`).
+        """
         parts: list[str] = []
         before = None
         start = (lambda b: b.y0) if self.vertical else (lambda b: b.x0)
@@ -107,7 +110,7 @@ class Line:
                 parts.append(' ')
             parts.append(span.text)
             before = span
-        return ' '.join(''.join(parts).split())
+        return ' '.join(spaced(''.join(parts)).split())
 
     @property
     def y0(self) -> float:
@@ -141,7 +144,7 @@ class Line:
     @property
     def bold(self) -> bool:
         """Is every span with text bold?"""
-        return all(s.bold for s in self.spans if s.text.strip())
+        return all(s.bold for s in self.spans if spaced(s.text).strip())
 
 
 def upright(span: TextSpan) -> bool:

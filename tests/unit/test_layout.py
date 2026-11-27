@@ -8,6 +8,7 @@ from document_lab import layout
 from document_lab.ir import BBox, Page, Provenance, TextSpan
 from document_lab.layout import lines
 from document_lab.pdf import read_pdf
+from tests.synthetic import ACTUAL_TEXT_LINES, actual_text_pdf
 
 
 def _line_texts(path):
@@ -85,6 +86,22 @@ def test_a_vertical_block_across_the_middle_is_full_width_and_reads_right_to_lef
 def test_vertical_columns_stacked_read_top_band_first():
     page = _page(_vertical('LOW', 500, 300), _vertical('TOP2', 485, 100), _vertical('TOP1', 500, 100))
     assert [ln.text for ln in layout.ordered(layout.lines(page, weighted=True))] == ['TOP1', 'TOP2', 'LOW']
+
+
+def test_a_stated_space_reads_as_a_space_a_word_joiner_as_none_and_a_ligature_as_its_letters(tmp_path):
+    page = read_pdf(actual_text_pdf(tmp_path / 'actual.pdf')).page(1)
+    # The IR states each replacement as the document does; reading it as lines is layout's.
+    top_down = sorted(page.spans, key=lambda s: s.provenance.bbox.y0)
+    assert [s.text for s in top_down] == [before + actual + after for before, _, actual, after in ACTUAL_TEXT_LINES]
+    assert [ln.text for ln in layout.ordered(lines(page, weighted=True))] == ['80 V', '80 V', '80V', 'Exfinal']
+
+
+def test_a_span_of_a_zero_width_space_holds_no_text():
+    bold = TextSpan('Head', SIZE, 'Helvetica-Bold', SRC.at(bbox=BBox(100, 100, 120, 110)), bold=True)
+    gap = TextSpan('\u200b', SIZE, 'Helvetica', SRC.at(bbox=BBox(120, 100, 123, 110)))
+    (line,) = layout.lines(_page(bold, gap), weighted=True)
+    assert (line.text, line.bold) == ('Head', True)
+    assert layout.lines(_page(gap), weighted=True) == []
 
 
 def _running_pdf(path, pages=4):

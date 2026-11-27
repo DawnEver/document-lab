@@ -29,6 +29,18 @@ def _parser() -> argparse.ArgumentParser:
     ocr.add_argument('pdf', type=Path)
     ocr.add_argument('-o', '--out', type=Path, help='the PDF to write (default: the PDF itself, replaced when whole)')
     ocr.add_argument('--lang', default='eng', help="Tesseract's languages, '+'-joined (default eng; e.g. chi_sim+eng)")
+    ocr.add_argument(
+        '--orientation-confidence',
+        type=_off_or_float,
+        default=argparse.SUPPRESS,
+        help="OSD's confidence at which a page is read turned (default: document_lab.ocr's measured one; 'off': never)",
+    )
+    ocr.add_argument(
+        '--deskew-above',
+        type=_off_or_float,
+        default=argparse.SUPPRESS,
+        help="degrees of skew above which a page is read turned back (default: document_lab.ocr's; 'off': never)",
+    )
     pages = sub.add_parser(
         'pages',
         help='a PDF as page-NNN.md and page-NNN.png per page, its regions cut out, and INDEX.md (a folder or a .zip)',
@@ -58,12 +70,20 @@ def _refused(error: Exception) -> int:
     return 2
 
 
+def _off_or_float(value: str) -> float | None:
+    """A command-line number, or ``off`` for None."""
+    return None if value == 'off' else float(value)
+
+
 def _ocr(args: argparse.Namespace) -> int:
-    from document_lab.ocr import TesseractPlaces, text_layer  # noqa: PLC0415 -- a subcommand loads only what it runs
+    from document_lab import ocr  # noqa: PLC0415 -- a subcommand loads only what it runs
 
     out = args.out or args.pdf
-    laid = text_layer(args.pdf, out, args.lang, places=TesseractPlaces.of(os.environ))
-    emit(f'{out}: text layer on {laid} page(s)')
+    asked = {k: v for k, v in vars(args).items() if k in {'orientation_confidence', 'deskew_above'}}  # those given
+    laid = ocr.text_layer(args.pdf, out, args.lang, places=ocr.TesseractPlaces.of(os.environ), **asked)
+    emit(f'{out}: text layer on {len(laid.readings)} page(s)')
+    for note in filter(None, (reading.note() for reading in laid.readings)):
+        emit(f'  {note}')
     return 0
 
 
@@ -79,8 +99,10 @@ def _pages(args: argparse.Namespace) -> int:
     if len(done.textless) == done.pages:
         emit('no page has text: a capture needs `document-lab ocr` first')
         return 1
-    if done.textless:
-        emit(f'pages without text (blank, or a picture only): {list(done.textless)}')
+    if done.unread:
+        emit(f'pictures without a text layer: pages {list(done.unread)}; `document-lab ocr` lays one')
+    if blank := [n for n in done.textless if n not in done.unread]:
+        emit(f'pages without text (blank, or drawings only): {blank}')
     return 0
 
 

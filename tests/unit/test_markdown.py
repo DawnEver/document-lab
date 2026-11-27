@@ -6,6 +6,7 @@ import pytest
 from document_lab.ir import BBox
 from document_lab.markdown import page_markdowns, table, to_markdown
 from document_lab.pdf import read_pdf
+from tests.synthetic import actual_text_pdf
 
 LEFT, RIGHT, WIDTH = 50, 320, 240
 
@@ -146,6 +147,36 @@ def test_a_table_row_led_by_a_year_heads_nothing(tmp_path):
     doc.save(tmp_path / 's.pdf')
     heads = [line for line in to_markdown(read_pdf(tmp_path / 's.pdf')).splitlines() if line[:1] == '#']
     assert heads == ['### 4.2 Duty types', '## 12 Tests']
+
+
+def test_text_of_a_layer_turned_off_is_written_only_when_asked(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    _write(page, LEFT, 120, 'Shown in every view.')
+    _write(page, LEFT, 160, 'Drawn on a layer turned off.')
+    page.insert_text((LEFT, 200), 'Off too.', fontname='tiro', fontsize=10, oc=doc.add_ocg('Off', on=False))
+    doc.save(tmp_path / 'oc.pdf')
+    read = read_pdf(tmp_path / 'oc.pdf')
+    assert 'Off too.' not in to_markdown(read)
+    assert 'Off too.' not in page_markdowns(read)[0]
+    assert 'Off too.' in to_markdown(read, include_hidden=True)
+    assert 'Off too.' in page_markdowns(read, include_hidden=True)[0]
+
+
+def test_markdown_writes_a_stated_space_as_a_space_and_a_word_joiner_as_none(tmp_path):
+    assert to_markdown(read_pdf(actual_text_pdf(tmp_path / 'actual.pdf'))) == '80 V\n\n80 V\n\n80V\n\nExfinal\n'
+
+
+def test_a_table_s_merged_cells_are_written_once_given_its_cells_boxes():
+    rows = (('Parameter', 'Limits', 'Limits'), ('Parameter', 'min', 'max'), ('a|b', '1', '2'))
+    merged, wide = BBox(0, 0, 10, 20), BBox(10, 0, 30, 10)
+    boxes = (
+        (merged, wide, wide),
+        (merged, BBox(10, 10, 20, 20), BBox(20, 10, 30, 20)),
+        (BBox(0, 20, 10, 30), BBox(10, 20, 20, 30), BBox(20, 20, 30, 30)),
+    )
+    assert table(rows, boxes) == '| Parameter | Limits |  |\n| --- | --- | --- |\n|  | min | max |\n| a\\|b | 1 | 2 |'
+    assert table(rows).count('Limits') == 2  # without boxes no merge is known
 
 
 def test_a_placed_block_stands_where_its_box_is_in_place_of_the_lines_inside_it(tmp_path):

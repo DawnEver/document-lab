@@ -49,7 +49,8 @@ part -- is read as an untagged one is.
   paragraph.
 - Placed blocks: a caller that knows a page's regions (`document_lab.per_page`) hands boxes with their own markdown
   (:data:`Placed`: a table read from its cells, a figure's link); the lines inside a box leave the paragraphs, and the
-  block stands where the box does in reading order. :func:`table` writes rows as a markdown table.
+  block stands where the box does in reading order -- read in the page's frame (`document_lab.layout.holder`), so a
+  table printed sideways follows the caption beside it. :func:`table` writes rows as a markdown table.
 """
 
 from __future__ import annotations
@@ -60,7 +61,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal
 
 from document_lab import layout, tags
-from document_lab.ir import BBox, Provenance, TextSpan
+from document_lab.ir import BBox
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterator, Sequence
@@ -596,8 +597,7 @@ def _with_placed(page: Page, lines: list[layout.Line], placed: Sequence[Placed])
 
     lines[:] = [ln for ln in lines if not inside(ln)]
     for box, text in placed:
-        here = Provenance('', '', page=page.number, bbox=box)
-        holder = layout.Line([TextSpan(_HOLDER, 0.0, '', here)], layout.column(box.x0, box.x1, page.width / 2))
+        holder = layout.holder(page, box, _HOLDER)  # read in the page's frame: a sideways table after its caption
         lines.append(holder)
         held[id(holder)] = text
     return held

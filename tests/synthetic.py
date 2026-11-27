@@ -1209,3 +1209,42 @@ def draw_sideways_table(page: pymupdf.Page, rows: Sequence[Sequence[str]] = TABL
             rect = table_cell_rect(r, c)
             at = turned(rect.x0 + 4, rect.y1 - 6, turn)
             page.insert_text(at, text, fontname='helv', fontsize=9, rotate=-turn % 360)
+
+
+#: A landscape table's caption above it and a note below it, each ``(text, baseline origin)`` in the table's own frame
+#: (:func:`draw_sideways_table`'s before it is turned): set turned with it, they read bottom to top.
+LANDSCAPE_CAPTION = ('Table 10 - Magnetic properties of the sintered grades', (72.0, 385.0))
+LANDSCAPE_NOTE = ('NOTE The values are typical of the grades listed above.', (72.0, 505.0))
+#: The upright running head over it: two spans at the page's top, ``(text, baseline origin)``.
+LANDSCAPE_HEAD = (('IEC 60404-8-1:2023', (72.0, 40.0)), ('- 24 -', (290.0, 40.0)))
+
+
+def landscape_pdf(path: Path, pages: int = 1) -> Path:
+    """``pages`` pages of a landscape table printed sideways (:func:`draw_sideways_table`, read bottom to top) under an
+    upright running head (:data:`LANDSCAPE_HEAD`), its caption above it and a note below it in its own frame -- as a
+    standard prints a landscape table on a portrait page. All in Helvetica 9: most of each page reads sideways."""
+    with pymupdf.open() as doc:
+        for _ in range(pages):
+            page = doc.new_page(width=SCAN_PAGE.width, height=SCAN_PAGE.height)
+            for text, at in LANDSCAPE_HEAD:
+                page.insert_text(at, text, fontname='helv', fontsize=9)
+            draw_sideways_table(page)
+            for text, (x, y) in (LANDSCAPE_CAPTION, LANDSCAPE_NOTE):
+                page.insert_text(turned(x, y, -90), text, fontname='helv', fontsize=9, rotate=90)
+        doc.save(path)
+    return path
+
+
+#: A run of text on a page: its baseline origin (x, y), its text and the degrees PyMuPDF turns it counterclockwise
+#: (0 upright, 90 read bottom to top, 270 read top to bottom).
+type TurnedRun = tuple[float, float, str, int]
+
+
+def turned_text_pdf(path: Path, runs: Sequence[TurnedRun]) -> Path:
+    """One letter page of ``runs``, each set in Helvetica 9 at its origin, turned as it says: every box is known."""
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=612, height=792)
+        for x, y, text, rotate in runs:
+            page.insert_text((x, y), text, fontname='helv', fontsize=9, rotate=rotate)
+        doc.save(path)
+    return path

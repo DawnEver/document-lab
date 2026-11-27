@@ -59,7 +59,7 @@ from typing import TYPE_CHECKING, Final
 import numpy as np
 
 from document_lab.ir import BBox, Page, Table, spaced, union
-from document_lab.layout import Line, lines, upright
+from document_lab.layout import UP, Line, lines, reading_way, upright
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -190,18 +190,12 @@ def grids(page: Page, *, rulings: Rulings | None = None, tolerance: float = TOLE
 def _upright_turn(page: Page, box: BBox) -> int:
     """The quarter turns, in degrees clockwise, that set level the baseline most of the text in ``box`` runs along.
 
-    Most: more than half its characters run along one direction (each span's, to the nearest quarter turn); else 0.
+    Most: the way the text whose center stands in ``box`` reads (`document_lab.layout.reading_way`: more of its
+    characters than any other, vertical writing upright); else 0.
     """
-    counts: dict[int, int] = defaultdict(int)
-    for span in page.spans:
-        x, y = span.center
-        if span.text.strip() and box.x0 <= x <= box.x1 and box.y0 <= y <= box.y1:
-            dx, dy = span.direction
-            counts[round(math.degrees(math.atan2(dy, dx)) / 90) % 4 * 90] += len(span.text.strip())
-    if not counts:
-        return 0
-    angle, most = max(counts.items(), key=lambda item: item[1])
-    return (360 - angle) % 360 if most * 2 > sum(counts.values()) else 0
+    inside = (s for s in page.spans if box.x0 <= s.center[0] <= box.x1 and box.y0 <= s.center[1] <= box.y1)
+    way = reading_way(inside)
+    return 0 if way is None else round(-math.degrees(math.atan2(way[1], way[0]))) % 360
 
 
 def _quarter(x: float, y: float, turn: int, page: Page) -> tuple[float, float]:
@@ -744,7 +738,7 @@ def aligned(spans: Sequence[TextSpan], *, body: Sequence[TextSpan] | None = None
         return None
 
     def text(cell: list[list[TextSpan]]) -> str:
-        return ' '.join(Line(line, '').text for line in cell if line)
+        return ' '.join(Line(line, '', UP).text for line in cell if line)
 
     def bbox(cell: list[list[TextSpan]]) -> BBox | None:
         boxes = [s.provenance.bbox for line in cell for s in line]

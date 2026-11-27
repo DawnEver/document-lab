@@ -1,8 +1,11 @@
 """The ``ocr`` part: a captured image of known words, given a Tesseract text layer, reads back as those words, its
-pixels and page size unchanged; so does a fax scan of them, handed over in a TIFF, upright on a page turned or not.
-Its own part, never tests/base: it needs Tesseract with English data, and FAILS naming what is missing where there
-is none; it is never skipped."""
+pixels and page size unchanged; so does a fax scan of them, handed over in a TIFF, upright on a page turned or not;
+so do Chinese and Japanese, set in lines or in columns, the columns as vertical writing.
+Its own part, never tests/base: it needs Tesseract 5.3 or later with English, simplified Chinese and Japanese data
+(``eng``, ``chi_sim``, ``chi_sim_vert``, ``jpn``, ``jpn_vert``), and FAILS naming what is missing where there is
+none; it is never skipped."""
 
+import difflib
 import os
 
 import numpy as np
@@ -70,3 +73,82 @@ def test_a_fax_scan_reads_back_upright_on_a_page_turned_or_not(tmp_path, rotate)
     with pymupdf.open(tmp_path / 'ocr.pdf') as after:
         assert all(word in after[0].get_text().casefold() for word in WORDS)  # an independent reader reads them
     drawn_where_they_are(tmp_path / 'ocr.pdf')
+
+
+#: Chinese (simplified): the stator winding of a hydro generator heats and vibrates in service, so its insulation is
+#: inspected regularly; the cooling system matters greatly. Four columns or lines.
+ZH = (
+    '\u6c34\u7535\u673a\u7ec4\u7684\u5b9a\u5b50\u7ed5\u7ec4\u5728\u8fd0\u884c\u65f6',
+    '\u4ea7\u751f\u70ed\u91cf\u548c\u632f\u52a8\u56e0\u6b64\u9700\u8981\u5b9a',
+    '\u671f\u68c0\u67e5\u7edd\u7f18\u72b6\u6001\u4ee5\u4fdd\u8bc1\u5b89\u5168',
+    '\u53d1\u7535\u673a\u7684\u51b7\u5374\u7cfb\u7edf\u975e\u5e38\u91cd\u8981',
+)
+#: Japanese: the generator's stator winding heats and vibrates in service, so its insulation is inspected regularly.
+JA = (
+    '\u767a\u96fb\u6a5f\u306e\u56fa\u5b9a\u5b50\u5dfb\u7dda\u306f\u904b\u8ee2\u4e2d',
+    '\u306b\u71b1\u3068\u632f\u52d5\u3092\u767a\u751f\u3059\u308b\u305f\u3081\u7d76',
+    '\u7e01\u306e\u72b6\u614b\u3092\u5b9a\u671f\u7684\u306b\u70b9\u691c\u3059\u308b',
+)
+CJK_SIZE = 24  # points
+CJK_DPI = 200
+COLUMN_PITCH = 1.6  # sizes from one column's middle to the next
+
+
+def cjk_page(lines: tuple[str, ...], font: str, *, vertical: bool) -> tuple[np.ndarray, list[tuple[float, float]]]:
+    """``lines`` in PyMuPDF's built-in CJK ``font`` -- one under another, or in columns from the right, each
+    character standing upright an em below the last -- as RGB pixels at :data:`CJK_DPI`; and each line's extent
+    across the page (x for a column, y for a line), in points."""
+    longest = max(map(len, lines))
+    if vertical:
+        width, height = len(lines) * CJK_SIZE * COLUMN_PITCH + 80, longest * CJK_SIZE + 80
+    else:
+        width, height = longest * CJK_SIZE + 80, len(lines) * CJK_SIZE * COLUMN_PITCH + 80
+    extents = []
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=width, height=height)
+        for i, line in enumerate(lines):
+            if vertical:
+                left = width - 40 - CJK_SIZE * COLUMN_PITCH * i - CJK_SIZE
+                for j, char in enumerate(line):
+                    page.insert_text((left, 40 + CJK_SIZE * (j + 0.88)), char, fontname=font, fontsize=CJK_SIZE)
+                extents.append((left, left + CJK_SIZE))
+            else:
+                top = 40 + CJK_SIZE * COLUMN_PITCH * i
+                page.insert_text((40, top + CJK_SIZE * 0.88), line, fontname=font, fontsize=CJK_SIZE)
+                extents.append((top, top + CJK_SIZE))
+        pix = page.get_pixmap(dpi=CJK_DPI)
+    pixels = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)[..., :3].copy()
+    return pixels, extents
+
+
+@pytest.mark.parametrize(
+    ('lines', 'font', 'languages', 'vertical'),
+    [
+        (ZH, 'china-s', 'chi_sim', False),
+        (ZH, 'china-s', 'chi_sim_vert', True),
+        (JA, 'japan', 'jpn', False),
+        (JA, 'japan', 'jpn_vert', True),
+    ],
+    ids=['chinese-lines', 'chinese-columns', 'japanese-lines', 'japanese-columns'],
+)
+def test_cjk_reads_back_in_its_lines_or_columns_columns_as_vertical_writing(tmp_path, lines, font, languages, vertical):
+    check(languages, PLACES)
+    pixels, extents = cjk_page(lines, font, vertical=vertical)
+    capture = to_pdf(pixels, tmp_path / 'capture.pdf', page_height=0, dpi=CJK_DPI)
+    assert len(text_layer(capture, tmp_path / 'ocr.pdf', languages, places=PLACES).readings) == 1
+    page = read_pdf(tmp_path / 'ocr.pdf').pages[0]
+    assert page.spans
+    assert all(span.vertical == vertical for span in page.spans), [(s.text, s.vertical) for s in page.spans]
+    across, along = (0, 1) if vertical else (1, 0)
+    on = [[] for _ in lines]
+    for span in page.spans:  # each on the column or line it was drawn in (Tesseract's CJK boxes run wide)
+        drawn = [i for i, (start, end) in enumerate(extents) if start < span.center[across] < end]
+        assert drawn, (span.text, span.provenance.bbox)
+        on[drawn[0]].append(span)
+    read = [''.join(s.text for s in sorted(spans, key=lambda s: s.center[along])) for spans in on]
+    matched = sum(
+        block.size
+        for got, drawn in zip(read, lines, strict=True)
+        for block in difflib.SequenceMatcher(None, got, drawn, autojunk=False).get_matching_blocks()
+    )
+    assert matched > 0.85 * sum(map(len, lines)), read  # each column read top to bottom, each line left to right

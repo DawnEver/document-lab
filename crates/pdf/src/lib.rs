@@ -36,6 +36,7 @@ pub mod page;
 pub mod parser;
 pub mod paths;
 pub mod spans;
+mod symbol_tables;
 pub mod writer;
 pub mod xref;
 

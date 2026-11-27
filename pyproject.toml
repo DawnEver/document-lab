@@ -27,16 +27,16 @@ dependencies = [
 gpu = ["marker-pdf"]
 # Values a model reads out of a document (`document_lab.ai`), through the family's one model interface.
 ai = ["ai_lab @ git+https://github.com/DawnEver/ai-lab.git"]
-# `document_lab.capture` / `document-lab capture`: a window or screen region, scrolled and stitched, to a PDF. Windows
-# only, and it needs nothing beyond the base: ctypes drives the desktop, tkinter draws the region overlay, PyMuPDF
-# writes the PDF. The extra names the capability so a consumer can depend on it explicitly.
-capture = []
+# `document_lab.capture` / `document-lab capture`: a window or screen region, scrolled and stitched, to a PDF, on
+# Windows, macOS and Linux (X11). ctypes drives the Windows desktop (user32) and the macOS one (Quartz), so they need
+# nothing; python-xlib speaks the X protocol on Linux, installed there alone. tkinter draws the overlay and the panel.
+capture = ["python-xlib; sys_platform == 'linux'"]
 # The family's development kit: rules registry, rendered configs, shared test bodies, verify entry.
 dev = [
     # The build backend: this repo's own tool, not the test kit's.
     "maturin>=1.7",
     "dev-lab[test] @ git+https://github.com/DawnEver/dev-lab.git",
-    "document_lab[ai]",
+    "document_lab[ai,capture]",
     "pytest",
     "ruff",
 ]
@@ -65,6 +65,8 @@ markers = [
     "vendor: reads the real document DOCUMENT_LAB_VENDOR_PDF names: its own part (tests/vendor), never tests/base",
     "papers: ingests the real papers in the directory DOCUMENT_LAB_PAPERS names: its own part (tests/paper/e2e), never tests/base",
     "windows: drives a real window on the Windows desktop: its own part (tests/windows), never tests/base",
+    "macos: drives a real window on the macOS desktop: its own part (tests/macos), never tests/base",
+    "linux: drives a real window on an X11 desktop on Linux: its own part (tests/linux), never tests/base",
     "ocr: lays a Tesseract text layer over a capture: its own part (tests/ocr), never tests/base",
 ]
 
@@ -107,16 +109,21 @@ output = "output/logs"
 # `papers` the real papers, neither of which may be committed (the repo is public), `ocr` Tesseract with English data. This repo's tests run on GitHub Actions alone (user ruling
 # 2026-11-11), so no part here produces them: they stay marked, and a consumer's unified run selects them by marker.
 unproduced = ["gpu", "vendor", "papers", "ocr"]
+# The OS parts run on their own hosted runner (`windows`, `macos`, `linux`); the linux runner has no display, so its
+# setup starts a virtual one (Xvfb) with a window manager on it (openbox: the EWMH lists the capture reads) and names
+# it for the steps after it -- a process started in a step lives until the job ends (its output let go, so the step
+# does not wait on it).
+hosted = { linux = { setup = "sudo apt-get update && sudo apt-get install -y xvfb openbox && (Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp >/dev/null 2>&1 &) && sleep 2 && (DISPLAY=:99 openbox >/dev/null 2>&1 &) && sleep 2 && echo DISPLAY=:99 >> \"$GITHUB_ENV\"" } }
 
 # The extras every environment carries: `dev` (the kit, pytest, ruff; it carries `ai`). `gpu` (marker-pdf -> torch)
-# is installed only for an environment whose need-set holds the `gpu` resource marker; `capture` is empty.
+# is installed only for an environment whose need-set holds the `gpu` resource marker; `dev` carries `capture`.
 [tool.dev_lab.dep]
 extras = ["dev"]
 needs = { gpu = "gpu" }
 
 [tool.lab_commons.tests]
 produce = ["-m", "dev_lab.dev.verify", "--part", "{part}"]
-resources = ["gpu", "vendor", "papers", "ocr", "windows"]
+resources = ["gpu", "vendor", "papers", "ocr", "windows", "macos", "linux"]
 
 # The family branch flow: integrate/main coordinates; main moves only by `integrate promote` (fast-forward).
 [tool.dev_lab.integrator]

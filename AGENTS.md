@@ -13,14 +13,16 @@ consumer's vocabulary here -- schemas live in consumers. Modules and usage: `REA
   `ink`, `pdf`; `markdown`, `regions` -> `layout` -> `ir`; `ink` -> `ir` (`regions` takes its drawings as boxes, never pixels);
   `extract` -> `plot`, `pdf`, `html` -> `numbers`, `ir`; `plot` -> `glyphs` -> `strokefont`; `strokes` -> `plot`, `ir`; `ocr` imports
   nothing of ours; `capture` is apart (`cli` -> `session` -> `stitch`; `cli` -> `desktop`, `export`, `ocr`, `files` ->
-  `desktop`, `export`; `join` -> `export`, `stitch`), imported only by `__main__`. OCR is `ocr`'s alone: no other module calls Tesseract. The base imports
+  `win32`, `export`; `desktop` -> `win32` | `quartz` | `x11` (one per OS, chosen at run time) -> `screen`; `join` ->
+  `export`, `stitch`), imported only by `__main__`. OCR is `ocr`'s alone: no other module calls Tesseract. The base imports
   without `ai_lab` (`tests/unit/test_ai.py` proves it in a subprocess).
 - A test that needs expected values builds a SYNTHETIC PDF (`tests/synthetic.py`); no real PDF is ever committed
   (the repo is public). Three real papers, held locally (`DOCUMENT_LAB_PAPERS=<dir>`, the `papers` part), are checked
   STRUCTURALLY against what each PDF says (`tests/paper/structure.py`), every check paired with a planted wrong truth
   it must report.
-- `windows` (`tests/windows`: a real window, `viewer.py`, scrolled and captured) is an OS part: CI runs it on the
-  hosted `windows-latest` runner. `gpu` (marker-pdf), `vendor` (`DOCUMENT_LAB_VENDOR_PDF=<pdf>`), `papers`
+- `windows`, `macos`, `linux` (`tests/<os>`: a real window, `tests/capture_viewer.py`, scrolled and captured; one
+  body, `tests/capture_part.py`) are OS parts: CI runs each on its hosted runner (`linux` after a setup starting Xvfb
+  and openbox, `[tool.dev_lab.parts] hosted`). `gpu` (marker-pdf), `vendor` (`DOCUMENT_LAB_VENDOR_PDF=<pdf>`), `papers`
   (`DOCUMENT_LAB_PAPERS=<dir>`) and `ocr` (Tesseract) are declared resource parts, unproduced on
   hosted runners: base never selects them, and they FAIL where their resource is missing, never skip.
 - A value the document does not state is absent, a raster plot raises, an ambiguous match refuses: never a

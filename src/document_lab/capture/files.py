@@ -27,7 +27,7 @@ from lab_commons.log import emit
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Sequence
 
-    from document_lab.capture.desktop import Region, Window
+    from document_lab.capture.screen import Region, Window
 
     Gate = Callable[[str], None]  # between pages: shows what is in hand, waits while paused, raises Stopped
 
@@ -94,32 +94,32 @@ class Park:
     """The mouse while a run goes on: off the viewer's page, and back where the user left it.
 
     A viewer floats its toolbar over a page while the mouse rests on it, so a page is taken with the mouse off the
-    window (:func:`desktop.park_cursor`). Where the user last put it is remembered across the whole run -- not given
+    window (:func:`win32.park_cursor`). Where the user last put it is remembered across the whole run -- not given
     back after each document only to be taken away again -- and given back when the run ends or waits for the user.
     A mouse the user takes back while a run goes on teaches the new place: it is where it will be given back.
     """
 
     def __init__(self) -> None:
         """Remember where the mouse is now: the user's place until they put it somewhere else."""
-        from document_lab.capture import desktop  # noqa: PLC0415
+        from document_lab.capture import win32  # noqa: PLC0415
 
-        self.where = desktop.cursor()
+        self.where = win32.cursor()
         self.at: tuple[int, int] | None = None  # where the run parked it; None when it is the user's again
 
     def go(self, window: Window) -> None:
         """Take the mouse off ``window`` when it is on it, keeping the user's place for :meth:`restore`."""
-        from document_lab.capture import desktop  # noqa: PLC0415
+        from document_lab.capture import win32  # noqa: PLC0415
 
-        was = desktop.park_cursor(window)
+        was = win32.park_cursor(window)
         if was is not None:  # it was on the window: that is the user's place, and the mouse is parked now
-            self.where, self.at = was, desktop.cursor()
+            self.where, self.at = was, win32.cursor()
 
     def restore(self) -> None:
         """Give the mouse back where the user left it, unless they have moved it since it was parked."""
-        from document_lab.capture import desktop  # noqa: PLC0415
+        from document_lab.capture import win32  # noqa: PLC0415
 
-        if self.at is not None and desktop.cursor() == self.at:
-            desktop.move_cursor(*self.where)
+        if self.at is not None and win32.cursor() == self.at:
+            win32.move_cursor(*self.where)
         self.at = None
 
 
@@ -243,7 +243,7 @@ def document_window(shown: Sequence[Window], before: Collection[int], name: str)
     with the file's name is, for a viewer that opens each file in the window it already has. None or several is
     refused, naming what the viewer shows.
     """
-    found = [w for w in shown if w.hwnd not in before] or [w for w in shown if name.casefold() in w.title.casefold()]
+    found = [w for w in shown if w.handle not in before] or [w for w in shown if name.casefold() in w.title.casefold()]
     if len(found) == 1:
         return found[0]
     listing = '; '.join(repr(w.title) for w in found) or 'none'
@@ -261,16 +261,16 @@ def shut(window: Window, viewer: Viewer) -> None:
     counts that as closed abruptly and opens the next document with a recovery bar over the first page -- which a
     capture would take for the page. The viewer's own close key (Acrobat's ``ctrl+w``) leaves it shut down cleanly.
     """
-    from document_lab.capture import desktop  # noqa: PLC0415
+    from document_lab.capture import win32  # noqa: PLC0415
 
     if viewer.close is not None:
         with contextlib.suppress(LookupError, OSError, ValueError):
-            desktop.press(window, viewer.close)
+            win32.press(window, viewer.close)
             end = time.monotonic() + REDRAW * 5
-            while time.monotonic() < end and desktop.windows() and window.hwnd in {w.hwnd for w in desktop.windows()}:
+            while time.monotonic() < end and win32.windows() and window.handle in {w.handle for w in win32.windows()}:
                 time.sleep(STILL)
-    if window.hwnd in {w.hwnd for w in desktop.windows()}:
-        desktop.close(window)
+    if window.handle in {w.handle for w in win32.windows()}:
+        win32.close(window)
 
 
 def open_in(viewer: Viewer, pdf: Path, timeout: float, monitor: Region | None = None) -> Window:
@@ -283,14 +283,14 @@ def open_in(viewer: Viewer, pdf: Path, timeout: float, monitor: Region | None = 
     window (:data:`CLEARED`): a key the viewer missed (it was still drawing) is pressed again; still not, it is
     refused. A window this opened is closed again when it cannot be brought so far.
     """
-    from document_lab.capture import desktop  # noqa: PLC0415 -- the run alone touches the desktop
+    from document_lab.capture import win32  # noqa: PLC0415 -- the run alone touches the desktop
 
-    before = {w.hwnd for w in desktop.windows()}
+    before = {w.handle for w in win32.windows()}
     subprocess.Popen([str(viewer.program), *viewer.options, str(pdf)])
     window = _wait_for_document(viewer, pdf.stem, before, timeout)
     try:
-        desktop.maximize(window, monitor)
-        desktop.view(window, viewer.view)  # the page view is there: the document is open, not a dialog
+        win32.maximize(window, monitor)
+        win32.view(window, viewer.view)  # the page view is there: the document is open, not a dialog
         for _ in range(CLEAR_TRIES):
             for chord in viewer.chords:
                 _press(window, chord)
@@ -301,7 +301,7 @@ def open_in(viewer: Viewer, pdf: Path, timeout: float, monitor: Region | None = 
             _not_cleared(window, viewer)
     except (OSError, LookupError, ValueError):
         with contextlib.suppress(OSError):  # a close that fails must not hide why the window could not be used
-            desktop.close(window)
+            win32.close(window)
         raise
     return window
 
@@ -312,14 +312,14 @@ def _press(window: Window, chord: str) -> None:
     A dialog of the viewer's own holds the keyboard, so its window takes no key and cannot even be brought to the
     front: Enter answers the dialog's own button, and the press goes in.
     """
-    from document_lab.capture import desktop  # noqa: PLC0415
+    from document_lab.capture import win32  # noqa: PLC0415
 
     try:
-        desktop.press(window, chord)
+        win32.press(window, chord)
     except (LookupError, OSError):
-        desktop.key('enter')
+        win32.key('enter')
         time.sleep(REDRAW)
-        desktop.press(window, chord)
+        win32.press(window, chord)
 
 
 def _cleared(window: Window, viewer: Viewer) -> bool:
@@ -329,11 +329,11 @@ def _cleared(window: Window, viewer: Viewer) -> bool:
     :data:`REDRAW` reads a slow viewer as an uncleared one: the chord pressed again would take the full screen back
     off. So the width is read until it fills the window, or the viewer is given up on.
     """
-    from document_lab.capture import desktop  # noqa: PLC0415
+    from document_lab.capture import win32  # noqa: PLC0415
 
     end = time.monotonic() + SETTLE
     while True:
-        if desktop.view(window, viewer.view).width >= CLEARED * window.client().width:
+        if win32.view(window, viewer.view).width >= CLEARED * win32.client(window).width:
             return True
         if time.monotonic() > end:
             return False
@@ -346,18 +346,18 @@ def _wait_for_document(viewer: Viewer, name: str, before: Collection[int], timeo
     Only windows holding the viewer's page view (:attr:`Viewer.view`) are the document's -- a dialog it puts up is
     not. One it opened and cannot settle on by ``timeout`` is closed, so a refused run leaves none behind.
     """
-    from document_lab.capture import desktop  # noqa: PLC0415
+    from document_lab.capture import win32  # noqa: PLC0415
 
     end = time.monotonic() + timeout
     while True:
         shown = []
-        for candidate in desktop.windows():
+        for candidate in win32.windows():
             try:
-                desktop.view(candidate, viewer.view)
+                win32.view(candidate, viewer.view)
             except LookupError:
-                if candidate.hwnd not in before:  # a dialog the viewer put up: Acrobat's crash-recovery bar is one,
+                if candidate.handle not in before:  # a dialog the viewer put up: Acrobat's crash-recovery bar is one,
                     with contextlib.suppress(OSError):  # drawn over the page and captured as if it were the page
-                        desktop.close(candidate)
+                        win32.close(candidate)
                 continue
             shown.append(candidate)
         try:
@@ -365,9 +365,9 @@ def _wait_for_document(viewer: Viewer, name: str, before: Collection[int], timeo
         except LookupError:
             if time.monotonic() > end:
                 for window in shown:
-                    if window.hwnd not in before:
+                    if window.handle not in before:
                         with contextlib.suppress(OSError):
-                            desktop.close(window)
+                            win32.close(window)
                 raise
         time.sleep(0.5)
 
@@ -380,13 +380,13 @@ def _settled(area: Region, seen: np.ndarray | None = None) -> np.ndarray:
     page turn's own, :func:`_turned`), taken as the first look rather than grabbed again; a viewer's floating toolbar
     fading in or out is caught by the same rule. After :data:`SETTLE` seconds the last grab is taken as it is.
     """
-    from document_lab.capture import desktop  # noqa: PLC0415
+    from document_lab.capture import win32  # noqa: PLC0415
 
     end = time.monotonic() + SETTLE
-    last = desktop.grab(area) if seen is None else seen
+    last = win32.grab(area) if seen is None else seen
     while time.monotonic() < end:
         time.sleep(STILL)
-        now = desktop.grab(area)
+        now = win32.grab(area)
         if same_page(last, now):
             return now
         last = now
@@ -409,15 +409,15 @@ def _take(
     backdrop), until :data:`PAGE_WAIT` seconds have passed, then refused. The view goes back with the page so the
     next page turn can be waited for as a change of it (:func:`_turned`).
     """
-    from document_lab.capture import desktop  # noqa: PLC0415
+    from document_lab.capture import win32  # noqa: PLC0415
 
     end = time.monotonic() + PAGE_WAIT
     shown = np.zeros((1, 1, 3), dtype=np.uint8)
     view = shown
     tries = 0
     while tries < TAKE_TRIES:
-        (park.go(window) if park is not None else desktop.park_cursor(window))
-        view = _settled(area or desktop.view(window, viewer.view), seen)
+        (park.go(window) if park is not None else win32.park_cursor(window))
+        view = _settled(area or win32.view(window, viewer.view), seen)
         seen = None  # the turn's grab is spent: a later try looks twice
         shown = view
         if area is None:
@@ -519,15 +519,15 @@ def held(*, front: bool, idle: float) -> bool:
 def _yield_to_user(window: Window, gate: Gate | None, park: Park | None = None) -> None:
     """Hold the capture while the user is working in another window, and say so.
 
-    Every key the capture sends takes the foreground for the viewer (:func:`desktop.press`), so a page turned while
+    Every key the capture sends takes the foreground for the viewer (:func:`win32.press`), so a page turned while
     the user types takes their keystrokes and their window loses the front. While another window is in front and
     the machine has been used within :data:`USER_IDLE` seconds, the page is held; the user away from the keyboard,
     or back in the viewer, and the run goes on -- or ``stop`` is asked, and the run ends.
     """
-    from document_lab.capture import desktop  # noqa: PLC0415
+    from document_lab.capture import win32  # noqa: PLC0415
 
     told = False
-    while held(front=desktop.in_front(window), idle=desktop.idle_seconds()):
+    while held(front=win32.in_front(window), idle=win32.idle_seconds()):
         if park is not None:
             park.restore()  # the mouse is the user's while they are at the machine
         if gate is not None:
@@ -548,12 +548,12 @@ def _turned(window: Window, viewer: Viewer, last: np.ndarray) -> np.ndarray | No
     its first look, the page then being taken only once it holds still -- and None is said when it does not change
     (a key lost mid-draw, or the last page).
     """
-    from document_lab.capture import desktop  # noqa: PLC0415
+    from document_lab.capture import win32  # noqa: PLC0415
 
     end = time.monotonic() + REDRAW
     while time.monotonic() < end:
         time.sleep(TURN_POLL)
-        seen = desktop.grab(desktop.view(window, viewer.view))
+        seen = win32.grab(win32.view(window, viewer.view))
         if not same_page(last, seen):
             return seen
     return None

@@ -65,8 +65,8 @@ type Box4 = (f64, f64, f64, f64);
 type LayerRow = (bool, bool, Option<String>);
 /// A span: text, font name (no subset tag), size, bold, box, render mode, the number it shares with the spans its
 /// words run on into with no space between (None: none), whether it is written vertically, the unit vector its
-/// baseline runs along (page space, y down), its layer, its fill color (None: not filled), and whether it continues
-/// the run of the span before it (`pdf::spans::Span`).
+/// baseline runs along (page space, y down), its layer, its fill color (None: not filled) and whether that is the
+/// color painted under it, and whether it continues the run of the span before it (`pdf::spans::Span`).
 type SpanRow = (
     String,
     String,
@@ -78,7 +78,7 @@ type SpanRow = (
     bool,
     (f64, f64),
     LayerRow,
-    Option<Vec<f64>>,
+    (Option<Vec<f64>>, bool),
     bool,
 );
 /// What a page paints as paths, as columns -- `document_lab.pdf` takes each buffer whole with `numpy.frombuffer`,
@@ -244,7 +244,10 @@ impl Reader {
                     s.vertical,
                     s.direction,
                     layer(&s.layer),
-                    s.fill.as_ref().map(pdf::color::Color::rgb_or_components),
+                    (
+                        s.fill.as_ref().map(pdf::color::Color::rgb_or_components),
+                        s.in_background_color,
+                    ),
                     s.continues_run,
                 )
             })

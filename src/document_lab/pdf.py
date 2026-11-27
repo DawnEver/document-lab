@@ -189,8 +189,9 @@ def _page(
 
 
 def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
-    text, font, size, bold, box, mode, unspaced, vertical, direction, layer, fill, continues_run = row
+    text, font, size, bold, box, mode, unspaced, vertical, direction, layer, paint, continues_run = row
     hidden, _, annotation = layer
+    fill, in_background_color = paint
     return TextSpan(
         text,
         size,
@@ -205,6 +206,7 @@ def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
         annotation=annotation,
         fill=None if fill is None else tuple(fill),
         continues_run=continues_run,
+        in_background_color=in_background_color,
     )
 
 

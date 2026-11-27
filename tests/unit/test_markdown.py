@@ -450,3 +450,25 @@ def test_a_data_sheets_numbered_rows_in_another_face_head_nothing(tmp_path):
     _write(page, 57, 250, '2 Dimensions', font='tibo')
     doc.save(tmp_path / 's.pdf')
     assert _heads(to_markdown(read_pdf(tmp_path / 's.pdf'))) == ['## 1 Scope', '## 2 Dimensions']
+
+
+def test_text_filled_in_the_color_under_it_is_not_written(tmp_path):
+    """A manual (ACT1210 p3) sets a white ``T`` on the white page under a heading's first letter: it shows nothing, so
+    it is not written, and the page reads as printed. The control: the same white ``T`` on a black box is written."""
+
+    def page_md(name, *, box):
+        doc = pymupdf.open()
+        page = doc.new_page(width=612, height=792)
+        if box:
+            page.draw_rect(pymupdf.Rect(60, 80, 400, 110), color=None, fill=(0, 0, 0))
+        page.insert_text((72, 100), 'T', fontname='tiro', fontsize=10, color=(1, 1, 1))
+        _write(page, 72, 100, 'Tolerances of the drive')
+        _write(page, 72, 140, 'The body of the page is set in the body face, in roman, at the body size.')
+        doc.save(tmp_path / name)
+        return to_markdown(read_pdf(tmp_path / name))
+
+    printed = page_md('white.pdf', box=False)
+    assert 'Tolerances of the drive' in printed
+    assert 'T Tolerances' not in printed
+    assert 'TTolerances' not in printed
+    assert printed != page_md('black.pdf', box=True)  # the control: on a black box the white T shows

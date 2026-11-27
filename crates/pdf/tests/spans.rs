@@ -280,3 +280,75 @@ fn a_fill_change_with_another_break_starts_a_run() {
         );
     }
 }
+
+/// Each span's text and whether it is filled in the color painted under it.
+fn unseen(content: &str) -> Vec<(String, bool)> {
+    page_spans(content)
+        .into_iter()
+        .map(|s| (s.text, s.in_background_color))
+        .collect()
+}
+
+#[test]
+fn text_filled_in_the_color_under_it_shows_nothing() {
+    let one = |text: &str, unseen: bool| vec![(text.to_string(), unseen)];
+    // White on the white page.
+    assert_eq!(
+        unseen("BT 1 g /F1 10 Tf 10 50 Td (white) Tj ET"),
+        one("white", true)
+    );
+    // White on a black box: the visible control.
+    assert_eq!(
+        unseen("0 g 0 0 200 100 re f BT 1 g /F1 10 Tf 10 50 Td (white) Tj ET"),
+        one("white", false)
+    );
+    // Black on a black box closed twice (`re h`), its color stated in another space: compared as sRGB.
+    assert_eq!(
+        unseen("0 0 0 rg 0 0 200 100 re h f BT 0 g /F1 10 Tf 10 50 Td (black) Tj ET"),
+        one("black", true)
+    );
+    // Black on the white page: text as it is mostly set.
+    assert_eq!(
+        unseen("BT /F1 10 Tf 10 50 Td (black) Tj ET"),
+        one("black", false)
+    );
+}
+
+#[test]
+fn text_shows_where_anything_under_it_is_another_color() {
+    let shown = |resources: &str, content: &str| {
+        let file = File::open(
+            common::one_page(resources, content, &[HELVETICA, BOLD]),
+            b"",
+        )
+        .unwrap();
+        let page = file.pages().unwrap().remove(0);
+        let found = spans(&file.interpret(&page, false).unwrap().events);
+        assert!(
+            !found.is_empty() && found.iter().all(|s| !s.in_background_color),
+            "{content}"
+        );
+    };
+    // Black text half on a black box: the rest is on the white page.
+    shown(
+        FONTS,
+        "0 g 0 0 20 100 re f BT /F1 10 Tf 10 50 Td (black) Tj ET",
+    );
+    // White text on a white box drawn over half a black one.
+    shown(
+        FONTS,
+        "0 g 0 0 20 100 re f 1 g 15 0 185 100 re f BT 1 g /F1 10 Tf 10 50 Td (white) Tj ET",
+    );
+    // Black text on a white glyph on a black box (a caution sign's `!` on its triangle).
+    shown(
+        FONTS,
+        "0 g 0 0 200 100 re f BT 1 g /F1 60 Tf 5 20 Td (M) Tj ET BT 0 g /F1 10 Tf 20 40 Td (!) Tj ET",
+    );
+    // White text stroked too (render mode 2): its outline shows.
+    shown(FONTS, "BT 1 g 2 Tr /F1 10 Tf 10 50 Td (white) Tj ET");
+    // Black text on a black box painted half transparent: grey under it.
+    shown(
+        "/Resources << /Font << /F1 5 0 R /F2 6 0 R >> /ExtGState << /G1 << /ca 0.5 >> >> >>",
+        "q /G1 gs 0 g 0 0 200 100 re f Q BT 0 g /F1 10 Tf 10 50 Td (black) Tj ET",
+    );
+}

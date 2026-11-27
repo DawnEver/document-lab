@@ -50,6 +50,7 @@ _HID_TAP: Final = 0  # kCGHIDEventTap
 _DOWN, _UP = 125, 126  # kVK_DownArrow, kVK_UpArrow
 _TITLED: Final = 1  # NSWindowStyleMaskTitled
 _RGBX: Final = 5  # kCGImageAlphaNoneSkipLast, default byte order: R, G, B, then a byte unused, in memory
+_RGBA: Final = 1  # kCGImageAlphaPremultipliedLast, default byte order: R, G, B (times A), then A, in memory
 _COPY: Final = 17  # kCGBlendModeCopy: the picture's pixels replace the bitmap's, never blended onto them
 _NO_INTERPOLATION: Final = 1  # kCGInterpolationNone
 FRONT_TRIES: Final = 5  # tries to bring a window to the front before it is refused
@@ -426,8 +427,8 @@ def _srgb() -> int:
     return _cg().CGColorSpaceCreateWithName(_key('kCGColorSpaceSRGB'))
 
 
-def _pixels(image: int, width: int, height: int, space: int) -> np.ndarray:
-    """A CGImage as ``(h, w, 3)`` 8-bit RGB in color space ``space``.
+def _pixels(image: int, width: int, height: int, space: int, *, alpha: bool = False) -> np.ndarray:
+    """A CGImage as ``(h, w, 3)`` 8-bit RGB in color space ``space``; ``(h, w, 4)`` premultiplied RGBA with ``alpha``.
 
     It is drawn one pixel a pixel into a bitmap of that space, so CoreGraphics color-matches it and reads its pixel
     format, whatever that is.
@@ -438,7 +439,8 @@ def _pixels(image: int, width: int, height: int, space: int) -> np.ndarray:
         msg = f'macOS gave a {got[0]}x{got[1]} picture of a {width}x{height} area'
         raise OSError(msg)
     pixels = np.zeros((height, width, 4), dtype=np.uint8)
-    context = cg.CGBitmapContextCreate(pixels.ctypes.data, width, height, 8, 4 * width, space, _RGBX)
+    info = _RGBA if alpha else _RGBX
+    context = cg.CGBitmapContextCreate(pixels.ctypes.data, width, height, 8, 4 * width, space, info)
     if not context:
         msg = f'CoreGraphics made no {width}x{height} bitmap in {_described(space)}'
         raise OSError(msg)
@@ -448,7 +450,7 @@ def _pixels(image: int, width: int, height: int, space: int) -> np.ndarray:
         cg.CGContextDrawImage(context, _Rect(_Point(0, 0), _Size(width, height)), image)
     finally:
         cg.CGContextRelease(context)
-    return np.ascontiguousarray(pixels[..., :3])
+    return pixels if alpha else np.ascontiguousarray(pixels[..., :3])
 
 
 def _image(target: Window | Region) -> tuple[int, Region]:
@@ -475,14 +477,14 @@ def grab(target: Window | Region) -> np.ndarray:
 
 
 def _tagged(target: Window | Region) -> tuple[np.ndarray, str]:
-    """For a diagnosis: ``target``'s pixels as macOS gave them, and the color space it tagged them with.
+    """For a diagnosis: ``target``'s pixels as macOS gave them, RGBA, and the color space it tagged them with.
 
-    What :func:`grab` color-matches to sRGB, read without a conversion.
+    What :func:`grab` color-matches to sRGB, read without a conversion; the alpha is the window's shape.
     """
     image, shown = _image(target)
     try:
         space = _cg().CGImageGetColorSpace(image)
-        return _pixels(image, shown.width, shown.height, space), _described(space)
+        return _pixels(image, shown.width, shown.height, space, alpha=True), _described(space)
     finally:
         _cg().CGImageRelease(image)
 

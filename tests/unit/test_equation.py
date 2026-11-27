@@ -98,8 +98,12 @@ def test_an_equation_across_a_one_column_page_is_cropped_whole(tmp_path):
     assert faults(doc.pages[0], without(box, left=100), formula)  # planted: its left part cut off
 
 
+#: A formula line set across both columns of a two-column page: it starts in the left column, crosses the middle.
+ACROSS = 'W = sum k a b + c d + e f g + h k m + p q r + s t u'
+
+
 def test_an_equation_across_both_columns_of_a_two_column_page_is_cropped_whole(tmp_path):
-    formula = [math(110, 420, 'W = sum k a b'), math(330, 420, 'c d + e f g'), number(545, 420, 2)]
+    formula = [math(110, 420, ACROSS), number(545, 420, 2)]
     columns = [*column(50, 250, range(100, 400, 12)), *column(312, 250, range(100, 400, 12))]
     below = [*column(50, 250, range(450, 600, 12)), *column(312, 250, range(450, 600, 12))]
     doc = read(tmp_path, [*columns, *formula, *below])
@@ -282,7 +286,7 @@ def test_a_right_column_equation_takes_nothing_of_the_left_column(tmp_path):
 
 
 def test_an_equation_across_both_columns_is_found_whole(tmp_path):
-    formula = [math(110, 420, 'W = sum k a b'), math(330, 420, 'c d + e f g'), number(545, 420, 3)]
+    formula = [math(110, 420, ACROSS), number(545, 420, 3)]
     columns = [*column(50, 250, range(100, 400, 12)), *column(312, 250, range(100, 400, 12))]
     below = [*column(50, 250, range(450, 600, 12)), *column(312, 250, range(450, 600, 12))]
     doc = read(tmp_path, [*columns, *formula, *below])
@@ -301,10 +305,10 @@ def test_a_number_at_the_left_of_its_column_is_no_equation(tmp_path):
 
 def test_a_value_in_parentheses_is_no_equation_number_a_chapter_s_number_is(tmp_path):
     """A table's spread ``(0.167)`` set alone at a line's right reads like a number; none starts with 0."""
-    value = [noise(150, 300, 'x = 0.5'), (270, 300, '(0.167)', 'helv', 10)]
+    value = [noise(150, 300, 'x = 0.5 + y'), (270, 300, '(0.167)', 'helv', 10)]
     doc = read(tmp_path, [*column(50, 250, range(100, 290, 12)), *value, *column(50, 250, range(320, 400, 12))])
     assert [label for label, _ in found(doc)] == ['Untitled equation 1']  # its formula, no number
-    chapter = [noise(150, 300, 'x = 0.5'), (270, 300, '(2.8)', 'helv', 10)]
+    chapter = [noise(150, 300, 'x = 0.5 + y'), (270, 300, '(2.8)', 'helv', 10)]
     doc = read(tmp_path, [*column(50, 250, range(100, 290, 12)), *chapter, *column(50, 250, range(320, 400, 12))])
     assert [label for label, _ in found(doc)] == ['(2.8)']  # planted: a number that is one
 
@@ -524,3 +528,42 @@ def test_a_number_beside_a_taller_display_of_the_other_column_takes_its_column_a
     box = crop(doc, 9)
     assert faults(doc.pages[0], box, short) == []
     assert faults(doc.pages[0], without(box, left=-330), short)  # planted: taken across, over the left display
+
+
+def test_strict_wants_a_display_apart_above_below_and_across_and_a_formula_beyond_one_relation(tmp_path):
+    """Each D122 strict rule against a line loose takes for a display: one relation and nothing more (``P = T w``),
+    a formula flush with its column, one set at the paragraph's leading above the text below it, and a table's rows
+    of aligned cells, no rule drawn. The control: set apart above, below and across, a ``+`` beyond its relation."""
+    above, below = column(72, 468, range(100, 200, 12)), column(72, 468, range(260, 330, 12))
+    control = [math(250, 222, 'E = m c2 + k')]
+    doc = read(tmp_path, [*above, *control, *below])
+    assert kinds(doc, 'strict') == kinds(doc, 'loose') == ['Untitled equation 1']
+    one_relation = [math(250, 222, 'P = T w')]
+    flush = [math(72, 222, 'E = m c2 + k')]
+    for false in (one_relation, flush):
+        doc = read(tmp_path, [*above, *false, *below])
+        assert kinds(doc, 'strict') == []
+        assert kinds(doc, 'loose') == ['Untitled equation 1']  # planted: what strict leaves out
+    leading = [math(250, 222, 'E = m c2 + k'), *column(72, 468, range(234, 330, 12))]
+    doc = read(tmp_path, [*above, *leading])
+    assert kinds(doc, 'strict') == []
+    assert kinds(doc, 'loose') == ['Untitled equation 1']  # planted
+    rows = [
+        (100, 222, 'Torque', 'helv', 10),
+        math(250, 222, 'T = 10 + k'),
+        (450, 222, '[Nm]', 'helv', 10),
+        (100, 246, 'Speed', 'helv', 10),
+        math(250, 246, 'w = 3 + n'),
+        (450, 246, '[rpm]', 'helv', 10),
+    ]
+    doc = read(tmp_path, [*above, *rows, *column(72, 468, range(280, 330, 12))])
+    assert kinds(doc, 'strict') == []
+    assert kinds(doc, 'loose') == ['Untitled equation 1', 'Untitled equation 2']  # planted
+    captioned = [
+        (280, 210, 'TABLE I', 'helv', 10),
+        (100, 234, 'Rated torque', 'helv', 10),
+        math(250, 234, 'T = 10 + k'),
+    ]
+    doc = read(tmp_path, [*above, *captioned, *column(72, 468, range(270, 330, 12))])
+    assert kinds(doc, 'strict') == []  # a paper's table under its caption, one row, no rule drawn
+    assert kinds(doc, 'loose') == ['Untitled equation 1']  # planted

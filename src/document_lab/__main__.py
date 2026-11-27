@@ -42,7 +42,8 @@ _RENDERER = {
 _UNNUMBERED = {
     'choices': UNNUMBERED,
     'default': 'strict',
-    'help': 'displays without a number: strict (default: only those standing apart, showing math beyond a relation), '
+    'help': 'displays without a number: strict (default: those set apart above, below and across, in no table or '
+    'figure, showing a formula beyond one relation sign), '
     'loose (every formula line that is no prose: more found, more taken in error) or off (numbered ones only)',
 }
 

@@ -7,6 +7,7 @@ is a known function sampled at known points, so a digitizer that is wrong cannot
 from __future__ import annotations
 
 import functools
+import itertools
 import math
 import re
 from dataclasses import dataclass, field, replace
@@ -81,6 +82,8 @@ class PlotSpec:
     #: A rectangle drawn around the whole figure (a border box), or None.
     border: pymupdf.Rect | None = None
     grid_reach: float = 1.0  # the fraction of the frame width a horizontal grid line spans (a legend cuts it)
+    #: Spans (fractions of the frame height from its top) where a label set over the grid cuts each vertical grid line.
+    grid_gaps: Sequence[tuple[float, float]] = ()
     stray: Sequence[tuple[str, float, float, float]] = ()  # extra text: (text, x, y, size)
     #: A y-axis title set ROTATED 90 degrees (reading upward) with its baseline at x, starting at y: (text, x, y, size).
     y_title: tuple[str, float, float, float] | None = None
@@ -338,11 +341,15 @@ def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
         if spec.tick_marks:
             page.draw_line((px, f.y1), (px, f.y1 - 4), color=(0, 0, 0), width=0.5)
         if spec.grid and not (spec.filled_frame and i in (0, len(spec.x.ticks) - 1)):
-            page.draw_line((px, f.y0), (px, f.y1), color=(spec.grid_grey,) * 3, width=0.3)
+            cuts = [f.y0, *(f.y0 + k * f.height for gap in spec.grid_gaps for k in gap), f.y1]
+            for top, bottom in itertools.batched(cuts, 2):
+                page.draw_line((px, top), (px, bottom), color=(spec.grid_grey,) * 3, width=0.3)
         _x_label(page, spec, spec.x.labels[i] if spec.x.labels else _label(v), px)
     _y_axis(page, spec)
-    for text, x, y, size in spec.stray:
-        page.insert_text((x, y), text, fontname='helv', fontsize=size)
+    for text, x, y, size in spec.stray:  # a font object sets every character Helvetica has (``Ω``), not only Latin-1
+        writer = pymupdf.TextWriter(page.rect)
+        writer.append((x, y), text, font=pymupdf.Font('helv'), fontsize=size)
+        writer.write_text(page)
     if spec.y_title is not None:
         text, x, y, size = spec.y_title
         page.insert_text((x, y), text, fontname='helv', fontsize=size, rotate=90)

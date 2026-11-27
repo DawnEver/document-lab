@@ -211,6 +211,16 @@ def test_grid_lines_cut_short_by_a_legend_are_not_curves(tmp_path):
     assert [c.stroke for c in _one_plot(tmp_path, spec).curves] == [RED]
 
 
+def test_grid_lines_drawn_in_pieces_around_labels_are_not_curves(tmp_path):
+    """TDK ACT1210 p5: each grid line stops at every label set over the grid; its pieces came back as 47 curves.
+
+    The control: a straight two-point data segment inside the frame, on no grid line, is still a curve.
+    """
+    curves = [(lambda x: x, XS, RED), (lambda _: 50, [20.0, 60.0], BLUE)]
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), curves, grid=True, grid_gaps=[(0.2, 0.3), (0.6, 0.7)])
+    assert sorted(c.stroke for c in _one_plot(tmp_path, spec).curves) == sorted([RED, BLUE])
+
+
 def test_a_broken_linear_axis_is_mapped_piecewise_at_its_scale_change(tmp_path):
     # -25..50 every 25 over the left half, 50..250 every 50 over the right: one straight line skews every value.
     x = Axis([-25, 0, 25, 50, 100, 150, 200, 250], at=[0, 1 / 6, 2 / 6, 3 / 6, 5 / 8, 6 / 8, 7 / 8, 1])
@@ -483,6 +493,13 @@ def test_an_unreadable_outlined_tick_label_refuses_the_frame_by_name(tmp_path, l
         plots(page)
 
 
+def test_an_outlined_unit_letter_in_place_of_a_tick_label_is_no_label(tmp_path):
+    """TDK ACT1210 p6 sets ``°C`` where the 140 label belongs: its lone ``C``, a ``c`` by shape, refused the frame."""
+    spec = PlotSpec(Axis([0, 50, 100], labels=['0', 'C', '100']), Axis([0, 50, 100]), [(lambda x: x, XS, RED)])
+    (plot,) = plots(read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1))
+    assert sorted(v for _, v in plot.x.ticks) == [0, 100]
+
+
 def test_a_recognized_outlined_frame_still_reads_beside_an_outlined_axis_title(tmp_path):
     spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=[('Il', 240.0, 325.0, 8.0)])
     page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1)
@@ -647,6 +664,14 @@ def test_an_outlined_axis_title_arrowhead_in_the_label_column_is_no_tick_label(t
     """SIFERRIT N48 p4: the y title's filled arrowhead read as a glyph of no digit, refusing the frame."""
     (plot,) = plots(_outlined_with(tmp_path, _log_grid(), lambda page: _arrow(page, 89.0, 135.0)))
     assert sorted(v for _, v in plot.y.ticks) == [1, 10, 100]
+
+
+def test_an_outlined_ohm_sign_in_the_label_column_is_a_unit_not_a_label(tmp_path):
+    """TDK impedance figures set ``Ω`` under a log y axis' top label, on a minor grid line: it refused the frame."""
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', _log_grid(stray=[('Ω', 85.0, 143.0, 8.0)]), outlined=True)).page(1)
+    (plot,) = plots(page)
+    assert sorted(v for _, v in plot.y.ticks) == [1, 10, 100]
+    assert [s.text for s in outline_text(page)] == ['Ω']
 
 
 def test_an_unreadable_outlined_word_in_the_label_column_still_refuses(tmp_path):

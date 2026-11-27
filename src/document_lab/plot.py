@@ -1316,16 +1316,39 @@ def _misfit(pos: np.ndarray, target: np.ndarray) -> float:
 
 
 def _curve_paths(frame: BBox, paths: Sequence[VectorPath]) -> list[VectorPath]:
-    """Stroked open paths inside the frame (clipped to it) that are not a single tick mark, grid line or frame edge."""
-    out = []
-    for path in paths:
-        if path.stroke is None or path.closed or len(path.points) < 2:  # noqa: PLR2004
-            continue
-        for piece in _clipped(path, frame):
-            rules = _edges([piece])
-            if len(piece.points) == 2 and rules and _is_rule(rules[0], frame):  # noqa: PLR2004
-                continue
-            out.append(piece)
+    """Stroked open paths inside the frame (clipped to it) that are no tick mark, grid line or frame edge.
+
+    A grid line is whole (:func:`_is_rule`) or cut into pieces by the labels set over it (:func:`_cut_grid`).
+    """
+    pieces = [
+        piece
+        for path in paths
+        if path.stroke is not None and not path.closed and len(path.points) >= 2  # noqa: PLR2004
+        for piece in _clipped(path, frame)
+    ]
+    straight = [(piece, rules[0]) for piece in pieces if len(piece.points) == 2 and (rules := _edges([piece]))]  # noqa: PLR2004
+    rules = {id(piece) for piece, edge in straight if _is_rule(edge, frame)} | _cut_grid(frame, straight)
+    return [piece for piece in pieces if id(piece) not in rules]
+
+
+def _cut_grid(frame: BBox, straight: Sequence[tuple[VectorPath, _Edge]]) -> set[int]:
+    """The ids of the straight pieces that draw a grid line cut by the labels set over it.
+
+    TDK ACT1210 p5 stops every grid line at each label inside the frame: a grid line is then two or more pieces in one
+    pen on one line (within ``AXIS_TOL``) that together reach both frame edges (within ``EDGE_TOL``).
+    """
+    out = set()
+    for path, edge in straight:
+        line = [
+            e
+            for p, e in straight
+            if e.vertical == edge.vertical
+            and abs(e.at - edge.at) <= AXIS_TOL
+            and (p.stroke, p.width) == (path.stroke, path.width)
+        ]
+        first, last = (frame.y0, frame.y1) if edge.vertical else (frame.x0, frame.x1)
+        if len(line) > 1 and min(e.lo for e in line) <= first + EDGE_TOL and max(e.hi for e in line) >= last - EDGE_TOL:
+            out.add(id(path))
     return out
 
 

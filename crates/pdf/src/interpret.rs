@@ -3,9 +3,14 @@
 //! The graphics state is tracked across `q`/`Q`, `cm`, colors, line style and Form `XObject`s; each painted path,
 //! each image placed, each string shown and each shading painted (`sh`) is an event, its geometry already in page
 //! space (points, y down). A fill or stroke with a pattern is a path event whose color names the pattern
-//! ([`crate::color::Pattern`]); a pattern's own content (a tiling cell, a shading's colors) is not interpreted. A
-//! fill or stroke in the colorant `None` marks nothing ([`crate::color::Space::paints`]): it is no paint of the event,
-//! and a path painted in it alone is no event.
+//! ([`crate::color::Pattern`]); a pattern's own content (a tiling cell, a shading's colors) is not interpreted, but
+//! an uncolored tiling pattern's tint is the color's, in the pattern space's base.
+//!
+//! What is painted in the colorant `None` ([`crate::color::Space::paints`]) marks nothing (8.6.6.4) and is still an
+//! event, its [`Layer::inkless`] set, as hidden content is: a path filled or stroked in it -- a path whose fill marks
+//! and whose stroke does not (or the reverse) is two events, the marking paint's and the inkless one's --, a stencil
+//! mask painted in it, an image or a shading in a space of it alone. Text is not flagged: text shown in it is the
+//! page's text as an invisible text layer's is (render mode 3, an OCR layer), which the reader reports as text.
 //!
 //! The clip is tracked as the box it lies in -- the page's crop box, narrowed by each clipping path's bounds, each
 //! Form's `/BBox` and, at `ET`, the union of the boxes of the glyphs shown in a clipping text mode (4-7) -- and a
@@ -32,18 +37,22 @@
 //! appearance string (`/DA`) is not applied: it is the recipe for making an appearance, not part of drawing one.
 //!
 //! Not interpreted: a pattern's content and optional content usage ([`crate::optional`] says which). An operation
-//! that cannot be read is skipped and named in [`Content::warnings`], never silently; a color whose space or tint
-//! transform does not read is set by its components alone, with no RGB, and named there too -- never left in the
-//! space set before.
+//! that cannot be read is skipped and named in [`Content::warnings`], never silently; a color whose space, profile
+//! or tint transform does not read is set by its components alone, with no RGB, and named there too -- never left in
+//! the space set before.
+//!
+//! The rendering intent (`ri`, a graphics state's `/RI`; relative colorimetric until one is set) is part of the
+//! graphics state: a color in an `ICCBased` space converts at the intent in force when it is painted.
 
 use std::rc::Rc;
 
-use crate::color::{Color, Space};
+use crate::color::{Color, Pattern, Space};
 use crate::content::{Operation, operations};
 use crate::error::{Error, Result};
 use crate::file::File;
 use crate::font::{Font, FontInfo};
 use crate::geometry::{Matrix, Point, Rect};
+use crate::icc::Intent;
 use crate::object::{Dict, Object, Stream, text_string};
 use crate::optional::OptionalContent;
 use crate::page::Page;
@@ -108,11 +117,13 @@ pub struct PathEvent {
 }
 
 /// Where an event is drawn beyond the page's own visible content: in optional content the default view hides, in
-/// an annotation's appearance. The default is the page's content, shown.
+/// the colorant `None`, in an annotation's appearance. The default is the page's content, shown.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Layer {
     /// Optional content the default view hides draws it (see [`crate::optional`]).
     pub hidden: bool,
+    /// It is painted in the colorant `None`: it marks nothing, in any view (see the module).
+    pub inkless: bool,
     /// The `/Subtype` of the annotation whose appearance draws it (`Widget`, `FreeText`, `Stamp`, ...); None for
     /// the page's content.
     pub annotation: Option<String>,
@@ -239,6 +250,8 @@ struct State {
     text: TextState,
     /// The box the clip lies in, page space.
     clip: Rect,
+    /// The rendering intent colors convert at.
+    intent: Intent,
 }
 
 /// The text state parameters (9.3), part of the graphics state.
@@ -268,6 +281,7 @@ impl State {
             dash_phase: 0.0,
             cap: 0,
             join: 0,
+            intent: Intent::default(),
             text: TextState {
                 char_spacing: 0.0,
                 word_spacing: 0.0,
@@ -461,11 +475,12 @@ impl Interpreter<'_> {
                             .or_else(|| dict.get(short))
                             .and_then(Object::as_integer)
                     };
+                    let inkless = self.image_inkless(dict, true, resources);
                     self.image(
                         int(b"Width", b"W").unwrap_or(0),
                         int(b"Height", b"H").unwrap_or(0),
-                        None,
-                        Some((dict.clone(), data.to_vec())),
+                        (None, Some((dict.clone(), data.to_vec()))),
+                        inkless,
                     );
                 }
             }
@@ -557,6 +572,7 @@ impl Interpreter<'_> {
     fn layer(&self) -> Layer {
         Layer {
             hidden: self.hiding_entries > 0 || self.marked.iter().any(|m| m.hides),
+            inkless: false,
             annotation: self.annotation.clone(),
         }
     }
@@ -603,7 +619,13 @@ impl Interpreter<'_> {
             bbox = bbox.intersect(own);
         }
         if bbox.x0 <= bbox.x1 && bbox.y0 <= bbox.y1 {
-            let layer = self.layer();
+            let inkless = dict
+                .get(b"ColorSpace")
+                .is_some_and(|space| self.file.colorant_none(space, resources));
+            let layer = Layer {
+                inkless,
+                ..self.layer()
+            };
             self.out
                 .events
                 .push(Event::Shading(ShadingEvent { bbox, layer }));
@@ -651,6 +673,13 @@ impl Interpreter<'_> {
                 self.state.dash_phase = operands.get(1).and_then(Object::as_number).unwrap_or(0.0);
             }
             b"gs" => self.ext_state(operands, resources)?,
+            b"ri" => {
+                let name = operands
+                    .last()
+                    .and_then(Object::as_name)
+                    .ok_or_else(|| Error::malformed("needs a name"))?;
+                self.set_intent(name);
+            }
             _ => return Ok(false),
         }
         Ok(true)
@@ -1016,6 +1045,9 @@ impl Interpreter<'_> {
                         Space::Other(named.unwrap_or(b"Unknown").to_vec(), 1)
                     }
                 };
+                if let Some(why) = space.unread() {
+                    self.warn(operator, &format!("its colors have no RGB: {why}"));
+                }
                 let color = self.converted(operator, &space, space.initial_components());
                 (space, color)
             }
@@ -1056,18 +1088,20 @@ impl Interpreter<'_> {
         ));
     }
 
-    /// The color of `components` in `space`; when the space gives them no RGB for a cause (a tint transform's
-    /// error), the components alone, the cause named in a warning.
+    /// The color of `components` in `space`, at the intent in force; when the space gives them no RGB for a cause (a
+    /// tint transform's error), the components alone, the cause named in a warning.
     fn converted(&mut self, operator: &[u8], space: &Space, components: Vec<f64>) -> Color {
-        space.color(components.clone()).unwrap_or_else(|e| {
-            self.warn(operator, &format!("its color has no RGB: {e}"));
-            Color {
-                space: space.family(),
-                components,
-                rgb: None,
-                pattern: None,
-            }
-        })
+        space
+            .color(components.clone(), self.state.intent)
+            .unwrap_or_else(|e| {
+                self.warn(operator, &format!("its color has no RGB: {e}"));
+                Color {
+                    space: space.family(),
+                    components,
+                    rgb: None,
+                    pattern: None,
+                }
+            })
     }
 
     /// The color `operands` set in `space`: in `Pattern`, the pattern the last operand names (after an uncolored
@@ -1079,15 +1113,65 @@ impl Interpreter<'_> {
         operands: &[Object],
         resources: &Dict,
     ) -> Result<Color> {
-        let mut color = self.converted(operator, space, numbers_in(operands));
-        if *space == Space::Pattern {
+        let pattern = if let Space::Pattern(_) = space {
             let name = operands
                 .last()
                 .and_then(Object::as_name)
                 .ok_or_else(|| Error::malformed("needs a pattern name"))?;
-            color.pattern = Some(self.file.pattern(name, resources)?);
+            Some(self.file.pattern(name, resources)?)
+        } else {
+            None
+        };
+        Ok(self.painted(operator, space, numbers_in(operands), pattern))
+    }
+
+    /// The color of `components` in `space` painting `pattern`: a pattern's has an RGB only when it is an uncolored
+    /// tiling pattern's tint; another's components are the operands it was set by, if any.
+    fn painted(
+        &mut self,
+        operator: &[u8],
+        space: &Space,
+        components: Vec<f64>,
+        pattern: Option<Pattern>,
+    ) -> Color {
+        let tinted = matches!(pattern, None | Some(Pattern::Tiling { uncolored: true }));
+        let mut color = if tinted {
+            self.converted(operator, space, components)
+        } else {
+            Color {
+                space: space.family(),
+                components,
+                rgb: None,
+                pattern: None,
+            }
+        };
+        color.pattern = pattern;
+        color
+    }
+
+    /// `ri`, a graphics state's `/RI`: the intent `name` names is in force, the colors set converted at it; a name the
+    /// standard does not define leaves the default, relative colorimetric (8.6.5.8).
+    fn set_intent(&mut self, name: &[u8]) {
+        let intent = Intent::named(name).unwrap_or_default();
+        if intent == self.state.intent {
+            return;
         }
-        Ok(color)
+        self.state.intent = intent;
+        for stroking in [true, false] {
+            let (space, color) = if stroking {
+                (&self.state.stroke_space, &self.state.stroke_color)
+            } else {
+                (&self.state.fill_space, &self.state.fill_color)
+            };
+            let (space, components, pattern) =
+                (space.clone(), color.components.clone(), color.pattern);
+            let color = self.painted(b"ri", &space, components, pattern);
+            if stroking {
+                self.state.stroke_color = color;
+            } else {
+                self.state.fill_color = color;
+            }
+        }
     }
 
     fn extend(&mut self, segment: Segment, end: Point) {
@@ -1119,32 +1203,48 @@ impl Interpreter<'_> {
 
     fn paint(&mut self, stroke: bool, fill: Option<bool>) {
         let bounds = bounds(&self.path);
-        // A paint in the colorant `None` marks nothing: the path ends as `n` ends it.
-        let stroke = stroke && self.state.stroke_space.paints();
-        let fill = fill.filter(|_| self.state.fill_space.paints());
-        if (stroke || fill.is_some()) && bounds.is_some_and(|b| b.meets(self.state.clip)) {
-            let layer = self.layer();
-            let state = &self.state;
-            let scale = state.ctm.scale();
-            let event = PathEvent {
-                segments: std::mem::take(&mut self.path),
-                stroke: stroke.then(|| Stroke {
-                    color: state.stroke_color.clone(),
-                    width: state.line_width * scale,
-                    dashes: state.dashes.iter().map(|d| d * scale).collect(),
-                    dash_phase: state.dash_phase * scale,
-                    cap: state.cap,
-                    join: state.join,
-                }),
-                fill: fill.map(|even_odd| Fill {
-                    color: state.fill_color.clone(),
-                    even_odd,
-                }),
-                layer,
-            };
-            self.out.events.push(Event::Path(event));
+        if bounds.is_some_and(|b| b.meets(self.state.clip)) {
+            // The paints that mark, then those in the colorant `None`, which mark nothing: an event each.
+            let (strokes, fills) = (
+                self.state.stroke_space.paints(),
+                self.state.fill_space.paints(),
+            );
+            for inkless in [false, true] {
+                let stroke = stroke && strokes != inkless;
+                let fill = fill.filter(|_| fills != inkless);
+                if stroke || fill.is_some() {
+                    self.push_path(stroke, fill, inkless);
+                }
+            }
         }
         self.ended(bounds);
+    }
+
+    /// The path painted: stroked when `stroke`, filled by the even-odd rule or not when `fill` says, `inkless` when
+    /// the paints are in the colorant `None`.
+    fn push_path(&mut self, stroke: bool, fill: Option<bool>, inkless: bool) {
+        let state = &self.state;
+        let scale = state.ctm.scale();
+        let event = PathEvent {
+            segments: self.path.clone(),
+            stroke: stroke.then(|| Stroke {
+                color: state.stroke_color.clone(),
+                width: state.line_width * scale,
+                dashes: state.dashes.iter().map(|d| d * scale).collect(),
+                dash_phase: state.dash_phase * scale,
+                cap: state.cap,
+                join: state.join,
+            }),
+            fill: fill.map(|even_odd| Fill {
+                color: state.fill_color.clone(),
+                even_odd,
+            }),
+            layer: Layer {
+                inkless,
+                ..self.layer()
+            },
+        };
+        self.out.events.push(Event::Path(event));
     }
 
     fn ext_state(&mut self, operands: &[Object], resources: &Dict) -> Result<()> {
@@ -1170,6 +1270,9 @@ impl Interpreter<'_> {
         }
         if let Some(j) = self.file.get(&gs, b"LJ")?.and_then(|o| o.as_integer()) {
             self.state.join = j;
+        }
+        if let Some(Object::Name(intent)) = self.file.get(&gs, b"RI")? {
+            self.set_intent(&intent);
         }
         if let Some(Object::Array(d)) = self.file.get(&gs, b"D")? {
             self.state.dashes = d
@@ -1211,11 +1314,12 @@ impl Interpreter<'_> {
         let drawn = match subtype {
             b"Image" => {
                 let int = |k: &[u8]| stream.dict.get(k).and_then(Object::as_integer).unwrap_or(0);
+                let inkless = self.image_inkless(&stream.dict, false, resources);
                 self.image(
                     int(b"Width"),
                     int(b"Height"),
-                    reference.as_reference().map(|r| r.num),
-                    None,
+                    (reference.as_reference().map(|r| r.num), None),
+                    inkless,
                 );
                 Ok(())
             }
@@ -1391,12 +1495,29 @@ impl Interpreter<'_> {
         drawn
     }
 
+    /// Whether the image whose dictionary is `dict` (an inline image's when `inline`, its keys and names
+    /// abbreviated) marks nothing: a stencil mask in a fill color of the colorant `None`, or samples in a space of it
+    /// alone.
+    fn image_inkless(&self, dict: &Dict, inline: bool, resources: &Dict) -> bool {
+        let key = |long: &'static [u8], short: &'static [u8]| {
+            dict.get(long)
+                .or_else(|| if inline { dict.get(short) } else { None })
+        };
+        let mask = key(b"ImageMask", b"IM").and_then(|m| self.file.resolve(m).ok());
+        if matches!(mask, Some(Object::Bool(true))) {
+            return !self.state.fill_space.paints();
+        }
+        key(b"ColorSpace", b"CS").is_some_and(|space| self.file.colorant_none(space, resources))
+    }
+
+    /// An image placed: `width` x `height` samples, the image `XObject`'s number or the inline image's dictionary and
+    /// data, `inkless` when it marks nothing.
     fn image(
         &mut self,
         width: i64,
         height: i64,
-        object: Option<u32>,
-        inline: Option<(Dict, Vec<u8>)>,
+        (object, inline): (Option<u32>, Option<(Dict, Vec<u8>)>),
+        inkless: bool,
     ) {
         let m = self.state.ctm;
         let corners = [
@@ -1416,7 +1537,10 @@ impl Interpreter<'_> {
             height,
             object,
             inline,
-            layer: self.layer(),
+            layer: Layer {
+                inkless,
+                ..self.layer()
+            },
         }));
     }
 }

@@ -5,11 +5,13 @@ import pymupdf
 import pytest
 
 from document_lab.glyphs import (
+    RASTER_ROWS,
     STROKE,
     Font,
     Glyph,
     UnreadableGlyph,
     has_letter,
+    rasterize,
     read_glyph,
     read_number,
     read_word,
@@ -182,3 +184,15 @@ def test_a_near_tie_between_two_characters_is_no_letter(a, b):
     """The control: two letters (an ``l`` or an ``I`` may be a sheet's ``1``), or a letter and a digit, say nothing."""
     zero = [Glyph(_stroked('0'), (0, 0, 4, 7))]
     assert not has_letter(zero, _between(a, b))
+
+
+def test_a_flat_fill_rasterizes_to_a_bounded_blank_not_a_column_per_nanopoint():
+    """A filled path with no height (a rule or a minus drawn as a fill) once sized its raster from 1e-9 pt: 888 GiB.
+
+    Seen 2026-11-09 on the Magnetics 2026 powder catalogue. Its ink holds no area, so it is blank, and its column count
+    is bounded by the rows -- the box, not the ink, still tells a minus from a point in ``read_number``.
+    """
+    ink = rasterize([[(0.0, 5.0), (8.0, 5.0), (4.0, 5.0)]], (0.0, 5.0, 8.0, 5.0))
+    assert ink.shape[0] == RASTER_ROWS
+    assert ink.shape[1] <= RASTER_ROWS
+    assert not ink.any()

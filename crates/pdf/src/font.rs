@@ -3,7 +3,8 @@
 //! outlines are not read.
 
 use crate::base14::{FONTS, Metrics};
-use crate::cmap::CMap;
+use crate::cid2unicode::Collection;
+use crate::cmap::{CMap, legacy_encoding};
 use crate::error::Result;
 use crate::file::File;
 use crate::fontfile::{self, GlyphText};
@@ -76,35 +77,30 @@ impl FontInfo {
 }
 
 impl FontInfo {
-    /// The facts of the font named `name`, of `subtype`, its descriptor stating them and its embedded program
-    /// stating `program_weight`.
+    /// The facts of the font named `name`, of `subtype`, its descriptor stating them (its values resolved in
+    /// `file`) and its embedded program stating `program_weight`.
+    ///
+    /// Refuses a reference in the descriptor that does not resolve.
     fn new(
+        file: &File,
         name: String,
         subtype: String,
         descriptor: Option<&Dict>,
         program_weight: Option<f64>,
-    ) -> Self {
-        let number = |key: &[u8]| {
-            descriptor
-                .and_then(|d| d.get(key))
-                .and_then(Object::as_number)
-        };
-        Self {
+    ) -> Result<Self> {
+        Ok(Self {
             name,
             subtype,
-            flags: descriptor
-                .and_then(|d| d.get(b"Flags"))
-                .and_then(Object::as_integer)
-                .unwrap_or(0),
-            descriptor_weight: number(b"FontWeight"),
+            flags: file.flags(descriptor)?,
+            descriptor_weight: file.number(descriptor, b"FontWeight")?,
             program_weight,
-            italic_angle: number(b"ItalicAngle"),
+            italic_angle: file.number(descriptor, b"ItalicAngle")?,
             embedded: descriptor.is_some_and(|d| {
                 [&b"FontFile"[..], b"FontFile2", b"FontFile3"]
                     .iter()
                     .any(|k| d.get(k).is_some())
             }),
-        }
+        })
     }
 }
 
@@ -221,13 +217,38 @@ enum Kind {
         encoding: Vec<Option<String>>,
         base14: Option<&'static Metrics>,
     },
-    /// Codes by a `CMap`, widths by `CID`.
+    /// Codes by a `CMap`, widths by `CID`; vertical displacements by `CID` when the `CMap` writes vertically.
     Composite {
         cmap: CMap,
-        widths: Vec<(u32, u32, f64)>,
-        default: f64,
+        widths: CidMetric,
+        vertical: Option<CidMetric>,
         code_text: CodeText,
+        /// Adobe's text of the `CID`s, of the collection a predefined `CMap` is of, or for Identity and an embedded
+        /// `CMap` the one the `CIDFont`'s `/CIDSystemInfo` names, when Adobe's tables cover it. The ordering decides,
+        /// not the font's kind: a `CIDFontType2` declaring `Adobe-Identity` has `CID`s that are only glyph ids, and
+        /// none; one declaring `Adobe-Japan1` has that collection's `CID`s (its `/CIDToGIDMap` turns them into
+        /// glyphs).
+        collection: Option<&'static Collection>,
     },
+}
+
+/// One metric of a composite font's glyphs by `CID`, in glyph space (9.7.4.3): `/W`'s widths and `/DW`, or a
+/// vertical font's displacements w1y from `/W2` and `/DW2`.
+#[derive(Debug, Clone)]
+struct CidMetric {
+    /// (first `CID`, last `CID`, value) runs, in the order stated: the first run holding a `CID` gives its value.
+    runs: Vec<(u32, u32, f64)>,
+    /// The value of a `CID` no run holds.
+    default: f64,
+}
+
+impl CidMetric {
+    fn of(&self, cid: u32) -> f64 {
+        self.runs
+            .iter()
+            .find(|(lo, hi, _)| (*lo..=*hi).contains(&cid))
+            .map_or(self.default, |run| run.2)
+    }
 }
 
 /// What a composite font's codes are, as text, when no `ToUnicode` `CMap` says.
@@ -258,13 +279,11 @@ pub struct Font {
     pub ascent: f64,
     /// The descent in glyph space (negative).
     pub descent: f64,
-    /// Whether the writing mode is vertical (read as horizontal; the text is kept).
-    pub vertical: bool,
     /// What of it could not be read, in words (a program too malformed to state its weight); empty when all was.
     pub warnings: Vec<String>,
 }
 
-/// One code of a string: its value, Unicode text and width in text space (before the font size).
+/// One code of a string: its value, Unicode text and advances in text space (before the font size).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Code {
     /// The code.
@@ -273,14 +292,30 @@ pub struct Code {
     pub bytes: usize,
     /// Its text, when the font says what it is.
     pub text: Option<String>,
-    /// Its horizontal advance in text space units of one font size.
+    /// Its horizontal advance w0 in text space units of one font size.
     pub width: f64,
+    /// Its vertical advance w1y in text space units of one font size (negative: down the column), when its font
+    /// writes vertically.
+    pub vertical_advance: Option<f64>,
 }
 
 const GLYPH_SPACE: Matrix = Matrix([0.001, 0.0, 0.0, 0.001, 0.0, 0.0]);
 
 impl Font {
-    /// Split `bytes` into codes, each with its text and width.
+    /// Whether the font writes vertically: its `CMap`'s writing mode is 1 (a predefined vertical `CMap`, `Identity-V`,
+    /// an embedded one with `/WMode 1`), so its glyphs advance down a column (ISO 32000-2 9.7.4.3).
+    #[must_use]
+    pub fn vertical(&self) -> bool {
+        matches!(
+            self.kind,
+            Kind::Composite {
+                vertical: Some(_),
+                ..
+            }
+        )
+    }
+
+    /// Split `bytes` into codes, each with its text and advances.
     #[must_use]
     pub fn codes(&self, bytes: &[u8]) -> Vec<Code> {
         let units = self.matrix.0[0];
@@ -317,41 +352,45 @@ impl Font {
                         bytes: 1,
                         text,
                         width: width * units,
+                        vertical_advance: None,
                     }
                 })
                 .collect(),
             Kind::Composite {
                 cmap,
                 widths,
-                default,
+                vertical,
                 code_text,
+                collection,
             } => cmap
                 .codes(bytes)
                 .into_iter()
                 .map(|(code, len)| {
                     let cid = cmap.cid(code);
+                    // The text: `ToUnicode`'s, else the code's when codes are Unicode, else the embedded program's
+                    // glyph's (the very glyph drawn), else the collection's for the `CID`, else the code's in its
+                    // legacy encoding, else none.
                     let text = self
                         .to_unicode
                         .as_ref()
                         .and_then(|c| c.text(code))
                         .map(str::to_string)
-                        .or_else(|| code_as_text(*code_text, code, len))
+                        .or_else(|| unicode_text(*code_text, code, len))
                         .or_else(|| {
                             let gid = match &self.cid_to_gid {
                                 Some(map) => *map.get(usize::try_from(cid).ok()?)?,
                                 None => u16::try_from(cid).ok()?,
                             };
                             self.program.as_ref()?.text(gid)
-                        });
-                    let width = widths
-                        .iter()
-                        .find(|(lo, hi, _)| (*lo..=*hi).contains(&cid))
-                        .map_or(*default, |w| w.2);
+                        })
+                        .or_else(|| collection.and_then(|c| c.text(cid)))
+                        .or_else(|| legacy_text(*code_text, code, len));
                     Code {
                         code,
                         bytes: len,
                         text,
-                        width: width * units,
+                        width: widths.of(cid) * units,
+                        vertical_advance: vertical.as_ref().map(|v| v.of(cid) * units),
                     }
                 })
                 .collect(),
@@ -359,17 +398,32 @@ impl Font {
     }
 }
 
-/// A composite font's code as text, by what its codes are.
-fn code_as_text(kind: CodeText, code: u32, len: usize) -> Option<String> {
-    match kind {
-        CodeText::Unknown => None,
-        CodeText::Utf16 => char::from_u32(code).map(String::from),
-        CodeText::Legacy(encoding) => {
-            let bytes = &code.to_be_bytes()[4 - len.min(4)..];
-            let (text, _, failed) = encoding.decode(bytes);
-            (!failed).then(|| text.into_owned())
-        }
+/// A code as text when the codes are Unicode: one UTF-16 code unit, or two (a surrogate pair, four bytes).
+fn unicode_text(kind: CodeText, code: u32, len: usize) -> Option<String> {
+    if !matches!(kind, CodeText::Utf16) {
+        return None;
     }
+    let units = if len == 4 {
+        vec![
+            u16::try_from(code >> 16).ok()?,
+            u16::try_from(code & 0xFFFF).ok()?,
+        ]
+    } else {
+        vec![u16::try_from(code).ok()?]
+    };
+    char::decode_utf16(units)
+        .collect::<std::result::Result<String, _>>()
+        .ok()
+}
+
+/// A code as text when its bytes are a legacy encoding's.
+fn legacy_text(kind: CodeText, code: u32, len: usize) -> Option<String> {
+    let CodeText::Legacy(encoding) = kind else {
+        return None;
+    };
+    let bytes = &code.to_be_bytes()[4 - len.min(4)..];
+    let (text, _, failed) = encoding.decode(bytes);
+    (!failed).then(|| text.into_owned())
 }
 
 /// A standard font's width of the character `text`.
@@ -419,15 +473,16 @@ impl File {
     ///
     /// Refuses a reference in it that does not resolve.
     pub fn font(&self, dict: &Dict) -> Result<Font> {
-        let name_of = |key: &[u8]| {
-            dict.get(key)
-                .and_then(Object::as_name)
-                .map(|n| String::from_utf8_lossy(n).into_owned())
+        let name_of = |key: &[u8]| -> Result<Option<String>> {
+            Ok(self
+                .get(dict, key)?
+                .and_then(|o| o.as_name().map(|n| String::from_utf8_lossy(n).into_owned())))
         };
-        let subtype = name_of(b"Subtype").unwrap_or_default();
-        let base_name = name_of(b"BaseFont")
-            .or_else(|| name_of(b"Name"))
-            .unwrap_or_default();
+        let subtype = name_of(b"Subtype")?.unwrap_or_default();
+        let base_name = match name_of(b"BaseFont")? {
+            Some(name) => name,
+            None => name_of(b"Name")?.unwrap_or_default(),
+        };
         let to_unicode = match self.get(dict, b"ToUnicode")? {
             Some(Object::Stream(s)) => self
                 .decode(&s)
@@ -444,7 +499,7 @@ impl File {
         };
         let descriptor = self.descriptor(cid_font.as_ref().unwrap_or(dict))?;
         let program = self.program(descriptor.as_ref())?;
-        let (kind, vertical) = match &cid_font {
+        let kind = match &cid_font {
             Some(cid_font) => self.composite(dict, cid_font)?,
             None => self.simple(
                 dict,
@@ -465,12 +520,7 @@ impl File {
         } else {
             GLYPH_SPACE
         };
-        let number = |key: &[u8]| {
-            descriptor
-                .as_ref()
-                .and_then(|d| d.get(key))
-                .and_then(Object::as_number)
-        };
+        let number = |key: &[u8]| self.number(descriptor.as_ref(), key);
         let standard = base14(&base_name);
         let bbox = match &descriptor {
             Some(d) => self.rect(d, b"FontBBox")?,
@@ -481,12 +531,12 @@ impl File {
         // the size (the proportions of a Latin text face).
         // (In glyph space: a Type 3 font's is its own, through its matrix.)
         let unit = 0.001 / matrix.0[3].abs().max(f64::MIN_POSITIVE);
-        let ascent = number(b"Ascent")
+        let ascent = number(b"Ascent")?
             .filter(|a| *a > 0.0)
             .or(standard.map(|m| m.ascent))
             .or(bbox.map(|b| b.y1))
             .unwrap_or(800.0 * unit);
-        let descent = number(b"Descent")
+        let descent = number(b"Descent")?
             .filter(|d| *d < 0.0)
             .or(standard.map(|m| m.descent))
             .or(bbox.map(|b| b.y0))
@@ -503,7 +553,13 @@ impl File {
             ),
         };
         Ok(Font {
-            info: FontInfo::new(base_name, subtype, descriptor.as_ref(), program_weight),
+            info: FontInfo::new(
+                self,
+                base_name,
+                subtype,
+                descriptor.as_ref(),
+                program_weight,
+            )?,
             kind,
             to_unicode,
             program: match program {
@@ -514,7 +570,6 @@ impl File {
             matrix,
             ascent,
             descent,
-            vertical,
             warnings,
         })
     }
@@ -525,6 +580,22 @@ impl File {
             return Ok(None);
         };
         let decoded = |stream: &Stream| self.decode(stream).ok().and_then(|d| d.into_bytes().ok());
+        let subtype = |stream: &Stream| -> Result<Option<Vec<u8>>> {
+            Ok(self
+                .get(&stream.dict, b"Subtype")?
+                .as_ref()
+                .and_then(Object::as_name)
+                .map(<[u8]>::to_vec))
+        };
+        let open_type = |stream: &Stream| {
+            Ok::<_, crate::error::Error>(subtype(stream)?.as_deref() == Some(b"OpenType"))
+        };
+        let bare_cff = |stream: &Stream| {
+            Ok::<_, crate::error::Error>(matches!(
+                subtype(stream)?.as_deref(),
+                Some(b"Type1C" | b"CIDFontType0C")
+            ))
+        };
         Ok(
             match (
                 self.get(descriptor, b"FontFile")?,
@@ -532,19 +603,8 @@ impl File {
                 self.get(descriptor, b"FontFile3")?,
             ) {
                 (_, Some(Object::Stream(s)), _) => decoded(&s).map(Program::Sfnt),
-                (_, _, Some(Object::Stream(s)))
-                    if s.dict.get(b"Subtype").and_then(Object::as_name) == Some(b"OpenType") =>
-                {
-                    decoded(&s).map(Program::Sfnt)
-                }
-                (_, _, Some(Object::Stream(s)))
-                    if matches!(
-                        s.dict.get(b"Subtype").and_then(Object::as_name),
-                        Some(b"Type1C" | b"CIDFontType0C")
-                    ) =>
-                {
-                    decoded(&s).map(Program::Cff)
-                }
+                (_, _, Some(Object::Stream(s))) if open_type(&s)? => decoded(&s).map(Program::Sfnt),
+                (_, _, Some(Object::Stream(s))) if bare_cff(&s)? => decoded(&s).map(Program::Cff),
                 (Some(Object::Stream(s)), ..) => decoded(&s).map(Program::Type1),
                 _ => None,
             },
@@ -581,6 +641,23 @@ impl File {
         })
     }
 
+    /// The number `descriptor[key]` holds, resolved; None when there is no descriptor or no number.
+    fn number(&self, descriptor: Option<&Dict>, key: &[u8]) -> Result<Option<f64>> {
+        Ok(match descriptor {
+            Some(d) => self.get(d, key)?.as_ref().and_then(Object::as_number),
+            None => None,
+        })
+    }
+
+    /// The descriptor's `/Flags`, resolved; 0 when absent.
+    fn flags(&self, descriptor: Option<&Dict>) -> Result<i64> {
+        Ok(match descriptor {
+            Some(d) => self.get(d, b"Flags")?.as_ref().and_then(Object::as_integer),
+            None => None,
+        }
+        .unwrap_or(0))
+    }
+
     fn descriptor(&self, dict: &Dict) -> Result<Option<Dict>> {
         Ok(match self.get(dict, b"FontDescriptor")? {
             Some(Object::Dict(d)) => Some(d),
@@ -595,7 +672,7 @@ impl File {
         name: &str,
         descriptor: Option<&Dict>,
         program: Option<&Program>,
-    ) -> Result<(Kind, bool)> {
+    ) -> Result<Kind> {
         let first = self
             .get(dict, b"FirstChar")?
             .and_then(|o| o.as_integer())
@@ -612,22 +689,16 @@ impl File {
                 .collect(),
             _ => Vec::new(),
         };
-        let missing = descriptor
-            .and_then(|d| d.get(b"MissingWidth"))
-            .and_then(Object::as_number)
-            .unwrap_or(0.0);
+        let missing = self.number(descriptor, b"MissingWidth")?.unwrap_or(0.0);
         let standard = base14(name);
         let encoding = self.simple_encoding(dict, subtype, standard, descriptor, program)?;
-        Ok((
-            Kind::Simple {
-                first,
-                widths,
-                missing,
-                encoding,
-                base14: standard,
-            },
-            false,
-        ))
+        Ok(Kind::Simple {
+            first,
+            widths,
+            missing,
+            encoding,
+            base14: standard,
+        })
     }
 
     /// A simple font's text by code: its base encoding (named, built into its program, or by its kind) with its
@@ -640,10 +711,7 @@ impl File {
         descriptor: Option<&Dict>,
         program: Option<&Program>,
     ) -> Result<Vec<Option<String>>> {
-        let symbolic = descriptor
-            .and_then(|d| d.get(b"Flags"))
-            .and_then(Object::as_integer)
-            .is_some_and(|f| f & 4 != 0);
+        let symbolic = self.flags(descriptor)? & 4 != 0;
         // The base encoding: the one named, else the font's own -- Symbol's and ZapfDingbats' built in, Standard
         // for any other Type 1, and for a symbolic TrueType none at all (its codes are its glyphs).
         let builtin: &pdf_encoding::ForwardMap = match standard.map(|m| m.name) {
@@ -706,41 +774,90 @@ impl File {
         Ok(encoding)
     }
 
-    fn composite(&self, dict: &Dict, cid_font: &Dict) -> Result<(Kind, bool)> {
-        let (cmap, vertical, code_text) = match self.get(dict, b"Encoding")? {
+    fn composite(&self, dict: &Dict, cid_font: &Dict) -> Result<Kind> {
+        // The `CMap`, and the collection whose text its `CID`s stand for: a predefined `CMap`'s own (ISO 32000-2
+        // section 9.10.2), Identity's and an embedded one's the `CIDFont`'s; none for a name no table defines, whose
+        // codes' `CID`s are not known (they are read as Identity's). The writing mode is the `CMap`'s: a predefined
+        // one's by its table, Identity's by its name, an embedded one's by its program's `/WMode`, else its
+        // dictionary's.
+        let (cmap, vertical, code_text, collection) = match self.get(dict, b"Encoding")? {
             Some(Object::Name(n)) => {
                 let name = String::from_utf8_lossy(&n).into_owned();
-                // A predefined `CMap`: Identity is read; a Unicode one (`Uni...-UCS2-` / `-UTF16-`) has the text as
-                // its codes; a legacy CJK one has its codes as bytes of that encoding; any other selects CIDs from a
-                // registry's table this reader does not carry.
-                let vertical = name.ends_with("-V");
-                if let Some((cmap, encoding)) = CMap::legacy(&name) {
-                    (cmap, vertical, CodeText::Legacy(encoding))
-                } else if name.starts_with("Uni")
-                    && (name.contains("UCS2") || name.contains("UTF16"))
-                {
-                    (CMap::identity(), vertical, CodeText::Utf16)
+                if let Some((cmap, vertical, collection)) = CMap::predefined(&name) {
+                    // A Unicode `CMap`'s codes are the text; a legacy CJK one's are bytes of its encoding.
+                    let code_text = if name.starts_with("Uni")
+                        && (name.contains("UCS2") || name.contains("UTF16"))
+                    {
+                        CodeText::Utf16
+                    } else {
+                        legacy_encoding(&name).map_or(CodeText::Unknown, CodeText::Legacy)
+                    };
+                    (cmap, vertical, code_text, collection)
                 } else {
-                    (CMap::identity(), vertical, CodeText::Unknown)
+                    let identity = matches!(name.as_str(), "Identity-H" | "Identity-V");
+                    let collection = if identity {
+                        self.collection(cid_font)?
+                    } else {
+                        None
+                    };
+                    let vertical = name.ends_with("-V");
+                    (CMap::identity(), vertical, CodeText::Unknown, collection)
                 }
             }
             Some(Object::Stream(s)) => {
-                let vertical = self.get(&s.dict, b"WMode")?.and_then(|o| o.as_integer()) == Some(1);
+                let cmap = CMap::parse(&self.decode(&s)?.into_bytes()?);
+                let stated = match cmap.wmode() {
+                    Some(mode) => Some(mode),
+                    None => self.get(&s.dict, b"WMode")?.and_then(|o| o.as_integer()),
+                };
                 (
-                    CMap::parse(&self.decode(&s)?.into_bytes()?),
-                    vertical,
+                    cmap,
+                    stated == Some(1),
                     CodeText::Unknown,
+                    self.collection(cid_font)?,
                 )
             }
-            _ => (CMap::identity(), false, CodeText::Unknown),
+            _ => (CMap::identity(), false, CodeText::Unknown, None),
         };
-        let default = self
+        let width = self
             .get(cid_font, b"DW")?
             .and_then(|o| o.as_number())
             .unwrap_or(1000.0);
-        let mut widths = Vec::new();
-        if let Some(Object::Array(w)) = self.get(cid_font, b"W")? {
-            let items: Vec<Object> = w
+        let widths = self.cid_metric(cid_font, b"W", 1, width)?;
+        let vertical = if vertical {
+            // `/DW2` is [vy w1y], [880 -1000] when absent.
+            let displacement = match self.get(cid_font, b"DW2")? {
+                Some(Object::Array(dw2)) => dw2.get(1).and_then(Object::as_number),
+                _ => None,
+            }
+            .unwrap_or(-1000.0);
+            Some(self.cid_metric(cid_font, b"W2", 3, displacement)?)
+        } else {
+            None
+        };
+        Ok(Kind::Composite {
+            cmap,
+            widths,
+            vertical,
+            code_text,
+            collection,
+        })
+    }
+
+    /// The metric `key` of a `CIDFont` states, `default` for any `CID` it does not list: `/W`, one number a `CID`
+    /// (its width w0), or `/W2`, three (w1y vx vy), of which the displacement w1y is read. (The position vector
+    /// (vx, vy) places the glyph's outline off its vertical origin; text is placed by the origin and the
+    /// displacement, so it is not read.) A list is `c [v ...]`, a run `c_first c_last v`.
+    fn cid_metric(
+        &self,
+        cid_font: &Dict,
+        key: &[u8],
+        per: usize,
+        default: f64,
+    ) -> Result<CidMetric> {
+        let mut runs = Vec::new();
+        if let Some(Object::Array(array)) = self.get(cid_font, key)? {
+            let items: Vec<Object> = array
                 .iter()
                 .map(|i| self.resolve(i).unwrap_or(Object::Null))
                 .collect();
@@ -751,37 +868,41 @@ impl File {
                 };
                 match &items[i + 1] {
                     Object::Array(list) => {
-                        for (cid, width) in (first..).zip(list.iter()) {
-                            widths.push((
-                                cid,
-                                cid,
-                                self.resolve(width)?.as_number().unwrap_or(default),
-                            ));
+                        for (cid, values) in (first..).zip(list.chunks(per)) {
+                            let value = self.resolve(&values[0])?.as_number().unwrap_or(default);
+                            runs.push((cid, cid, value));
                         }
                         i += 2;
                     }
                     last => {
-                        let (Some(last), Some(width)) = (
+                        let (Some(last), Some(value)) = (
                             last.as_integer().and_then(|v| u32::try_from(v).ok()),
                             items.get(i + 2).and_then(Object::as_number),
                         ) else {
                             break;
                         };
-                        widths.push((first, last, width));
-                        i += 3;
+                        runs.push((first, last, value));
+                        i += 2 + per;
                     }
                 }
             }
         }
-        Ok((
-            Kind::Composite {
-                cmap,
-                widths,
-                default,
-                code_text,
+        Ok(CidMetric { runs, default })
+    }
+
+    /// Adobe's table of the collection a `CIDFont`'s `/CIDSystemInfo` names, when there is one.
+    fn collection(&self, cid_font: &Dict) -> Result<Option<&'static Collection>> {
+        let Some(Object::Dict(info)) = self.get(cid_font, b"CIDSystemInfo")? else {
+            return Ok(None);
+        };
+        Ok(
+            match (self.get(&info, b"Registry")?, self.get(&info, b"Ordering")?) {
+                (Some(Object::String(registry)), Some(Object::String(ordering))) => {
+                    Collection::named(&registry, &ordering)
+                }
+                _ => None,
             },
-            vertical,
-        ))
+        )
     }
 }
 
@@ -879,6 +1000,14 @@ mod tests {
         );
         assert!(base14("CMR10").is_none());
     }
+
+    #[test]
+    fn a_standard_font_measures_its_ligatures() {
+        let times = base14("Times-Roman").unwrap();
+        assert_eq!(standard_width(times, Some("\u{FB01}")), Some(556.0));
+        assert_eq!(standard_width(times, Some("\u{FB02}")), Some(556.0));
+    }
+
     fn info(name: &str) -> FontInfo {
         FontInfo {
             name: name.to_string(),
@@ -956,19 +1085,27 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_code_decodes_as_its_encoding() {
+    fn a_code_reads_as_unicode_or_as_its_legacy_encoding() {
         assert_eq!(
-            code_as_text(CodeText::Legacy(encoding_rs::GBK), 0xC4E3, 2).as_deref(),
+            legacy_text(CodeText::Legacy(encoding_rs::GBK), 0xC4E3, 2).as_deref(),
             Some("\u{4F60}")
         );
         assert_eq!(
-            code_as_text(CodeText::Legacy(encoding_rs::SHIFT_JIS), 0x82A0, 2).as_deref(),
+            legacy_text(CodeText::Legacy(encoding_rs::SHIFT_JIS), 0x82A0, 2).as_deref(),
             Some("\u{3042}")
         );
         assert_eq!(
-            code_as_text(CodeText::Utf16, 0x3B1, 2).as_deref(),
+            unicode_text(CodeText::Utf16, 0x3B1, 2).as_deref(),
             Some("\u{3B1}")
         );
-        assert_eq!(code_as_text(CodeText::Unknown, 0x41, 2), None);
+        assert_eq!(
+            unicode_text(CodeText::Utf16, 0xD840_DC0B, 4).as_deref(),
+            Some("\u{2000B}")
+        );
+        assert_eq!(
+            unicode_text(CodeText::Legacy(encoding_rs::GBK), 0x41, 1),
+            None
+        );
+        assert_eq!(legacy_text(CodeText::Unknown, 0x41, 2), None);
     }
 }

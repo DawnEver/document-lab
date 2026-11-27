@@ -2,7 +2,8 @@
 
 import pytest
 
-from document_lab.capture.desktop import Region, _edited, recall, remember, size_label
+from document_lab.capture.desktop import _edited, recall, remember, size_label
+from document_lab.capture.screen import Region
 
 BOX = Region(100, 200, 300, 150)
 

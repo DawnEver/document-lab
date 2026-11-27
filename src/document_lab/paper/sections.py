@@ -2,6 +2,7 @@
 
 import re
 
+from document_lab.markdown import back_matter
 from document_lab.paper.text import RN_PATTERN as _RN
 from document_lab.paper.text import strip_formatting
 
@@ -11,7 +12,6 @@ _KEEP_HEADINGS = re.compile(r'result|experiment|evaluat|ablat|comparison', re.IG
 # Match: "III. INTERFERENCE MITIGATION..." — no $ anchor because body text
 # may leak onto the same line in 2-column IEEE converter output.
 _ROMAN_HEADING_RE = re.compile(rf'^({_RN})\.\s+([A-Z][A-Z\s,/-]{{4,}})')
-_STANDALONE_RE = re.compile(r'^(ACKNOWLEDGMENT|REFERENCES|APPENDIX|CONCLUSION)S?\s*$')
 _CLEAN_HEADING_RE = re.compile(r'^((?:I{1,3}V?|VI{1,3}|IX|X{1,3}V?I{0,2})\.)')
 
 
@@ -73,8 +73,8 @@ def _split_plaintext(md: str) -> list[tuple[str, str]]:
             i += 1
             continue
 
-        # Standalone ALL-CAPS section: ACKNOWLEDGMENT, REFERENCES, etc.
-        if _STANDALONE_RE.match(stripped):
+        # Standalone back matter: REFERENCES, Acknowledgments, etc.
+        if back_matter(stripped):
             if in_preamble and current_body:
                 sections.append(('', '\n'.join(current_body).strip()))
             elif not in_preamble and current_body:
@@ -182,7 +182,7 @@ def classify_section(heading: str, body: str) -> str:
     clean_heading = re.sub(r'[*#]', '', heading).strip()
 
     # A recognized section heading is a section however short its body (a one-line acknowledgment).
-    if _ROMAN_HEADING_RE.match(clean_heading) or _STANDALONE_RE.match(clean_heading):
+    if _ROMAN_HEADING_RE.match(clean_heading) or back_matter(clean_heading):
         return 'keep'
 
     # diagram sub-labels: (a), (b), (c), (d) — never real sections

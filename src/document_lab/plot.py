@@ -3,7 +3,8 @@
 :func:`plots` reads the VECTOR plots of a page; :func:`raster_plot` reads one plot from pixels (:class:`Raster`).
 Every :class:`Curve` says which (``basis``); a raster curve carries one pixel's extent in data units per point.
 
-A plot here is an axis-aligned rectangular frame with numeric tick labels below it (x) and left of it (y). A label
+A plot here is an axis-aligned rectangular frame (stroked, or a filled rectangle as a design tool draws it) with
+numeric tick labels below it (x) and left of it (y). A label
 is text, or glyph outlines / stroke-font polylines / pixels read by shape (:mod:`document_lab.glyphs`, which refuses
 rather than guesses); stroke-font lettering that reads is never a curve. Each
 label's position is snapped to the tick mark or grid line it labels when one is drawn, else its box center is
@@ -23,6 +24,17 @@ array) whose ends meet (to ``JOIN_DIGITS`` decimals) become one, unless more tha
 there (ambiguous, left unjoined). A short horizontal curve (at most ``SAMPLE_MAX`` long) with a text span starting
 within ``SAMPLE_GAP`` right of it, at its height, is a legend sample: it goes to ``Plot.legend`` with that text,
 not to ``Plot.curves``.
+
+A data point drawn as a TEXT glyph (one of ``MARK_GLYPHS``, a filled span of its own whose center is inside the
+frame) is a marker at the center of its glyph box. The reader boxes a glyph by its font's ascent and descent across
+its advance, not by its ink, so a marker's ink may sit off its center by up to half that box (``Markers.size``).
+Markers of one glyph and fill are split into series by the curves joining them: two markers are one series when one
+curve has a vertex within half a glyph box of each; the markers no curve reaches form one series of their own (a
+scatter). A white glyph is an OPEN marker (it fills an outline drawn around it), its own series by its fill. A glyph
+is a legend entry, not a point, when it sits on a legend sample line (it takes that sample's label) or when no curve
+reaches it and a text span starts within ``SAMPLE_GAP`` right of it, at its height (a data glyph at a curve's end
+beside an annotation stays a point). Mark glyphs the reader joined into one span (set side by side on one baseline)
+do not state where each stands: the page raises :class:`JoinedMarkers` rather than drop or guess them.
 
 In :func:`plots`, a frame whose curves are a RASTER image raises :class:`RasterPlot` (a silent empty result would
 read as "this plot has no curves"): read it with :func:`raster_plot` over ``pdf.read_raster``. A page on which
@@ -51,7 +63,7 @@ from document_lab.glyphs import (
     Glyph,
     UnreadableGlyph,
     has_letter,
-    rasterise,
+    rasterize,
     read_number,
     read_word,
     stroke,
@@ -60,13 +72,15 @@ from document_lab.ir import BBox, Page, Provenance, Raster, TextSpan, VectorPath
 from document_lab.numbers import parse_number
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
 __all__ = [
     'Axis',
     'Basis',
     'Curve',
+    'JoinedMarkers',
     'LegendSample',
+    'Markers',
     'NoCurveOfColor',
     'NoPlotFrame',
     'Plot',
@@ -125,6 +139,10 @@ JOIN_DIGITS: Final = 2
 SAMPLE_MAX: Final = 40.0
 #: The widest gap (points) between a legend sample line and its label.
 SAMPLE_GAP: Final = 10.0
+#: Text glyphs that draw a data point: filled and open circle, triangles, square, diamond, star, crosses.
+MARK_GLYPHS: Final = frozenset(
+    '\u25cf\u25cb\u25b2\u25b3\u25bc\u25bd\u25a0\u25a1\u25c6\u25c7\u25ce\u2605\u2606\u00d7\u2715+\uff0b'
+)
 #: The largest glyph (points, either side) an outlined tick label is set in.
 GLYPH_MAX: Final = 12.0
 #: A glyph below this fraction of a word's height whose bottom sits above it by the rest is raised (an exponent).
@@ -190,6 +208,14 @@ class UnrecognizedFrame(ValueError):
     """
 
 
+class JoinedMarkers(ValueError):
+    """Mark glyphs inside a plot's frame were joined into one span: where each of them stands is not stated.
+
+    The reader joins glyphs set side by side on one baseline; dropping the span would lose data points silently,
+    and splitting it would guess their places.
+    """
+
+
 class NoCurveOfColor(ValueError):
     """A raster plot holds no curve of the color the caller asked :func:`raster_plot` for."""
 
@@ -250,14 +276,34 @@ class LegendSample:
 
 
 @dataclass(frozen=True, slots=True, eq=False)
+class Markers:
+    """Data points drawn as one text glyph in one fill, in data coordinates, ordered by x."""
+
+    glyph: str
+    fill: tuple[float, ...]
+    x: np.ndarray
+    y: np.ndarray
+    #: The glyphs' median box height (points), their font's descent to its ascent: a point stands at its box's
+    #: center, and its ink may sit off it by up to half of this.
+    size: float
+    #: The text of the series' legend entry, or ``None`` when the frame holds none.
+    label: str | None
+    provenance: Provenance
+
+
+@dataclass(frozen=True, slots=True, eq=False)
 class Plot:
-    """A calibrated frame, the curves inside it and its legend samples."""
+    """A calibrated frame, the curves and glyph-marker series inside it and its legend samples.
+
+    :func:`raster_plot` reads curves alone: a raster plot's legend and markers are empty because they are not read.
+    """
 
     frame: BBox
     x: Axis
     y: Axis
     curves: tuple[Curve, ...]
     legend: tuple[LegendSample, ...]
+    markers: tuple[Markers, ...]
     provenance: Provenance
 
 
@@ -350,8 +396,8 @@ def plots(
                 legend.append(LegendSample(label, path.stroke, path.width, path.dashes, path.provenance))
         curves = tuple(
             Curve(
-                x_axis.to_data(np.array([p[0] for p in path.points])),
-                y_axis.to_data(np.array([p[1] for p in path.points])),
+                x_axis.to_data(path.points[:, 0]),
+                y_axis.to_data(path.points[:, 1]),
                 path.provenance,
                 (x_axis.scale, y_axis.scale),
                 path.stroke,
@@ -363,9 +409,12 @@ def plots(
             )
             for path in paths
         )
-        if not curves:
+        markers = _markers(page, frame, (paths, legend, words), (x_axis, y_axis))
+        if not curves and not markers:
             _refuse_raster(page, frame)
-        found.append(Plot(frame, x_axis, y_axis, curves, tuple(legend), page.paths[0].provenance.at(bbox=frame)))
+        found.append(
+            Plot(frame, x_axis, y_axis, curves, tuple(legend), markers, page.paths[0].provenance.at(bbox=frame))
+        )
     if not found and stroked:
         named = '; '.join(
             f'{tuple(round(v, 1) for v in frame)} (first at {tuple(round(v, 1) for v in box)})'
@@ -391,11 +440,13 @@ def _dashes(paths: Sequence[VectorPath]) -> list[_Edge]:
     A short flat segment of a longer path is part of a curve (one continuing past the frame under the PDF clip, or
     crossing the label row), never a minus: DMEGC and SIFERRIT curves read so negated a tick label.
     """
-    small = [p.provenance.bbox for p in paths if p.provenance.bbox is not None and _glyph_sized(p.provenance.bbox)]
+    small = _Shapes(
+        [p.provenance.bbox for p in paths if p.provenance.bbox is not None and _glyph_sized(p.provenance.bbox)]
+    )
     out = []
     for path in paths:
         box = path.provenance.bbox
-        if box is not None and box.width <= DASH_MAX + AXIS_TOL and box.height <= RULE_MAX and not _stacked(box, small):
+        if box is not None and box.width <= DASH_MAX + AXIS_TOL and box.height <= RULE_MAX and not small.stacked(box):
             out.extend(e for e in _edges([path]) if not e.vertical and e.length <= DASH_MAX)
     return out
 
@@ -405,15 +456,38 @@ def _glyph_sized(box: BBox) -> bool:
     return box.width <= 2 * DASH_MAX and box.height <= 2 * DASH_MAX
 
 
-def _stacked(box: BBox, small: Sequence[BBox]) -> bool:
-    """Whether another glyph-sized shape lies across ``box`` within ``STACK_GAP`` above or below it."""
-    return any(
-        other != box
-        and other.x0 < box.x1
-        and other.x1 > box.x0
-        and (0 <= box.y0 - other.y1 <= STACK_GAP or 0 <= other.y0 - box.y1 <= STACK_GAP)
-        for other in small
-    )
+class _Shapes:
+    """Glyph-sized shapes' boxes on a grid of ``2 * DASH_MAX`` cells: a box finds its neighbors in a few cells.
+
+    A page may draw 100k of them (a meshed figure), in rows of thousands: no box visits every other.
+    """
+
+    #: The grid's cell side (points): a shape is at most this across, so it covers at most two cells each way.
+    _CELL: Final = 2 * DASH_MAX
+
+    def __init__(self, boxes: Sequence[BBox]) -> None:
+        self._cells: dict[tuple[int, int], list[BBox]] = defaultdict(list)
+        for box in boxes:
+            for cell in self._covering(box.x0, box.y0, box.x1, box.y1):
+                self._cells[cell].append(box)
+
+    def _covering(self, x0: float, y0: float, x1: float, y1: float) -> Iterator[tuple[int, int]]:
+        cell = self._CELL
+        for i in range(math.floor(x0 / cell), math.floor(x1 / cell) + 1):
+            for j in range(math.floor(y0 / cell), math.floor(y1 / cell) + 1):
+                yield i, j
+
+    def stacked(self, box: BBox) -> bool:
+        """Whether another shape lies across ``box`` within ``STACK_GAP`` above or below it."""
+        near = self._covering(box.x0, box.y0 - STACK_GAP, box.x1, box.y1 + STACK_GAP)
+        return any(
+            other != box
+            and other.x0 < box.x1
+            and other.x1 > box.x0
+            and (0 <= box.y0 - other.y1 <= STACK_GAP or 0 <= other.y0 - box.y1 <= STACK_GAP)
+            for cell in near
+            for other in self._cells.get(cell, ())
+        )
 
 
 def _refuse_unread(
@@ -511,24 +585,48 @@ def _on_a_mark(center: float, half: float, marks: Sequence[float]) -> bool:
 
 
 def _edges(paths: Sequence[VectorPath]) -> list[_Edge]:
-    """Every axis-parallel stroked segment, and every thin filled rectangle (a rule drawn as a fill)."""
+    """Every axis-parallel stroked segment and every thin filled rectangle (a rule drawn as a fill).
+
+    A filled rectangle large enough to frame a plot gives its four sides: a design tool draws a frame as a fill.
+    """
     out = []
     for path in paths:
         if path.stroke is None:
             box = path.provenance.bbox
-            if path.closed and box is not None and min(box.width, box.height) <= RULE_MAX:
+            if not path.closed or box is None:
+                continue
+            if min(box.width, box.height) <= RULE_MAX:
                 if box.height > box.width:
                     out.append(_Edge(vertical=True, at=(box.x0 + box.x1) / 2, lo=box.y0, hi=box.y1))
                 else:
                     out.append(_Edge(vertical=False, at=(box.y0 + box.y1) / 2, lo=box.x0, hi=box.x1))
+            elif min(box.width, box.height) >= MIN_FRAME and _is_rectangle(path, box):
+                out.extend(
+                    (
+                        _Edge(vertical=False, at=box.y0, lo=box.x0, hi=box.x1),
+                        _Edge(vertical=False, at=box.y1, lo=box.x0, hi=box.x1),
+                        _Edge(vertical=True, at=box.x0, lo=box.y0, hi=box.y1),
+                        _Edge(vertical=True, at=box.x1, lo=box.y0, hi=box.y1),
+                    )
+                )
             continue
-        points = (*path.points, path.points[0]) if path.closed else path.points
-        for (x0, y0), (x1, y1) in itertools.pairwise(points):
+        points = _closed(path) if path.closed else path.points
+        for (x0, y0), (x1, y1) in itertools.pairwise(points.tolist()):
             if abs(x0 - x1) <= AXIS_TOL < abs(y0 - y1):
                 out.append(_Edge(vertical=True, at=(x0 + x1) / 2, lo=min(y0, y1), hi=max(y0, y1)))
             elif abs(y0 - y1) <= AXIS_TOL < abs(x0 - x1):
                 out.append(_Edge(vertical=False, at=(y0 + y1) / 2, lo=min(x0, x1), hi=max(x0, x1)))
     return out
+
+
+def _is_rectangle(path: VectorPath, box: BBox) -> bool:
+    """The path visits the four corners of its own box and nothing else: an axis-aligned rectangle."""
+    corners = [(x, y) for x in (box.x0, box.x1) for y in (box.y0, box.y1)]
+    hit = {
+        next((k for k, (cx, cy) in enumerate(corners) if abs(x - cx) <= AXIS_TOL and abs(y - cy) <= AXIS_TOL), None)
+        for x, y in path.points
+    }
+    return hit == set(range(len(corners)))
 
 
 def _frames(edges: Sequence[_Edge]) -> list[BBox]:
@@ -662,17 +760,24 @@ def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, str 
         and min(p.provenance.bbox.width, p.provenance.bbox.height) >= SLIVER
     ]
     shapes.sort(key=lambda p: -p.provenance.bbox.width * p.provenance.bbox.height)
-    glyphs: list[tuple[BBox, list[tuple[tuple[float, float], ...]]]] = []
+    glyphs: list[tuple[BBox, list[np.ndarray]]] = []
+    # Each glyph's index on a grid of GLYPH_MAX cells (a glyph covers at most two each way): a shape's host is the
+    # first glyph holding its center, found among those in the center's cell, not among every glyph of the page.
+    cells: dict[tuple[int, int], list[int]] = defaultdict(list)
     for shape in shapes:
         box = shape.provenance.bbox
         cx, cy = (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2
-        host = next((g for g in glyphs if g[0].contains(cx, cy) and g[0] != box), None)
+        near = cells.get((math.floor(cx / GLYPH_MAX), math.floor(cy / GLYPH_MAX)), ())
+        host = next((glyphs[k] for k in near if glyphs[k][0].contains(cx, cy) and glyphs[k][0] != box), None)
         if host is None:
+            for i in range(math.floor(box.x0 / GLYPH_MAX), math.floor(box.x1 / GLYPH_MAX) + 1):
+                for j in range(math.floor(box.y0 / GLYPH_MAX), math.floor(box.y1 / GLYPH_MAX) + 1):
+                    cells[i, j].append(len(glyphs))
             glyphs.append((box, [shape.points]))
         else:
             host[1].append(shape.points)
     glyphs = _dotted([g for g in glyphs if not (len(g[1]) == 1 and _arrowhead(g[1][0], g[0]))])
-    return _read_words([Glyph(rasterise(polys, tuple(box)), tuple(box)) for box, polys in glyphs], HELVETICA)
+    return _read_words([Glyph(rasterize(polys, tuple(box)), tuple(box)) for box, polys in glyphs], HELVETICA)
 
 
 def _stroke_words(paths: Sequence[VectorPath]) -> tuple[list[tuple[float | None, str | None, BBox]], set[int]]:
@@ -690,7 +795,7 @@ def _stroke_words(paths: Sequence[VectorPath]) -> tuple[list[tuple[float | None,
     for group in _stroke_groups(paths):
         box = union([p.provenance.bbox for p in group])
         if max(box.width, box.height) <= GLYPH_MAX:
-            drawn = [(p.points + p.points[:1]) if p.closed else p.points for p in group]
+            drawn = [_closed(p) if p.closed else p.points for p in group]
             glyph = Glyph(stroke(drawn, max(p.width or 0.0 for p in group)), tuple(box))
             if not (_solid_triangle(glyph.ink) and not _reads(glyph)):
                 glyphs.append(glyph)
@@ -855,7 +960,7 @@ def _turned(glyph: Glyph) -> Glyph:
     return Glyph(np.rot90(glyph.ink, k=-1), (-y1, x0, -y0, x1))
 
 
-def _arrowhead(points: Sequence[tuple[float, float]], box: BBox) -> bool:
+def _arrowhead(points: np.ndarray, box: BBox) -> bool:
     """Whether a glyph's one fill is a triangle: an arrowhead (SIFERRIT N48 p4 heads its axis-title arrow so).
 
     Only a fill with no hole: a ``4``'s counter is a triangle too. Corners closer than ``CORNER_MERGE`` of the
@@ -863,15 +968,15 @@ def _arrowhead(points: Sequence[tuple[float, float]], box: BBox) -> bool:
     """
     reach = CORNER_MERGE * max(box.width, box.height)
     corners: list[tuple[float, float]] = []
-    for x, y in points:
+    for x, y in points.tolist():
         if all(math.hypot(x - cx, y - cy) > reach for cx, cy in corners):
             corners.append((x, y))
     return len(corners) == 3  # noqa: PLR2004 -- a triangle
 
 
 def _dotted(
-    glyphs: list[tuple[BBox, list[tuple[tuple[float, float], ...]]]],
-) -> list[tuple[BBox, list[tuple[tuple[float, float], ...]]]]:
+    glyphs: list[tuple[BBox, list[np.ndarray]]],
+) -> list[tuple[BBox, list[np.ndarray]]]:
     """Each small mark just above a taller glyph whose extent across holds its center, joined to it (an ``i``'s dot).
 
     Just above is a gap of at most ``DOT_GAP`` of the glyph's height; the joined glyph is read as one shape.
@@ -1253,12 +1358,13 @@ def _clipped(path: VectorPath, frame: BBox) -> list[VectorPath]:
     A sheet draws a curve past its frame and clips it there (DMEGC): the part inside is the curve. A path wholly
     inside (to ``EDGE_TOL``) is returned as it is.
     """
-    if all(frame.contains(x, y, tol=EDGE_TOL) for x, y in path.points):
+    (x0, y0), (x1, y1) = path.points.min(axis=0), path.points.max(axis=0)
+    if frame.contains(x0, y0, tol=EDGE_TOL) and frame.contains(x1, y1, tol=EDGE_TOL):
         return [path]
     box = frame
     runs: list[list[tuple[float, float]]] = []
     current: list[tuple[float, float]] = []
-    for a, b in itertools.pairwise(path.points):
+    for a, b in itertools.pairwise(map(tuple, path.points.tolist())):
         cut = _clip_segment(a, b, box)
         if cut is None:
             if current:
@@ -1278,7 +1384,14 @@ def _clipped(path: VectorPath, frame: BBox) -> list[VectorPath]:
     if current:
         runs.append(current)
     return [
-        VectorPath(tuple(run), path.stroke, path.width, path.dashes, False, path.provenance.at(bbox=_points_box(run)))  # noqa: FBT003
+        VectorPath(
+            _polyline(run),
+            path.stroke,
+            path.width,
+            path.dashes,
+            closed=False,
+            provenance=path.provenance.at(bbox=_points_box(run)),
+        )
         for run in runs
         if len(run) >= 2 and run[0] != run[-1]  # noqa: PLR2004 -- a curve needs two points
     ]
@@ -1308,6 +1421,18 @@ def _clip_segment(
     return start, end
 
 
+def _polyline(points: Sequence[tuple[float, float]] | np.ndarray) -> np.ndarray:
+    """``points`` as a :class:`VectorPath` holds them: an ``(n, 2)`` float64 array, read-only."""
+    out = np.array(points, dtype=np.float64).reshape(-1, 2)
+    out.flags.writeable = False
+    return out
+
+
+def _closed(path: VectorPath) -> np.ndarray:
+    """A closed path's points with its start repeated at the end: the closing segment drawn."""
+    return np.vstack((path.points, path.points[:1]))
+
+
 def _points_box(points: Sequence[tuple[float, float]]) -> BBox:
     xs, ys = [p[0] for p in points], [p[1] for p in points]
     return BBox(min(xs), min(ys), max(xs), max(ys))
@@ -1320,7 +1445,7 @@ def _joined(paths: Sequence[VectorPath]) -> list[VectorPath]:
     """
     ends: dict[tuple, list[tuple[int, int]]] = defaultdict(list)
     for i, path in enumerate(paths):
-        for end, (x, y) in ((0, path.points[0]), (1, path.points[-1])):
+        for end, (x, y) in enumerate(path.points[[0, -1]].tolist()):
             ends[(path.stroke, path.width, path.dashes, round(x, JOIN_DIGITS), round(y, JOIN_DIGITS))].append((i, end))
     link = {}
     for meeting in ends.values():
@@ -1334,12 +1459,12 @@ def _joined(paths: Sequence[VectorPath]) -> list[VectorPath]:
             continue
         i = start
         enter = 1 if (i, 0) in link and (i, 1) not in link else 0
-        members, points = [], []
+        members, runs = [], []
         while i not in seen:
             seen.add(i)
             members.append(paths[i])
             run = paths[i].points if enter == 0 else paths[i].points[::-1]
-            points.extend(run if not points else run[1:])
+            runs.append(run if not runs else run[1:])
             nxt = link.get((i, 1 - enter))
             if nxt is None:
                 break
@@ -1350,7 +1475,14 @@ def _joined(paths: Sequence[VectorPath]) -> list[VectorPath]:
             continue
         box = union([m.provenance.bbox for m in members if m.provenance.bbox is not None])
         out.append(
-            VectorPath(tuple(points), first.stroke, first.width, first.dashes, False, first.provenance.at(bbox=box))  # noqa: FBT003
+            VectorPath(
+                _polyline(np.vstack(runs)),
+                first.stroke,
+                first.width,
+                first.dashes,
+                closed=False,
+                provenance=first.provenance.at(bbox=box),
+            )
         )
     return out
 
@@ -1360,12 +1492,108 @@ def _sample_label(path: VectorPath, spans: Sequence[TextSpan]) -> str | None:
     box = path.provenance.bbox
     if box is None or box.width > SAMPLE_MAX or box.height > EDGE_TOL:
         return None
+    return _text_right_of(box, spans)
+
+
+def _text_right_of(box: BBox, spans: Sequence[TextSpan]) -> str | None:
+    """The text of a span (not a mark glyph) starting within ``SAMPLE_GAP`` right of ``box``, at its height."""
     y = (box.y0 + box.y1) / 2
     for span in spans:
-        sb = span.provenance.bbox
-        if sb is not None and box.x1 <= sb.x0 <= box.x1 + SAMPLE_GAP and sb.y0 <= y <= sb.y1:
-            return span.text.strip()
+        sb, text = span.provenance.bbox, span.text.strip()
+        if (
+            sb is not None
+            and text not in MARK_GLYPHS
+            and box.x1 <= sb.x0 <= box.x1 + SAMPLE_GAP
+            and sb.y0 <= y <= sb.y1
+        ):
+            return text
     return None
+
+
+def _markers(
+    page: Page,
+    frame: BBox,
+    found: tuple[Sequence[VectorPath], Sequence[LegendSample], Sequence[TextSpan]],
+    axes: tuple[Axis, Axis],
+) -> tuple[Markers, ...]:
+    """The mark glyphs inside ``frame`` as series: per glyph and fill, split by the curves joining them.
+
+    ``found`` is the frame's curves, its legend samples and the page's words (a legend label may be outlined).
+    """
+    paths, legend, words = found
+    groups: dict[tuple[str, tuple[float, ...]], list[TextSpan]] = defaultdict(list)
+    labels: dict[tuple[str, tuple[float, ...]], str] = {}
+    for span in page.spans:
+        glyph, box = span.text.strip(), span.provenance.bbox
+        if span.fill is None or box is None or not frame.contains(*span.center):
+            continue
+        if len(glyph) > 1 and set(glyph.replace(' ', '')) <= MARK_GLYPHS:
+            msg = (
+                f'page {page.number}: the mark glyphs {glyph!r} at {tuple(round(v, 1) for v in box)}, inside the '
+                f'plot framed at {tuple(round(v, 1) for v in frame)}, were joined into one span: where each '
+                'stands is not stated'
+            )
+            raise JoinedMarkers(msg)
+        if glyph not in MARK_GLYPHS:
+            continue
+        key = (glyph, span.fill)
+        sample = next((e.label for e in legend if e.provenance.bbox and _on(span, e.provenance.bbox)), None)
+        if sample is None and not any(_near(span, path) for path in paths):
+            sample = _text_right_of(box, words)
+        if sample is None:
+            groups[key].append(span)
+        else:
+            labels.setdefault(key, sample)
+    out = []
+    for (glyph, fill), spans in groups.items():
+        for members in _series(spans, paths):
+            members.sort(key=lambda m: m.center[0])
+            px, py = np.array([m.center[0] for m in members]), np.array([m.center[1] for m in members])
+            boxes = [m.provenance.bbox for m in members if m.provenance.bbox is not None]
+            size = float(np.median([b.height for b in boxes]))
+            here = members[0].provenance.at(bbox=union(boxes))
+            label = labels.get((glyph, fill))
+            out.append(Markers(glyph, fill, axes[0].to_data(px), axes[1].to_data(py), size, label, here))
+    return tuple(out)
+
+
+def _reach(span: TextSpan) -> float:
+    """How far (points) a glyph's ink may sit from its box's center: half the box's height."""
+    box = span.provenance.bbox
+    return 0.0 if box is None else box.height / 2
+
+
+def _on(span: TextSpan, box: BBox) -> bool:
+    """Whether the glyph's center lies on ``box`` (a legend sample line), within its reach."""
+    return box.contains(*span.center, _reach(span))
+
+
+def _near(span: TextSpan, path: VectorPath) -> bool:
+    """Whether ``path`` has a vertex within the glyph's reach of its center: the curve runs through the marker."""
+    cx, cy = span.center
+    return any(math.hypot(x - cx, y - cy) <= _reach(span) for x, y in path.points)
+
+
+def _series(spans: Sequence[TextSpan], paths: Sequence[VectorPath]) -> list[list[TextSpan]]:
+    """``spans`` grouped by the curves joining them; the ones no curve reaches together (a scatter)."""
+    parent = list(range(len(spans)))
+
+    def root(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    reached: set[int] = set()
+    for path in paths:
+        on = [i for i, span in enumerate(spans) if _near(span, path)]
+        reached.update(on)
+        for i in on[1:]:
+            parent[root(i)] = root(on[0])
+    groups: dict[int, list[TextSpan]] = defaultdict(list)
+    for i, span in enumerate(spans):
+        groups[root(i) if i in reached else -1].append(span)
+    return list(groups.values())
 
 
 def _is_rule(edge: _Edge, frame: BBox) -> bool:
@@ -1458,7 +1686,7 @@ def raster_plot(
         for mask in masks
     )
     curves = tuple(c for c in traced if c.x.size)  # ink whose every run is half hidden yields no clean sample
-    return Plot(frame, x_axis, y_axis, curves, (), raster.provenance.at(bbox=frame))
+    return Plot(frame, x_axis, y_axis, curves, (), (), raster.provenance.at(bbox=frame))
 
 
 def _dark_edges(ink: np.ndarray, dark: np.ndarray, box: BBox, scale: tuple[float, float]) -> list[_Edge]:

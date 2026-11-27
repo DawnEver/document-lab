@@ -11,6 +11,8 @@ license = "MIT AND BSD-3-Clause"
 license-files = ["LICENSE", "crates/pdf/src/cid2unicode/LICENSE.txt", "crates/pdf/src/cmaps/LICENSE.txt"]
 description = "Documents (PDF, HTML tables) to typed data that carries its provenance"
 readme = "README.md"
+# The family Python (dev_lab.dev.pythontoolchain), rendered here as in every family repo; the ceiling is the
+# one-interpreter ruling of 2026-11-27, not a resolver bound.
 requires-python = ">=3.14,<3.15"
 authors = [{ name = "Mingyang Bao" }]
 # The package's own Rust crates (`document_lab._pdf`) read PDFs, render them to pixels and write captures and OCR

@@ -152,9 +152,7 @@ def _drawn(tmp_path, entries: str, data: bytes, *, mupdf: bool = False) -> np.nd
     path = tmp_path / 'jpx.pdf'
     path.write_bytes(_page(entries, data))
     reading = 'mupdf' if mupdf else 'standard'
-    return read_raster(
-        path, 1, BBox(0, 0, 60, 40), dpi=72, jpx_decode=reading, jpx_opacity=reading
-    ).pixels
+    return read_raster(path, 1, BBox(0, 0, 60, 40), dpi=72, jpx_decode=reading, jpx_opacity=reading).pixels
 
 
 def _off(drawn: np.ndarray, truth: np.ndarray) -> int:

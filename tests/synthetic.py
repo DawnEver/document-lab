@@ -379,7 +379,7 @@ def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
             _tick(page, spec, (px, f.y1), (px, f.y1 - 4))
         if spec.grid and not (spec.filled_frame and i in (0, len(spec.x.ticks) - 1)):
             cuts = [f.y0, *(f.y0 + k * f.height for gap in spec.grid_gaps for k in gap), f.y1]
-            for top, bottom in itertools.batched(cuts, 2):
+            for top, bottom in itertools.batched(cuts, 2, strict=True):
                 page.draw_line((px, top), (px, bottom), color=(spec.grid_grey,) * 3, width=0.3)
         _x_label(page, spec, spec.x.labels[i] if spec.x.labels else _label(v), px)
     _y_axis(page, spec)

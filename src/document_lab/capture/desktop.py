@@ -506,7 +506,7 @@ def recall(screen: Region, path: Path) -> Region | None:
     """The last area confirmed, if one was and it still lies wholly on ``screen`` (monitors change); else None."""
     try:
         shown = Region(**json.loads(path.read_text(encoding='utf-8')))
-    except (OSError, ValueError, TypeError):  # none yet, or not one this code wrote: nothing to open on
+    except OSError, ValueError, TypeError:  # none yet, or not one this code wrote: nothing to open on
         return None
     inside = (
         shown.width > 0

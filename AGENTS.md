@@ -42,7 +42,7 @@ consumer's vocabulary here -- schemas live in consumers. Modules and usage: `REA
 - A value the document does not state is absent, a raster plot raises, an ambiguous match refuses: never a
   silent default.
 - No pymupdf4llm: markdown is written from the IR (`markdown.py`). The dev extra's `pymupdf<2` because 2.x
-  requires pymupdf4llm and onnxruntime (no cp315 wheel); the venv is the family's Python 3.15.
+  requires pymupdf4llm and onnxruntime (no cp315 wheel); the venv is the family's Python 3.14.
 - Verdicts: `.venv/Scripts/python.exe -m dev_lab.dev.verify -- <paths>`. Family files are rendered
   (`tests/architecture/_famconfig.py`, `python -m dev_lab.dev.famfiles`, `python -m dev_lab.dev.ciworkflows render`).
 - Design record: `.claude/memory/2026/11/05/`.

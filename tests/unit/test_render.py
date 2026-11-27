@@ -474,7 +474,6 @@ def test_the_own_renderer_refuses_a_region_holding_what_it_cannot_draw_by_name(t
     read_raster(path, 1, BBox(120, 0, 200, 150), dpi=DPI)
 
 
-
 #: An 8 x 6 stencil mask's samples (rows top-down; 0 paints) and where it is placed (O45): its width, height and
 #: lower-left corner in pixels at :data:`DPI`. The page is 312.5 pixels tall there, so whole pixels up are half pixels
 #: down: every sample edge of the first lies half a pixel off the grid, the 2.3 % a stencil measured off before.

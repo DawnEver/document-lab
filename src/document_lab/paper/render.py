@@ -6,9 +6,6 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import numpy as np
-import pymupdf
-
 from document_lab import formula, layout, png
 from document_lab.ir import BBox
 from document_lab.paper.crop import crop_figure, get_equation_context
@@ -24,6 +21,8 @@ from document_lab.pdf import read_pdf, read_raster
 from document_lab.regions import equation, regions
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from document_lab.formula import Transcribe
     from document_lab.ir import Document, Page
     from document_lab.pdf import Renderer
@@ -71,22 +70,21 @@ class _Located:
 RENDER_DPI = 144.0
 
 
-def _render(pdf: Path, read: Document, page_num: int, img_path: Path, crop: BBox | None, renderer: Renderer) -> None:
-    """The page, or its ``crop``, rendered by ``renderer`` at :data:`RENDER_DPI` to ``img_path`` (once)."""
+def _render(
+    pdf: Path, read: Document, page_num: int, img_path: Path, crop: BBox | None, renderer: Renderer
+) -> np.ndarray | None:
+    """The page, or its ``crop``, rendered by ``renderer`` at :data:`RENDER_DPI` to ``img_path`` (once).
+
+    Returns the pixels written -- a PNG is lossless, so they are the file's -- or None when ``img_path`` was there.
+    """
     if img_path.exists():
-        return
+        return None
     page = read.pages[page_num]
     region = crop or BBox(0.0, 0.0, page.width, page.height)
     pixels = read_raster(pdf, page_num + 1, region, dpi=RENDER_DPI, renderer=renderer).pixels
     img_path.parent.mkdir(parents=True, exist_ok=True)
     img_path.write_bytes(png.encode(pixels))
-
-
-def _pixels(img_path: Path) -> np.ndarray:
-    """The RGB pixels of a rendered crop, as written (`document_lab.png`: a gray one's level in each channel)."""
-    pix = pymupdf.Pixmap(str(img_path))
-    pixels = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-    return np.repeat(pixels, 3, axis=2) if pix.n == 1 else pixels[..., :3]
+    return pixels
 
 
 def _render_one_equation(
@@ -98,18 +96,21 @@ def _render_one_equation(
     img_path: Path,
     located: _Located | None,
     renderer: Renderer,
-) -> None:
-    """Equation ``(eq_num)`` of page ``page_num`` of ``paper`` (read without its running lines) to ``img_path``."""
+) -> np.ndarray | None:
+    """Equation ``(eq_num)`` of page ``page_num`` of ``paper`` (read without its running lines) to ``img_path``.
+
+    Returns the pixels written (:func:`_render`); None when none were: the file was there, or the equation not found.
+    """
     if img_path.exists():
-        return
+        return None
     page = paper.pages[page_num]
     if is_full_page_image(page):  # a picture page: where its text locates the number, if it does
         crop = located.crop(page_num, f'({eq_num})') if located is not None else None
     else:
         crop = equation(page, eq_num, face)
     if crop is None:
-        return  # equation position not found on page; skip
-    _render(pdf, paper, page_num, img_path, crop, renderer)
+        return None  # equation position not found on page; skip
+    return _render(pdf, paper, page_num, img_path, crop, renderer)
 
 
 # ── Markdown insertion helpers ────────────────────────────────────────────────
@@ -443,10 +444,10 @@ def render_equation_images(
 
         img_name = f'page-{page_num + 1:02d}-{eq_label.lower().replace(" ", "-")}.png'
         img_path = out_dir / 'img' / f'sec{owning:02d}' / img_name
-        _render_one_equation(pdf_path, paper, face, page_num, eq_num, img_path, located, renderer)
+        written = _render_one_equation(pdf_path, paper, face, page_num, eq_num, img_path, located, renderer)
         figure_images[eq_label] = f'img/sec{owning:02d}/{img_name}'
-        if transcribe is not None and img_path.exists():
-            latex[eq_label] = formula.beside(transcribe(_pixels(img_path)), eq_num)
+        if transcribe is not None and written is not None:
+            latex[eq_label] = formula.beside(transcribe(written), eq_num)
 
     # Build context (lead-in + formula text) for equations that may lack (N) in markdown
     eq_context: dict[str, tuple[str | None, str | None]] = {}

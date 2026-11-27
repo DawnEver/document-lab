@@ -49,8 +49,9 @@ MODELS: Final[dict[str, tuple[str, str]]] = {
     'texteller': ('OleehyO/TexTeller', '7b96df06b9d81cdb129c3bef68b7250bc3e2b0ea'),  # 2024-06-22, TexTeller 3
     'codeformula-v2': ('docling-project/CodeFormulaV2', 'ecedbe111d15c2dc60bfd4a823cbe80127b58af4'),  # 2025-08-11
 }
-#: An equation crop's RGB pixels (rows, columns, 3; uint8) to its LaTeX; None where the model gives no reading: a
-#: blank crop, or a reading that never ends (it repeats until the token budget runs out, measured on 2% of crops).
+#: An equation crop's pixels as written (`document_lab.png`: rows, columns and 3 RGB channels, or rows and columns
+#: of gray; uint8) to its LaTeX; None where the model gives no reading: a blank crop, or a reading that never ends
+#: (it repeats until the token budget runs out, measured on 2% of crops).
 Transcribe = Callable[[np.ndarray], str | None]
 #: What stands beside a crop the model gave no reading of: never silently nothing.
 UNREAD: Final = '<!-- formulas: no LaTeX read from this crop (blank, or the reading never ended) -->'
@@ -58,6 +59,7 @@ UNREAD: Final = '<!-- formulas: no LaTeX read from this crop (blank, or the read
 _MAX_TOKENS: Final = 1024  # a reading longer than this never ended
 _BORDER: Final = 15  # gray levels from the background color a pixel must differ by to be ink
 _GRAY: Final = np.array([0.2989, 0.587, 0.114])  # ITU-R 601-2, as torchvision's Grayscale
+_GRAY_AXES: Final = 2  # a gray crop's: rows and columns, no channel axis
 
 # TexTeller's own inference transform (texteller/constants.py, utils/image.py): grayscale, the background border
 # trimmed, scaled to fit a 448-pixel square, normalized by its training images' mean and spread, padded at the right
@@ -106,7 +108,9 @@ def transcriber(formulas: Formulas, *, model: Model = 'texteller', device: str |
 
 def _ink(pixels: np.ndarray) -> np.ndarray | None:
     """The crop's gray levels (0..255) cut to its ink; None for a blank crop (its corners' one color throughout)."""
-    gray = pixels[..., :3].astype(np.float64) @ _GRAY
+    gray = pixels.astype(np.float64)
+    if gray.ndim != _GRAY_AXES:
+        gray = gray[..., :3] @ _GRAY
     corners = (gray[0, 0], gray[0, -1], gray[-1, 0], gray[-1, -1])
     background = Counter(np.round(corners)).most_common(1)[0][0]
     rows, cols = np.nonzero(np.abs(gray - background) > _BORDER)
@@ -169,7 +173,8 @@ def _codeformula(repo: str, revision: str, device: str) -> Transcribe:
     def transcribe(pixels: np.ndarray) -> str | None:
         if _ink(pixels) is None:
             return None
-        inputs = processor(text=[prompt], images=[np.ascontiguousarray(pixels[..., :3])], return_tensors='pt')
+        rgb = np.repeat(pixels[..., None], 3, axis=2) if pixels.ndim == _GRAY_AXES else pixels[..., :3]
+        inputs = processor(text=[prompt], images=[np.ascontiguousarray(rgb)], return_tensors='pt')
         inputs = inputs.to(model.device)
         with torch.inference_mode():
             ids = model.generate(**inputs, max_new_tokens=_MAX_TOKENS, do_sample=False)

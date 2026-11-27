@@ -37,7 +37,26 @@ def test_scrolls_to_the_end_and_stops_there():
     image = tall(1234)
     view = Viewport(image, 300, 170)
     assert np.array_equal(run(view), image)
-    assert view.scrolls == 7  # 6 moves, then one that did not move
+    assert view.scrolls == 8  # 6 moves, then one that did not move, sent once more before it is taken for the end
+
+
+class DroppingViewport(Viewport):
+    """A view whose desktop drops scroll number ``dropped``: the input never reaches it (macOS lost a wheel)."""
+
+    def __init__(self, *args, dropped: int, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.dropped = dropped
+
+    def scroll(self, notches: int = 1) -> None:
+        if self.scrolls + 1 == self.dropped:
+            self.scrolls += 1
+            return
+        super().scroll(notches)
+
+
+def test_a_scroll_the_desktop_dropped_is_not_the_end():
+    image = tall(1234)
+    assert np.array_equal(run(DroppingViewport(image, 300, 170, dropped=3)), image)
 
 
 def test_waits_for_the_view_to_settle():

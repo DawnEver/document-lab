@@ -13,6 +13,7 @@ it, every stitched row reaches ``sink`` and the :class:`Capture` says why it sto
 
 from __future__ import annotations
 
+import functools
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
@@ -46,7 +47,9 @@ class Settling:
 
     A view that has not moved is looked at once more after ``end_wait`` seconds before it is taken for the end: a
     scroll the application handles late (a posted message, a busy view) shows two equal frames first, and a page that
-    loads more as it nears its end (an infinite feed) needs that long to grow.
+    loads more as it nears its end (an infinite feed) needs that long to grow. Still unmoved, the scroll is sent once
+    more and looked at the same way: a desktop may drop an input (macOS loses a wheel now and then), and a dropped
+    scroll looks exactly like the end.
     """
 
     interval: float = 0.12
@@ -187,13 +190,28 @@ def _recover(
 
 
 def _moved(
-    stitcher: Stitcher, grab: Callable[[], np.ndarray], settling: Settling, sleep: Callable[[float], None], gap: float
+    stitcher: Stitcher,
+    grab: Callable[[], np.ndarray],
+    settling: Settling,
+    sleep: Callable[[float], None],
+    gap: float,
+    *,
+    again: Callable[[], None],
 ) -> int:
-    """The rows the settled view moved, looked at once more after ``end_wait`` when none: 0 is the end."""
-    if moved := stitcher.add(_settled(grab, settling, sleep, gap)):
-        return moved
-    sleep(settling.end_wait)
-    return stitcher.add(_settled(grab, settling, sleep, gap))
+    """The rows the settled view moved: 0 is the end.
+
+    None, it is looked at once more after ``end_wait``; still none, the scroll is sent ``again`` and looked at the
+    same way -- a dropped input looks exactly like the end.
+    """
+    for resend in (False, True):
+        if resend:
+            again()
+        if moved := stitcher.add(_settled(grab, settling, sleep, gap)):
+            return moved
+        sleep(settling.end_wait)
+        if moved := stitcher.add(_settled(grab, settling, sleep, gap)):
+            return moved
+    return 0
 
 
 class _Blocked(Exception):
@@ -369,7 +387,8 @@ def capture(
             step(pacing.notches)
             last = stitcher.last
             try:
-                if not (moved := _moved(stitcher, grab, settling, sleep, pacing.gap)):
+                again = functools.partial(step, pacing.notches)  # the desktop may have dropped the input
+                if not (moved := _moved(stitcher, grab, settling, sleep, pacing.gap, again=again)):
                     break
                 pacing.placed_step(moved, len(first))
                 lapses = 0

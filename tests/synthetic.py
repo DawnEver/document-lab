@@ -6,6 +6,7 @@ is a known function sampled at known points, so a digitizer that is wrong cannot
 
 from __future__ import annotations
 
+import functools
 import math
 import re
 from dataclasses import dataclass, field, replace
@@ -26,6 +27,10 @@ FRAME = pymupdf.Rect(100, 100, 400, 300)
 RED = (1, 0, 0)
 BLUE = (0, 0, 1)
 FONT_SIZE = 8
+#: The size (points) of a marker glyph, as small as the sheets' marks.
+MARK_SIZE = 5
+#: The PDF font name the marker glyphs are set in (PyMuPDF's CJK font, which holds the geometric shapes).
+MARK_FONT = 'mark'
 
 
 @dataclass
@@ -84,6 +89,12 @@ class PlotSpec:
     legend: Sequence[tuple[str, tuple[float, float, float], str | None]] = ()
     #: Tick labels drawn in the stroke font (:func:`stroke_text`): polylines only, no text, as TDK SIFERRIT N72 does.
     stroke_font: bool = False
+    #: The frame is a filled, unstroked rectangle with grid lines inside it only, as sheets drawn in a design tool are.
+    filled_frame: bool = False
+    #: Data points drawn as a text glyph centered on each: (glyph, [(x, y), ...], color).
+    markers: Sequence[tuple[str, Sequence[tuple[float, float]], tuple[float, float, float]]] = ()
+    #: Legend entries inside the frame's top left: (glyph, label, color), the glyph with its label just right of it.
+    marker_legend: Sequence[tuple[str, str, tuple[float, float, float]]] = ()
 
 
 def to_page(spec: PlotSpec, x: float, y: float) -> tuple[float, float]:
@@ -235,6 +246,8 @@ def _draw_frame(page: pymupdf.Page, spec: PlotSpec) -> None:
         lines = ((f.tl, f.tr), ((f.x0 - o, f.y1), f.br), (f.tl, (f.x0, f.y1 + o)), (f.tr, f.br))
         for a, b in lines:
             page.draw_line(a, b, color=(0, 0, 0), width=0.8)
+    elif spec.filled_frame:
+        page.draw_rect(f, color=None, fill=(0.95, 0.95, 0.95), width=0)
     elif spec.frame_as_lines:
         for a, b in ((f.tl, f.tr), (f.bl, f.br), (f.tl, f.bl), (f.tr, f.br)):
             page.draw_line(a, b, color=(0, 0, 0), width=0.8)
@@ -288,7 +301,7 @@ def _y_axis(page: pymupdf.Page, spec: PlotSpec) -> None:
         _, py = to_page(spec, spec.x.ticks[0], v)
         if spec.tick_marks:
             page.draw_line((f.x0, py), (f.x0 + 4, py), color=(0, 0, 0), width=0.5)
-        if spec.grid:
+        if spec.grid and not (spec.filled_frame and i in (0, len(spec.y.ticks) - 1)):
             page.draw_line((f.x0, py), (f.x0 + spec.grid_reach * f.width, py), color=(spec.grid_grey,) * 3, width=0.3)
         py += spec.y.label_drop
         text = spec.y.labels[i] if spec.y.labels else _label(v)
@@ -324,7 +337,7 @@ def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
         px, _ = to_page(spec, v, spec.y.ticks[0])
         if spec.tick_marks:
             page.draw_line((px, f.y1), (px, f.y1 - 4), color=(0, 0, 0), width=0.5)
-        if spec.grid:
+        if spec.grid and not (spec.filled_frame and i in (0, len(spec.x.ticks) - 1)):
             page.draw_line((px, f.y0), (px, f.y1), color=(spec.grid_grey,) * 3, width=0.3)
         _x_label(page, spec, spec.x.labels[i] if spec.x.labels else _label(v), px)
     _y_axis(page, spec)
@@ -344,6 +357,49 @@ def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
         x = spec.frame.x1 - 80
         page.draw_line((x, y), (x + 20, y), color=color, width=1.0, dashes=dashes)
         page.insert_text((x + 24, y + FONT_SIZE * 0.35), text, fontname='helv', fontsize=FONT_SIZE)
+    _draw_marks(page, spec)
+
+
+@functools.cache
+def _ink(glyph: str) -> tuple[float, float]:
+    """The center of ``glyph``'s ink at `MARK_SIZE` relative to its text origin, measured on a rendered pixmap.
+
+    Rendering measures the drawn shape without the reader, so a planted center is not the reader's own answer.
+    """
+    zoom, origin = 40, (10.0, 20.0)
+    doc = pymupdf.open()
+    page = doc.new_page(width=30, height=30)
+    page.insert_font(fontname=MARK_FONT, fontbuffer=pymupdf.Font('cjk').buffer)
+    page.insert_text(origin, glyph, fontname=MARK_FONT, fontsize=MARK_SIZE)
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), colorspace=pymupdf.csGRAY)
+    ink = np.frombuffer(pix.samples, np.uint8).reshape(pix.h, pix.w) < 128  # mid-gray
+    rows, cols = np.nonzero(ink)
+    center = ((cols.min() + cols.max() + 1) / 2 / zoom, (rows.min() + rows.max() + 1) / 2 / zoom)
+    return (center[0] - origin[0], center[1] - origin[1])
+
+
+def mark_box_height() -> float:
+    """The height (points) of a marker glyph's font box at `MARK_SIZE`: its font's descent to its ascent."""
+    font = pymupdf.Font('cjk')
+    return MARK_SIZE * (font.ascender - font.descender)
+
+
+def draw_mark(page: pymupdf.Page, glyph: str, cx: float, cy: float, color: tuple[float, float, float]) -> None:
+    """``glyph`` set as text with its ink centered on (``cx``, ``cy``)."""
+    dx, dy = _ink(glyph)
+    page.insert_font(fontname=MARK_FONT, fontbuffer=pymupdf.Font('cjk').buffer)
+    page.insert_text((cx - dx, cy - dy), glyph, fontname=MARK_FONT, fontsize=MARK_SIZE, color=color)
+
+
+def _draw_marks(page: pymupdf.Page, spec: PlotSpec) -> None:
+    for glyph, points, color in spec.markers:
+        for x, y in points:
+            draw_mark(page, glyph, *to_page(spec, x, y), color)
+    for k, (glyph, text, color) in enumerate(spec.marker_legend):
+        y = spec.frame.y0 + 12 + 12 * k
+        x = spec.frame.x0 + 20
+        draw_mark(page, glyph, x, y, color)
+        page.insert_text((x + 5, y + FONT_SIZE * 0.35), text, fontname='helv', fontsize=FONT_SIZE)
 
 
 def plot_pdf(path: Path, *specs: PlotSpec, outlined: bool = False) -> Path:
@@ -363,7 +419,7 @@ def plot_pdf(path: Path, *specs: PlotSpec, outlined: bool = False) -> Path:
     return path
 
 
-#: Points around the frame a rasterised plot keeps, so its tick labels are inside the image.
+#: Points around the frame a rasterized plot keeps, so its tick labels are inside the image.
 RASTER_MARGIN = 40.0
 
 
@@ -533,6 +589,24 @@ def mixed_pdf(path: Path) -> Path:
     page.insert_text((72, 715), 'Figure 1. A blue square.', fontname='helv', fontsize=9)
     page2 = doc.new_page(width=612, height=792)
     page2.draw_polyline([(100, 100), (200, 150), (300, 120)], color=RED, width=1.5)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+#: A run of text on a synthetic page: its baseline's left end (x, y), its text, its PyMuPDF font name and its size.
+type Run = tuple[float, float, str, str, float]
+
+
+def text_pdf(path: Path, pages: Sequence[Sequence[Run]], bars: Sequence[Sequence[pymupdf.Rect]] = ()) -> Path:
+    """Letter pages of runs of text, each where it is placed, and filled bars (a fraction's): every box is known."""
+    doc = pymupdf.open()
+    for number, runs in enumerate(pages):
+        page = doc.new_page(width=612, height=792)
+        for x, y, text, font, size in runs:
+            page.insert_text((x, y), text, fontname=font, fontsize=size)
+        for bar in bars[number] if number < len(bars) else ():
+            page.draw_rect(bar, color=None, fill=(0, 0, 0))
     doc.save(path)
     doc.close()
     return path

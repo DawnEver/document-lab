@@ -4,6 +4,9 @@ marker is never chosen for the caller: surya 0.23, its OCR, needs a model server
 a ``llama-server``), and marker is GPL-3.0 with model weights under a non-commercial license. Its remaining value over
 the IR path is equations as LaTeX and an ML layout, so it stays an option (``tool='marker'``) that refuses by name
 when its server is missing (D54).
+
+The IR path writes the paper without its running heads and feet (`document_lab.layout.without_running`): a journal's
+name and a page number repeated at every page's edge are no part of its text.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
 
+from document_lab import layout
 from document_lab.markdown import to_markdown
 from document_lab.pdf import read_pdf
 
@@ -137,7 +141,10 @@ def convert(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> tuple[str,
     choice = choose_tool(tool)
     flat = out_dir / 'img' / 'flat'
     flat.mkdir(parents=True, exist_ok=True)
-    return (_run_marker(pdf, out_dir) if choice.tool == 'marker' else to_markdown(read_pdf(pdf))), choice
+    markdown = (
+        _run_marker(pdf, out_dir) if choice.tool == 'marker' else to_markdown(layout.without_running(read_pdf(pdf)))
+    )
+    return markdown, choice
 
 
 def _run_marker(pdf: Path, out_dir: Path) -> str:

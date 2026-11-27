@@ -8,8 +8,10 @@ windowNumberAtPoint``); the Accessibility API brings a window to the front for `
 Coordinates are Quartz points, the space Tk places its windows in; a grab is taken one pixel a point
 (``kCGWindowImageNominalResolution``), so a grab of a region is the region's size on a Retina display too, and is
 color-matched from the color space macOS gives it in to sRGB, the space a PDF's RGB is read in. A window's content
-area is its frame less the title bar AppKit draws on a titled window: a program that draws into its own title bar
-loses that strip from a window capture -- mark a region for it.
+area is what the program draws and macOS shows untouched: its frame less the title bar AppKit draws on a titled
+window, less the edge the window server draws over -- a ring along its sides and bottom, and its rounded bottom
+corners. A program that draws into its own title bar loses that strip from a window capture, and every window its
+outermost pixels -- mark a region for them.
 
 Two privacy permissions gate it, each refused by name with where to grant it (:func:`problem`): Screen Recording to
 read other programs' windows, Accessibility to send them input (asked only when the capture scrolls for the user).
@@ -32,6 +34,7 @@ import numpy as np
 from document_lab.capture.screen import SCROLL_METHODS, Region, Window
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 __all__ = ['census', 'client', 'grab', 'monitors', 'open_file', 'owned', 'problem', 'scroll', 'window', 'windows']
@@ -53,6 +56,11 @@ _RGBX: Final = 5  # kCGImageAlphaNoneSkipLast, default byte order: R, G, B, then
 _RGBA: Final = 1  # kCGImageAlphaPremultipliedLast, default byte order: R, G, B (times A), then A, in memory
 _COPY: Final = 17  # kCGBlendModeCopy: the picture's pixels replace the bitmap's, never blended onto them
 _NO_INTERPOLATION: Final = 1  # kCGInterpolationNone
+#: Points: the border the window server draws just inside a window's left, right and bottom edges, over the
+#: program's pixels. It is opaque, so the window's alpha does not show it (measured on macOS 26: one point, tinted).
+_RING: Final = 1
+_PROBE: Final = 64  # points: the bottom of a window read for its rounded corners, at most
+_NOTCH_GAP: Final = 0.01  # seconds between a wheel's notches: each its own event, none merged with the next
 FRONT_TRIES: Final = 5  # tries to bring a window to the front before it is refused
 _SCREEN_RECORDING: Final = (
     'macOS has not let this program record the screen: in System Settings > Privacy & Security > Screen & System '
@@ -340,9 +348,44 @@ def problem(*, sends_input: bool) -> str | None:
 
 
 def client(window: Window) -> Region:
-    """``window``'s content area in points: its frame less the title bar."""
+    """``window``'s content area in points: what the program draws and macOS shows untouched.
+
+    Its frame less the title bar, less the edge the window server draws over the program's pixels: the :data:`_RING`
+    along its sides and, at its bottom, the rows its rounded corners take (:func:`_bottom`).
+    """
     frame, bar = _info(window).bounds, _title_bar()
-    return Region(frame.left, frame.top + bar, frame.width, max(frame.height - bar, 0))
+    height = max(frame.height - bar, 0)
+    bottom = _bottom(window.handle, frame) if height and frame.width else 0
+    return Region(frame.left + _RING, frame.top + bar, max(frame.width - 2 * _RING, 0), max(height - bottom, 0))
+
+
+@functools.lru_cache(maxsize=64)
+def _bottom(handle: int, frame: Region) -> int:
+    """The rows at the bottom of window ``handle``, at ``frame``, the window server draws over (:func:`_corner_rows`).
+
+    Read from the window's own picture, once for each place and size it has.
+    """
+    rows = min(_PROBE, frame.height)
+    rect = _Rect(_Point(frame.left, frame.top + frame.height - rows), _Size(frame.width, rows))
+    image = _cg().CGWindowListCreateImage(rect, _INCLUDING_WINDOW, handle, _NOMINAL_RESOLUTION)
+    if not image:
+        msg = f'macOS gave no picture of window {handle}: {_SCREEN_RECORDING}'
+        raise OSError(msg)
+    try:
+        return _corner_rows(_pixels(image, frame.width, rows, _srgb(), alpha=True)[..., 3])
+    finally:
+        _cg().CGImageRelease(image)
+
+
+def _corner_rows(alpha: np.ndarray) -> int:
+    """The rows at the bottom of a window's picture whose ``alpha`` its rounded corners cut, and at least the ring.
+
+    A rounded corner leaves its outermost column short of opaque up from the bottom edge for as many rows as it is
+    tall; the border the window server draws along its curve lies within them (measured on macOS 26: corners 24 rows,
+    their border 20). A window whose sides are short of opaque all the way up gives every row read.
+    """
+    cut = (alpha[:, 0] < 255) | (alpha[:, -1] < 255)  # noqa: PLR2004 -- opaque
+    return max(len(cut) if cut.all() else int(np.argmin(cut[::-1])), _RING)
 
 
 def _shown() -> list[_Info]:
@@ -521,11 +564,19 @@ def _cursor() -> _Point:
         _cf().CFRelease(event)
 
 
-def _wheel(notches: int, x: int, y: int) -> int:
-    """A wheel event of ``notches`` lines (down when > 0) at ``x, y``; the caller releases it."""
-    event = _cg().CGEventCreateScrollWheelEvent2(None, _LINE, 1, -notches, 0, 0)
-    _cg().CGEventSetLocation(event, _Point(x, y))
-    return event
+def _wheel(notches: int, x: int, y: int, post: Callable[[int], None]) -> None:
+    """``notches`` wheel notches (down when > 0) at ``x, y``, each handed to ``post`` as its own one-line event.
+
+    One event a notch, as a wheel sends them: Tk 9 on macOS scrolls one notch for an event of any number of lines, so a
+    capture pacing its steps by notches would double them until the event's delta overflows (2**16 lines: nothing).
+    """
+    cg, cf = _cg(), _cf()
+    for _ in range(abs(notches)):
+        event = cg.CGEventCreateScrollWheelEvent2(None, _LINE, 1, -1 if notches > 0 else 1, 0, 0)
+        cg.CGEventSetLocation(event, _Point(x, y))
+        post(event)
+        cf.CFRelease(event)
+        time.sleep(_NOTCH_GAP)
 
 
 def _copy(element: int, attribute: str) -> int | None:
@@ -597,7 +648,7 @@ def _bring_to_front(window: Window) -> None:
 
 
 def scroll(target: Window | Region, notches: int, method: str) -> None:
-    """Scroll the view under ``target``'s center ``notches`` lines (or arrow presses): down, up if < 0."""
+    """Scroll the view under ``target``'s center ``notches`` wheel notches (or arrow presses): down, up if < 0."""
     if method not in SCROLL_METHODS:
         msg = f'scroll method {method!r} is not one of {SCROLL_METHODS}'
         raise ValueError(msg)
@@ -608,9 +659,7 @@ def scroll(target: Window | Region, notches: int, method: str) -> None:
         _require_on_top(target, x, y)
         was = _cursor()
         cg.CGWarpMouseCursorPosition(_Point(x, y))
-        event = _wheel(notches, x, y)
-        cg.CGEventPost(_HID_TAP, event)
-        cf.CFRelease(event)
+        _wheel(notches, x, y, lambda event: cg.CGEventPost(_HID_TAP, event))
         time.sleep(0.05)  # the wheel goes to the window under the pointer when it is processed
         cg.CGWarpMouseCursorPosition(was)
     elif method == 'message':
@@ -618,9 +667,7 @@ def scroll(target: Window | Region, notches: int, method: str) -> None:
         if under is None:
             msg = f'no window is under the middle of {target} ({_nobody(x, y)})'
             raise OSError(msg)
-        event = _wheel(notches, x, y)
-        cg.CGEventPostToPid(under.pid, event)
-        cf.CFRelease(event)
+        _wheel(notches, x, y, lambda event: cg.CGEventPostToPid(under.pid, event))
     else:
         under = _under(x, y)
         if not isinstance(target, Window) and under is None:

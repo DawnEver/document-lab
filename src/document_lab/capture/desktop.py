@@ -205,6 +205,7 @@ class _Overlay:
         self.cursor = 'crosshair'  # the canvas's, as last set
         self.edit: tuple[str, Region] | None = None  # the part held and the box when the press took it
         self.confirmed: Window | Region | None = None
+        self.answered = False  # confirmed or cancelled: set by :meth:`answer`
         self.root = tk.Tk()
         self.root.withdraw()  # unmapped until it is set up: the picture is grabbed without it
         self.live = self.root.tk.call('tk', 'windowingsystem') == 'win32'
@@ -228,7 +229,7 @@ class _Overlay:
         ):
             self.canvas.bind(sequence, handler)
         self.root.bind('<Return>', self.confirm)
-        self.root.bind('<Escape>', lambda _: self.root.quit())
+        self.root.bind('<Escape>', lambda _: self.answer())
         for key, (dx, dy) in {'Left': (-1, 0), 'Right': (1, 0), 'Up': (0, -1), 'Down': (0, 1)}.items():
             self.root.bind(f'<{key}>', lambda _, dx=dx, dy=dy: self.nudge(dx, dy))
             self.root.bind(f'<Shift-{key}>', lambda _, dx=dx, dy=dy: self.nudge(10 * dx, 10 * dy))
@@ -285,7 +286,7 @@ class _Overlay:
         ):
             glass.bind(sequence, handler)
         glass.bind('<Return>', self.confirm)
-        glass.bind('<Escape>', lambda _: self.root.quit())
+        glass.bind('<Escape>', lambda _: self.answer())
         glass.withdraw()
         return glass
 
@@ -294,7 +295,7 @@ class _Overlay:
         window.overrideredirect(boolean=True)
         window.attributes('-topmost', True)  # noqa: FBT003 -- Tk's own spelling
         window.bind('<Return>', self.confirm)
-        window.bind('<Escape>', lambda _: self.root.quit())
+        window.bind('<Escape>', lambda _: self.answer())
         return window
 
     def run(self) -> Window | Region | None:
@@ -304,7 +305,8 @@ class _Overlay:
             self.canvas.coords('backdrop', *self.local(self.screen.left, self.screen.top))
         if self.premarked is not None:
             self.root.after(_SHOWN_MS, self.mark, self.premarked)  # once the overlay is up and active
-        self.root.mainloop()
+        if not self.answered:  # an answer given while the overlay was set up stands (:meth:`answer`)
+            self.root.mainloop()
         # Destroyed only once the loop is left: destroying it inside a handler frees the canvas while the same event
         # still runs its other bindings on it (Tcl: "alloc: invalid block").
         self.root.destroy()
@@ -459,7 +461,16 @@ class _Overlay:
     def confirm(self, _: object = None) -> None:
         if self.marked is not None:
             self.confirmed = self.marked
-            self.root.quit()
+            self.answer()
+
+    def answer(self) -> None:
+        """End the selection -- confirmed, or (nothing confirmed) cancelled -- even before :meth:`run` enters its loop.
+
+        Tk's ``quit`` only leaves a loop already running: one an ``update`` meets first is undone when ``mainloop``
+        starts, which would then wait for nothing.
+        """
+        self.answered = True
+        self.root.quit()
 
 
 def select(memory: Path, marked: Window | Region | None = None) -> Window | Region:

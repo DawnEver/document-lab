@@ -9,10 +9,13 @@
 //!
 //! A text layer ([`Writer::copy_page_with_text`]) shows each word in render mode 3 -- invisible -- stretched over
 //! the box it is seen in, along the baseline it is seen on (a table set sideways, a scan fed askew), so selecting and
-//! reading the page find it there. Its font draws nothing and embeds
-//! nothing: a `Type0` font, `Identity-H`, whose every glyph is half an em wide (Tesseract's `GlyphLessFont`); each
-//! character met is given the next CID, and the font's `/ToUnicode` maps the CIDs back, so Latin, CJK and any other
-//! script are laid alike. One font serves the whole document, written when it is finished.
+//! reading the page find it there. Its font draws nothing and embeds nothing: a `CIDFontType2` whose every glyph is
+//! half an em wide and steps an em down a column (Tesseract's `GlyphLessFont`); each character met is given the next
+//! CID, and the `/ToUnicode` maps the CIDs back, so Latin, CJK and any other script are laid alike. A word written
+//! horizontally is shown through the `Type0` font over it by `Identity-H`, along the box's bottom; one written
+//! vertically (CJK set in columns) by `Identity-V`, writing mode 1 (ISO 32000-2 9.7.4.3): its characters stand
+//! upright and step down the box, so a reader reads it as vertical writing, not as text turned sideways. The fonts
+//! serve the whole document, written when it is finished.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -42,7 +45,7 @@ const BFCHAR_BLOCK: usize = 100;
 pub const LEVEL: u8 = 6;
 
 /// A word of a text layer: its text, its box and the angle its baseline runs at, in page space (points, y down,
-/// origin at the top left of the page as displayed).
+/// origin at the top left of the page as displayed), and how it is written.
 #[derive(Debug, Clone, Copy)]
 pub struct Word<'a> {
     /// The text.
@@ -53,11 +56,15 @@ pub struct Word<'a> {
     /// Degrees its baseline is turned from left to right, clockwise as seen: 0 level, -90 set bottom to top (a
     /// table printed sideways), a few degrees on a scan fed askew.
     pub angle: f64,
+    /// Whether it is written vertically: its characters stand upright down the box, read top to bottom.
+    pub vertical: bool,
 }
 
-/// The text layers' font: its object number, reserved when first used, and each character's CID (its place + 1).
+/// The text layers' fonts: the object number of each `Type0` font -- `Identity-H` written horizontally,
+/// `Identity-V` vertically -- reserved when a word first needs it, and each character's CID (its place + 1), which
+/// both share.
 struct LayerFont {
-    number: u32,
+    numbers: [Option<u32>; 2],
     cids: HashMap<char, u16>,
     chars: Vec<char>,
 }
@@ -290,24 +297,38 @@ impl<W: Write> Writer<W> {
             .and_then(Object::as_dict)
             .cloned()
             .unwrap_or_else(Dict::new);
-        let resource = (0..=fonts.len()) // one more name than there are fonts: one is free
+        self.font.get_or_insert_with(|| LayerFont {
+            numbers: [None, None],
+            cids: HashMap::new(),
+            chars: Vec::new(),
+        });
+        // A resource name for each way the words are written, free on the page: of two more names than there are
+        // fonts, two are free.
+        let mut free = (0..fonts.len() + 2)
             .map(|i| format!("OCR{i}").into_bytes())
-            .find(|n| fonts.get(n).is_none())
-            .expect("a free name");
-        if self.font.is_none() {
-            let number = self.reserve();
-            self.font = Some(LayerFont {
-                number,
-                cids: HashMap::new(),
-                chars: Vec::new(),
-            });
+            .filter(|n| fonts.get(n).is_none())
+            .collect::<Vec<_>>()
+            .into_iter();
+        let mut names: [Option<Vec<u8>>; 2] = [None, None];
+        for way in [false, true] {
+            if words.iter().any(|w| w.vertical == way) {
+                let known = self.font.as_ref().and_then(|f| f.numbers[usize::from(way)]);
+                let number = if let Some(number) = known {
+                    number
+                } else {
+                    let number = self.reserve();
+                    let font = self.font.as_mut().expect("made above");
+                    font.numbers[usize::from(way)] = Some(number);
+                    number
+                };
+                let resource = free.next().expect("a free name");
+                fonts.insert(resource.clone(), reference(number));
+                names[usize::from(way)] = Some(resource);
+            }
         }
-        let font = self.font.as_mut().expect("the font was just made");
-        fonts.insert(resource.clone(), reference(font.number));
-        let mut shows = format!(
-            "Q\nBT\n3 Tr\n/{} 1 Tf\n",
-            String::from_utf8_lossy(&resource)
-        );
+        let font = self.font.as_mut().expect("made above");
+        let mut shows = String::from("Q\nBT\n3 Tr\n");
+        let mut writing = None; // the way the font set writes
         let to_user = inverse(page.to_page_space());
         for word in words {
             let cids = word
@@ -315,24 +336,14 @@ impl<W: Write> Writer<W> {
                 .chars()
                 .map(|c| font.cid(c))
                 .collect::<Result<Vec<_>>>()?;
-            #[expect(clippy::cast_precision_loss, reason = "a word's length is small")]
-            let advance = cids.len() as f64 * ADVANCE / 1000.0;
-            let Rect { x0, y0, x1, y1 } = word.bbox;
-            // Text space, font size 1, onto the box: the baseline along its bottom, an em its height; then the box
-            // turned by the word's angle about its center.
-            let (sin, cos) = word.angle.to_radians().sin_cos();
-            let (cx, cy) = (f64::midpoint(x0, x1), f64::midpoint(y0, y1));
-            let turned = Matrix([
-                cos,
-                sin,
-                -sin,
-                cos,
-                sin.mul_add(cy, cos.mul_add(-cx, cx)),
-                cos.mul_add(-cy, sin.mul_add(-cx, cy)),
-            ]);
-            let Matrix(m) = Matrix([(x1 - x0) / advance, 0.0, 0.0, y0 - y1, x0, y1])
-                .then(turned)
-                .then(to_user);
+            if writing != Some(word.vertical) {
+                let resource = names[usize::from(word.vertical)]
+                    .as_ref()
+                    .expect("named above");
+                let _ = writeln!(shows, "/{} 1 Tf", String::from_utf8_lossy(resource));
+                writing = Some(word.vertical);
+            }
+            let Matrix(m) = onto(word, cids.len()).then(to_user);
             let m: Vec<String> = m.iter().map(|&v| real(v)).collect();
             let _ = write!(shows, "{} Tm <", m.join(" "));
             for cid in cids {
@@ -354,8 +365,9 @@ impl<W: Write> Writer<W> {
         Ok(replaced(&own, b"Contents", Object::Array(contents)))
     }
 
-    /// The text layers' font: a `Type0` font over a `CIDFontType2` that draws nothing, every glyph half an em wide,
-    /// and a `/ToUnicode` naming each CID's character.
+    /// The text layers' fonts: each `Type0` font a layer used -- `Identity-H`, `Identity-V` -- over one
+    /// `CIDFontType2` that draws nothing, every glyph half an em wide and stepping an em down a column, and one
+    /// `/ToUnicode` naming each CID's character.
     fn write_font(&mut self, font: &LayerFont) -> Result<()> {
         let (descendant, descriptor, to_unicode) = (self.reserve(), self.reserve(), self.reserve());
         let mut cmap = String::from(
@@ -399,19 +411,25 @@ impl<W: Write> Writer<W> {
         dict.insert(b"CIDSystemInfo".to_vec(), Object::Dict(system));
         dict.insert(b"FontDescriptor".to_vec(), reference(descriptor));
         dict.insert(b"DW".to_vec(), Object::Real(ADVANCE));
+        // Written vertically: the origin 880 above the glyph... and an em's step down; the default, stated.
+        dict.insert(b"DW2".to_vec(), numbers(&[880.0, -1000.0]));
         dict.insert(b"CIDToGIDMap".to_vec(), name(b"Identity"));
         self.object(descendant, &Object::Dict(dict))?;
-        let mut dict = Dict::new();
-        dict.insert(b"Type".to_vec(), name(b"Font"));
-        dict.insert(b"Subtype".to_vec(), name(b"Type0"));
-        dict.insert(b"BaseFont".to_vec(), name(GLYPHLESS));
-        dict.insert(b"Encoding".to_vec(), name(b"Identity-H"));
-        dict.insert(
-            b"DescendantFonts".to_vec(),
-            Object::Array(vec![reference(descendant)]),
-        );
-        dict.insert(b"ToUnicode".to_vec(), reference(to_unicode));
-        self.object(font.number, &Object::Dict(dict))
+        for (number, encoding) in font.numbers.iter().zip([b"Identity-H", b"Identity-V"]) {
+            let Some(number) = *number else { continue };
+            let mut dict = Dict::new();
+            dict.insert(b"Type".to_vec(), name(b"Font"));
+            dict.insert(b"Subtype".to_vec(), name(b"Type0"));
+            dict.insert(b"BaseFont".to_vec(), name(GLYPHLESS));
+            dict.insert(b"Encoding".to_vec(), name(encoding));
+            dict.insert(
+                b"DescendantFonts".to_vec(),
+                Object::Array(vec![reference(descendant)]),
+            );
+            dict.insert(b"ToUnicode".to_vec(), reference(to_unicode));
+            self.object(number, &Object::Dict(dict))?;
+        }
+        Ok(())
     }
 
     /// Write the text layers' font if a layer was laid, the page tree, the catalog and the cross-reference table,
@@ -601,6 +619,46 @@ impl LayerFont {
 }
 
 /// The matrix undoing `m`, which turns, flips and moves (a page's, never singular).
+/// From the text space of `word`, `length` glyphs shown at font size 1, onto its box in page space. Horizontally: the
+/// baseline along its bottom, an em its height, the advances its width. Vertically: the first glyph's vertical origin
+/// at its top center, an em its width, its height shared out among the em steps down. Then the box turned by the
+/// word's angle about its center.
+fn onto(word: &Word, length: usize) -> Matrix {
+    #[expect(clippy::cast_precision_loss, reason = "a word's length is small")]
+    let length = length as f64;
+    let Rect { x0, y0, x1, y1 } = word.bbox;
+    let level = if word.vertical {
+        Matrix([
+            x1 - x0,
+            0.0,
+            0.0,
+            (y0 - y1) / length,
+            f64::midpoint(x0, x1),
+            y0,
+        ])
+    } else {
+        Matrix([
+            (x1 - x0) / (length * ADVANCE / 1000.0),
+            0.0,
+            0.0,
+            y0 - y1,
+            x0,
+            y1,
+        ])
+    };
+    let (sin, cos) = word.angle.to_radians().sin_cos();
+    let (cx, cy) = (f64::midpoint(x0, x1), f64::midpoint(y0, y1));
+    let turned = Matrix([
+        cos,
+        sin,
+        -sin,
+        cos,
+        sin.mul_add(cy, cos.mul_add(-cx, cx)),
+        cos.mul_add(-cy, sin.mul_add(-cx, cy)),
+    ]);
+    level.then(turned)
+}
+
 fn inverse(m: Matrix) -> Matrix {
     let [xx, xy, yx, yy, dx, dy] = m.0;
     let det = xx * yy - xy * yx;

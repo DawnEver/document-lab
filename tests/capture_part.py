@@ -21,7 +21,7 @@ import pytest
 from document_lab.capture import desktop
 from document_lab.capture.screen import Region, Window
 from document_lab.capture.session import Limits, Rows, capture
-from tests.capture_viewer import HEIGHT, VIEW, picture
+from tests.capture_viewer import VIEW, WIDTH, picture
 
 VIEWER = Path(__file__).with_name('capture_viewer.py')
 LOCK = Path(__file__).resolve().parents[1] / 'output' / 'locks' / 'desktop.lock'
@@ -155,21 +155,24 @@ def child(script: str, *args: str, hang: int = HANG) -> subprocess.CompletedProc
 _NOISE: Final = 40  # the spread (standard deviation) of grey levels above which a grab shows the noise picture
 
 
-def shown(title: str, process: subprocess.Popen) -> Window:
-    """The viewer's window once it shows its whole view and its picture: the one its process owns, else the one titled
-    ``title``.
+def shown(title: str, process: subprocess.Popen) -> tuple[Window, tuple[int, int]]:
+    """The viewer's window once it shows its view and its picture -- the one its process owns, else the one titled
+    ``title`` -- and where on the screen its view starts.
 
-    By owner first: macOS names another program's windows only to a process granted Screen Recording. Its picture is
-    noise: a window still blank, all one color, is waited for (and named when it stays so).
+    By owner first: macOS names another program's windows only to a process granted Screen Recording. The window's
+    content area lies within the view, short of it by what the OS draws over at its edges (on macOS a ring and the
+    rounded corners). Its picture is noise: a window still blank, all one color, is waited for (and named when it
+    stays so).
     """
     pid = int(process.stdout.readline() or 0)
+    x, y = (int(v) for v in (process.stdout.readline().split() or (0, 0)))  # once the window is up
     system = desktop.system()
     deadline = time.monotonic() + 15
     whole: list[Window] = []
     while time.monotonic() < deadline and len(whole) != 1:
         with contextlib.suppress(OSError):  # a window closing while it is read
             found = system.owned(pid) or [w for w in system.windows() if w.title == title]
-            whole = [w for w in found if desktop.area(w).height == VIEW]
+            whole = [w for w in found if _within(desktop.area(w), Region(x, y, WIDTH, VIEW))]
         time.sleep(0.1)
     if len(whole) != 1:
         code = process.poll()
@@ -180,12 +183,34 @@ def shown(title: str, process: subprocess.Popen) -> Window:
         grabbed = system.grab(whole[0])
         if grabbed.std() > _NOISE:
             time.sleep(0.5)  # past the viewer's own redraw (``capture_viewer._redrawn``)
-            return whole[0]
+            return whole[0], (x, y)
         time.sleep(0.2)
     pytest.fail(
         f'the viewer window {title!r} appeared but never showed its picture: {_looks(grabbed)}; the screen there: '
         f'{_looks(system.grab(desktop.area(whole[0])))}{_census()}'
     )
+
+
+_EDGE_MOST: Final = 4  # the most of the view's height the OS may draw over at a window's edges: a quarter
+
+
+def _within(area: Region, view: Region) -> bool:
+    """Whether ``area`` lies within ``view`` and covers most of its height (it is the window laid out, not a sliver)."""
+    return (
+        view.left <= area.left
+        and view.top <= area.top
+        and area.left + area.width <= view.left + view.width
+        and area.top + area.height <= view.top + view.height
+        and area.height > view.height - view.height // _EDGE_MOST
+    )
+
+
+def _shows(picture: np.ndarray, area: Region, origin: tuple[int, int]) -> np.ndarray:
+    """What of ``picture`` a window's content ``area`` shows over a whole scroll, its view starting at ``origin``: the
+    columns it spans, and every row but those the edges above and below it keep from ever showing."""
+    dx, dy = area.left - origin[0], area.top - origin[1]
+    below = VIEW - dy - area.height
+    return picture[dy : len(picture) - below, dx : dx + area.width]
 
 
 def _looks(image: np.ndarray) -> str:
@@ -247,7 +272,8 @@ def viewer():
     with the_desktop():
         process = launched(title, seed)
         try:
-            yield shown(title, process), picture(seed)
+            window, origin = shown(title, process)
+            yield window, _shows(picture(seed), desktop.area(window), origin)
         finally:
             process.kill()
             process.wait()
@@ -270,14 +296,14 @@ def test_a_posted_wheel_places_every_row_it_captures(viewer):
     rows = Rows()
     done = capture(source.grab, source.scroll, rows)
     got = rows.image()
-    assert VIEW <= len(got) <= len(image), done
+    assert desktop.area(window).height <= len(got) <= len(image), done
     assert alike(got, image[: len(got)]), f'{done}\n{differences(got, image[: len(got)])}'
 
 
 def test_the_first_frame_is_the_view(viewer):
     window, image = viewer
-    got = desktop.system().grab(window)
-    assert alike(got, image[:VIEW]), differences(got, image[:VIEW], window)
+    got, view = desktop.system().grab(window), image[: desktop.area(window).height]
+    assert alike(got, view), differences(got, view, window)
 
 
 def test_a_region_is_the_screen_under_it(viewer):
@@ -331,7 +357,7 @@ def test_max_height_stops_early(viewer):
     rows = Rows()
     done = capture(source.grab, source.scroll, rows, limits=Limits(max_height=700))
     got = rows.image()
-    assert 700 <= len(got) < HEIGHT, done
+    assert 700 <= len(got) < len(image), done
     assert alike(got, image[: len(got)]), f'{done}\n{differences(got, image[: len(got)])}'
 
 
@@ -340,7 +366,7 @@ def test_a_wheel_onto_a_covered_window_refuses(viewer):
     title = f'document-lab capture cover {os.getpid()}'
     cover = launched(title, 8)  # opens at the same place, above the first
     try:
-        shown(title, cover)
+        shown(title, cover)  # over the first
         with pytest.raises(OSError, match='covers'):
             desktop.Source(window).scroll()
     finally:
@@ -457,6 +483,23 @@ print('ok')
     assert done.stdout.strip() == 'ok', done.stdout
 
 
+def test_an_answer_given_before_the_overlay_waits_is_kept():
+    """Regression: a confirm (or Esc) handled by an ``update`` before ``run`` entered Tk's loop was undone when the
+    loop started, and the overlay waited for nothing (macos-latest, 2026-11-27). Run in a `child`, so a wait fails."""
+    script = """
+from document_lab.capture import desktop
+from document_lab.capture.screen import Region
+o = desktop._Overlay(desktop.system().windows(), desktop.virtual_screen())
+o.mark(Region(150, 120, 400, 250))
+o.confirm()
+print(repr(o.run()))
+"""
+    with the_desktop():
+        done = child(script)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == repr(Region(150, 120, 400, 250)), done.stdout
+
+
 def test_adjusting_opens_the_overlay_with_the_area_set_already_marked():
     """Adjust reopens the selection on the area set: confirmed untouched, it comes back as it was."""
     script = """
@@ -482,6 +525,7 @@ __all__ = [
     'test_a_scrolled_window_is_captured_whole',
     'test_a_wheel_onto_a_covered_window_refuses',
     'test_adjusting_opens_the_overlay_with_the_area_set_already_marked',
+    'test_an_answer_given_before_the_overlay_waits_is_kept',
     'test_confirming_by_the_confirm_button_does_not_free_the_canvas_under_its_own_event',
     'test_max_height_stops_early',
     'test_nothing_is_taken_before_it_is_confirmed',

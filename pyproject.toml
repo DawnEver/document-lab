@@ -6,8 +6,9 @@ build-backend = "maturin"
 name = "document_lab"
 # The version is the Cargo workspace's (`Cargo.toml`), read by maturin; a release tag must match it.
 dynamic = ["version"]
-license = "MIT"
-license-files = ["LICENSE"]
+# MIT, and BSD-3-Clause for Adobe's tables the reader embeds: CID-to-Unicode and the predefined CMaps (crates/pdf/src).
+license = "MIT AND BSD-3-Clause"
+license-files = ["LICENSE", "crates/pdf/src/cid2unicode/LICENSE.txt", "crates/pdf/src/cmaps/LICENSE.txt"]
 description = "Documents (PDF, HTML tables) to typed data that carries its provenance"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -28,16 +29,17 @@ dependencies = [
 gpu = ["marker-pdf"]
 # Values a model reads out of a document (`document_lab.ai`), through the family's one model interface.
 ai = ["ai_lab @ git+https://github.com/DawnEver/ai-lab.git"]
-# `document_lab.capture` / `document-lab capture`: a window or screen region, scrolled and stitched, to a PDF. Windows
-# only, and it needs nothing beyond the base: ctypes drives the desktop, tkinter draws the region overlay, the
-# package's own writer (`document_lab._pdf`) writes the PDF. The extra names the capability so a consumer can depend on it explicitly.
-capture = []
+# `document_lab.capture` / `document-lab capture`: a window or screen region, scrolled and stitched, to a PDF, on
+# Windows, macOS and Linux (X11). ctypes drives the Windows desktop (user32) and the macOS one (Quartz), so they need
+# nothing; python-xlib speaks the X protocol on Linux, installed there alone. tkinter draws the overlay and the panel,
+# the package's own writer (`document_lab._pdf`) writes the PDF.
+capture = ["python-xlib; sys_platform == 'linux'"]
 # The family's development kit: rules registry, rendered configs, shared test bodies, verify entry.
 dev = [
     # The build backend: this repo's own tool, not the test kit's.
     "maturin>=1.7",
     "dev-lab[test] @ git+https://github.com/DawnEver/dev-lab.git",
-    "document_lab[ai]",
+    "document_lab[ai,capture]",
     "pytest",
     "ruff",
 ]
@@ -67,6 +69,8 @@ markers = [
     "papers: ingests the real papers in the directory DOCUMENT_LAB_PAPERS names: its own part (tests/paper/e2e), never tests/base",
     "reference: reads the real PDFs DOCUMENT_LAB_REFERENCE_PDFS names, against PyMuPDF: its own part (tests/reference), never tests/base",
     "windows: drives a real window on the Windows desktop: its own part (tests/windows), never tests/base",
+    "macos: drives a real window on the macOS desktop: its own part (tests/macos), never tests/base",
+    "linux: drives a real window on an X11 desktop on Linux: its own part (tests/linux), never tests/base",
     "ocr: lays a Tesseract text layer over a capture: its own part (tests/ocr), never tests/base",
     "corpus: reads real public PDFs fetched from their original URLs, pinned by sha256 (tests/corpus/sources.py): its own part (tests/corpus), never tests/base",
 ]
@@ -113,17 +117,24 @@ output = "output/logs"
 unproduced = ["gpu", "vendor", "papers", "reference", "ocr"]
 # `corpus` needs the network a hosted runner has: its setup fetches every source (tests/corpus/sources.py), so a
 # source down or changed fails the job before any test runs -- posted `class=environment`, never the code's red.
-hosted = { corpus = { setup = "uv run --no-sync python -m tests.corpus.sources" } }
+# The OS parts run on their own hosted runner (`windows`, `macos`, `linux`); the linux runner has no display, so its
+# setup starts a virtual one (Xvfb) with a window manager on it (openbox: the EWMH lists the capture reads) and names
+# it for the steps after it -- a process started in a step lives until the job ends (its output let go, so the step
+# does not wait on it). The overlay, the panel and the test viewer are Tk windows, and uv builds a hosted job's venv on
+# the runner's own interpreter, which ships without Tk: on linux /usr/bin/python3, whose tkinter Debian packages
+# apart (python3-tk); on macos Homebrew's python@X.Y, whose _tkinter is the python-tk@X.Y formula, X.Y read off the
+# venv. Both setups run after the sync and before the tests, and the venv reads its stdlib from that interpreter.
+hosted = { corpus = { setup = "uv run --no-sync python -m tests.corpus.sources" }, linux = { setup = "sudo apt-get update && sudo apt-get install -y xvfb openbox python3-tk && (Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp >/dev/null 2>&1 &) && sleep 2 && (DISPLAY=:99 openbox >/dev/null 2>&1 &) && sleep 2 && echo DISPLAY=:99 >> \"$GITHUB_ENV\"" }, macos = { setup = '''brew install "python-tk@$(uv run --no-sync python -c 'import sys; print("%d.%d" % sys.version_info[:2])')"''' } }
 
 # The extras every environment carries: `dev` (the kit, pytest, ruff; it carries `ai`). `gpu` (marker-pdf -> torch)
-# is installed only for an environment whose need-set holds the `gpu` resource marker; `capture` is empty.
+# is installed only for an environment whose need-set holds the `gpu` resource marker; `dev` carries `capture`.
 [tool.dev_lab.dep]
 extras = ["dev"]
 needs = { gpu = "gpu" }
 
 [tool.lab_commons.tests]
 produce = ["-m", "dev_lab.dev.verify", "--part", "{part}"]
-resources = ["gpu", "vendor", "papers", "reference", "ocr", "windows", "corpus"]
+resources = ["gpu", "vendor", "papers", "reference", "ocr", "windows", "macos", "linux", "corpus"]
 
 # The family branch flow: integrate/main coordinates; main moves only by `integrate promote` (fast-forward).
 [tool.dev_lab.integrator]

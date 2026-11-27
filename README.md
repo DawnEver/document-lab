@@ -15,14 +15,15 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 | `extract` | typed values against the caller's `Schema` from key-value (`from_rows`) or column (`from_columns`) tables |
 | `ai` | `ask(responder, schema, page_or_table)`: the same values read by a model through ai-lab (`[ai]` extra) |
 | `ocr` | `document-lab ocr <pdf> [-o out] [--lang eng]`: a Tesseract text layer, in its languages (`chi_sim+eng`; `jpn_vert`, `chi_sim_vert` for text set in columns), over every page that is one image and has no text -- read upright however the page turns it, a fax or JPEG scan handed over as stored in a TIFF -- each word invisible over where it is seen, one read down a column laid as vertical writing, by our own writer; the pixels kept exactly, a page never laid twice. Needs Tesseract 5.3 or later (Install) |
-| `layout` | `lines(page)` / `ordered(lines)`: a page's spans as lines in reading order (columns, a clause number with its title, vertical columns right to left); `wordy(text)` tells words from OCR noise |
+| `layout` | `lines(page)` / `ordered(lines)`: a page's spans as lines in reading order (columns, a clause number with its title, vertical columns right to left); `furniture(page)`: text turned sideways outside the page's text (a margin's stamp), left out of its lines; `wordy(text)` tells words from OCR noise |
 | `markdown` | `to_markdown(doc)` / `page_markdowns(doc)`: the IR as markdown -- headings, paragraphs -- whole, or each page standing alone |
 | `regions` | `regions(page, body, drawings=())`: a page's figures, tables and equations from its text -- a caption and the prose around it, an equation number and the noise beside it, rows of cells -- so an OCR'd capture has them too; with the page's drawings (`ink`), a ruled table, a figure without a caption and an equation without a number as well |
+| `tables` | `tables(page)`: a PDF page's ruled tables from its rules and text alone, each cell its text and its box (rules stroked or drawn as thin filled bars; a merged cell repeats its text and box in every slot it covers, as `html` does), ready for `extract`; `grids(page)` also names each grid of rules that is no table and why (`NotATable`: a single box, a plot's frame, a rule stopping inside a cell, text across a rule) |
 | `ink` | `drawings(pixels, scale, text, reach)`: the drawn ink of a page's picture, its text left out -- each drawing's box, its rules, the ink off them and its longest stroke |
 | `png` | `encode(image)`: 8-bit gray or RGB pixels as a PNG file's bytes; its parts (`header`, `scanlines`, `chunk`) let a writer stream rows (`capture.export.PngWriter`) |
 | `per_page` | `document-lab pages <pdf> <out>`: a PDF as `page-NNN.md` (its text) and `page-NNN.png` (the page as seen, a captured page's own pixels) per page, each region cut out (`page-NNN-figure-2.png`, `-table-1`, `-equation-a-1`) and linked where its caption or number is, and `INDEX.md`, with the PDF itself -- into a directory, or one archive when `out` ends `.zip` -- for standards, manuals and data sheets, cited by clause on their page. OCR'd text is for finding; a formula's or a table's values are read off its picture |
 | `paper` | `document-lab paper <pdf> <out>`: a paper as per-section markdown (written from the IR, or marker-pdf on a GPU) plus cropped figures/tables/equations; a table-of-contents page opens no sections, and on a page that is one picture (a screen-captured or scanned PDF, OCR'd) a figure, table or equation is cut out where its text locates it (`regions`), else the page is linked whole, once |
-| `capture` | `document-lab capture <out.pdf>`: any window or screen region, scrolled to its end and stitched losslessly, to a PDF of page images -- the stage before `ocr` (Windows, `[capture]` extra; `--ocr LANGS` runs `ocr` on the result); `--resume` and `capture-merge` join captures where they overlap; `capture-files` takes each PDF of a directory or list page by page as its viewer (Acrobat) shows it, one PDF each |
+| `capture` | `document-lab capture <out.pdf>`: any window or screen region, scrolled to its end and stitched losslessly, to a PDF of page images -- the stage before `ocr` (Windows, macOS, Linux under X11; `[capture]` extra; `--ocr LANGS` runs `ocr` on the result); `--resume` and `capture-merge` join captures where they overlap; `capture-files` (Windows) takes each PDF of a directory or list page by page as its viewer (Acrobat) shows it, one PDF each |
 
 A screen-captured standard, end to end: `capture std.pdf` -> `ocr std.pdf` -> `pages std.pdf std.zip`.
 
@@ -64,16 +65,23 @@ document-lab capture-files raw/ -o captured/         # each PDF as Acrobat shows
 document-lab capture out.pdf --open                # open the PDF once written
 ```
 
-Requires Windows and a tkinter that starts: Python 3.13.0 in a venv cannot (cpython #125235, `Can't find a usable
-init.tcl`); use Python >= 3.13.1, or copy the base install's `tcl` folder into `.venv\tcl`. The capture checks this
-before it opens any window and prints that remedy.
+Requires a tkinter that starts: Python 3.13.0 in a venv cannot (cpython #125235, `Can't find a usable init.tcl`);
+use Python >= 3.13.1, or copy the base install's `tcl` folder into `.venv\tcl`. And a desktop
+(`capture.screen.System`, one module per OS): Windows (`capture.win32`, ctypes); macOS (`capture.quartz`, ctypes over
+Quartz -- coordinates are points, a grab one pixel a point; the app running Python needs Screen Recording, and
+Accessibility to scroll for you, both in System Settings > Privacy & Security); Linux under X11 (`capture.x11`,
+python-xlib from the `capture` extra; an EWMH window manager; a covered window is refused, X11 keeping no picture of
+it). A Wayland session lets no program read other windows: log in to its X11 session. The capture checks all this
+before it opens any window and prints the remedy. `capture-files` drives Acrobat on Windows alone.
 
-Targets: none dims every monitor, live, the last area confirmed already marked (kept in
-`%LOCALAPPDATA%\document-lab\capture-area.json`; not if it is off the screen now) -- the window under the pointer
+Targets: none dims every monitor -- live on Windows; elsewhere a picture of the screen, grabbed as it opens, Tk there
+having no transparent color -- the last area confirmed already marked (kept in `capture-area.json` under
+`%LOCALAPPDATA%\document-lab`, `~/Library/Application Support/document-lab` or `$XDG_STATE_HOME/document-lab`; not if
+it is off the screen now) -- the window under the pointer
 is outlined; a click marks it, a drag marks a
 rectangle (shown clear, the rest dim, its W x H above its corner) -- a new drag, inside it or out, marks again; its edges, corners and top handle
 drag to adjust it, arrows nudge it (Shift: 10 px, Ctrl: resize); Enter or Confirm sets it, Esc cancels -- or
-`--window TITLE` (must match one), `--hwnd`, `--rect L,T,W,H`. Once set, nothing covers the desktop: open or arrange
+`--window TITLE` (must match one), `--handle`, `--rect L,T,W,H`. Once set, nothing covers the desktop: open or arrange
 other windows freely while the area waits, framed in blue, until the panel beside it starts the capture:
 **Start (I scroll)** follows your own scrolling, **Auto scroll** scrolls for you to the end (as `--auto`); either way
 Finish ends it, and **Pause** holds it: nothing is grabbed or scrolled -- scroll anywhere, use any window -- until
@@ -99,11 +107,11 @@ one it cannot recover ends it (kept by `--keep-lost`). A view is settled when tw
 doubles for every later step, up to `--settle-max` (default 1.0) -- a slow renderer (Acrobat in reading mode) gets
 the wait it needs instead of bouncing between its first pages; raise `--settle` to start there. A reader in
 single-page / page-flip mode shares nothing between frames: the capture stops and says to switch it to continuous
-scrolling (no `--tolerance` helps). A scroll Windows refuses (a UAC prompt, an elevated window in front, the lock
-screen) ends it the same way: what was stitched is written, the reason printed, exit 1. An output that exists is refused before anything unless
+scrolling (no `--tolerance` helps). A scroll the desktop refuses (on Windows a UAC prompt, an elevated window in
+front, the lock screen; on macOS Accessibility not granted) ends it the same way: what was stitched is written, the reason printed, exit 1. An output that exists is refused before anything unless
 `--overwrite`: it may be the very document on screen; so is a name Windows cannot hold (`a:b.pdf` would be written as
 a hidden stream of a file `a`), with one it can. A window is read
-through `PrintWindow`, so another window over it does not show; the wheel, which does land on whatever covers it,
+through `PrintWindow` (on macOS from the window server), so another window over it does not show; the wheel, which does land on whatever covers it,
 refuses then (bring it forward, or `--method message` -- which some applications act on only some of the time, so it
 may stop early); `keys` refuses a window it cannot bring forward.
 
@@ -146,12 +154,12 @@ as `<name>.part` and renamed into place when the capture ends, however it ends, 
 Everything runs in one thread, in order -- grab, scroll, stitch, write -- so nothing races. In Python:
 `capture.session.capture(grab, scroll, sink)` takes any source and any sink (`Rows` keeps the image in memory;
 `capture.export.PdfWriter`/`PngWriter` stream it) and returns a `Capture` (frames, height, why it stopped);
-`capture.desktop.Source` is the Windows source.
+`capture.desktop.Source` is the desktop's source, on whichever OS `capture.desktop.system()` drives.
 
 ## Install
 
 `pip install "document_lab @ git+https://github.com/DawnEver/document-lab.git"`; extras: `gpu` (marker-pdf),
-`ai` (ai-lab), `capture` (no packages beyond the base). Domain schemas live in the consumers.
+`ai` (ai-lab), `capture` (python-xlib on Linux; nothing beyond the base elsewhere). Domain schemas live in the consumers.
 
 `ocr` (and `capture --ocr`) runs the `tesseract` executable, 5.3 or later, which is yours to install -- it is never
 bundled; a language is its `<lang>.traineddata` in Tesseract's `tessdata` folder.

@@ -13,8 +13,8 @@ from document_lab.capture.files import document_window, held, listed, page_box, 
 
 
 @dataclass(frozen=True)
-class _Window:  # what document_window reads of a window: its handle and title (desktop.Window is the real one)
-    hwnd: int
+class _Window:  # what document_window reads of a window: its handle and title (screen.Window is the real one)
+    handle: int
     title: str
 
 
@@ -178,6 +178,7 @@ def test_a_run_with_a_text_layer_refuses_a_missing_language_before_any_capture(t
     from document_lab import ocr  # noqa: PLC0415
     from document_lab.capture import cli  # noqa: PLC0415
 
+    monkeypatch.setattr(cli.sys, 'platform', 'win32')  # the run's own platform refusal comes first elsewhere
     monkeypatch.setattr(ocr, '_executable', lambda _places: tmp_path / 'tesseract')
     said = {'--version': 'tesseract v5.4.0\n', '--list-langs': 'List of available languages in "/t/" (1):\neng\n'}
     monkeypatch.setattr(ocr, '_run', lambda command: said[command[1]])

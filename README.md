@@ -6,7 +6,7 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 | module | does |
 |---|---|
 | `ir` | frozen IR: `Provenance`, `TextSpan`, `VectorPath`, `Table`/`Cell`, `Figure`, `Raster`, `Page`, `Document` |
-| `pdf` | `read_pdf(path, password=)`: spans, vector paths and image figures, each with its page and box, read by the package's own reader (`document_lab._pdf`, the Rust crate `crates/pdf`); `read_raster(path, page, bbox)`: a region's pixels at its images' native resolution (rendered by PyMuPDF) |
+| `pdf` | `read_pdf(path, password=)`: spans, vector paths and image figures, each with its page and box, read by the package's own reader (`document_lab._pdf`, the Rust crate `crates/pdf`); `read_raster(path, page, bbox)`: a region's pixels at its images' native resolution -- one image whole is its own samples, read by the reader, any other region rendered by PyMuPDF |
 | `html` | `read_html(path)`: every `<table>` as a `Table` (standard-library parser) |
 | `plot` | `plots(page)`: curves digitized from VECTOR plots (axes linear, log10, or piecewise between labeled ticks; labels as text, glyph outlines or stroke-font polylines; fragments joined; legend samples apart); a raster plot raises `RasterPlot`. `raster_plot(raster)`: one plot traced from pixels, each point with its pixel uncertainty; unreadable labels raise `UnreadableTickLabels` unless stated (`x_values=`, `y_values=`) |
 | `strokes` | thick strokes in a `Raster`: `fragments` (a morphological opening drops hairlines), `link` (dashes joined end to start along their own direction; crossing curves stay apart), `bands` (fragments to the nearest solid curve), `dots` + `split_by_dots` (a smaller opening keeps dash-dot dots; they trace the dash-dot curve, telling it from a dashed one two strokes away) |
@@ -15,10 +15,12 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 | `extract` | typed values against the caller's `Schema` from key-value (`from_rows`) or column (`from_columns`) tables |
 | `ai` | `ask(responder, schema, page_or_table)`: the same values read by a model through ai-lab (`[ai]` extra) |
 | `ocr` | `document-lab ocr <pdf> [-o out] [--lang eng]`: a Tesseract text layer over every page that is one image and has no text; the pixels kept exactly, a page never laid twice |
-| `layout` | `lines(page)` / `ordered(lines)`: a page's spans as lines in reading order (columns, a clause number with its title); `wordy(text)` tells words from OCR noise |
+| `layout` | `lines(page)` / `ordered(lines)`: a page's spans as lines in reading order (columns, a clause number with its title, vertical columns right to left); `wordy(text)` tells words from OCR noise |
 | `markdown` | `to_markdown(doc)` / `page_markdowns(doc)`: the IR as markdown -- headings, paragraphs -- whole, or each page standing alone |
 | `regions` | `regions(page, body, drawings=())`: a page's figures, tables and equations from its text -- a caption and the prose around it, an equation number and the noise beside it, rows of cells -- so an OCR'd capture has them too; with the page's drawings (`ink`), a ruled table, a figure without a caption and an equation without a number as well |
+| `tables` | `tables(page)`: a PDF page's ruled tables from its rules and text alone, each cell its text and its box (rules stroked or drawn as thin filled bars; a merged cell repeats its text and box in every slot it covers, as `html` does), ready for `extract`; `grids(page)` also names each grid of rules that is no table and why (`NotATable`: a single box, a plot's frame, a rule stopping inside a cell, text across a rule) |
 | `ink` | `drawings(pixels, scale, text, reach)`: the drawn ink of a page's picture, its text left out -- each drawing's box, its rules, the ink off them and its longest stroke |
+| `png` | `encode(image)`: 8-bit gray or RGB pixels as a PNG file's bytes; its parts (`header`, `scanlines`, `chunk`) let a writer stream rows (`capture.export.PngWriter`) |
 | `per_page` | `document-lab pages <pdf> <out>`: a PDF as `page-NNN.md` (its text) and `page-NNN.png` (the page as seen, a captured page's own pixels) per page, each region cut out (`page-NNN-figure-2.png`, `-table-1`, `-equation-a-1`) and linked where its caption or number is, and `INDEX.md`, with the PDF itself -- into a directory, or one archive when `out` ends `.zip` -- for standards, manuals and data sheets, cited by clause on their page. OCR'd text is for finding; a formula's or a table's values are read off its picture |
 | `paper` | `document-lab paper <pdf> <out>`: a paper as per-section markdown (written from the IR, or marker-pdf on a GPU) plus cropped figures/tables/equations; a table-of-contents page opens no sections, and on a page that is one picture (a screen-captured or scanned PDF, OCR'd) a figure, table or equation is cut out where its text locates it (`regions`), else the page is linked whole, once |
 | `capture` | `document-lab capture <out.pdf>`: any window or screen region, scrolled to its end and stitched losslessly, to a PDF of page images -- the stage before `ocr` (Windows, `[capture]` extra; `--ocr LANGS` runs `ocr` on the result); `--resume` and `capture-merge` join captures where they overlap; `capture-files` takes each PDF of a directory or list page by page as its viewer (Acrobat) shows it, one PDF each |
@@ -151,3 +153,9 @@ Everything runs in one thread, in order -- grab, scroll, stitch, write -- so not
 
 `pip install "document_lab @ git+https://github.com/DawnEver/document-lab.git"`; extras: `gpu` (marker-pdf),
 `ai` (ai-lab), `capture` (no packages beyond the base). Domain schemas live in the consumers.
+
+## Tests
+
+No real PDF is committed. The `corpus` part reads real public PDFs -- CC BY 4.0 papers and US Government works only --
+fetched from their original URLs and pinned by sha256; `tests/corpus/sources.py` lists each one's license and
+attribution.

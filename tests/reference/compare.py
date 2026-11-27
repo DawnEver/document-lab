@@ -48,7 +48,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import pymupdf
 
-from document_lab.pdf import CURVE_SAMPLES, read_pdf
+from document_lab.pdf import CURVE_SAMPLES, Locked, read_pdf
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
@@ -521,10 +521,8 @@ def compare(path: Path, reference_path: Path | None = None, plant: Plant | None 
         if reference.needs_pass:
             try:
                 read_pdf(path)
-            except ValueError as refused:
-                if 'password' in str(refused):
-                    return Compared(path, locked=True, pages=(), reference_pages=reference.page_count)
-                raise
+            except Locked:
+                return Compared(path, locked=True, pages=(), reference_pages=reference.page_count)
             msg = f'{path.name}: PyMuPDF asks a password, the reader did not'
             raise AssertionError(msg)
         doc = read_pdf(path)

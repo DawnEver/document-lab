@@ -35,7 +35,7 @@ impl Bits<'_> {
             let byte = *self
                 .data
                 .get(self.pos)
-                .ok_or_else(|| Error::at(self.pos, "deflate data ends early"))?;
+                .ok_or_else(|| Error::malformed_at(self.pos, "deflate data ends early"))?;
             self.buf |= u32::from(byte) << self.count;
             self.pos += 1;
             self.count += 8;
@@ -92,7 +92,10 @@ impl Huffman {
             first = (first + count) << 1;
             code <<= 1;
         }
-        Err(Error::at(bits.pos, "invalid Huffman code in deflate data"))
+        Err(Error::malformed_at(
+            bits.pos,
+            "invalid Huffman code in deflate data",
+        ))
     }
 }
 
@@ -120,7 +123,7 @@ pub fn inflate(data: &[u8]) -> Result<Vec<u8>> {
                 let (lit, dist) = dynamic(&mut bits)?;
                 codes(&mut bits, &mut out, &lit, &dist)?;
             }
-            _ => return Err(Error::at(bits.pos, "invalid deflate block type")),
+            _ => return Err(Error::malformed_at(bits.pos, "invalid deflate block type")),
         }
         if last {
             return Ok(out);
@@ -134,17 +137,17 @@ fn stored(bits: &mut Bits<'_>, out: &mut Vec<u8>) -> Result<()> {
     let head = bits
         .data
         .get(at..at + 4)
-        .ok_or_else(|| Error::at(at, "stored block header cut short"))?;
+        .ok_or_else(|| Error::malformed_at(at, "stored block header cut short"))?;
     let len16 = u16::from_le_bytes([head[0], head[1]]);
     let nlen = u16::from_le_bytes([head[2], head[3]]);
     let len = usize::from(len16);
     if nlen != !len16 {
-        return Err(Error::at(at, "stored block length check fails"));
+        return Err(Error::malformed_at(at, "stored block length check fails"));
     }
     let body = bits
         .data
         .get(at + 4..at + 4 + len)
-        .ok_or_else(|| Error::at(at, "stored block cut short"))?;
+        .ok_or_else(|| Error::malformed_at(at, "stored block cut short"))?;
     out.extend_from_slice(body);
     bits.pos = at + 4 + len;
     Ok(())
@@ -164,7 +167,10 @@ fn dynamic(bits: &mut Bits<'_>) -> Result<(Huffman, Huffman)> {
     let ndist = bits.take(5)? as usize + 1;
     let ncode = bits.take(4)? as usize + 4;
     if nlen > 286 || ndist > 30 {
-        return Err(Error::at(bits.pos, "deflate code counts out of range"));
+        return Err(Error::malformed_at(
+            bits.pos,
+            "deflate code counts out of range",
+        ));
     }
     let mut code_lengths = [0u8; 19];
     for &slot in &CODE_LENGTH_ORDER[..ncode] {
@@ -178,16 +184,19 @@ fn dynamic(bits: &mut Bits<'_>) -> Result<(Huffman, Huffman)> {
         let (value, repeat) = match symbol {
             0..=15 => (symbol.to_le_bytes()[0], 1),
             16 => {
-                let prev = *lengths[..i]
-                    .last()
-                    .ok_or_else(|| Error::at(bits.pos, "length repeat with no previous"))?;
+                let prev = *lengths[..i].last().ok_or_else(|| {
+                    Error::malformed_at(bits.pos, "length repeat with no previous")
+                })?;
                 (prev, 3 + bits.take(2)? as usize)
             }
             17 => (0, 3 + bits.take(3)? as usize),
             _ => (0, 11 + bits.take(7)? as usize),
         };
         if i + repeat > lengths.len() {
-            return Err(Error::at(bits.pos, "deflate code lengths overrun"));
+            return Err(Error::malformed_at(
+                bits.pos,
+                "deflate code lengths overrun",
+            ));
         }
         lengths[i..i + repeat].fill(value);
         i += repeat;
@@ -207,18 +216,21 @@ fn codes(bits: &mut Bits<'_>, out: &mut Vec<u8>, lit: &Huffman, dist: &Huffman) 
             _ => {
                 let s = usize::from(symbol - 257);
                 if s >= 29 {
-                    return Err(Error::at(bits.pos, "invalid deflate length code"));
+                    return Err(Error::malformed_at(bits.pos, "invalid deflate length code"));
                 }
                 let len =
                     usize::from(LENGTH_BASE[s]) + bits.take(u32::from(LENGTH_EXTRA[s]))? as usize;
                 let d = usize::from(dist.decode(bits)?);
                 if d >= 30 {
-                    return Err(Error::at(bits.pos, "invalid deflate distance code"));
+                    return Err(Error::malformed_at(
+                        bits.pos,
+                        "invalid deflate distance code",
+                    ));
                 }
                 let back =
                     usize::from(DIST_BASE[d]) + bits.take(u32::from(DIST_EXTRA[d]))? as usize;
                 if back > out.len() {
-                    return Err(Error::at(
+                    return Err(Error::malformed_at(
                         bits.pos,
                         "deflate distance reaches before the start",
                     ));

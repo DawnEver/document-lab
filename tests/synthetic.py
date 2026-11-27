@@ -756,6 +756,37 @@ def draw_ruled_table(
                 page.insert_text((rect.x0 + 4, rect.y1 - 6), text, fontname='helv', fontsize=9)
 
 
+#: A table ruled every few rows, as a standard's tolerance table is: bands of rows, no rule between a band's rows; the
+#: first band its header, its cells wrapped over two lines alike.
+BANDED_ROWS = (
+    (('Nominal', 'Nominal', 'Tolerance'), ('from', 'to', 'mm')),
+    (('4', '6', '+0,15'), ('6', '8', '+0,20'), ('8', '10', '+0,25')),
+    (('10', '13', '+0,30'), ('13', '16', '+0,35')),
+)
+
+
+def draw_banded_table(
+    page: pymupdf.Page, bands: Sequence[Sequence[Sequence[str]]] = BANDED_ROWS, *, pitch: float = 14.0
+) -> None:
+    """``bands`` in a grid ruled round each band alone, at :data:`TABLE_ORIGIN`, :data:`TABLE_CELL` wide columns:
+    each band's rows set ``pitch`` points apart in its ruled cells, no rule between them (an empty string sets
+    nothing)."""
+    x0, y0 = TABLE_ORIGIN
+    width, columns = TABLE_CELL[0], len(bands[0][0])
+    tops = [y0]
+    for band in bands:
+        tops.append(tops[-1] + pitch * len(band) + 6)
+    for y in tops:
+        page.draw_line((x0, y), (x0 + width * columns, y), color=(0, 0, 0), width=0.5)
+    for c in range(columns + 1):
+        page.draw_line((x0 + width * c, y0), (x0 + width * c, tops[-1]), color=(0, 0, 0), width=0.5)
+    for band, top in zip(bands, tops, strict=False):
+        for k, row in enumerate(band):
+            for c, text in enumerate(row):
+                if text:
+                    page.insert_text((x0 + width * c + 4, top + 12 + pitch * k), text, fontname='helv', fontsize=9)
+
+
 #: Booktabs' rules: the top and bottom rules heavier than the one under the header (0.08 em and 0.05 em at 10 pt).
 TOP_RULE, MID_RULE = 0.8, 0.5
 

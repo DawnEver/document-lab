@@ -8,6 +8,10 @@
 - Cells: slots no rule parts are one cell. A cell spanning slots repeats its text and its own box in each slot it
   covers, as :mod:`document_lab.html` repeats a spanning cell, so every row reads the same width.
 - A cell's text: the spans whose center stands in it, as lines (:func:`document_lab.layout.lines`) top to bottom.
+- Rows its rules leave unparted: below the grid's first row, a band between two rules whose every cell holding text
+  holds as many lines as the others, two or more, standing on common levels (within a quarter text size) -- a table
+  ruled only every few rows -- is a row per level, each cell its line there and its box its share of the band; a
+  cell wrapped beside cells of another count of lines keeps the band one row.
 
 A grid is a table only when nothing about it is a guess: each slot side is ruled end to end or not at all, its outline
 is closed and no rule runs on past it -- a side no rule closes is closed where EVERY rule across it ends (a table
@@ -738,24 +742,36 @@ def _table(page: Page, slots: _Slots, drawings: list[VectorPath], tolerance: flo
         msg = 'a drawing crosses its rules (a figure)'
         raise _Broken(msg)
     boxes = [BBox(slots.xs[c0], slots.ys[r0], slots.xs[c1 + 1], slots.ys[r1 + 1]) for r0, c0, r1, c1 in spans]
-    texts = _texts(page, slots, cell_of, boxes, tolerance)
+    held = _held(page, slots, cell_of, boxes, tolerance)
+    texts = [_text(page, cell) for cell in held]
     if sum(bool(t) for t in texts) < 2:  # noqa: PLR2004 -- a label and what it labels
         msg = 'fewer than two cells hold text (a drawn grid, a plot)'
         raise _Broken(msg)
     here: Provenance = page.spans[0].provenance.at(bbox=box)  # two cells hold text: the page has spans
-    return Table(
-        tuple(tuple(texts[cell_of[r][c]] for c in range(cols)) for r in range(rows)),
-        tuple(tuple(boxes[cell_of[r][c]] for c in range(cols)) for r in range(rows)),
-        here,
-    )
+    read: list[tuple[tuple[str, ...], tuple[BBox, ...]]] = []
+    for r in range(rows):
+        cells = [cell_of[r][c] for c in range(cols)]
+        alone = r > 0 and all(spans[i][0] == spans[i][2] for i in cells)  # no cell runs on into another band
+        levels = _levels([held[i] for i in cells]) if alone else None
+        if levels is None:
+            read.append((tuple(texts[i] for i in cells), tuple(boxes[i] for i in cells)))
+            continue
+        middles, lined = levels
+        parts = [(a + b) / 2 for a, b in itertools.pairwise(middles)]  # where one level's share meets the next's
+        for k, line in enumerate(lined):
+            share = [BBox(b.x0, ([b.y0, *parts])[k], b.x1, ([*parts, b.y1])[k]) for b in (boxes[i] for i in cells)]
+            read.append((tuple(_text(page, spans) for spans in line), tuple(share)))
+    return Table(tuple(row for row, _ in read), tuple(cut for _, cut in read), here)
 
 
 def _overlap(a: BBox, b: BBox) -> bool:
     return a.x0 < b.x1 and b.x0 < a.x1 and a.y0 < b.y1 and b.y0 < a.y1
 
 
-def _texts(page: Page, slots: _Slots, cell_of: list[list[int]], boxes: list[BBox], tolerance: float) -> list[str]:
-    """Each cell's text: its spans as lines, top to bottom; a span reaching over a rule breaks the grid."""
+def _held(
+    page: Page, slots: _Slots, cell_of: list[list[int]], boxes: list[BBox], tolerance: float
+) -> list[list[TextSpan]]:
+    """Each cell's spans, those whose center stands in it; a span reaching over a rule breaks the grid."""
     held: list[list[TextSpan]] = [[] for _ in boxes]
     for span in page.spans:
         if not spaced(span.text).strip():
@@ -775,7 +791,29 @@ def _texts(page: Page, slots: _Slots, cell_of: list[list[int]], boxes: list[BBox
             msg = 'text crosses a rule'
             raise _Broken(msg)
         held[index].append(span)
-    return [_text(page, spans) for spans in held]
+    return held
+
+
+def _levels(cells: list[list[TextSpan]]) -> tuple[list[float], list[list[list[TextSpan]]]] | None:
+    """The rows of one band of a grid whose ``cells`` (its spans, slot by slot) stand on levels; None for one row.
+
+    On levels: every cell holding text holds as many lines as the others, two or more, its k-th line within a quarter
+    text size of the others' k-th (:func:`_cell_lines`, :func:`_middle`), and two cells or more hold text. Returned:
+    each level's middle, and per level each slot's line there.
+    """
+    filled = [cell for cell in cells if cell]
+    if len({id(cell) for cell in filled}) < 2:  # noqa: PLR2004 -- a merged cell is one cell: two cells to align
+        return None
+    size = statistics.median(s.size for cell in filled for s in cell)
+    lines = {id(cell): _cell_lines(cell, size) for cell in filled}
+    counts = {len(found) for found in lines.values()}
+    if len(counts) > 1 or min(counts) < 2:  # noqa: PLR2004 -- one line is one row
+        return None
+    middles = [[_middle(line) for line in found] for found in lines.values()]
+    level = [statistics.median(at) for at in zip(*middles, strict=True)]
+    if any(abs(m - at) > size / 4 for found in middles for m, at in zip(found, level, strict=True)):
+        return None
+    return level, [[lines[id(cell)][k] if cell else [] for cell in cells] for k in range(len(level))]
 
 
 def _text(page: Page, spans: list[TextSpan]) -> str:

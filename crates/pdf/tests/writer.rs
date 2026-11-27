@@ -179,6 +179,7 @@ fn word(text: &str, [x0, y0, x1, y1]: [f64; 4]) -> Word<'_> {
     Word {
         text,
         bbox: Rect { x0, y0, x1, y1 },
+        angle: 0.0,
     }
 }
 
@@ -224,6 +225,31 @@ fn a_text_layer_reads_back_invisible_over_its_words() {
     }
     let events = copy.interpret(&pages[0], false).unwrap().events;
     assert!(events.iter().any(|e| matches!(e, Event::Path(_)))); // what the page drew is drawn still
+}
+
+#[test]
+fn a_word_turned_lies_along_its_baseline_over_where_it_is_seen() {
+    let source = common::one_page("", "", &[]);
+    // 40 x 10 level, turned about its center (100, 50): set bottom to top it stands 10 wide and 40 high.
+    let turned = |angle| Word {
+        angle,
+        ..word("sideways", [80.0, 45.0, 120.0, 55.0])
+    };
+    for (angle, expected, direction) in [
+        (-90.0, [95.0, 30.0, 105.0, 70.0], (0.0, -1.0)),
+        (90.0, [95.0, 30.0, 105.0, 70.0], (0.0, 1.0)),
+        (180.0, [80.0, 45.0, 120.0, 55.0], (-1.0, 0.0)),
+    ] {
+        let (copy, pages) = laid(&source, &[turned(angle)]);
+        let events = copy.interpret(&pages[0]).unwrap().events;
+        let found = pdf::spans::spans(&events);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let b = found[0].bbox;
+        assert_eq!(found[0].text, "sideways");
+        assert!(near([b.x0, b.y0, b.x1, b.y1], expected), "{b:?} turned {angle}");
+        let (dx, dy) = found[0].direction;
+        assert!((dx - direction.0).abs() + (dy - direction.1).abs() < 1e-9, "{dx} {dy} turned {angle}");
+    }
 }
 
 #[test]

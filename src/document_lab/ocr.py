@@ -1,14 +1,22 @@
 """A text layer over a PDF of page images, by Tesseract: its words readable, its pixels exactly as they were.
 
 Each page that is one image and has no text is recognized by the ``tesseract`` executable, run on the image at the
-resolution it carries and as the page shows it -- upright, though its samples be placed turned or mirrored by quarter
-turns (a scan on a ``/Rotate`` page); a placement at another angle is refused. Lossless samples are handed over as a
-PGM/PPM, turned upright and, under a ``/Decode`` of ``[1 0]``, inverted exactly; any other ``/Decode`` is refused. An
-image still in a codec is never decoded here: JPEG and JPEG 2000 go as their encoded data, untouched, and are refused
-placed turned or inverted; CCITT fax data goes, as stored, inside a TIFF (:func:`_fax_tiff`) whose tags say its coding,
-its black and its placement; any other codec is refused by name. The words Tesseract reports (TSV, each with its
-pixel box on the upright image) are laid invisible over where they are seen, by `document_lab._pdf`'s writer
-(`Writer.copy_page_with_text`); every page is otherwise copied as it is, so a layer is never laid twice.
+resolution it carries and as the page shows it -- though its samples be placed turned or mirrored by quarter turns (a
+scan on a ``/Rotate`` page); a placement at another angle is refused. Lossless samples are handed over as a PGM/PPM,
+turned and, under a ``/Decode`` of ``[1 0]``, inverted exactly; any other ``/Decode`` is refused. CCITT fax data goes,
+as stored, inside a TIFF (:func:`_fax_tiff`) whose tags say its coding, its black and how it is shown; JPEG and JPEG
+2000 go as their encoded data when shown as stored, and are decoded (`document_lab.pdf.read_raster`) only to be
+measured, or turned, inverted or deskewed; any other codec is refused by name.
+
+What the page shows is not always upright. Tesseract's orientation detection (OSD) says how far to turn it -- a
+table printed sideways -- and a turn it is sure enough of (:data:`ORIENTATION_CONFIDENCE`) is read beside the page as
+placed, line by line the surer kept, so an upright running head over a sideways table reads too; one it is unsure of
+is reported and the page read as placed, never guessed. A page skewed more than :data:`DESKEW_ABOVE` degrees
+(`document_lab.ink.skew`) is handed over turned back by its skew, resampled for Tesseract's eyes only: the PDF's
+pixels stay as they were. The words Tesseract reports (TSV, each with its pixel box on the image it read) are mapped
+back through every turn and laid invisible over where they are seen, along the baseline they are seen on, by
+`document_lab._pdf`'s writer (`Writer.copy_page_with_text`); every page is otherwise copied as it is, so a layer is
+never laid twice. How each page was read is returned (:class:`Layered`).
 
 Tesseract is the user's to install, never bundled: :func:`check` finds it -- on PATH, else in the
 :class:`TesseractPlaces` an entry reads from the environment (beside ``TESSDATA_PREFIX``, where its Windows
@@ -18,10 +26,14 @@ it, before any work is spent.
 
 from __future__ import annotations
 
+import itertools
+import math
+import re
 import shutil
 import struct
 import subprocess
 import tempfile
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Self
@@ -29,12 +41,26 @@ from typing import TYPE_CHECKING, Final, Self
 import numpy as np
 from lab_commons.temp import TEMP_PREFIX
 
-from document_lab import _pdf
+from document_lab import _pdf, ink
+from document_lab.ir import BBox
+from document_lab.pdf import read_raster
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-__all__ = ['TesseractPlaces', 'check', 'text_layer']
+__all__ = ['DESKEW_ABOVE', 'ORIENTATION_CONFIDENCE', 'Layered', 'Reading', 'TesseractPlaces', 'check', 'text_layer']
+
+#: OSD's confidence at or above which a page is read turned as it says. Measured over 795 pages of 25 scanned IEC
+#: standards (96 dpi captures): OSD proposed a turn on 36, by eye every one of 27 sideways tables right (confidence
+#: 4.76 to 18.83) and 9 near-blank pages or a back cover wrong (0.59 to 3.65); the default stands between them.
+ORIENTATION_CONFIDENCE: Final = 4.2
+#: Degrees of skew above which Tesseract is handed the page turned back by it. Measured on synthetic scans (prose
+#: and a ruled table, 186 words, at 300 and 150 dpi): as placed it reads 172-173 and 167 words at 2 and 2.5 degrees
+#: and almost none from 3 (0-62 of 186 at 3 to 8 degrees), deskewed 176-186 at every skew; at 1.5 deskewing gains 2
+#: and 13 words, below 1 degree it changes a few either way -- there the picture is handed exactly as it is.
+DESKEW_ABOVE: Final = 1.0
+_BAND: Final = 256  # rows deskewed at a time
+_TOO_FEW: Final = 'Too few characters'  # Tesseract OSD's failure on a page with too little text to judge by
 
 _INSTALL: Final = (
     'install it -- Windows: the UB Mannheim installer (https://github.com/UB-Mannheim/tesseract/wiki), then add its '
@@ -200,34 +226,18 @@ def _fax_tiff(
     return struct.pack('<2sHI', b'II', 42, _TIFF_HEADER) + directory + data
 
 
-def _image_file(samples: tuple, placement: Placement, folder: Path, name: str) -> Path:
-    """The image ``samples`` (``Reader.image``), shown as ``placement`` says, as a file Tesseract reads upright.
+def _lossless(samples: tuple, placement: Placement, name: str) -> np.ndarray | None:
+    """The image ``samples`` (``Reader.image``) as the page shows them, 8-bit rows by columns by components, exactly.
 
-    Written in ``folder``: lossless samples as an 8-bit PGM/PPM, turned upright and inverted as their ``/Decode``
-    says; a codec's data as stored, CCITT fax's inside a TIFF. Refused, by name, when Tesseract could not read it,
-    or not as the page shows it.
+    Lossless samples only, inverted as their ``/Decode`` says; None for a codec's. Refused, by name, when Tesseract
+    could not be handed them.
     """
-    width, height, space, components, bits, data, codec, decode, _masked, fax = samples
-    if codec is None and (components not in {1, 3} or space == 'Indexed'):
+    width, height, space, components, bits, data, codec, decode, _masked, _fax = samples
+    if codec is not None:
+        return None
+    if components not in {1, 3} or space == 'Indexed':
         msg = f'{name} is {space} ({components} components): Tesseract is handed gray or RGB samples only'
         raise ValueError(msg)
-    inverted = _inverted(decode, components, name)
-    if codec == 'CCITTFaxDecode':
-        path = folder / 'page.tif'
-        orientation = _tiff_orientation(placement)
-        path.write_bytes(_fax_tiff(width, height, data, fax, inverted=inverted, orientation=orientation, name=name))
-        return path
-    if codec is not None:
-        if codec not in _CODEC_FILES:
-            msg = f'{name} is in {codec}, which Tesseract does not read'
-            raise ValueError(msg)
-        for wrong, how in ((placement != _UPRIGHT, 'placed turned or mirrored'), (inverted, 'inverted by its /Decode')):
-            if wrong:
-                msg = f'{name} is in {codec}, {how}: showing it so needs its pixels decoded, which is not done here'
-                raise ValueError(msg)
-        path = folder / f'page{".j2k" if data.startswith(_J2K_CODESTREAM) else _CODEC_FILES[codec]}'
-        path.write_bytes(data)
-        return path
     row = (width * components * bits + 7) // 8
     stored = np.frombuffer(data, dtype=np.uint8)[: row * height].reshape(height, row)
     if bits == 16:  # noqa: PLR2004 -- the high byte of each big-endian sample
@@ -239,28 +249,234 @@ def _image_file(samples: tuple, placement: Placement, folder: Path, name: str) -
         weights = 1 << np.arange(bits - 1, -1, -1)
         levels = unpacked.reshape(height, width * components, bits) @ weights
         values = (levels * 255 // (2**bits - 1)).astype(np.uint8)
-    if inverted:  # exact: each depth's levels spread over 0-255 evenly, so a level's inverse is 255 less it
+    if _inverted(decode, components, name):  # exact: each depth's levels spread over 0-255 evenly, so 255 less
         values = 255 - values
-    rows = _upright(values[:, : width * components].reshape(height, width, components), placement)
-    kind, suffix = ('P5', '.pgm') if components == 1 else ('P6', '.ppm')
+    return _upright(values[:, : width * components].reshape(height, width, components), placement)
+
+
+def _pnm(rows: np.ndarray, folder: Path) -> Path:
+    """``rows`` (rows by columns by 1 or 3 components) as an 8-bit PGM/PPM in ``folder``."""
+    kind, suffix = ('P5', '.pgm') if rows.shape[2] == 1 else ('P6', '.ppm')
     path = folder / f'page{suffix}'
-    header = f'{kind}\n{rows.shape[1]} {rows.shape[0]}\n255\n'.encode()
-    path.write_bytes(header + np.ascontiguousarray(rows).tobytes())
+    path.write_bytes(f'{kind}\n{rows.shape[1]} {rows.shape[0]}\n255\n'.encode() + np.ascontiguousarray(rows).tobytes())
     return path
 
 
-def _words(tsv: str, box: Box, width: int, height: int) -> Words:
-    """Each word of Tesseract's ``tsv`` and its box in page space: its pixels mapped onto the image's ``box``."""
-    x0, y0, x1, y1 = box
-    sx, sy = (x1 - x0) / width, (y1 - y0) / height
-    out = []
-    for line in tsv.splitlines()[1:]:
-        level, *_, left, top, across, down, _conf, text = line.split('\t')
-        left, top, across, down = int(left), int(top), int(across), int(down)
-        if level == _WORD_LEVEL and text.strip() and across > 0 and down > 0:
-            seen = (x0 + left * sx, y0 + top * sy, x0 + (left + across) * sx, y0 + (top + down) * sy)
-            out.append((text.strip(), seen))
+def _turned_placement(placement: Placement, turn: int) -> Placement:
+    """The placement that shows samples placed by ``placement`` turned ``turn`` degrees further, clockwise."""
+    probe = np.arange(6).reshape(2, 3, 1)
+    wanted = np.rot90(_upright(probe, placement), -turn // 90)
+    return next(p for p in itertools.product((False, True), repeat=3) if np.array_equal(_upright(probe, p), wanted))
+
+
+def _stored_file(samples: tuple, placement: Placement, turn: int, folder: Path, name: str) -> Path | None:
+    """A codec's data, as stored, in a file Tesseract reads as ``placement`` shows it, turned ``turn`` degrees on.
+
+    CCITT fax data inside a TIFF whose Orientation says how it is shown; JPEG and JPEG 2000 as their own files when
+    shown as stored, else None (turning or inverting them needs their pixels decoded; a TIFF's Orientation over a
+    color JPEG is not honored alike by every Tesseract build). Refused, by name, when no TIFF holds its fax coding.
+    """
+    width, height, _space, components, _bits, data, codec, decode, _masked, fax = samples
+    inverted = _inverted(decode, components, name)
+    if codec == 'CCITTFaxDecode':
+        path = folder / 'page.tif'
+        orientation = _tiff_orientation(_turned_placement(placement, turn))
+        path.write_bytes(_fax_tiff(width, height, data, fax, inverted=inverted, orientation=orientation, name=name))
+        return path
+    if placement != _UPRIGHT or turn or inverted:
+        return None
+    path = folder / f'page{".j2k" if data.startswith(_J2K_CODESTREAM) else _CODEC_FILES[codec]}'
+    path.write_bytes(data)
+    return path
+
+
+def _orientation(tesseract: str, path: Path) -> tuple[int, float] | None:
+    """Tesseract's OSD of the image at ``path``: the degrees to turn it clockwise to read it upright, and how sure.
+
+    None when OSD tells nothing: too few characters to judge by (a blank page, a picture).
+    """
+    try:
+        found = _run([tesseract, str(path), 'stdout', '--psm', '0'])
+    except OSError as failed:
+        if _TOO_FEW in str(failed):
+            return None
+        raise
+    turn, confidence = (re.search(rf'{field}: ([-\d.]+)', found) for field in ('Rotate', 'Orientation confidence'))
+    if turn is None or confidence is None:
+        msg = f'Tesseract OSD of {path.name} said no turn and confidence: {found!r}'
+        raise OSError(msg)
+    return int(turn[1]) % 360, float(confidence[1])
+
+
+def _deskewed(rows: np.ndarray, degrees: float) -> np.ndarray:
+    """``rows`` turned back by ``degrees`` (their skew, clockwise as seen) about their center, on the same canvas.
+
+    Resampled bilinearly, white where the turn brings in nothing: for Tesseract's eyes only, never written to a PDF.
+    """
+    height, width = rows.shape[:2]
+    cx, cy = width / 2, height / 2
+    sin, cos = math.sin(math.radians(degrees)), math.cos(math.radians(degrees))
+    padded = np.pad(rows, ((1, 1), (1, 1), (0, 0)), constant_values=255)
+    out = np.empty_like(rows)
+    x = np.arange(width, dtype=np.float32) + 0.5 - cx
+    for start in range(0, height, _BAND):  # a band of rows at a time: a page's grids would take a gigabyte at once
+        y = np.arange(start, min(start + _BAND, height), dtype=np.float32)[:, None] + 0.5 - cy
+        # Each pixel of the picture turned back shows the point the skew turned it to (pixel centers at the halves).
+        sx, sy = cx + x * cos - y * sin - 0.5, cy + x * sin + y * cos - 0.5
+        left, top = np.floor(sx), np.floor(sy)
+        fx, fy = (sx - left)[..., None], (sy - top)[..., None]
+        x0, y0 = np.clip(left + 1, 0, width + 1).astype(np.intp), np.clip(top + 1, 0, height + 1).astype(np.intp)
+        x1, y1 = np.clip(left + 2, 0, width + 1).astype(np.intp), np.clip(top + 2, 0, height + 1).astype(np.intp)
+        above = padded[y0, x0] * (1 - fx) + padded[y0, x1] * fx
+        below = padded[y1, x0] * (1 - fx) + padded[y1, x1] * fx
+        out[start : start + y.shape[0]] = np.clip(above * (1 - fy) + below * fy + 0.5, 0, 255)
     return out
+
+
+def _frame(box: Box, size: tuple[int, int], skew: float, turn: int) -> np.ndarray:
+    """The affine map (3 x 3) from a pixel of the image Tesseract read to page space.
+
+    That image is the picture as the page shows it (``size``: columns, rows), filling ``box``, turned back by
+    ``skew`` degrees about its center, then turned ``turn`` degrees clockwise.
+    """
+    width, height = size
+    x0, y0, x1, y1 = box
+    onto = np.array([[(x1 - x0) / width, 0, x0], [0, (y1 - y0) / height, y0], [0, 0, 1]])
+    sin, cos = math.sin(math.radians(skew)), math.cos(math.radians(skew))
+    cx, cy = width / 2, height / 2
+    back = np.array([[cos, -sin, cx - cx * cos + cy * sin], [sin, cos, cy - cx * sin - cy * cos], [0, 0, 1]])
+    unturn = {  # a point of the image turned clockwise, on the image before the turn
+        0: [[1, 0, 0], [0, 1, 0]],
+        90: [[0, 1, 0], [-1, 0, height]],
+        180: [[-1, 0, width], [0, -1, height]],
+        270: [[0, -1, width], [1, 0, 0]],
+    }[turn]
+    return onto @ back @ np.array([*unturn, [0, 0, 1]], dtype=np.float64)
+
+
+type _Line = tuple[int, int, int, int]  # a word's line: its reading's index, then Tesseract's block, paragraph, line
+
+
+@dataclass(frozen=True)
+class _Word:
+    """A recognized word, in page space.
+
+    Its ``text``, its ``box`` turned back level, its baseline's ``angle`` (degrees clockwise as seen), its ``line``
+    and Tesseract's ``confidence`` in it.
+    """
+
+    text: str
+    box: Box
+    angle: float
+    line: _Line
+    confidence: float
+
+    def covers(self) -> Box:
+        """The box it covers on the page, turned as it is."""
+        x0, y0, x1, y1 = self.box
+        cx, cy, half_w, half_h = (x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) / 2, (y1 - y0) / 2
+        sin, cos = abs(math.sin(math.radians(self.angle))), abs(math.cos(math.radians(self.angle)))
+        across, down = half_w * cos + half_h * sin, half_w * sin + half_h * cos
+        return cx - across, cy - down, cx + across, cy + down
+
+
+def _words(tsv: str, frame: np.ndarray, reading: int) -> list[_Word]:
+    """Each word of Tesseract's ``tsv``, mapped by ``frame`` (:func:`_frame`) into page space."""
+    linear = frame[:2, :2]
+    along, across = linear @ (1.0, 0.0), linear @ (0.0, 1.0)
+    angle = round(math.degrees(math.atan2(along[1], along[0])), 6)
+    out = []
+    for row in tsv.splitlines()[1:]:
+        level, _page, block, paragraph, line, _word, left, top, wide, high, confidence, text = row.split('\t')
+        left, top, wide, high = int(left), int(top), int(wide), int(high)
+        if level == _WORD_LEVEL and text.strip() and wide > 0 and high > 0:
+            cx, cy, _ = frame @ (left + wide / 2, top + high / 2, 1.0)
+            half_w, half_h = wide * math.hypot(*along) / 2, high * math.hypot(*across) / 2
+            box = (cx - half_w, cy - half_h, cx + half_w, cy + half_h)
+            key = (reading, int(block), int(paragraph), int(line))
+            out.append(_Word(text.strip(), box, angle, key, float(confidence)))
+    return out
+
+
+def _surer(readings: list[list[_Word]]) -> list[_Word]:
+    """The words of every reading but those whose line another reading reads surer where it lies.
+
+    A page read as placed and turned -- a table printed sideways under an upright running head -- is misread by each
+    reading where the other reads right. Line by line, a line is kept unless a line of another reading overlaps it
+    with a higher mean confidence.
+    """
+    lines: dict[_Line, list[_Word]] = defaultdict(list)
+    for word in itertools.chain.from_iterable(readings):
+        lines[word.line].append(word)
+    measured: dict[_Line, tuple[Box, float]] = {}
+    for key, words in lines.items():
+        boxes = [w.covers() for w in words]
+        box = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
+        measured[key] = (box, sum(w.confidence for w in words) / len(words))
+
+    def beaten(key: _Line) -> bool:
+        (x0, y0, x1, y1), mine = measured[key]
+        return any(
+            other[0] != key[0] and theirs > mine and ox0 < x1 and x0 < ox1 and oy0 < y1 and y0 < oy1
+            for other, ((ox0, oy0, ox1, oy1), theirs) in measured.items()
+        )
+
+    kept = {key for key in lines if not beaten(key)}
+    return [w for w in itertools.chain.from_iterable(readings) if w.line in kept]
+
+
+@dataclass(frozen=True)
+class Reading:
+    """How page ``page`` was recognized.
+
+    ``osd``: Tesseract's orientation detection -- the degrees to turn the page clockwise to read it upright, and how
+    sure it is -- or None when it told nothing (too few characters) or was not asked; ``turn``: the degrees the page
+    was read turned besides as placed (0: as placed only); ``unsure``: OSD told nothing, or proposed a turn it was
+    not sure enough of, so the page was read as placed. ``skew``: the degrees its lines stand turned, clockwise as
+    seen (None: no lines tell, or it was not measured); ``deskewed``: whether Tesseract was handed it turned back.
+    """
+
+    page: int
+    osd: tuple[int, float] | None
+    turn: int
+    unsure: bool
+    skew: float | None
+    deskewed: bool
+
+    def note(self) -> str | None:
+        """What a reader of the layer should know of how this page was read; None when read as placed, unskewed."""
+        parts = []
+        if self.turn and self.osd is not None:
+            parts.append(f'read turned {self.turn} degrees as well as placed (OSD confidence {self.osd[1]:.2f})')
+        elif self.unsure and self.osd is None:
+            parts.append('orientation untold (OSD: too few characters), read as placed')
+        elif self.unsure and self.osd is not None:
+            turn, confidence = self.osd
+            parts.append(
+                f'OSD proposed turning {turn} degrees at confidence {confidence:.2f}, too unsure: read as placed'
+            )
+        if self.deskewed:
+            parts.append(f'read deskewed by {self.skew:.2f} degrees')
+        return f'page {self.page}: {"; ".join(parts)}' if parts else None
+
+
+@dataclass(frozen=True)
+class Layered:
+    """What :func:`text_layer` did: a :class:`Reading` of each page it recognized, in page order (none: a copy)."""
+
+    readings: tuple[Reading, ...]
+
+
+@dataclass(frozen=True)
+class _Asked:
+    """How pages are to be read.
+
+    The OSD confidence a turn is read at (None: never turned, OSD not asked) and the skew above which a page is
+    deskewed (None: never, skew not measured).
+    """
+
+    orientation_confidence: float | None
+    deskew_above: float | None
 
 
 def _image(reader: _pdf.Reader, number: int) -> tuple | None:
@@ -271,45 +487,102 @@ def _image(reader: _pdf.Reader, number: int) -> tuple | None:
     return images[0]
 
 
-def _recognize(reader: _pdf.Reader, image: tuple, tesseract: list[str], name: str) -> Words:
-    """The words ``tesseract`` (its command, but for the image) reads on ``image`` upright, in page space.
+def _recognize(
+    pdf: Path, reader: _pdf.Reader, number: int, image: tuple, *, tesseract: list[str], asked: _Asked
+) -> tuple[list[_Word], Reading]:
+    """The words ``tesseract`` (its command, but for the image) reads on page ``number``'s ``image``, in page space.
 
-    The upright image fills its box, so each word's pixel box maps onto the box.
+    The picture as the page shows it is measured -- its skew (`document_lab.ink.skew`) and, by OSD, its orientation
+    -- and Tesseract reads it turned back by its skew when above ``asked``'s and, when OSD is sure enough of a turn,
+    turned so as well as placed, line by line the surer kept (:func:`_surer`). It is handed over exact where it can
+    be -- lossless samples turned exactly, fax data and an upright JPEG as stored -- and decoded
+    (`document_lab.pdf.read_raster`) only to be measured, or when in a codec to be turned or deskewed.
     """
-    box, width, height, obj, matrix, placement, _ = image
+    name = f'page {number} of {pdf.name}'
+    box, _width, _height, obj, matrix, placement, _ = image
     if placement is None:
         msg = f'{name} is placed at an angle no quarter turn makes ({matrix}): Tesseract reads it upright only'
         raise ValueError(msg)
-    across, down = (height, width) if placement[0] else (width, height)
-    dpi = round(across * 72 / (box[2] - box[0]))
-    with tempfile.TemporaryDirectory(prefix=TEMP_PREFIX) as folder:
-        path = _image_file(reader.image(obj), placement, Path(folder), name)
-        tsv = _run([tesseract[0], str(path), *tesseract[1:], '--dpi', str(dpi), 'tsv'])
-    return _words(tsv, box, across, down)
+    samples = reader.image(obj)
+    if samples[6] is not None and samples[6] not in {*_CODEC_FILES, 'CCITTFaxDecode'}:
+        msg = f'{name} is in {samples[6]}, which Tesseract does not read'
+        raise ValueError(msg)
+    shown = (samples[1], samples[0]) if placement[0] else (samples[0], samples[1])  # columns, rows as shown
+    exact = _lossless(samples, placement, name)
+    measure = asked.deskew_above is not None
+    pixels = exact
+    if pixels is None and measure:  # a codec's pixels, at their own resolution, as the page shows them
+        decoded = read_raster(pdf, number, BBox(*box), dpi=None).pixels
+        pixels = decoded[..., :1] if samples[3] == 1 else decoded[..., :3]
+    skew = ink.skew(pixels) if measure and pixels is not None else None
+    deskew = skew is not None and asked.deskew_above is not None and abs(skew) > asked.deskew_above
+    with tempfile.TemporaryDirectory(prefix=TEMP_PREFIX) as made:
+        folder = Path(made)
+
+        def handed(turn: int) -> tuple[Path, tuple[int, int]]:
+            """The file Tesseract reads turned ``turn`` degrees clockwise (deskewed when it is to be), and its size.
+
+            The size (columns, rows) is the picture's before that turn.
+            """
+            nonlocal pixels
+            if not deskew and exact is None and (stored := _stored_file(samples, placement, turn, folder, name)):
+                return stored, shown
+            if pixels is None:  # a codec turned or inverted, never measured
+                decoded = read_raster(pdf, number, BBox(*box), dpi=None).pixels
+                pixels = decoded[..., :1] if samples[3] == 1 else decoded[..., :3]
+            rows = _deskewed(pixels, skew) if deskew and skew is not None else pixels
+            return _pnm(np.rot90(rows, -turn // 90), folder), (pixels.shape[1], pixels.shape[0])
+
+        osd = None if asked.orientation_confidence is None else _orientation(tesseract[0], handed(0)[0])
+        sure = osd is not None and asked.orientation_confidence is not None and osd[1] >= asked.orientation_confidence
+        turn = osd[0] if sure and osd is not None else 0
+        readings = []
+        for reading, quarter in enumerate([0, turn] if turn else [0]):
+            path, size = handed(quarter)
+            dpi = str(round(size[0] * 72 / (box[2] - box[0])))
+            tsv = _run([tesseract[0], str(path), *tesseract[1:], '--dpi', dpi, 'tsv'])
+            frame = _frame(box, size, skew if deskew and skew is not None else 0.0, quarter)
+            readings.append(_words(tsv, frame, reading))
+    unsure = asked.orientation_confidence is not None and (osd is None or (osd[0] != 0 and not sure))
+    words = _surer(readings) if len(readings) > 1 else readings[0]
+    return words, Reading(number, osd, turn, unsure, skew, deskew)
 
 
-def text_layer(pdf: Path, out: Path, languages: str = 'eng', *, places: TesseractPlaces) -> int:
+def text_layer(
+    pdf: Path,
+    out: Path,
+    languages: str = 'eng',
+    *,
+    places: TesseractPlaces,
+    orientation_confidence: float | None = ORIENTATION_CONFIDENCE,
+    deskew_above: float | None = DESKEW_ABOVE,
+) -> Layered:
     """``pdf`` with a text layer in ``languages`` over every page that is one image and has no text, to ``out``.
 
-    Tesseract is found on PATH or in ``places``, and only once there is a page to recognize: a document already
-    read needs none. ``out`` may be ``pdf`` itself: it is written beside as ``<out>.part`` and moved into place when
-    whole; nothing is written when a page cannot be recognized. How many pages were recognized (0: ``out`` is a
-    copy).
+    A page OSD says to turn with ``orientation_confidence`` or more is read turned as well as placed (None: OSD is
+    not asked, and Tesseract's ``osd`` data not needed); a page skewed more than ``deskew_above`` degrees is read
+    turned back (None: skew is not measured). Tesseract is found on PATH or in ``places``, and only once there is a
+    page to recognize: a document already read needs none. ``out`` may be ``pdf`` itself: it is written beside as
+    ``<out>.part`` and moved into place when whole; nothing is written when a page cannot be recognized.
     """
     reader = _pdf.open(pdf.read_bytes(), b'')
-    layers: dict[int, Words] = {}
+    asked = _Asked(orientation_confidence, deskew_above)
+    layers: dict[int, list[_Word]] = {}
+    readings = []
     tesseract: list[str] = []
     for number, _, _ in reader.pages:
         if (image := _image(reader, number)) is None:
             continue
-        tesseract = tesseract or [str(check(languages, places)), 'stdout', '-l', languages]
-        layers[number] = _recognize(reader, image, tesseract, f'page {number} of {pdf.name}')
+        needed = languages if orientation_confidence is None else f'{languages}+osd'
+        tesseract = tesseract or [str(check(needed, places)), 'stdout', '-l', languages]
+        layers[number], reading = _recognize(pdf, reader, number, image, tesseract=tesseract, asked=asked)
+        readings.append(reading)
     part = out.with_name(out.name + '.part')
     writer = _pdf.create(part)
     try:
         for number, _, _ in reader.pages:
             if number in layers:
-                writer.copy_page_with_text(reader, number, layers[number])
+                writer.copy_page_with_text(reader, number, [(w.text, w.box, w.angle) for w in layers[number]])
             else:
                 writer.copy_page(reader, number)
         writer.close()
@@ -318,4 +591,4 @@ def text_layer(pdf: Path, out: Path, languages: str = 'eng', *, places: Tesserac
         part.unlink(missing_ok=True)
         raise
     part.replace(out)
-    return len(layers)
+    return Layered(tuple(readings))

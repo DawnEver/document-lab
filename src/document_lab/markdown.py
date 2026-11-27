@@ -3,7 +3,10 @@
 Lines and their reading order are `document_lab.layout`'s -- or, for a tagged PDF, what its tags state
 (`document_lab.tags`; the ``tagged`` uses, all on by default): ``order``, lines in the stated order; ``headings``, a
 line heading as its tag says (``Title`` ``#``, ``H1`` ``##``, ...); ``paragraphs``, the lines of one tagged block (a
-paragraph, a list item, a cell) one paragraph, a block rejoined across a break only with its own element. Tags
+paragraph, a list item, a cell) one paragraph, a block rejoined across a break only with its own element. A tagged
+heading the rules below make a heading too takes their level (a tag's level follows a word processor's styles: the
+IEEE template sets its acknowledgment and references as ``H5``); one only the tags state keeps its tag's level, at
+most one below the heading before it (no level skipped). Tags
 stating no heading at all leave every line's heading to the rules below, tags stating no title the title, and a
 heading those rules find heads no tagged block. A line the tags do not cover -- an artifact, a document tagged in
 part -- is read as an untagged one is:
@@ -102,7 +105,11 @@ def _blocks(doc: Document, *, include_hidden: bool, tagged: Collection[str]) -> 
     weighted = any(span.bold for span in doc.spans())
     body = layout.body_size(doc)
     title_size = max((s.size for s in doc.pages[0].spans), default=0.0) if doc.pages else 0.0
-    return [_page_blocks(page, body, title_size, weighted=weighted, reading=reading, uses=uses) for page in doc.pages]
+    last = [0]  # the level of the last heading written, page after page
+    return [
+        _page_blocks(page, body, title_size, weighted=weighted, reading=reading, uses=uses, last=last)
+        for page in doc.pages
+    ]
 
 
 def _rejoin(blocks: list[_Block]) -> list[str]:
@@ -166,6 +173,7 @@ def _page_blocks(
     weighted: bool,
     reading: tags.Reading | None,
     uses: frozenset[str],
+    last: list[int],
 ) -> list[_Block]:
     blocks: list[str] = []
     owners: list[Element | None] = []  # the tagged element each block is set from
@@ -178,6 +186,8 @@ def _page_blocks(
     def put(text: str, owner: Element | None) -> None:
         blocks.append(text)
         owners.append(owner)
+        if text.startswith('#'):
+            last[0] = len(text) - len(text.lstrip('#'))
 
     def end_paragraph() -> None:
         if paragraph:
@@ -214,6 +224,9 @@ def _page_blocks(
         held = block
         level = reading.level(line) if covered and stated_heads else None
         if level:
+            # The tags state the line heads. Where the rules make it a heading too, theirs is its level (a tag's
+            # follows a word processor's styles); else the tag's, at most one below the heading before it.
+            level = inferred.index(' ') if inferred else min(level, max(2, last[0] + 1))
             heading = f'{"#" * level} {line.text}'
         elif covered and stated_heads:
             titled = reading.titled or inferred is None or not inferred.startswith('# ')

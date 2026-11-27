@@ -278,3 +278,23 @@ def test_regions_take_from_the_tags_only_the_kinds_asked_and_stated(tmp_path):
     doc = _table_doc(tmp_path)
     assert [r.label for r in regions(doc.page(1), 10.0, structure=doc.structure, tagged={'figures'})] != ['Table 4']
     assert [r.label for r in regions(doc.page(1), 10.0, structure=doc.structure, tagged={'tables'})] == ['Table 4']
+
+
+def test_a_tagged_heading_the_rules_find_too_takes_their_level_and_no_level_is_skipped(tmp_path):
+    content = ' '.join(
+        [
+            marked('H1', 0, shown(20, 50, 'Background')),
+            marked('H5', 1, shown(20, 80, 'REFERENCES')),
+            marked('H4', 2, shown(20, 110, 'Deep heading')),
+        ]
+    )
+    tree = {'root': '<< /K [{a} {b} {c}] >>'} | {
+        name: f'<< /S /{role} /Pg {{page1}} /K {i} >>'
+        for i, (name, role) in enumerate(zip('abc', ('H1', 'H5', 'H4'), strict=True))
+    }
+    # REFERENCES heads by the rules too: a section, not the H5 a word processor's style made it.
+    assert [h for _, h in headings(_doc(tmp_path, content, tree))] == [
+        '## Background',
+        '## REFERENCES',
+        '### Deep heading',
+    ]

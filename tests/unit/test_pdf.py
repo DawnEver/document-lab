@@ -166,6 +166,31 @@ def test_a_span_says_its_render_mode(tmp_path):
     assert modes == {'hidden': 3, 'shown': 0}
 
 
+def background_pdf(path):
+    """White on the white page, white on a black box (the visible control), black on a black box, black on white."""
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.draw_rect(pymupdf.Rect(60, 85, 300, 140), color=None, fill=(0, 0, 0))
+    page.insert_text((72, 72), 'white on white', fontname='helv', fontsize=10, color=(1, 1, 1))
+    page.insert_text((72, 100), 'white on black', fontname='helv', fontsize=10, color=(1, 1, 1))
+    page.insert_text((72, 128), 'black on black', fontname='helv', fontsize=10, color=(0, 0, 0))
+    page.insert_text((72, 156), 'black on white', fontname='helv', fontsize=10, color=(0, 0, 0))
+    doc.save(path)
+    return read_pdf(path).page(1)
+
+
+def test_text_filled_in_the_color_under_it_shows_nothing_and_the_shown_page_leaves_it_out(tmp_path):
+    page = background_pdf(tmp_path / 'b.pdf')
+    assert {s.text: s.in_background_color for s in page.spans} == {
+        'white on white': True,
+        'white on black': False,
+        'black on black': True,
+        'black on white': False,
+    }
+    assert [s.text for s in page.shown().spans] == ['white on black', 'black on white']
+    assert len(page.shown(include_in_background_color=True).spans) == 4
+
+
 def test_an_encrypted_file_opens_with_its_password_and_refuses_without(tmp_path):
     doc = pymupdf.open()
     doc.new_page().insert_text((72, 72), 'secret', fontname='helv', fontsize=10)

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ctypes
 import functools
+import os
 import platform
 import subprocess
 import sys
@@ -31,7 +32,7 @@ from document_lab.capture.screen import SCROLL_METHODS, Region, Window
 if TYPE_CHECKING:
     from pathlib import Path
 
-__all__ = ['client', 'grab', 'monitors', 'open_file', 'problem', 'scroll', 'window', 'windows']
+__all__ = ['census', 'client', 'grab', 'monitors', 'open_file', 'owned', 'problem', 'scroll', 'window', 'windows']
 
 _FRAMEWORK: Final = '/System/Library/Frameworks/{0}.framework/{0}'
 _ON_SCREEN_ONLY: Final = 1 << 0  # kCGWindowListOptionOnScreenOnly: front to back
@@ -284,15 +285,45 @@ def client(window: Window) -> Region:
     return Region(frame.left, frame.top + bar, frame.width, max(frame.height - bar, 0))
 
 
-def windows() -> list[Window]:
-    """The on-screen, titled windows of programs (normal or kept on top), front to back."""
-    listed = [
-        i
-        for i in _infos(_ON_SCREEN_ONLY | _EXCLUDE_DESKTOP)
-        if 0 <= i.layer <= _FLOATING_LAYER and i.alpha > 0 and i.title
-    ]
+def _shown() -> list[_Info]:
+    """The on-screen windows of programs (normal or kept on top), front to back, named or not."""
+    return [i for i in _infos(_ON_SCREEN_ONLY | _EXCLUDE_DESKTOP) if 0 <= i.layer <= _FLOATING_LAYER and i.alpha > 0]
+
+
+def _sized(listed: list[_Info]) -> list[Window]:
     found = [Window(i.number, i.title) for i in listed]
     return [w for w in found if client(w).width and client(w).height]
+
+
+def windows() -> list[Window]:
+    """The on-screen, titled windows of programs (normal or kept on top), front to back."""
+    return _sized([i for i in _shown() if i.title])
+
+
+def owned(pid: int) -> list[Window]:
+    """The on-screen windows process ``pid`` owns, front to back, titled or not.
+
+    macOS names another program's windows only to a process granted Screen Recording; without it they are untitled.
+    """
+    return _sized([i for i in _shown() if i.pid == pid])
+
+
+def census() -> str:
+    """What CoreGraphics tells this process, for a report when a window cannot be found.
+
+    Its two permissions, then every on-screen window: number, owner and pid, layer, alpha, bounds, and its name or that
+    macOS withheld it.
+    """
+    granted, posts = bool(_cg().CGPreflightScreenCaptureAccess()), _may_post()
+    lines = [f'Screen Recording granted: {granted}; input may be posted: {posts}; this process: pid {os.getpid()}']
+    for i in _infos(_ON_SCREEN_ONLY | _EXCLUDE_DESKTOP):
+        b = i.bounds
+        name = repr(i.title) if i.title else 'no name (withheld)'
+        lines.append(
+            f'  window {i.number}: {i.owner!r} pid {i.pid}, layer {i.layer}, alpha {i.alpha:g}, '
+            f'{b.width}x{b.height} at {b.left},{b.top}, {name}'
+        )
+    return '\n'.join(lines)
 
 
 def window(handle: int) -> Window:

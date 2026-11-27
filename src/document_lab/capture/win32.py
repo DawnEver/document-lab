@@ -27,6 +27,7 @@ import numpy as np
 from document_lab.capture.screen import SCROLL_METHODS, Region, Window, bounds
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 __all__ = [
@@ -42,6 +43,7 @@ __all__ = [
     'monitors',
     'move_cursor',
     'open_file',
+    'owned',
     'park_cursor',
     'parking_spot',
     'press',
@@ -234,20 +236,36 @@ def _cloaked(hwnd: int) -> bool:
     return bool(flag.value)
 
 
-def windows() -> list[Window]:
-    """Visible, titled, non-minimized, uncloaked top-level windows, front to back."""
+def _shown(keep: Callable[[int, str], bool]) -> list[Window]:
+    """The visible, non-minimized, uncloaked top-level windows ``keep`` takes (by handle and title), front to back."""
     user32 = _dll('user32')
     found: list[Window] = []
 
     @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HANDLE, wintypes.LPARAM)
     def visit(hwnd: int, _: int) -> bool:
         shown = user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd) and not _cloaked(hwnd)
-        if shown and (title := _title(hwnd)):
+        if shown and keep(hwnd, title := _title(hwnd)):
             found.append(Window(hwnd, title))
         return True
 
     user32.EnumWindows(visit, 0)
     return [w for w in found if client(w).width and client(w).height]
+
+
+def windows() -> list[Window]:
+    """Visible, titled, non-minimized, uncloaked top-level windows, front to back."""
+    return _shown(lambda _, title: bool(title))
+
+
+def _pid(hwnd: int) -> int:
+    pid = wintypes.DWORD()
+    _dll('user32').GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value
+
+
+def owned(pid: int) -> list[Window]:
+    """The visible, non-minimized, uncloaked top-level windows process ``pid`` owns, front to back, titled or not."""
+    return _shown(lambda hwnd, _: _pid(hwnd) == pid)
 
 
 def window(handle: int) -> Window:

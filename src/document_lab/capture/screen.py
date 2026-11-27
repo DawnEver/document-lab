@@ -73,6 +73,13 @@ class System(Protocol):
         """The visible, titled top-level windows a capture may take, front to back."""
         ...
 
+    def owned(self, pid: int) -> list[Window]:
+        """The visible top-level windows process ``pid`` owns, front to back, titled or not.
+
+        macOS withholds another program's window names from a process without Screen Recording.
+        """
+        ...
+
     def window(self, handle: int) -> Window:
         """The window with ``handle``; refused when none has it."""
         ...

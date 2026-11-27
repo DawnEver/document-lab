@@ -3,8 +3,8 @@
 import pymupdf
 import pytest
 
-from document_lab.ir import BBox, Provenance, Table
-from document_lab.markdown import page_markdowns, table_markdown, to_markdown
+from document_lab.ir import BBox
+from document_lab.markdown import page_markdowns, table, to_markdown
 from document_lab.pdf import read_pdf
 
 LEFT, RIGHT, WIDTH = 50, 320, 240
@@ -148,9 +148,7 @@ def test_a_table_row_led_by_a_year_heads_nothing(tmp_path):
     assert heads == ['### 4.2 Duty types', '## 12 Tests']
 
 
-def test_a_table_is_a_pipe_table_its_merged_cells_written_once_and_its_bars_escaped():
-    box = BBox(0, 0, 10, 10)
-    here = Provenance('0' * 64, 'file:///t.pdf', page=1)
+def test_a_table_s_merged_cells_are_written_once_given_its_cells_boxes():
     rows = (('Parameter', 'Limits', 'Limits'), ('Parameter', 'min', 'max'), ('a|b', '1', '2'))
     merged, wide = BBox(0, 0, 10, 20), BBox(10, 0, 30, 10)
     boxes = (
@@ -158,10 +156,46 @@ def test_a_table_is_a_pipe_table_its_merged_cells_written_once_and_its_bars_esca
         (merged, BBox(10, 10, 20, 20), BBox(20, 10, 30, 20)),
         (BBox(0, 20, 10, 30), BBox(10, 20, 20, 30), BBox(20, 20, 30, 30)),
     )
-    assert table_markdown(Table(rows, boxes, here.at(bbox=box))) == (
-        '| Parameter | Limits |  |\n| --- | --- | --- |\n|  | min | max |\n| a\\|b | 1 | 2 |\n'
-    )
-    assert table_markdown(Table(rows, None, here)).count('Limits') == 2  # without boxes no merge is known
+    assert table(rows, boxes) == '| Parameter | Limits |  |\n| --- | --- | --- |\n|  | min | max |\n| a\\|b | 1 | 2 |'
+    assert table(rows).count('Limits') == 2  # without boxes no merge is known
+
+
+def test_a_placed_block_stands_where_its_box_is_in_place_of_the_lines_inside_it(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    _write(page, LEFT, 100, 'Technical data and measuring conditions.')
+    _write(page, LEFT, 140, 'Rated voltage')
+    _write(page, 220, 140, '80 V DC')
+    _write(page, LEFT, 160, 'Weight')
+    _write(page, 220, 160, 'Approx. 0.075 g')
+    _write(page, LEFT, 220, 'Characteristics and ordering codes.')
+    doc.save(tmp_path / 'p.pdf')
+    block = table([('Rated voltage', '80 V DC'), ('Weight', 'Approx. 0.075 g')])
+    (text,) = page_markdowns(read_pdf(tmp_path / 'p.pdf'), [[(BBox(40, 125, 400, 170), block)]])
+    assert text.split('\n\n') == [
+        'Technical data and measuring conditions.',
+        '| Rated voltage | 80 V DC |\n| --- | --- |\n| Weight | Approx. 0.075 g |',
+        'Characteristics and ordering codes.\n',
+    ]
+
+
+def test_a_title_wrapping_beside_a_placed_logo_stays_whole(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    _write(page, 54, 300, 'Data and Signal Line Chokes', size=18)
+    _write(page, 54, 366, 'Common-mode Chokes, EIA 1210 and more', size=18)
+    _write(page, 54, 500, 'Series and type of the part, the date of its issue and the rights reserved to it.')
+    _write(page, 54, 512, 'Reproduction of this publication without prior express consent is prohibited.')
+    doc.save(tmp_path / 'p.pdf')
+    (text,) = page_markdowns(read_pdf(tmp_path / 'p.pdf'), [[(BBox(419, 69, 546, 101), '![logo](logo.png)')]])
+    assert text.split('\n\n')[:2] == [
+        '# Data and Signal Line Chokes Common-mode Chokes, EIA 1210 and more',
+        '![logo](logo.png)',
+    ]
+
+
+def test_a_table_is_written_with_its_header_rule_a_pipe_escaped_and_short_rows_padded():
+    assert table([('a', 'b|c'), ('1',)]) == '| a | b\\|c |\n| --- | --- |\n| 1 |  |'
 
 
 def _heads(md: str) -> list[str]:

@@ -26,7 +26,7 @@ from document_lab.capture.screen import SCROLL_METHODS, Region, Window
 if TYPE_CHECKING:
     from pathlib import Path
 
-__all__ = ['client', 'grab', 'monitors', 'open_file', 'problem', 'scroll', 'window', 'windows']
+__all__ = ['client', 'grab', 'monitors', 'open_file', 'owned', 'problem', 'scroll', 'window', 'windows']
 
 FRONT_TRIES: Final = 5  # tries to bring a window to the front before it is refused
 _WHEEL_DOWN, _WHEEL_UP = 5, 4  # the pointer buttons X11 sends for a wheel notch
@@ -181,6 +181,24 @@ def _frame(handle: int) -> Region:
 def windows() -> list[Window]:
     """The shown, titled, managed windows, front to back."""
     found = [Window(handle, title) for handle in reversed(_stacking()) if _shown(handle) and (title := _title(handle))]
+    return [w for w in found if client(w).width and client(w).height]
+
+
+def _pid(handle: int) -> int | None:
+    """The process that says it owns the window (``_NET_WM_PID``); None when it says none."""
+    from Xlib import error  # noqa: PLC0415
+
+    try:
+        said = _cardinals(_resource(handle), '_NET_WM_PID')
+    except error.BadWindow:
+        return None
+    return said[0] if said else None
+
+
+def owned(pid: int) -> list[Window]:
+    """The shown, managed windows process ``pid`` says it owns (``_NET_WM_PID``), front to back, titled or not."""
+    stacked = reversed(_stacking())
+    found = [Window(handle, _title(handle)) for handle in stacked if _shown(handle) and _pid(handle) == pid]
     return [w for w in found if client(w).width and client(w).height]
 
 

@@ -3,9 +3,8 @@
 The local ``papers`` part (tests/paper/e2e) checks the IEEE papers that may not be published; this part keeps the
 paper layout's end-to-end coverage on papers that may (user ruling: CI keeps it without the real papers). The truth
 below was read off each PDF -- its title, its top-level headings in order, the numbers its figure and table captions
-carry -- never off any converter's output. Each kind is its own check (`tests.paper.structure.CHECKS`), so what
-holds guards against regression while a kind the layout still misses is a known failure carrying its residual; every
-planted wrong truth (`tests.paper.structure.WRONG`) must be reported.
+carry -- never off any converter's output. Each kind is its own check (`tests.paper.structure.CHECKS`), so a
+regression names the kind it breaks; every planted wrong truth (`tests.paper.structure.WRONG`) must be reported.
 """
 
 from pathlib import Path
@@ -55,37 +54,9 @@ PREPRINT = Paper(
 )
 PAPERS = {paper.pdf: paper for paper in (ISMIR, PREPRINT)}
 
-#: What the layout misses today, by paper and kind: what it states instead (the residual).
-KNOWN = {
-    (ISMIR.pdf, 'title'): (
-        "paper.md opens '# arXiv:2204.08094v1 [eess.AS] 17 Apr 2022 the distribution of a tablature transcription "
-        "model's predic-': the margin's arXiv stamp and body text, not the title"
-    ),
-    (ISMIR.pdf, 'sections'): (
-        "the sections are split at the subsections ('', '2.1 Baseline Model' ... '4.3 Future Work'); the numbered "
-        'section headings (1. INTRODUCTION ...) and the unnumbered ones open none'
-    ),
-    (PREPRINT.pdf, 'sections'): (
-        "two sections: 'arXiv:2608.20674v1 [cs.DL] 21 Aug 2026' (the margin's arXiv stamp) and 'Appendix'; the "
-        'headings whose number is set apart (1 Introduction ...) open none'
-    ),
-}
 
-
-def _cases() -> list:
-    return [
-        pytest.param(
-            name,
-            kind,
-            id=f'{name}-{kind}',
-            marks=[pytest.mark.xfail(strict=True, reason=KNOWN[name, kind])] if (name, kind) in KNOWN else [],
-        )
-        for name in PAPERS
-        for kind in CHECKS
-    ]
-
-
-@pytest.mark.parametrize(('pdf', 'kind'), _cases(), indirect=['pdf'])
+@pytest.mark.parametrize('kind', sorted(CHECKS))
+@pytest.mark.parametrize('pdf', sorted(PAPERS), indirect=True)
 def test_the_ingested_paper_has_the_pdfs_structure(pdf: Path, kind: str, tmp_path_factory, request):
     truth = PAPERS[request.node.callspec.params['pdf']]
     assert CHECKS[kind](ingested(pdf, 'ir', tmp_path_factory), truth) == []

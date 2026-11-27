@@ -85,3 +85,14 @@ def test_a_vertical_block_across_the_middle_is_full_width_and_reads_right_to_lef
 def test_vertical_columns_stacked_read_top_band_first():
     page = _page(_vertical('LOW', 500, 300), _vertical('TOP2', 485, 100), _vertical('TOP1', 500, 100))
     assert [ln.text for ln in layout.ordered(layout.lines(page, weighted=True))] == ['TOP1', 'TOP2', 'LOW']
+
+
+def test_vertical_writing_beside_the_text_is_no_furniture_but_a_sideways_stamp_is():
+    """A column of vertical writing runs down the page as a turned stamp does, but it is the page's text: only text
+    turned sideways, outside the box of the page's text (vertical columns included), is furniture.
+    """
+    column = TextSpan('ABCDE', SIZE, 'Song', SRC.at(bbox=BBox(495, 100, 505, 150)), direction=(0.0, 1.0), vertical=True)
+    stamp = TextSpan('arXiv:0000.00000v1', SIZE, 'Times', SRC.at(bbox=BBox(20, 200, 30, 380)), direction=(0.0, -1.0))
+    page = _page(_flat('body text of the page', 100, 100), _flat('more body text here', 100, 120), column, stamp)
+    assert layout.furniture(page) == [stamp]
+    assert 'ABCDE' in [line.text for line in lines(page, weighted=False)]

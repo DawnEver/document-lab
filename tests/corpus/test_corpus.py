@@ -111,7 +111,7 @@ def jpx_images(pdf: Path, page: int, objects: frozenset[int]) -> list[str]:
     reader = _pdf.open(pdf.read_bytes(), b'')
 
     def codec(image: int) -> str | None:
-        _width, _height, _space, _components, _bits, _data, still_in, _decode, _masked = reader.image(image)
+        _width, _height, _space, _components, _bits, _data, still_in, *_ = reader.image(image)
         return still_in
 
     placed = {figure.image for figure in _read(pdf).page(page).figures if figure.image is not None}

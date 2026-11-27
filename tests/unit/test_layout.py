@@ -295,3 +295,36 @@ def test_a_caption_turned_sideways_is_one_paragraph_of_the_page_markdown(tmp_pat
     assert ' '.join(text for text, _, turn in SIDEWAYS if turn == 90) in paragraphs
     # The planted wrong truth: the caption run on into the upright line beside it.
     assert f'{caption} Beside the caption' not in paragraphs
+
+
+#: Two lines set 1.1 sizes apart (the control: close, yet two lines), each glyph drawn on its own.
+GREY_LINES = ((100.0, 'Glyphs each in a grey of their own'), (111.0, 'read as the run their source set.'))
+
+
+def _grey_pdf(path, greys: tuple[float, ...]):
+    """:data:`GREY_LINES` glyph by glyph, cycling through ``greys`` and jittering each baseline by up to 0.04 sizes."""
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=612, height=792)
+        for y, text in GREY_LINES:
+            x = 72.0
+            for i, char in enumerate(text):
+                page.insert_text(
+                    (x, y + 0.4 * (i % 3 - 1)), char, fontname='helv', fontsize=10, color=(greys[i % 3],) * 3
+                )
+                x += pymupdf.get_text_length(char, fontname='helv', fontsize=10)
+        doc.save(path)
+    return read_pdf(path).page(1)
+
+
+def test_a_run_split_by_its_fill_reads_as_the_run_its_source_set(tmp_path):
+    """A reader splits a run where its fill changes: glyphs each in a grey of their own are as many spans. Their lines
+    -- text, frame, so every paragraph gap measured from them -- are those of the same glyphs in one grey."""
+    split = _grey_pdf(tmp_path / 'greys.pdf', (0.2, 0.3, 0.45))
+    whole = _grey_pdf(tmp_path / 'grey.pdf', (0.3, 0.3, 0.3))
+    assert (len(split.spans), len(whole.spans)) == (sum(len(t) - t.count(' ') for _, t in GREY_LINES), 2)
+
+    def read(page):
+        return [(ln.text, ln.frame) for ln in layout.ordered(layout.lines(page, weighted=False))]
+
+    assert read(split) == read(whole)
+    assert [text for text, _ in read(split)] == [text for _, text in GREY_LINES]  # the control: two lines stay two

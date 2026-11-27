@@ -132,9 +132,10 @@ def test_running_heads_and_feet_repeat_at_the_page_edges_page_numbers_varying(tm
 
 def test_an_equation_number_closing_pages_at_one_place_is_no_running_foot(tmp_path):
     """A paper's text block ends at one baseline on every page: pages ending in a numbered equation set its number at
-    the same place, ``(7)``, ``(12)``, ``(19)`` -- each its own equation, never a page number repeating."""
+    the same place, a chapter's ``(4.7)``, ``(4.12)``, ``(4.19)`` -- each its own equation, never a page number
+    repeating."""
     doc = pymupdf.open()
-    for number, equation in enumerate((7, 12, 19, 23), start=1):
+    for number, equation in enumerate(('4.7', '4.12', '4.19', '4.23'), start=1):
         page = doc.new_page(width=595, height=842)
         page.insert_text((37, 120), f'Section {number} opens the page with its own words', fontsize=11)
         page.insert_text((200, 780), f'x{number} = a + b', fontsize=11)

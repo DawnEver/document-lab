@@ -53,7 +53,7 @@ from document_lab.ir import BBox
 from document_lab.markdown import Headings, headings, page_markdowns
 from document_lab.markdown import table as markdown_table
 from document_lab.pdf import Renderer, read_pdf, read_raster
-from document_lab.regions import Region, regions
+from document_lab.regions import Region, Unnumbered, regions
 from document_lab.tables import tables
 
 if TYPE_CHECKING:
@@ -314,6 +314,7 @@ def write_pages(
     tagged: Collection[str] = tags.DEFAULT_USES,
     formulas: formula.Formulas | None = None,
     formula_model: formula.Model = 'texteller',
+    unnumbered: Unnumbered = 'strict',
     include_hidden: bool = False,
     include_in_background_color: bool = False,
 ) -> Paged:
@@ -324,7 +325,8 @@ def write_pages(
     (`document_lab.markdown.headings`). ``tagged``: what a tagged PDF's tags give (`document_lab.tags.USES`; by default
     ``DEFAULT_USES``, all but figures); none infers it all from layout. ``formulas``: ``latex`` writes each equation's
     LaTeX after its link, read by ``formula_model`` (`document_lab.formula`); refused by
-    :class:`document_lab.formula.FormulaUnavailable` before anything is written when that model cannot run. Every
+    :class:`document_lab.formula.FormulaUnavailable` before anything is written when that model cannot run.
+    ``unnumbered``: how displays without a number are found (`document_lab.regions.Unnumbered`). Every
     step reads the page as its default view shows it (`document_lab.ir.Page.shown`): its pictures, ruled tables,
     regions, tags, running heads, headings and markdown, and how the tags agree with layout
     (`document_lab.agreement`); ``include_hidden``: what hidden layers draw is read too,
@@ -345,7 +347,7 @@ def write_pages(
     shown = {'include_hidden': include_hidden, 'include_in_background_color': include_in_background_color}
     compared = compare(read, drawn, **shown)
     found = [
-        regions(page, face, drawings, structure=read.structure, tagged=tagged, **shown)
+        regions(page, face, drawings, structure=read.structure, tagged=tagged, unnumbered=unnumbered, **shown)
         for page, drawings in zip(read.pages, drawn, strict=True)
     ]
     furniture = layout.running(read)

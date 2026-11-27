@@ -18,6 +18,7 @@ from lab_commons.log import emit
 from document_lab import fonts
 from document_lab.capture import cli as capture_cli
 from document_lab.formula import MODELS
+from document_lab.regions import UNNUMBERED
 
 if TYPE_CHECKING:
     from document_lab.markdown import Headings
@@ -37,6 +38,14 @@ _RENDERER = {
     'choices': ('pymupdf', 'own'),
     'default': 'pymupdf',
     'help': "what draws the pictures: pymupdf (default) or own (document-lab's renderer; refuses what it cannot draw)",
+}
+#: `--unnumbered-equations`: how displays without a number are found (`document_lab.regions.Unnumbered`).
+_UNNUMBERED = {
+    'choices': UNNUMBERED,
+    'default': 'strict',
+    'help': 'displays without a number: strict (default: those set apart above, below and across, in no table or '
+    'figure, showing a formula beyond one relation sign), '
+    'loose (every formula line that is no prose: more found, more taken in error) or off (numbered ones only)',
 }
 
 
@@ -94,6 +103,7 @@ def _parser() -> argparse.ArgumentParser:
     pages.add_argument('--tags', type=_uses, default=_DEFAULT, help=_TAGS_HELP)
     pages.add_argument('--no-outline', action='store_true', help=_NO_OUTLINE)
     _formulas_option(pages)
+    pages.add_argument('--unnumbered-equations', **_UNNUMBERED)
     pages.add_argument('--include-hidden', action='store_true', help=_HIDDEN)
     pages.add_argument('--include-in-background-color', action='store_true', help=_IN_BACKGROUND_COLOR)
     paper = sub.add_parser('paper', help='a paper PDF to per-section markdown and cropped figures')
@@ -108,6 +118,7 @@ def _parser() -> argparse.ArgumentParser:
     paper.add_argument('--tags', type=_uses, default=_DEFAULT, help=_TAGS_HELP)
     paper.add_argument('--no-outline', action='store_true', help=_NO_OUTLINE)
     _formulas_option(paper)
+    paper.add_argument('--unnumbered-equations', **_UNNUMBERED)
     paper.add_argument('--include-hidden', action='store_true', help=_HIDDEN)
     paper.add_argument('--include-in-background-color', action='store_true', help=_IN_BACKGROUND_COLOR)
     fonts_cmd = sub.add_parser(
@@ -176,6 +187,7 @@ def _pages(args: argparse.Namespace) -> int:
             args.out,
             renderer=args.renderer,
             outline=not args.no_outline,
+            unnumbered=args.unnumbered_equations,
             tagged=args.tags,
             include_hidden=args.include_hidden,
             include_in_background_color=args.include_in_background_color,
@@ -208,6 +220,7 @@ def _paper(args: argparse.Namespace) -> int:
             tool=args.tool,
             renderer=args.renderer,
             outline=not args.no_outline,
+            unnumbered=args.unnumbered_equations,
             tagged=args.tags,
             include_hidden=args.include_hidden,
             include_in_background_color=args.include_in_background_color,

@@ -138,9 +138,9 @@ def test_an_untitled_table_ends_at_the_formula_after_it(tmp_path):
         _text(page, 240, 'U,=qW,+a, +220]', x=230, size=18)  # a formula, OCR'd
         _text(page, 265, '1/. +0U,', x=260, size=14)
 
-    found = regions(*_page(tmp_path, draw))
-    assert [(r.kind, r.label) for r in found] == [('table', 'Untitled table 1')]
-    assert found[0].bbox.y1 < 225
+    found = regions(*_page(tmp_path, draw))  # the formula is a display of its own, no number printed
+    assert [(r.kind, r.label) for r in found] == [('table', 'Untitled table 1'), ('equation', 'Untitled equation 1')]
+    assert found[0].bbox.y1 < 225 and found[0].bbox.y1 <= found[1].bbox.y0
 
 
 def test_two_columns_of_prose_split_into_three_pieces_are_no_table(tmp_path):

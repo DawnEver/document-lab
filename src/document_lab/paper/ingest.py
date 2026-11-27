@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from document_lab.markdown import Headings
     from document_lab.paper.convert import Tool, ToolChoice
     from document_lab.pdf import Renderer
+    from document_lab.regions import Unnumbered
 
 __all__ = ['Ingested', 'NoSections', 'ingest']
 
@@ -104,6 +105,7 @@ def ingest(
     tagged: Collection[str] = DEFAULT_USES,
     formulas: Formulas | None = None,
     formula_model: Model = 'texteller',
+    unnumbered: Unnumbered = 'strict',
     include_hidden: bool = False,
     include_in_background_color: bool = False,
 ) -> Ingested:
@@ -114,7 +116,8 @@ def ingest(
     the rules. ``tagged``: what a tagged PDF's tags give its markdown, and so its sections
     (`document_lab.paper.convert.convert`). ``formulas``: ``latex`` writes each equation crop's LaTeX under its image,
     read by ``formula_model`` (`document_lab.formula`); refused by :class:`document_lab.formula.FormulaUnavailable`
-    before anything is written when that model cannot run. Every step reading text reads the paper as its default
+    before anything is written when that model cannot run. ``unnumbered``: how displays without a number are found
+    (`document_lab.regions.Unnumbered`). Every step reading text reads the paper as its default
     view shows it (`document_lab.ir.Page.shown`): its markdown and running heads, its tags and how they agree with
     layout (`document_lab.agreement`), its captions and equations; ``include_hidden``: what hidden layers draw is
     read too, ``include_in_background_color``: the text filled in the color under it.
@@ -156,6 +159,7 @@ def ingest(
         pdf_path=pdf,
         renderer=renderer,
         transcribe=transcribe,
+        unnumbered=unnumbered,
         include_hidden=include_hidden,
         include_in_background_color=include_in_background_color,
     )
@@ -177,9 +181,10 @@ def ingest(
             title_override=title,
             pdf_path=pdf,
             renderer=renderer,
+            transcribe=transcribe,
+            unnumbered=unnumbered,
             include_hidden=include_hidden,
             include_in_background_color=include_in_background_color,
-            transcribe=transcribe,
         )
         shutil.rmtree(flat, ignore_errors=True)
         written.append(target)

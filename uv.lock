@@ -660,6 +660,11 @@ dev = [
     { name = "python-xlib", marker = "sys_platform == 'linux'" },
     { name = "ruff" },
 ]
+formula = [
+    { name = "torch", version = "2.15.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'win32'" },
+    { name = "torch", version = "2.15.0+cu132", source = { registry = "https://download.pytorch.org/whl/cu132" }, marker = "sys_platform == 'win32'" },
+    { name = "transformers" },
+]
 gpu = [
     { name = "marker-pdf" },
     { name = "six" },
@@ -683,12 +688,15 @@ requires-dist = [
     { name = "python-xlib", marker = "sys_platform == 'linux' and extra == 'capture'" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "six", marker = "extra == 'gpu'" },
+    { name = "torch", marker = "sys_platform == 'win32' and extra == 'formula'", index = "https://download.pytorch.org/whl/cu132" },
     { name = "torch", marker = "sys_platform == 'win32' and extra == 'gpu'", index = "https://download.pytorch.org/whl/cu132" },
+    { name = "torch", marker = "sys_platform != 'win32' and extra == 'formula'" },
     { name = "torch", marker = "sys_platform != 'win32' and extra == 'gpu'" },
     { name = "torchvision", marker = "sys_platform == 'win32' and extra == 'gpu'", index = "https://download.pytorch.org/whl/cu132" },
     { name = "torchvision", marker = "sys_platform != 'win32' and extra == 'gpu'" },
+    { name = "transformers", marker = "extra == 'formula'" },
 ]
-provides-extras = ["ai", "capture", "dev", "gpu"]
+provides-extras = ["ai", "capture", "dev", "formula", "gpu"]
 
 [[package]]
 name = "execnet"

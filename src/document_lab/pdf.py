@@ -46,6 +46,9 @@ CURVE_SAMPLES: Final = 8
 VECTOR_DPI: Final = 300.0
 #: How far (in pixels) a placed image's edges and sides may miss a region's and the region still be the image whole.
 WHOLE_IMAGE_SLACK: Final = 0.25
+#: Where a span row and an image row (``Reader.page``) hold their layer.
+_SPAN_LAYER: Final = 9
+_IMAGE_LAYER: Final = 6
 #: The text rendering mode that neither fills nor strokes (an OCR layer): text that shows nothing.
 INVISIBLE_TEXT: Final = 3
 #: Gray depths whose levels spread over 0..255 exactly (255 is a multiple of each level count less one).
@@ -185,7 +188,7 @@ def _page(
 
 
 def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
-    text, font, size, bold, box, mode, unspaced, vertical, direction, (hidden, annotation) = row
+    text, font, size, bold, box, mode, unspaced, vertical, direction, (hidden, annotation), fill = row
     return TextSpan(
         text,
         size,
@@ -198,6 +201,7 @@ def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
         direction=direction,
         hidden=hidden,
         annotation=annotation,
+        fill=None if fill is None else tuple(fill),
     )
 
 
@@ -267,7 +271,7 @@ def read_raster(path: Path | str, page: int, bbox: BBox, *, dpi: float | None = 
     data = path.read_bytes()  # rendered and cited alike: the pixels are those of the bytes hashed
     reader = _pdf.open(data, password.encode())
     spans, paths, images, _ = reader.page(page, annotations=True, curve_samples=1)
-    spans, images = _shown(spans), _shown(images)
+    spans, images = _shown(spans, _SPAN_LAYER), _shown(images, _IMAGE_LAYER)
     under = [row for row in images if _meets(row[0], bbox)]
     if dpi is None:
         dpi = max(filter(None, map(_native, under)), default=VECTOR_DPI)
@@ -278,9 +282,9 @@ def read_raster(path: Path | str, page: int, bbox: BBox, *, dpi: float | None = 
     return Raster(pixels, here)
 
 
-def _shown(rows: list) -> list:
-    """The rows (spans or images, each ending in its layer) no hidden layer draws."""
-    return [row for row in rows if not row[-1][0]]
+def _shown(rows: list, layer: int) -> list:
+    """The rows (spans or images, each holding its layer at index ``layer``) no hidden layer draws."""
+    return [row for row in rows if not row[layer][0]]
 
 
 def _meets(box: tuple[float, float, float, float], bbox: BBox) -> bool:

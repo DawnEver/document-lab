@@ -90,6 +90,16 @@ def test_a_bold_span_says_so(tmp_path):
     assert spans == {'Strong': True, 'plain': False}
 
 
+def test_a_span_says_its_render_mode(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), 'hidden', fontname='helv', fontsize=10, render_mode=3)  # invisible, an OCR layer
+    page.insert_text((72, 100), 'shown', fontname='helv', fontsize=10)
+    doc.save(tmp_path / 'r.pdf')
+    modes = {s.text: s.render_mode for s in read_pdf(tmp_path / 'r.pdf').spans()}
+    assert modes == {'hidden': 3, 'shown': 0}
+
+
 def test_an_encrypted_file_opens_with_its_password_and_refuses_without(tmp_path):
     doc = pymupdf.open()
     doc.new_page().insert_text((72, 72), 'secret', fontname='helv', fontsize=10)

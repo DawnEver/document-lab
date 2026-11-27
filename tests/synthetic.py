@@ -684,6 +684,24 @@ def mixed_pdf(path: Path) -> Path:
     return path
 
 
+#: A run of text on a synthetic page: its baseline's left end (x, y), its text, its PyMuPDF font name and its size.
+type Run = tuple[float, float, str, str, float]
+
+
+def text_pdf(path: Path, pages: Sequence[Sequence[Run]], bars: Sequence[Sequence[pymupdf.Rect]] = ()) -> Path:
+    """Letter pages of runs of text, each where it is placed, and filled bars (a fraction's): every box is known."""
+    doc = pymupdf.open()
+    for number, runs in enumerate(pages):
+        page = doc.new_page(width=612, height=792)
+        for x, y, text, font, size in runs:
+            page.insert_text((x, y), text, fontname=font, fontsize=size)
+        for bar in bars[number] if number < len(bars) else ():
+            page.draw_rect(bar, color=None, fill=(0, 0, 0))
+    doc.save(path)
+    doc.close()
+    return path
+
+
 #: Lines top to bottom, each ``(before, drawn, actual, after)``: ``drawn`` is shown, marked with ``/ActualText``
 #: ``actual``. A drawn space stated a zero-width space, a no-break space, a word joiner; the control: ``XY`` stated
 #: the letters ``fi`` of its ligature, a replacement that is no space.

@@ -1,16 +1,18 @@
 //! `document_lab._pdf`: the `pdf` crate, exposed to Python as plain values -- no PDF logic of its own.
 //!
-//! `open(data, password)` reads a file; its `page(number, annotations=, curve_samples=, flatness=)` returns what
-//! the page draws as tuples and columns, which `document_lab.pdf` turns into the IR, its `image(object)` an image's
-//! samples and its `rgb(object)` their sRGB where they show as they stand. `create(path, level)` writes a PDF of
-//! image pages, or of pages copied from a `Reader` (`document_lab.capture`), perhaps with a text layer laid over
-//! them (`document_lab.ocr`).
+//! `open(source, password)` reads a PDF -- a file by its path, read here, or one already in memory as bytes -- and
+//! gives its `sha256`; its `page(number, annotations=, curve_samples=, flatness=)` returns what the page draws as
+//! tuples and columns, which `document_lab.pdf` turns into the IR, its `image(object)` an image's samples and its
+//! `rgb(object)` their sRGB where they show as they stand. `create(path, level)` writes a PDF of image pages, or of
+//! pages copied from a `Reader` (`document_lab.capture`), perhaps with a text layer laid over them
+//! (`document_lab.ocr`).
 //!
 //! A refusal raises by its kind: [`Refused`] and its kinds when the reader refuses the input, `ValueError` for a
 //! request it cannot honor, `OSError` when writing fails.
 
+use std::fmt::Write;
 use std::fs;
-use std::io::BufWriter;
+use std::io::{self, BufWriter};
 use std::path::PathBuf;
 
 use pdf::color::Pattern;
@@ -150,9 +152,16 @@ struct Reader {
     pages: Vec<pdf::Page>,
 }
 
-/// Open the PDF `data` with `password` (empty: none).
+/// Open the PDF `source` with `password` (empty: none): the file at a path (`str` or `os.PathLike`), read whole
+/// here, or the bytes of one already in memory (`bytes`), copied. Python holds no copy of a file read here.
 #[pyfunction]
-fn open(data: Vec<u8>, password: &[u8]) -> PyResult<Reader> {
+fn open(source: &Bound<'_, PyAny>, password: &[u8]) -> PyResult<Reader> {
+    let data = if let Ok(bytes) = source.cast::<PyBytes>() {
+        bytes.as_bytes().to_vec()
+    } else {
+        let path: PathBuf = source.extract()?;
+        fs::read(&path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?
+    };
     let file = pdf::File::open(data, password).map_err(|e| refused(&e))?;
     let pages = file.pages().map_err(|e| refused(&e))?;
     Ok(Reader { file, pages })
@@ -164,6 +173,18 @@ impl Reader {
     #[getter]
     fn repairs(&self) -> Vec<String> {
         self.file.repairs()
+    }
+
+    /// The SHA-256 digest of the bytes read, in hexadecimal.
+    #[getter]
+    fn sha256(&self) -> String {
+        self.file
+            .sha256()
+            .iter()
+            .fold(String::with_capacity(64), |mut hex, b| {
+                write!(hex, "{b:02x}").expect("writing into a String cannot fail");
+                hex
+            })
     }
 
     /// Each page's number, width and height as displayed (points).
@@ -384,9 +405,10 @@ impl Writer {
             .map_err(|e| refused(&e))
     }
 
-    /// Add page `number` (1-based) of `reader` as the next page, with `words` -- `(text, (x0, y0, x1, y1), angle)`,
-    /// each box in page space as the word stands turned back level, `angle` the degrees its baseline is turned,
-    /// clockwise as seen -- laid over it as an invisible text layer.
+    /// Add page `number` (1-based) of `reader` as the next page, with `words` -- `(text, (x0, y0, x1, y1), angle,
+    /// vertical)`, each box in page space as the word stands turned back level, `angle` the degrees its baseline is
+    /// turned, clockwise as seen, `vertical` whether it is written down its box -- laid over it as an invisible text
+    /// layer.
     #[expect(
         clippy::needless_pass_by_value,
         reason = "pyo3 hands a list over owned"
@@ -395,21 +417,24 @@ impl Writer {
         &mut self,
         reader: &Reader,
         number: usize,
-        words: Vec<(String, Box4, f64)>,
+        words: Vec<(String, Box4, f64, bool)>,
     ) -> PyResult<()> {
         let page = reader.at(number)?;
         let words: Vec<pdf::writer::Word> = words
             .iter()
-            .map(|(text, (x0, y0, x1, y1), angle)| pdf::writer::Word {
-                text,
-                bbox: Rect {
-                    x0: *x0,
-                    y0: *y0,
-                    x1: *x1,
-                    y1: *y1,
+            .map(
+                |(text, (x0, y0, x1, y1), angle, vertical)| pdf::writer::Word {
+                    text,
+                    bbox: Rect {
+                        x0: *x0,
+                        y0: *y0,
+                        x1: *x1,
+                        y1: *y1,
+                    },
+                    angle: *angle,
+                    vertical: *vertical,
                 },
-                angle: *angle,
-            })
+            )
             .collect();
         self.open()?
             .copy_page_with_text(&reader.file, page, &words)

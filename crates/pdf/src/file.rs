@@ -5,6 +5,8 @@ use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use sha2::{Digest, Sha256};
+
 use crate::crypt::Decryptor;
 use crate::error::{Error, Kind, Result};
 use crate::filter::{self, Decoded};
@@ -138,6 +140,11 @@ impl File {
             .entry(num)
             .or_insert_with(|| Rc::clone(&made) as Rc<dyn Any>);
         Ok(made)
+    }
+
+    /// The SHA-256 digest of the file's bytes, as read: what a reading cites as its source.
+    pub fn sha256(&self) -> [u8; 32] {
+        Sha256::digest(&self.data).into()
     }
 
     /// Every object number the table holds, free ones excluded.
@@ -361,6 +368,19 @@ mod tests {
         );
         assert_eq!(file.repairs(), Vec::<String>::new());
         assert_eq!(file.object(99).unwrap(), Object::Null);
+    }
+
+    #[test]
+    fn the_digest_is_the_sha256_of_the_bytes_read() {
+        let file =
+            File::open(classic(&[CATALOG, PAGES], "<< /Size 3 /Root 1 0 R >>"), b"").unwrap();
+        // The same bytes hashed by Python's hashlib, an independent implementation.
+        let expected = "50dc246b4ff9509811a23d9fcf7d6c8465ed2b4eed08aa049d9feae8e8afd526";
+        let expected: Vec<u8> = (0..expected.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&expected[i..i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(file.sha256().to_vec(), expected);
     }
 
     #[test]

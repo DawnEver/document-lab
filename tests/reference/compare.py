@@ -3,7 +3,10 @@
 Text is compared as each page's characters, whitespace dropped and order ignored (reading order is layout's, not the
 reader's): the share of the characters we state that PyMuPDF states too. A glyph no font source names reads as
 U+FFFD here (never a guess) while PyMuPDF prints something for it -- its glyph id, a byte -- so those characters are
-counted apart (``unknown``), out of the agreement.
+counted apart (``unknown``), out of the agreement. A symbol font's code PyMuPDF prints as the private-use code point
+its ``ToUnicode`` or ``cmap`` states (U+F0xx) reads here as the symbol shown (`pdf::font`), so each private-use
+character of PyMuPDF's we do not print pairs with one of ours it does not match, and both are counted apart
+(``private``), out of the agreement and out of where the text stands.
 
 Where the text stands is compared character by character, since the two cut a page's text into runs differently: a
 character of one of our spans is ``located`` when PyMuPDF states the same character with its origin (the start of its
@@ -42,6 +45,7 @@ and one page of PyMuPDF's.
 
 from __future__ import annotations
 
+import unicodedata
 from collections import Counter, defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -95,6 +99,7 @@ class Page:
     stated: int  # characters we state, U+FFFD not counted
     reference: int  # characters PyMuPDF states
     unknown: int  # U+FFFD we state
+    private: int  # PyMuPDF's private-use characters we state as another character
     located: int  # characters we state that stand where PyMuPDF states them
     edges: tuple[Edges, ...]  # one per span located whole along a page axis
     images: int  # ours
@@ -106,10 +111,19 @@ class Page:
     unreported: int  # PyMuPDF's fills and strokes that can show and no path of ours takes
 
     @property
+    def whole(self) -> int:
+        """The larger side's characters, the unknown taken from PyMuPDF's and the private from both."""
+        return max(self.stated - self.private, self.reference - self.unknown - self.private)
+
+    @property
     def agreement(self) -> float:
-        """Matched over the larger side, the unknown taken from PyMuPDF's: 1 when neither states a character."""
-        whole = max(self.stated, self.reference - self.unknown)
-        return 1.0 if whole <= 0 else self.matched / whole
+        """Matched over :attr:`whole`: 1 when neither states a character."""
+        return 1.0 if self.whole <= 0 else self.matched / self.whole
+
+    @property
+    def locatable(self) -> int:
+        """The characters we state that PyMuPDF can state the same: the private taken out."""
+        return self.stated - self.private
 
 
 @dataclass(frozen=True)
@@ -124,7 +138,7 @@ class Compared:
     @property
     def agreement(self) -> float:
         """The document's characters matched over all its pages' (as :attr:`Page.agreement`, summed first)."""
-        whole = sum(max(p.stated, p.reference - p.unknown) for p in self.pages)
+        whole = sum(p.whole for p in self.pages)
         return 1.0 if whole <= 0 else sum(p.matched for p in self.pages) / whole
 
     @property
@@ -135,9 +149,9 @@ class Compared:
 
     @property
     def location(self) -> float:
-        """The share of the characters we state that are located: 1 when we state none."""
-        stated = sum(p.stated for p in self.pages)
-        return 1.0 if stated == 0 else sum(p.located for p in self.pages) / stated
+        """The share of the :attr:`Page.locatable` characters that are located: 1 when there are none."""
+        locatable = sum(p.locatable for p in self.pages)
+        return 1.0 if locatable <= 0 else sum(p.located for p in self.pages) / locatable
 
     def baselines(self) -> list[tuple[int, float]]:
         """Each measured span's page and how far its :attr:`Edges.baseline` lies from its font's median in the document.
@@ -509,6 +523,11 @@ def _paints(ours: _Drawn, theirs: _Drawn, role: int) -> bool:
     )
 
 
+def _private(c: str) -> bool:
+    """Whether ``c`` is in the Basic Multilingual Plane's private-use area."""
+    return unicodedata.category(c) == 'Co'
+
+
 def _same(a: tuple[float, ...], b: tuple[float, ...]) -> bool:
     return all(abs(x - y) <= PLACED for x, y in zip(a, b, strict=True))
 
@@ -561,6 +580,9 @@ def compare(path: Path, reference_path: Path | None = None, plant: Plant | None 
             mine = Counter(c for s in ours.spans for c in s.text if c.strip())
             unknown = mine.pop(UNKNOWN, 0)
             other = Counter(ch.char for ch in chars)
+            matched = sum((mine & other).values())
+            stated = sum(mine.values())
+            private = sum(n for c, n in (other - mine).items() if _private(c))
             located, edges = _located(ours.spans, chars)
             drawn = _ours(ours.paths)
             unmatched, unreported = _paths(drawn, _Theirs(theirs, to, plant, glyphs))
@@ -568,10 +590,11 @@ def compare(path: Path, reference_path: Path | None = None, plant: Plant | None 
                 Page(
                     number=ours.number,
                     size_off=max(abs(ours.width - theirs.rect.width), abs(ours.height - theirs.rect.height)),
-                    matched=sum((mine & other).values()),
-                    stated=sum(mine.values()),
+                    matched=matched,
+                    stated=stated,
                     reference=sum(other.values()),
                     unknown=unknown,
+                    private=min(private, stated - matched),
                     located=located,
                     edges=tuple(edges),
                     **_images([f.provenance.bbox for f in ours.figures], theirs, to),

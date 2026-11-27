@@ -2,8 +2,9 @@
 //! samples an image's dictionary describes.
 //!
 //! - `DCTDecode` (JPEG) by `zune-jpeg`: gray, RGB or CMYK samples, 8 bits each, by the JPEG's own component count
-//!   (YCbCr and YCCK converted by the JPEG's transform); CMYK from a JPEG with an Adobe `APP14` marker is stored
-//!   inverted, and is inverted back.
+//!   (YCbCr and YCCK converted by the JPEG's transform). CMYK samples are taken as stored: a JPEG an Adobe
+//!   application wrote inverted states `/Decode [1 0 1 0 1 0 1 0]` in its PDF, which the image's mapping applies
+//!   (as Acrobat and `MuPDF` read it; inverting by the `APP14` marker as well drew such images dark).
 //! - `CCITTFaxDecode` (Group 3 one- and two-dimensional, Group 4) by `hayro-ccitt`: one bit a sample, 0 black
 //!   unless `/BlackIs1`.
 //! - `JPXDecode` (JPEG 2000) and `JBIG2Decode` are not decoded in stage 1: refused by name.
@@ -61,34 +62,12 @@ fn jpeg(data: &[u8]) -> Result<Decoded, String> {
             .set_max_width(1 << 16)
             .set_max_height(1 << 16),
     );
-    let mut samples = decoder.decode().map_err(|e| failed(&e))?;
-    if components == 4 && adobe(data) {
-        for s in &mut samples {
-            *s = 255 - *s;
-        }
-    }
+    let samples = decoder.decode().map_err(|e| failed(&e))?;
     Ok(Decoded {
         data: samples,
         components: Some(components),
         partial: false,
     })
-}
-
-/// Whether a JPEG's markers before its image data hold an Adobe `APP14` segment.
-fn adobe(data: &[u8]) -> bool {
-    let mut at = 2; // past SOI
-    while at + 4 <= data.len() && data[at] == 0xFF {
-        let marker = data[at + 1];
-        if marker == 0xDA {
-            return false; // start of scan: no more headers
-        }
-        let length = usize::from(u16::from_be_bytes([data[at + 2], data[at + 3]]));
-        if marker == 0xEE && data.get(at + 4..at + 9) == Some(b"Adobe") {
-            return true;
-        }
-        at += 2 + length;
-    }
-    false
 }
 
 /// A CCITT fax image's samples (ISO 32000-2 Table 11's parameters).

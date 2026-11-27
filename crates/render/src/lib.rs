@@ -225,6 +225,9 @@ impl Canvas<'_> {
         if compositing.soft_mask {
             self.undrawn("soft mask (stage 3; drawn without it)");
         }
+        if compositing.grouped {
+            self.undrawn("transparency group with alpha, blend mode or soft mask (stage 3; its marks drawn alone)");
+        }
         blend_mode(compositing.blend)
     }
 

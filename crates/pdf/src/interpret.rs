@@ -132,6 +132,10 @@ pub struct Compositing {
     pub blend: Blend,
     /// A soft mask (`/SMask` a dictionary) is in force: what shows is further masked by it.
     pub soft_mask: bool,
+    /// It is drawn inside a transparency group (a Form with a `/Group`, 11.6.6) entered with a constant alpha below
+    /// 1, a blend mode other than `Normal` or a soft mask: the group's result, not each mark, is composited so. The
+    /// group's own marks start from the initial alphas, blend mode and soft mask, as the standard has them.
+    pub grouped: bool,
 }
 
 impl Default for Compositing {
@@ -141,6 +145,7 @@ impl Default for Compositing {
             stroke_alpha: 1.0,
             blend: Blend::Normal,
             soft_mask: false,
+            grouped: false,
         }
     }
 }
@@ -1501,6 +1506,18 @@ impl Interpreter<'_> {
             self.start,
         );
         self.state.ctm = matrix.then(self.state.ctm);
+        if self.file.get(&stream.dict, b"Group")?.is_some() {
+            let entered = self.state.compositing;
+            let composited = entered.fill_alpha < 1.0
+                || entered.stroke_alpha < 1.0
+                || entered.blend != Blend::Normal
+                || entered.soft_mask
+                || entered.grouped;
+            self.state.compositing = Compositing {
+                grouped: composited,
+                ..Compositing::default()
+            };
+        }
         if let Some([x0, y0, x1, y1]) = four(self.file.get(&stream.dict, b"BBox")?) {
             let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| self.point(x, y));
             let shown = Rect::around(&corners).expect("four corners");

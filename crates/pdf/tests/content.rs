@@ -457,3 +457,25 @@ fn an_image_carries_the_fill_color_a_stencil_paints_in() {
     );
     assert_eq!(images(&content)[0].fill.rgb, Some([1.0, 0.0, 0.0]));
 }
+
+#[test]
+fn a_transparency_group_entered_with_an_alpha_starts_its_marks_afresh_and_flags_them() {
+    let group = common::stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Group << /S /Transparency >>",
+        "0 0 5 5 re f",
+    );
+    let (content, _) = events(
+        "/Resources << /XObject << /Fm1 5 0 R >> /ExtGState << /G1 << /ca 0.35 >> >> >>",
+        "/Fm1 Do /G1 gs /Fm1 Do 0 0 5 5 re f",
+        &[&group],
+    );
+    let found = paths(&content);
+    assert!(
+        !found[0].compositing.grouped,
+        "a group entered opaque is plain content"
+    );
+    let inside = found[1].compositing;
+    assert_eq!((inside.fill_alpha, inside.grouped), (1.0, true));
+    assert_eq!(found[2].compositing.fill_alpha, 0.35);
+    assert!(!found[2].compositing.grouped);
+}

@@ -148,6 +148,12 @@
     "needs": "verdict-entry-point"
   },
   {
+    "name": "ENVIRONMENT-THROUGH-DEP",
+    "pattern": "(?:\\S*python[\\w.]*\\s+-m\\s+dev_lab\\.dev\\.netverb\\b[^;&|\\n]*?\\s--\\s+)?(?:\\S*[/\\\\])?uv(?:\\.exe)?(?:\\s+-\\S+(?:\\s+[^-\\s]\\S*)?)*?\\s+sync\\b",
+    "matches": "command",
+    "reason": "ENVIRONMENT-THROUGH-DEP: a bare uv sync builds a checkout environment with no declared extras and no published prefix.\nBuild the environment through its door: {python} -m dev_lab.dev.dep --bootstrap <checkout> (a new tree), or {python} -m dev_lab.dev.dep --root <checkout> --sync [--extra X].\ndetails: docs-src/dev/refusals.md#environment-through-dep (dev-lab)"
+  },
+  {
     "name": "WORKTREE-BASE-IS-EXPLICIT",
     "pattern": "git(?:\\.exe)?(?:\\s+-[Cc]\\s+(?:\"[^\"\\n]*\"|'[^'\\n]*'|[^\\s;&|()]+))*\\s+worktree\\s+add\\b",
     "matches": "command",

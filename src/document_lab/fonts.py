@@ -3,10 +3,10 @@ r"""Font programs document-lab draws or reads with but never ships: fetched on f
 What they are (:data:`FONTS`): the own renderer's fallbacks (``_pdf.FALLBACK_FONTS``) -- Noto Sans CJK and Noto Serif
 CJK for each of Adobe's CJK collections, Noto Sans Symbols 2, Noto Sans Symbols and Noto Sans Math, all under the SIL
 Open Font License 1.1 -- which draw a font a PDF does not embed and no built-in substitute stands for (a CJK composite
-font, Wingdings, Webdings); and URW's Nimbus Sans (the Helvetica MuPDF draws; GNU AGPL 3.0 with URW's document
-exception), which :mod:`document_lab.glyphs` reads glyph shapes against. Each is pinned to the sha256 and size of its
-program and to URLs that keep serving those bytes; nothing is committed or redistributed (user ruling D120 of task
-document-lab-pdf-reader).
+font, Wingdings, Webdings); and URW's Nimbus Sans as MuPDF ships it (the very program MuPDF draws Helvetica with;
+GNU AGPL 3.0 with URW's document exception), which :mod:`document_lab.glyphs` reads glyph shapes against. Each is
+pinned to the sha256 and size of its program and to URLs that keep serving those bytes; nothing is committed or
+redistributed (user ruling D120 of task document-lab-pdf-reader).
 
 THE NETWORK is asked only the first time a font is needed -- a glyph of such a font drawn, a glyph shape read -- and
 each download is logged (WARNING, logger ``document_lab.fonts``) with its URL and destination. Where fonts are kept
@@ -23,7 +23,8 @@ bytes are the ones pinned.
 
 A font that cannot be had -- offline, every URL failing, other bytes served -- raises :class:`FontUnavailable`,
 naming the font and what each URL did; nothing is drawn or read in its place (the renderer counts the glyphs it
-would have drawn as undrawn, by that message).
+would have drawn as undrawn, by that message). The pinned bytes got another way are kept by :func:`keep` (the tests
+keep PyMuPDF's own Helvetica program as ``nimbus-sans``, never downloading it).
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ from typing import TYPE_CHECKING, Final, Self
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-__all__ = ['FONTS', 'Font', 'FontUnavailable', 'Fonts', 'fetch', 'program', 'use', 'used']
+__all__ = ['FONTS', 'Font', 'FontUnavailable', 'Fonts', 'fetch', 'held', 'keep', 'program', 'use', 'used']
 
 _log = logging.getLogger(__name__)
 
@@ -60,9 +61,8 @@ OFL: Final = 'SIL Open Font License 1.1'
 URW: Final = 'GNU AGPL 3.0 with a document exception (URW base35)'
 _NOTO_CJK: Final = 'https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c'
 _GOOGLE_FONTS: Final = 'https://raw.githubusercontent.com/google/fonts/5026800714d07231937d92eb4cceabf06e05d74e/ofl'
-_URW: Final = (
-    'https://raw.githubusercontent.com/ArtifexSoftware/urw-base35-fonts/3c0ba3b5687632dfc66526544a4e811fe0ec0cd9'
-)
+#: MuPDF 1.28.2's source, whose URW fonts PyMuPDF draws with.
+_MUPDF: Final = 'https://raw.githubusercontent.com/ArtifexSoftware/mupdf/fe374accd98a43174a328fa7980d7675e06d5b0d'
 
 
 class FontUnavailable(RuntimeError):
@@ -133,10 +133,11 @@ FONTS: Final[dict[str, Font]] = {
         ),
         Font(
             'nimbus-sans',
-            (f'{_URW}/fonts/NimbusSans-Regular.otf',),
-            '7c25be4d78155523080ab85b10277150657ff7dabbcad7037bdd536c9b6d0d08',
-            82264,
+            (f'{_MUPDF}/resources/fonts/urw/NimbusSans-Regular.cff',),
+            '366720e054067fa49d030f58005c739fc787dcc9727a9327a28767777791d706',
+            33151,
             URW,
+            '.cff',
         ),
     )
 }
@@ -198,8 +199,8 @@ def fetch(name: str) -> Path:
 
     """
     font = FONTS[name]
-    path = _used.cache / f'{font.sha256}{font.suffix}'
-    if path.is_file() and _digest(path.read_bytes()) == font.sha256:
+    path = _place(font)
+    if held(name):
         return path
     if not _used.download:
         msg = f'{name} cannot be had: it is not in {path.parent} and downloading is off (DOCUMENT_LAB_OFFLINE=1)'
@@ -215,21 +216,52 @@ def fetch(name: str) -> Path:
         if _digest(data) != font.sha256 or len(data) != font.size:
             said.append(f'{url} served {len(data)} bytes, sha256 {_digest(data)}')
             continue
-        path.parent.mkdir(parents=True, exist_ok=True)
-        part = path.with_name(f'{path.name}.{os.getpid()}.part')  # this process's own; renamed whole, never read half
-        part.write_bytes(data)
-        try:
-            part.replace(path)
-        except PermissionError:  # Windows: another process renamed its copy in first and holds it open
-            if not path.is_file() or _digest(path.read_bytes()) != font.sha256:
-                raise
-            part.unlink()
-        return path
+        return keep(name, data)
     msg = (
         f'{name} cannot be had: it is pinned to {font.size} bytes, sha256 {font.sha256}, and no URL gave them -- '
         f'{"; ".join(said)}'
     )
     raise FontUnavailable(msg)
+
+
+def keep(name: str, data: bytes) -> Path:
+    """Keep ``data`` as the font ``name`` in the cache (:func:`used`), when they are its pinned bytes; their path.
+
+    Raises:
+        KeyError: no font of that name.
+        FontUnavailable: ``data`` are other bytes than those pinned.
+
+    """
+    font = FONTS[name]
+    if _digest(data) != font.sha256 or len(data) != font.size:
+        msg = (
+            f'{name} is pinned to {font.size} bytes, sha256 {font.sha256}; '
+            f'not {len(data)} bytes, sha256 {_digest(data)}'
+        )
+        raise FontUnavailable(msg)
+    path = _place(font)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    part = path.with_name(f'{path.name}.{os.getpid()}.part')  # this process's own; renamed whole, never read half
+    part.write_bytes(data)
+    try:
+        part.replace(path)
+    except PermissionError:  # Windows: another process renamed its copy in first and holds it open
+        if not path.is_file() or _digest(path.read_bytes()) != font.sha256:
+            raise
+        part.unlink()
+    return path
+
+
+def held(name: str) -> bool:
+    """Whether the cache (:func:`used`) holds the font ``name``'s pinned bytes: :func:`fetch` asks no network."""
+    font = FONTS[name]
+    path = _place(font)
+    return path.is_file() and _digest(path.read_bytes()) == font.sha256
+
+
+def _place(font: Font) -> Path:
+    """Where the cache (:func:`used`) keeps ``font``."""
+    return _used.cache / f'{font.sha256}{font.suffix}'
 
 
 @functools.cache

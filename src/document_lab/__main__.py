@@ -96,7 +96,9 @@ def _parser() -> argparse.ArgumentParser:
         'cache holds; DOCUMENT_LAB_OFFLINE=1 forbids downloading',
     )
     fonts_cmd.add_argument('names', nargs='*', help='the fonts (default: all)')
-    fonts_cmd.add_argument('--fetch', action='store_true', help='download each the cache lacks now, for later offline use')
+    fonts_cmd.add_argument(
+        '--fetch', action='store_true', help='download each the cache lacks now, for later offline use'
+    )
     return parser
 
 
@@ -204,11 +206,10 @@ def _fonts(args: argparse.Namespace) -> int:
     if unknown:
         return _refused(ValueError(f'no font {", ".join(unknown)}: one of {", ".join(fonts.FONTS)}'))
     failed = 0
-    cache = fonts.used().cache
-    emit(f'cache: {cache}')
+    emit(f'cache: {fonts.used().cache}')
     for name in args.names or fonts.FONTS:
         font = fonts.FONTS[name]
-        held = (cache / f'{font.sha256}{font.suffix}').is_file()
+        held = fonts.held(name)
         if args.fetch and not held:
             try:
                 fonts.fetch(name)
@@ -217,7 +218,7 @@ def _fonts(args: argparse.Namespace) -> int:
                 failed += 1
                 continue
             held = True
-        emit(f'{name}: {"held" if held else "not held"}, {font.size / 1e6:.1f} MB, {font.license}')
+        emit(f'{name}: {"held" if held else "not held"}, {font.size / 1e6:.2f} MB, {font.license}')
     return 2 if failed else 0
 
 

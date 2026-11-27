@@ -528,6 +528,15 @@ def test_an_outlined_word_is_read_at_its_own_scale_and_a_lone_letter_by_shape_al
     assert sorted(s.text for s in outline_text(page)) == ['B', 'OX', 'ox']
 
 
+def test_an_outlined_word_of_one_shape_at_either_scale_is_refused(tmp_path):
+    """``xx`` and ``zz`` draw the same shapes as ``XX`` and ``ZZ``: nothing tells their scale, so neither is read;
+    ``max.`` is read at the x-height, its ``m`` and ``a`` lying far from their place at the ascent."""
+    stray = [('xx', 450.0, 120.0, 8.0), ('ZZ', 450.0, 140.0, 8.0), ('max.', 450.0, 160.0, 8.0)]
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=stray)
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1)
+    assert [s.text for s in outline_text(page)] == ['max.']
+
+
 def test_an_outlined_number_before_min_or_max_is_one_bound_span(tmp_path):
     """TDK E-core drawings: a window span set ``12.5 min.`` is a lower bound, not a bare number beside a word."""
     stray = [('12.5', 420.0, 400.0, 8.0), ('min.', 440.0, 400.0, 8.0), ('3', 420.0, 430.0, 8.0)]

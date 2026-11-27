@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 
 from document_lab import _pdf, fonts
+from document_lab.__main__ import main
 from document_lab.fonts import FONTS, OFL, Font, Fonts, FontUnavailable, fetch
 from document_lab.ir import BBox
 from document_lab.pdf import Unsupported, read_raster
@@ -143,6 +144,42 @@ def test_the_command_lines_environment_names_the_cache_and_forbids_the_network()
         assert stated == Path('/xdg/document-lab/fonts')
 
 
+def test_the_pinned_bytes_got_another_way_are_kept_and_others_refused(server, monkeypatch):
+    _pin(monkeypatch, 'served', ())
+    assert not fonts.held('served')
+    with pytest.raises(FontUnavailable, match=rf'served is pinned to {len(BODY)} bytes, sha256 {SHA}; not 5 bytes'):
+        fonts.keep('served', b'other')
+    assert not fonts.held('served')
+    path = fonts.keep('served', BODY)
+    assert fonts.held('served')
+    assert fetch('served') == path
+    assert _Served.hits == []
+
+
+def test_the_command_line_lists_fetches_and_refuses_fonts_by_name(server, monkeypatch, tmp_path, capsys):
+    """``document-lab fonts``: what the cache (``DOCUMENT_LAB_CACHE``) holds; ``--fetch`` downloads what it lacks,
+    one that cannot be had refused by name (exit 2); offline (``DOCUMENT_LAB_OFFLINE=1``) nothing is asked."""
+    _Served.routes['/a.otf'] = (200, BODY)
+    _pin(monkeypatch, 'served', (f'{server}/a.otf',))
+    _pin(monkeypatch, 'gone', (f'{server}/gone.otf',), b'OTTO another program')
+    monkeypatch.setenv('DOCUMENT_LAB_CACHE', str(tmp_path / 'root'))
+    monkeypatch.setenv('DOCUMENT_LAB_OFFLINE', '1')
+    assert main(['fonts', 'served']) == 0
+    assert 'served: not held' in capsys.readouterr().out
+    assert main(['fonts', '--fetch', 'served']) == 2
+    assert 'refused: served cannot be had' in capsys.readouterr().out
+    assert _Served.hits == []
+    monkeypatch.setenv('DOCUMENT_LAB_OFFLINE', '0')
+    assert main(['fonts', '--fetch', 'served', 'gone']) == 2
+    said = capsys.readouterr().out
+    assert f'cache: {tmp_path / "root" / "fonts"}' in said
+    assert 'served: held' in said
+    assert 'refused: gone cannot be had: it is pinned to 20 bytes' in said
+    assert main(['fonts', 'nothing']) == 2
+    said = capsys.readouterr()
+    assert 'refused: no font nothing' in said.out + said.err
+
+
 def _wingdings(tmp_path: Path) -> Path:
     """A page showing Wingdings 2's code 0x95 (U+22C5) large, the font not embedded."""
     font = (
@@ -192,7 +229,7 @@ def test_every_fallback_the_renderer_may_ask_for_is_pinned_under_a_free_license(
 
 #: A URL that keeps serving the same bytes: a file of a repository at a commit.
 IMMUTABLE = re.compile(
-    r'^https://raw\.githubusercontent\.com/(notofonts/noto-cjk|google/fonts|ArtifexSoftware/urw-base35-fonts)/'
+    r'^https://raw\.githubusercontent\.com/(notofonts/noto-cjk|google/fonts|ArtifexSoftware/mupdf)/'
     r'[0-9a-f]{40}/'
 )
 
@@ -205,7 +242,7 @@ def test_every_url_of_a_font_is_immutable(font):
 def test_the_immutable_url_rule_can_say_no():
     for url in (
         'https://raw.githubusercontent.com/google/fonts/main/ofl/notosansmath/NotoSansMath-Regular.ttf',
-        'https://github.com/ArtifexSoftware/urw-base35-fonts/raw/master/fonts/NimbusSans-Regular.otf',
+        'https://github.com/ArtifexSoftware/mupdf/raw/master/resources/fonts/urw/NimbusSans-Regular.cff',
     ):
         assert not IMMUTABLE.match(url)
 

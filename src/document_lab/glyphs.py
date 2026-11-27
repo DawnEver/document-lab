@@ -1,10 +1,10 @@
 """Numbers read from glyph SHAPES -- outlines drawn as paths, or ink in an image -- where a page has no text for them.
 
-A glyph is a bitmap. A digit is the reference digit (``REFERENCE_FONT``, URW's Nimbus Sans -- the Helvetica MuPDF
-draws, fetched on first use by :mod:`document_lab.fonts` -- set by the own renderer, ``_pdf.specimen``) whose shape it
-is nearest: both are cropped to their ink, sampled on a ``GRID`` of ink fractions, and compared by Euclidean distance
-plus ``ASPECT_WEIGHT`` times the difference of their width-to-height ratios. A glyph is read only when its nearest
-digit is within ``ACCEPT`` AND the second nearest is ``MARGIN`` farther; otherwise it raises
+A glyph is a bitmap. A digit is the reference digit (``REFERENCE_FONT``, URW's Nimbus Sans -- the Helvetica MuPDF draws,
+the program MuPDF ships fetched on first use by :mod:`document_lab.fonts` -- set by the own renderer, ``_pdf.specimen``)
+whose shape it is nearest: both are cropped to their ink, sampled on a ``GRID`` of ink fractions, and compared by
+Euclidean distance plus ``ASPECT_WEIGHT`` times the difference of their width-to-height ratios. A glyph is read only
+when its nearest digit is within ``ACCEPT`` AND the second nearest is ``MARGIN`` farther; otherwise it raises
 :class:`UnreadableGlyph` -- a near tie is a guess, and a guessed tick label silently rescales a whole axis.
 
 A word is glyphs on one row. Its sign and decimal point are read from geometry relative to its digits: a glyph no
@@ -57,9 +57,9 @@ __all__ = [
     'stroke',
 ]
 
-#: The font the references are set in, by its name in :data:`document_lab.fonts.FONTS`: Nimbus Sans, the Helvetica
-#: PyMuPDF rendered them in before (the renderer's Foxit substitute has no ``Ω``; TeX Gyre's sans draws its ``Ω`` and
-#: the dot of its ``i`` otherwise, which then read 2.9 and 3.1 from a Helvetica one, refused).
+#: The font the references are set in, by its name in :data:`document_lab.fonts.FONTS`: URW's Nimbus Sans as MuPDF
+#: ships it, the very program PyMuPDF rendered them in before (the renderer's Foxit substitute has no ``Ω``; TeX Gyre's
+#: sans draws its ``Ω`` and the dot of its ``i`` otherwise, which then read 2.9 and 3.1 from a Helvetica one, refused).
 REFERENCE_FONT: Final = 'nimbus-sans'
 #: The characters :func:`read_word` reads.
 ALPHABET: Final = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzµΩ'
@@ -299,7 +299,9 @@ def _word_chars(glyphs: Sequence[Glyph], font: Font) -> list[str | UnreadableGly
 
     The baseline is the median bottom of the word's letters (its marks aside). The word's top is the ascent (a
     capital, ascender or digit) or the x-height (``max.``, ``mm``): the word is read both ways and the way with fewer
-    refusals wins; when both read every letter but spell different text (``ox`` or ``OX``) each letter is refused. A
+    refusals wins; when both read every letter but spell different text, the way whose letters lie nearer their
+    references, by ``MARGIN`` a letter on average, wins (``max.``, whose ``m`` and ``a`` read at the ascent only far
+    from their place), else each letter is refused (``ox`` or ``OX``, the same shapes at either scale). A
     word of ONE letter has no baseline to place it by -- a lone ``u`` scaled as if its top were the ascent is a ``U``
     -- so that letter is read by shape alone, and refused when the reference font draws another character of that
     shape (``o`` and ``O``).
@@ -309,26 +311,35 @@ def _word_chars(glyphs: Sequence[Glyph], font: Font) -> list[str | UnreadableGly
     letters = [g for g in ordered if g.box[3] - g.box[1] > MARK_HEIGHT * tall]
     baseline = float(np.median([g.box[3] for g in letters]))
     top = min(g.box[1] for g in ordered)
-    readings = []
+    readings, distances = [], []
     for height in (font.ascent(), font.x_height()) if len(letters) > 1 else (font.ascent(),):
         em = (baseline - top) / height
+        read = [_letter(g, baseline, em, font, placed=len(letters) > 1) for g in letters]
         readings.append(
-            _marked(
-                [_letter(g, baseline, em, font, placed=len(letters) > 1) for g in letters], ordered, baseline, em, font
-            )
+            _marked([r if isinstance(r, UnreadableGlyph) else r[0] for r in read], ordered, baseline, em, font)
         )
+        distances.append(sum(0.0 if isinstance(r, UnreadableGlyph) else r[1] for r in read) / len(read))
     best = min(readings, key=lambda r: sum(isinstance(c, UnreadableGlyph) for c in r))
-    clean = [r for r in readings if not any(isinstance(c, UnreadableGlyph) for c in r)]
-    if len(clean) > 1 and clean[0] != clean[1]:
-        msg = f'the word reads as {"".join(clean[0])!r} at the ascent and {"".join(clean[1])!r} at the x-height'
+    clean = [k for k, r in enumerate(readings) if not any(isinstance(c, UnreadableGlyph) for c in r)]
+    if len(clean) > 1 and readings[0] != readings[1]:
+        if abs(distances[0] - distances[1]) >= MARGIN:
+            return readings[int(distances[1] < distances[0])]
+        ascent, x_height = (''.join(r) for r in readings)
+        msg = (
+            f'the word reads as {ascent!r} at the ascent and {x_height!r} at the x-height, its letters '
+            f'{distances[0]:.2f} and {distances[1]:.2f} from their references on average'
+        )
         return [UnreadableGlyph(msg) for _ in ordered]
     return best
 
 
-def _letter(glyph: Glyph, baseline: float, em: float, font: Font, *, placed: bool) -> str | UnreadableGlyph:
+def _letter(
+    glyph: Glyph, baseline: float, em: float, font: Font, *, placed: bool
+) -> tuple[str, float] | UnreadableGlyph:
+    """The character ``glyph`` reads as and its distance from its reference (:func:`_nearest`), else the refusal."""
     _, y0, _, y1 = glyph.box
     try:
-        return _read_char(glyph.ink, ((baseline - y0) / em, (baseline - y1) / em) if placed else None, font)
+        return _nearest(glyph.ink, ((baseline - y0) / em, (baseline - y1) / em) if placed else None, font)
     except UnreadableGlyph as refused:
         return refused
 
@@ -356,10 +367,11 @@ def _marked(
     return out
 
 
-def _read_char(ink: np.ndarray, place: tuple[float, float] | None, font: Font) -> str:
-    """The ``font`` character ``ink`` shows with its (top, bottom) ems from the baseline at ``place``.
+def _nearest(ink: np.ndarray, place: tuple[float, float] | None, font: Font) -> tuple[str, float]:
+    """The ``font`` character ``ink`` shows with its (top, bottom) ems from the baseline at ``place``; its distance.
 
-    With no ``place`` the character is read by shape alone, and a twin is then judged by shape alone too.
+    The distance is from that character's reference. With no ``place`` the character is read by shape alone, and a
+    twin is then judged by shape alone too.
     """
     ink = _crop(ink)
     if ink.shape[0] < MIN_ROWS:
@@ -383,7 +395,7 @@ def _read_char(ink: np.ndarray, place: tuple[float, float] | None, font: Font) -
     if twins:  # the reference itself cannot be told apart: matching it clearly says nothing
         msg = f'a glyph reads as {char!r}, which the reference font draws within {TWIN} of {"".join(twins)!r}'
         raise UnreadableGlyph(msg, (char, *twins))
-    return char
+    return char, best
 
 
 @functools.cache

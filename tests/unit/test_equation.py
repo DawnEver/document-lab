@@ -434,3 +434,17 @@ def test_a_number_in_a_plots_legend_box_is_no_equations(tmp_path):
     box = [pymupdf.Rect(532, 236, 562, 300)]
     assert displays(read(tmp_path, page, bars=(box,))) == []
     assert [label for label, _ in displays(read(tmp_path, page))] == ['(1)', '(2)', '(3)']  # planted: no box
+
+
+def test_a_relation_in_a_caption_a_list_item_or_a_table_row_is_no_display(tmp_path):
+    """A subfigure's caption ``(b) CHD vs. M (f = 12 kHz)``, a list item's last line ``complex with p = 1;`` set
+    where its item's text starts, and a table's row of cells ``M = 10`` each are no displays; the planted control, the
+    relation set apart on its own line, is one."""
+    above, below = column(72, 468, range(100, 200, 12)), column(72, 468, range(250, 300, 12))
+    caption = [(72, 214, '(b) CHD vs. M (f = 12 kHz, C = 60 uF)', 'helv', 9)]
+    item = [(72, 214, '-', 'helv', 10), prose(90, 214, 450), (90, 226, 'complex with p = 1;', 'helv', 10)]
+    row = [(x, 220, f'M = {x // 10} [Nm]', 'tiit', 10) for x in (80, 180, 280, 380, 480)]
+    for text in (caption, item, row):
+        assert displays(read(tmp_path, [*above, *text, *below])) == []
+    apart = [*above, math(250, 220, 'M = 10 [Nm]'), *below]
+    assert [label for label, _ in displays(read(tmp_path, apart))] == ['Untitled equation 1']  # planted

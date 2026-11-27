@@ -126,6 +126,8 @@ _MATH_SIGNS: Final = frozenset(
 _MATH_FONT: Final = re.compile(r'(?i)math|cmmi|cmsy|cmex|stix|msbm|msam|eufm|rsfs|mtmi|mtsy|txmi|txsy|pxmi|lmmi')
 #: A typewriter font: a code listing's, whose ``x = 1;`` is no formula.
 _CODE_FONT: Final = re.compile(r'(?i)mono|courier|cmtt|typewriter|consolas|lmtt')
+#: A caption's opening: ``Fig. 3.``, ``FIGURE 21.``, ``Table II``, a subfigure's ``(b) ``.
+_CAPTION_OPENS: Final = re.compile(r'^(?:Fig\.|FIG\.|Figure|FIGURE|Table|TABLE)\s*[A-Z]?[\dIVX]|^\([a-h]\)\s')
 #: A formula line flush with its column within this many body sizes below a line of prose is the paragraph's tail.
 TAIL_GAP: Final = 0.4
 #: A relation a display states: what tells a formula's line, numbered or not.
@@ -785,11 +787,15 @@ class _Around:
         A line that reads as words (:func:`_reads`: a word of four letters set in the body's font, or two in any font
         -- an italic heading) and starts within :data:`PROSE_INDENT` body sizes of its column's left edge (a
         paragraph's line, ``values [13].`` above a formula), or spans :data:`PROSE_WIDTH` of its column with no math
-        in it (:func:`_math`): a cases row set in from the edge (``(x) > 0 Solid material``) and a matrix's row are a
-        formula's. A line that reads as no word is prose only as a paragraph's tail: at the edge, in the body's font,
-        no math (``[55]:``). A formula's letters (``cos hweTs`` flush left, ``Lvsd =``, ``Ie5jwet``) and its short
-        words set inside it (``with``, ``otherwise``) are no prose.
+        in it (:func:`_math`) or reaching its right edge (a justified line, a list item's): a cases row set in from the
+        edge (``(x) > 0 Solid material``) and a matrix's row are a formula's. A line that reads as no word is prose
+        only at the edge -- reaching across the column (a justified line of inline math) or as a paragraph's tail, in
+        the body's font, no math (``[55]:``). A line holding :data:`TEXT_WORDS` words of four letters is prose
+        wherever it starts (a list item's second line). A formula's letters (``cos hweTs`` flush left, ``Lvsd =``,
+        ``Ie5jwet``) and its short words set inside it (``with``, ``otherwise``) are no prose.
         """
+        if _words(line.text) >= TEXT_WORDS:  # words a formula never holds so many of: a list item's second line
+            return True
         left, width = self.edge(line)
         flush = line.x0 - left <= PROSE_INDENT * self.body
         full = left + width - line.x1 <= self.body  # it reaches its column's right edge: a justified line
@@ -798,25 +804,34 @@ class _Around:
         return flush or (line.x1 - line.x0 >= PROSE_WIDTH * width and (full or not _math([line])))
 
     def inline(self, line: layout.Line) -> bool:
-        """Is the formula on ``line`` set in a paragraph, no display?
+        """Is the formula on ``line`` set in a paragraph, a caption or a table, no display?
 
-        Level with a line of prose of its column, beside or across it (a sub- or superscript the reader set apart from
-        its line: ``R>=0``), or the paragraph's tail: flush with the column, within :data:`TAIL_GAP` body sizes below
-        a line of prose (``eta2 = 99.15 %.`` ending a caption).
+        It opens a caption (``Fig. 3.``, ``FIGURE 21.``, a subfigure's ``(b)``); or it stands level with a line of prose
+        of its column, beside or across it (a sub- or superscript the reader set apart from its line: ``R>=0``); or it
+        is the tail of a paragraph, a list's item or a caption: within :data:`TAIL_GAP` body sizes below a line of prose
+        or a caption's, flush with the column or starting where that line starts (``eta2 = 99.15 %.``, ``complex with
+        p = 1;``); or :data:`ROW_CELLS` lines more stand level with it in its column, a table's row (``M = 10 [Nm]``).
         """
+        if _CAPTION_OPENS.match(line.text):
+            return True
         box = _spans_box(line)
         left, _ = self.edge(line)
         flush = line.x0 - left <= PROSE_INDENT * self.body
+        cells = 0
         for other in self.lines:
-            if other is line or self.edge(other)[0] != left or not self.prose(other):
+            if other is line or self.edge(other)[0] != left:
                 continue
             b = _spans_box(other)
             level = min(b.y1, box.y1) - max(b.y0, box.y0) >= (box.y1 - box.y0) / 2
+            cells += level and abs(_middle(other) - _middle(line)) <= self.body / 2
+            if not (self.prose(other) or _CAPTION_OPENS.match(other.text)):
+                continue
             if level and b.x0 < box.x1 + self.body and box.x0 < b.x1 + self.body:
                 return True
-            if flush and 0 <= box.y0 - b.y1 <= TAIL_GAP * self.body:
+            aligned = flush or abs(box.x0 - b.x0) <= TAIL_GAP * self.body
+            if aligned and 0 <= box.y0 - b.y1 <= TAIL_GAP * self.body:
                 return True
-        return False
+        return cells >= ROW_CELLS
 
     def number(self, line: layout.Line) -> str | None:
         """The equation number ``line`` ends in (:func:`_numbered`), where it ends right of its column's middle.

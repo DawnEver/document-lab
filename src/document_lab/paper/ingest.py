@@ -15,18 +15,19 @@ import shutil
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import pymupdf
-
+from document_lab import png
+from document_lab.ir import BBox
 from document_lab.paper.convert import convert
 from document_lab.paper.output import write_paper_output
 from document_lab.paper.sections import clean_sections, split_sections
 from document_lab.paper.text import slug
-from document_lab.pdf import read_pdf
+from document_lab.pdf import read_pdf, read_raster
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from document_lab.paper.convert import Tool
+    from document_lab.pdf import Renderer
 
 __all__ = ['Ingested', 'NoSections', 'ingest']
 
@@ -46,17 +47,18 @@ class Ingested:
     appended: tuple[Path, ...]
 
 
-#: Render scale of a scanned page: 3x (216 dpi) keeps a catalogue's 6 pt table digits legible.
-_SCAN_ZOOM = 3.0
+#: Render resolution of a scanned page: 3x (216 dpi) keeps a catalogue's 6 pt table digits legible.
+_SCAN_DPI = 216.0
 
 
-def _scanned_pages(pdf: Path, out_dir: Path) -> int:
+def _scanned_pages(pdf: Path, out_dir: Path, renderer: Renderer) -> int:
     """Write a document with ink but no text layer as page images; the count written (0: nothing inked).
 
     Raster scans and outlined glyphs: each inked page becomes ``img/pages/page-NNN.png`` with one section
     ``md/NN-page-N.md`` linking it.
     """
-    inked = [i for i, page in enumerate(read_pdf(pdf).pages) if page.figures or page.paths]
+    pages = read_pdf(pdf).pages
+    inked = [i for i, page in enumerate(pages) if page.figures or page.paths]
     if not inked:
         return 0
     img_dir, md_dir = out_dir / 'img' / 'pages', out_dir / 'md'
@@ -65,8 +67,9 @@ def _scanned_pages(pdf: Path, out_dir: Path) -> int:
     links = []
     for k, i in enumerate(inked, 1):
         name = f'page-{i + 1:03d}.png'
-        with pymupdf.open(pdf) as rendered:
-            rendered[i].get_pixmap(matrix=pymupdf.Matrix(_SCAN_ZOOM, _SCAN_ZOOM)).save(str(img_dir / name))
+        whole = BBox(0.0, 0.0, pages[i].width, pages[i].height)
+        pixels = read_raster(pdf, i + 1, whole, dpi=_SCAN_DPI, renderer=renderer).pixels
+        (img_dir / name).write_bytes(png.encode(pixels))
         section = f'{k:02d}-page-{i + 1}.md'
         (md_dir / section).write_text(
             f'# {pdf.stem} page {i + 1}\n\nno text layer: the page is the image\n\n'
@@ -78,8 +81,11 @@ def _scanned_pages(pdf: Path, out_dir: Path) -> int:
     return len(inked)
 
 
-def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> Ingested:
-    """Convert ``pdf`` (with ``tool``, else the best available) and write its paper layout into ``out_dir``."""
+def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None, renderer: Renderer = 'pymupdf') -> Ingested:
+    """Convert ``pdf`` (with ``tool``, else the best available) and write its paper layout into ``out_dir``.
+
+    Its figures, equations and scanned pages are rendered by ``renderer`` (`document_lab.pdf.read_raster`).
+    """
     pdf = pdf.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     md_text, used = convert(pdf, out_dir, tool=tool)
@@ -89,12 +95,12 @@ def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> Ingested:
         # whole text is its one section rather than nothing.
         main, appended = [(f'# {pdf.stem}', md_text)], []
     if not main:
-        scanned = _scanned_pages(pdf, out_dir)
+        scanned = _scanned_pages(pdf, out_dir, renderer)
         if scanned:
             return Ingested(used, scanned, scanned, 0, ())
         msg = f'{pdf.name}: the converted markdown has no section'
         raise NoSections(msg)
-    n_sec, n_fig, n_tbl = write_paper_output(main, out_dir, md_text, pdf_path=pdf)
+    n_sec, n_fig, n_tbl = write_paper_output(main, out_dir, md_text, pdf_path=pdf, renderer=renderer)
 
     appended_root = out_dir / 'appended'
     shutil.rmtree(appended_root, ignore_errors=True)
@@ -106,7 +112,7 @@ def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> Ingested:
         for img in (out_dir / 'img' / 'flat').iterdir():
             if img.is_file():
                 shutil.copy2(img, flat / img.name)
-        write_paper_output(sections, target, sections[0][1], title_override=title, pdf_path=pdf)
+        write_paper_output(sections, target, sections[0][1], title_override=title, pdf_path=pdf, renderer=renderer)
         shutil.rmtree(flat, ignore_errors=True)
         written.append(target)
 

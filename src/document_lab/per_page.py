@@ -34,7 +34,7 @@ from document_lab import layout, png
 from document_lab.ink import Drawing, drawings
 from document_lab.ir import BBox
 from document_lab.markdown import page_markdowns
-from document_lab.pdf import read_pdf, read_raster
+from document_lab.pdf import Renderer, read_pdf, read_raster
 from document_lab.regions import Region, regions
 
 if TYPE_CHECKING:
@@ -63,11 +63,14 @@ class Paged:
     textless: tuple[int, ...]
 
 
-def _picture(pdf: Path, page: Page) -> tuple[np.ndarray, float]:
-    """The page as seen, RGB rows, and its pixels per point: a page one image covers at that image's resolution."""
+def _picture(pdf: Path, page: Page, renderer: Renderer) -> tuple[np.ndarray, float]:
+    """The page as seen, RGB rows, and its pixels per point.
+
+    A page one image covers is read at that image's resolution, any other drawn by ``renderer``.
+    """
     whole = BBox(0, 0, page.width, page.height)
     covered = len(page.figures) == 1 and _covers(page.figures[0].provenance.bbox, whole)
-    pixels = read_raster(pdf, page.number, whole, dpi=None if covered else RENDER_DPI).pixels
+    pixels = read_raster(pdf, page.number, whole, dpi=None if covered else RENDER_DPI, renderer=renderer).pixels
     return pixels, pixels.shape[1] / page.width
 
 
@@ -161,21 +164,24 @@ def _clauses(markdown: str) -> str:
     return '; '.join(line.lstrip('#').strip() for line in markdown.splitlines() if line.startswith('##'))
 
 
-def write_pages(pdf: Path, out: Path) -> Paged:
-    """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive."""
+def write_pages(pdf: Path, out: Path, *, renderer: Renderer = 'pymupdf') -> Paged:
+    """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive.
+
+    Each page's picture is drawn by ``renderer`` (`document_lab.pdf.read_raster`).
+    """
     read = read_pdf(pdf)
     body = layout.body_size(read)
     texts = page_markdowns(read)
     width = max(3, len(str(len(texts))))
     index = [f'# {pdf.stem}', '']
     textless = []
-    drawn = _without_furniture([_drawings(*_picture(pdf, page), page, body) for page in read.pages], body)
+    drawn = _without_furniture([_drawings(*_picture(pdf, page, renderer), page, body) for page in read.pages], body)
     with _files(out) as put:
         if out / pdf.name != pdf:  # the layout stands alone; a PDF already where it goes is not copied onto itself
             put(pdf.name, pdf.read_bytes())
         for number, (text, page) in enumerate(zip(texts, read.pages, strict=True), start=1):
             name = f'page-{number:0{width}d}'
-            pixels, scale = _picture(pdf, page)
+            pixels, scale = _picture(pdf, page, renderer)
             put(f'{name}.png', png.encode(pixels))
             links = []
             for region in (found := regions(page, body, drawn[number - 1])):

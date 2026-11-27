@@ -2,7 +2,9 @@
 
 What a page draws comes back as text spans, vector paths and image figures, each with its box in page space. Pixels
 are the reader's only as an image's own samples (no codec is decoded): :func:`read_raster` takes a region that is
-one image whole from them, and renders any other with PyMuPDF (D4 of task document-lab-pdf-reader).
+one image whole from them, and draws any other with a renderer -- PyMuPDF (the reference, the default) or
+document-lab's own (``renderer='own'``: the ``render`` crate, drawing from this reader's interpreter; it draws no
+text until its stage 2, so it refuses a region holding text -- D37 of task document-lab-pdf-reader).
 
 What the reader refuses raises a :class:`Refused` of its kind -- :class:`NotPdf`, :class:`Locked` (the password
 opens no access), :class:`Unsupported`, :class:`Malformed` -- each a ``ValueError``.
@@ -13,7 +15,7 @@ from __future__ import annotations
 import hashlib
 import math
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 import numpy as np
 import pymupdf
@@ -28,6 +30,7 @@ __all__ = [
     'Malformed',
     'NotPdf',
     'Refused',
+    'Renderer',
     'Unsupported',
     'read_pdf',
     'read_raster',
@@ -43,6 +46,9 @@ WHOLE_IMAGE_SLACK: Final = 0.25
 INVISIBLE_TEXT: Final = 3
 #: A matrix entry at most this (points) is zero: the image is square to the page.
 _SQUARE: Final = 1e-6
+
+#: What draws a region: PyMuPDF, or document-lab's own renderer (no text until its stage 2).
+Renderer = Literal['pymupdf', 'own']
 
 
 def read_pdf(
@@ -126,15 +132,30 @@ def _path(row: tuple, here: Provenance) -> VectorPath:
     )
 
 
-def read_raster(path: Path | str, page: int, bbox: BBox, *, dpi: float | None = None, password: str = '') -> Raster:
+def read_raster(
+    path: Path | str,
+    page: int,
+    bbox: BBox,
+    *,
+    dpi: float | None = None,
+    password: str = '',
+    renderer: Renderer = 'pymupdf',
+) -> Raster:
     """The region ``bbox`` of 1-based ``page`` as pixels, everything drawn there composited.
 
     ``dpi`` defaults to the finest native resolution among the images shown (an annotation's too, not one hidden or
     inkless) the region overlaps, so a pixel is a source pixel and none is invented; a region holding no image
     renders at ``VECTOR_DPI``. A region that is one image whole at its native resolution, nothing else visible on it,
     is that image's own samples where the reader holds them as the page shows them (:func:`_samples`); any other
-    region is rendered by PyMuPDF.
+    region is drawn by ``renderer``: PyMuPDF, or the own renderer (:func:`_drawn`).
+
+    Raises:
+        Unsupported: ``renderer='own'`` and the region holds what it does not draw yet (text, a shading, ...).
+
     """
+    if renderer not in ('pymupdf', 'own'):
+        msg = f'renderer {renderer!r}: one of pymupdf, own'
+        raise ValueError(msg)
     path = Path(path)
     data = path.read_bytes()
     reader = _pdf.open(data, password.encode())
@@ -143,6 +164,8 @@ def read_raster(path: Path | str, page: int, bbox: BBox, *, dpi: float | None = 
     if dpi is None:
         dpi = max(filter(None, map(_native, under)), default=VECTOR_DPI)
     pixels = _samples(reader, under, bbox, dpi) if _alone(spans, paths, bbox) else None
+    if pixels is None and renderer == 'own':
+        pixels = _drawn(reader, page, bbox, dpi, spans)
     if pixels is None:
         pixels = _rendered(data, page, bbox, dpi, password)
     here = Provenance(hashlib.sha256(data).hexdigest(), path.resolve().as_uri(), page=page, bbox=bbox)
@@ -169,10 +192,37 @@ def _alone(spans: list, paths: list, bbox: BBox) -> bool:
         reach = width / 2
         if _meets((min(xs) - reach, min(ys) - reach, max(xs) + reach, max(ys) + reach), bbox):
             return False
-    return not any(
+    return not _texts(spans, bbox)
+
+
+def _texts(spans: list, bbox: BBox) -> int:
+    """How many spans of visible text (an OCR layer is invisible, hidden content too) are drawn on ``bbox``."""
+    return sum(
         not hidden and mode != INVISIBLE_TEXT and _meets(box, bbox)
         for _, _, _, _, box, mode, _, (hidden, _, _) in spans
     )
+
+
+def _drawn(reader: _pdf.Reader, page: int, bbox: BBox, dpi: float, spans: list) -> np.ndarray:
+    """``bbox`` drawn by the own renderer, refusing a region holding what it does not draw yet, by name and count."""
+    texts = _texts(spans, bbox)
+    if texts:
+        msg = (
+            f'page {page}: the own renderer draws no text until its stage 2, and the region holds {texts} span(s) of '
+            "it; render it with renderer='pymupdf'"
+        )
+        raise Unsupported(msg)
+    width, height, channels, pixels, undrawn = reader.render(
+        page, tuple(bbox), dpi / 72, text=False, annotations=True, alpha=False
+    )
+    if undrawn:
+        named = ', '.join(f'{what} x{count}' for what, count in undrawn)
+        msg = (
+            f'page {page}: the own renderer does not draw all the region holds yet: {named}; render it with '
+            "renderer='pymupdf'"
+        )
+        raise Unsupported(msg)
+    return np.frombuffer(pixels, dtype=np.uint8).reshape(height, width, channels).copy()
 
 
 def _samples(reader: _pdf.Reader, under: list, bbox: BBox, dpi: float) -> np.ndarray | None:

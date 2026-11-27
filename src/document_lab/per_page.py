@@ -36,7 +36,7 @@ import json
 import re
 import zipfile
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 import numpy as np
@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from pathlib import Path
 
-    from document_lab.ir import Document, Page, Table
+    from document_lab.ir import Page, Table
     from document_lab.markdown import Placed
 
 __all__ = ['RENDER_DPI', 'Paged', 'write_pages']
@@ -198,15 +198,6 @@ def _clauses(markdown: str) -> str:
     return '; '.join(line.lstrip('#').strip() for line in markdown.splitlines() if line.startswith('##'))
 
 
-def _body(doc: Document, furniture: list[layout.Running]) -> Document:
-    """``doc`` without its pages' running heads and feet: the text its markdown is written from."""
-    pages = []
-    for page, run in zip(doc.pages, furniture, strict=True):
-        out = {id(span) for line in (*run.head, *run.foot) for span in line.spans}
-        pages.append(replace(page, spans=tuple(s for s in page.spans if id(s) not in out)))
-    return replace(doc, pages=tuple(pages))
-
-
 def _front_matter(run: layout.Running) -> str:
     """The page's running head and foot as YAML front matter (``header:``, ``footer:``); none without them."""
     named = (('header', run.head), ('footer', run.foot))
@@ -292,7 +283,7 @@ def write_pages(pdf: Path, out: Path, *, renderer: Renderer = 'pymupdf') -> Page
     drawn = _without_furniture(drawn, body)
     found = [regions(page, body, drawings) for page, drawings in zip(read.pages, drawn, strict=True)]
     furniture = layout.running(read)
-    text = _body(read, furniture)
+    text = layout.without_running(read, furniture)
     placed = [_placed(*part) for part in zip(names, text.pages, found, ruled, strict=True)]
     texts = page_markdowns(text, placed)
     index = [f'# {pdf.stem}', '']

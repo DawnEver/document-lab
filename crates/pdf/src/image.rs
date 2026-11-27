@@ -1,11 +1,13 @@
 //! An image `XObject`'s samples (ISO 32000-2 section 8.9.5): its size, color space and depth, and its data through
 //! every lossless filter -- still in its image codec (`DCTDecode`, `JPXDecode`, ...) when it has one, for whoever
-//! turns it into pixels -- and, where they show as they stand, their sRGB ([`Samples::rgb`]).
+//! turns it into pixels -- where they show as they stand, their sRGB ([`Samples::rgb`]), and how a placement shows
+//! them ([`Placement`]).
 
 use crate::color::Space;
 use crate::error::{Error, Result};
 use crate::file::File;
 use crate::filter::Codec;
+use crate::geometry::Matrix;
 use crate::icc::Intent;
 use crate::object::{Dict, Object};
 
@@ -78,6 +80,48 @@ impl Samples {
             Space::Rgb => Some(levels),
             Space::Icc(icc) => icc.profile.as_ref().ok()?.rgb8(&levels, self.intent).ok(),
             _ => None,
+        }
+    }
+}
+
+/// A placement matrix entry at most this (points) is zero: the image is square to the page.
+const SQUARE: f64 = 1e-6;
+
+/// How an image placed square to the page shows its samples -- turned a quarter or not, mirrored or not: the picture
+/// as shown is its rows of samples (`turned`: its columns, each a row), then those rows last to first when
+/// `rows_reversed`, and each row last to first when `columns_reversed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Placement {
+    /// Its rows of samples run down the page, its columns across.
+    pub turned: bool,
+    /// The rows shown run last to first.
+    pub rows_reversed: bool,
+    /// Each row shown runs last to first.
+    pub columns_reversed: bool,
+}
+
+impl Placement {
+    /// How `matrix` -- from an image's unit square to page space (y down) -- places its samples; None when it is
+    /// skewed: no quarter turn or mirror puts it square to the page.
+    #[must_use]
+    pub fn of(matrix: &Matrix) -> Option<Self> {
+        let [a, b, c, d, _, _] = matrix.0;
+        // A sample (row i, column j) sits at u = (j + 1/2) / width, v = 1 - (i + 1/2) / height of the unit square,
+        // mapped to x = a u + c v + e, y = b u + d v + f.
+        if b.abs() <= SQUARE && c.abs() <= SQUARE {
+            Some(Self {
+                turned: false,
+                rows_reversed: d > 0.0,
+                columns_reversed: a < 0.0,
+            })
+        } else if a.abs() <= SQUARE && d.abs() <= SQUARE {
+            Some(Self {
+                turned: true,
+                rows_reversed: b < 0.0,
+                columns_reversed: c > 0.0,
+            })
+        } else {
+            None
         }
     }
 }

@@ -9,8 +9,21 @@ import pytest
 
 from document_lab.numbers import bound
 from document_lab.pdf import read_pdf
-from document_lab.plot import RasterPlot, UnreadFrame, UnrecognizedFrame, outline_text, plots
-from tests.synthetic import BLUE, FRAME, RED, Axis, PlotSpec, draw_plot, hidden_layer, plot_pdf, to_page
+from document_lab.plot import JoinedMarkers, RasterPlot, UnreadFrame, UnrecognizedFrame, outline_text, plots
+from tests.synthetic import (
+    BLUE,
+    FRAME,
+    MARK_SIZE,
+    RED,
+    Axis,
+    PlotSpec,
+    draw_mark,
+    draw_plot,
+    hidden_layer,
+    mark_box_height,
+    plot_pdf,
+    to_page,
+)
 
 XS = [float(x) for x in range(0, 101, 10)]
 
@@ -869,6 +882,156 @@ def test_a_rotated_outlined_y_title_in_the_label_column_is_no_tick_label(tmp_pat
     assert plot.y.ticks == bare.y.ticks  # the title removed gives the same ticks
 
 
+BLACK = (0.0, 0.0, 0.0)
+WHITE = (1.0, 1.0, 1.0)
+DOTS = [(10.0, 30.0), (40.0, 55.0), (70.0, 62.0), (90.0, 80.0)]
+TRIANGLES = [(20.0, 15.0), (50.0, 25.0), (80.0, 45.0)]
+#: A filled frame of 0..100 on both axes over `FRAME`: 3 points per x unit, 2 per y unit.
+PERCENT = Axis([0, 20, 40, 60, 80, 100])
+
+
+def _marker_spec(**kwargs):
+    return PlotSpec(
+        PERCENT,
+        PERCENT,
+        filled_frame=True,
+        tick_marks=False,
+        grid=True,
+        **{'markers': [('\u25cf', DOTS, BLACK), ('\u25b2', TRIANGLES, RED)], **kwargs},
+    )
+
+
+def _page_with(tmp_path, spec, draw):
+    """``spec`` drawn on a page, then ``draw(page)`` over it; the page read back."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    draw_plot(page, spec)
+    draw(page)
+    doc.save(tmp_path / 'marks.pdf')
+    return read_pdf(tmp_path / 'marks.pdf').page(1)
+
+
+def test_a_frame_drawn_as_a_filled_rectangle_is_a_plot(tmp_path):
+    plot = _one_plot(tmp_path, _marker_spec(markers=[], curves=[(lambda x: x / 2, XS, BLUE)]))
+    assert tuple(plot.frame) == pytest.approx(tuple(FRAME), abs=0.01)  # points
+    (curve,) = plot.curves
+    assert curve.y == pytest.approx([x / 2 for x in XS], abs=0.05)  # data units of y
+
+
+def _filled_shape_page(tmp_path, corners):
+    """A filled, unstroked shape of ``corners`` with tick labels at `FRAME`'s sides and a curve inside: no grid."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    page.draw_polyline(corners, color=None, fill=(0.95, 0.95, 0.95), width=0, closePath=True)
+    spec = PlotSpec(PERCENT, PERCENT)
+    for v in PERCENT.ticks:
+        px, py = to_page(spec, v, v)
+        page.insert_text((px - 4, FRAME.y1 + 10), str(v), fontname='helv', fontsize=8)
+        page.insert_text((FRAME.x0 - 16, py + 3), str(v), fontname='helv', fontsize=8)
+    page.draw_polyline([to_page(spec, x, x / 2) for x in XS], color=BLUE, width=1.0)
+    doc.save(tmp_path / 'shape.pdf')
+    return read_pdf(tmp_path / 'shape.pdf').page(1)
+
+
+@pytest.mark.parametrize(
+    ('corners', 'frames'),
+    [
+        ([FRAME.bl, FRAME.br, FRAME.tr, FRAME.tl], 1),
+        ([FRAME.bl, FRAME.br, FRAME.tr, FRAME.tl, FRAME.bl], 1),  # closed by a line back to its start, too
+        ([pymupdf.Point(FRAME.x0 + 10, FRAME.y1), FRAME.br, FRAME.tr, FRAME.tl], 0),  # planted: a corner off its box
+    ],
+)
+def test_only_a_filled_rectangle_frames_a_plot_not_a_filled_shape_its_box_would(tmp_path, corners, frames):
+    assert len(plots(_filled_shape_page(tmp_path, corners))) == frames
+
+
+def test_marker_glyphs_read_as_points_one_series_per_glyph_and_fill(tmp_path):
+    plot = _one_plot(tmp_path, _marker_spec())
+    series = {(m.glyph, m.fill): m for m in plot.markers}
+    assert set(series) == {('\u25cf', BLACK), ('\u25b2', RED)}
+    dots, triangles = series['\u25cf', BLACK], series['\u25b2', RED]
+    # The planted centers are the glyphs' ink, measured on a rendered pixmap; the reader places a glyph at its font
+    # box's center, which here sits within 0.17 pt of the ink (0.09 data units).
+    assert np.column_stack([dots.x, dots.y]) == pytest.approx(np.array(DOTS), abs=0.15)  # data units
+    assert np.column_stack([triangles.x, triangles.y]) == pytest.approx(np.array(TRIANGLES), abs=0.15)
+    assert dots.size == pytest.approx(mark_box_height(), abs=0.05)  # points: the font box, not the ink (2.2)
+    assert dots.label is None
+    assert dots.provenance.page == 1
+    assert plot.curves == ()
+
+
+def test_a_white_glyph_is_an_open_marker_its_own_series(tmp_path):
+    spec = _marker_spec()
+
+    def open_dot(page):
+        center = to_page(spec, 30, 90)
+        draw_mark(page, '\u25cf', *center, WHITE)
+        page.draw_circle(center, 1.8, color=BLACK, width=0.5)  # the outline the white fill sits in
+
+    (plot,) = plots(_page_with(tmp_path, spec, open_dot))
+    series = {m.fill: m for m in plot.markers if m.glyph == '\u25cf'}
+    assert len(series[BLACK].x) == len(DOTS)
+    assert np.column_stack([series[WHITE].x, series[WHITE].y]) == pytest.approx(np.array([[30, 90]]), abs=0.15)
+
+
+def test_curves_through_markers_split_one_glyph_into_series(tmp_path):
+    upper, lower = [(10.0, 70.0), (50.0, 80.0), (90.0, 90.0)], [(10.0, 20.0), (50.0, 30.0), (90.0, 35.0)]
+    ax, ay = to_page(PlotSpec(PERCENT, PERCENT), 90, 90)
+    spec = _marker_spec(markers=[('\u25cf', upper + lower, BLACK)], stray=[('annot', ax + 3, ay + 2, 8)])
+
+    def lines(page):
+        for line in (upper, lower):
+            page.draw_polyline([to_page(spec, x, y) for x, y in line], color=BLACK, width=0.6)
+
+    (plot,) = plots(_page_with(tmp_path, spec, lines))
+    got = sorted(np.round(np.column_stack([m.x, m.y])).tolist() for m in plot.markers)
+    # the dot at (90, 90) beside the annotation is a curve's end, not a legend entry
+    assert got == [[list(p) for p in lower], [list(p) for p in upper]]
+    assert all(m.label is None for m in plot.markers)
+
+
+def test_a_marker_glyph_beside_a_label_is_the_series_legend_not_a_point(tmp_path):
+    plot = _one_plot(tmp_path, _marker_spec(marker_legend=[('\u25b2', 'DAC (50HRC)', RED)]))
+    (triangles,) = [m for m in plot.markers if m.glyph == '\u25b2']
+    assert triangles.label == 'DAC (50HRC)'
+    assert len(triangles.x) == len(TRIANGLES)
+
+
+def test_marker_glyphs_without_a_plot_or_outside_the_frame_are_not_points(tmp_path):
+    """The planted negative: bullets and symbols set as text are not data, on a plain page or below a plot."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    for k, glyph in enumerate('\u25cf\u25b2\u25a0'):
+        draw_mark(page, glyph, 80, 100 + 20 * k, BLACK)
+        page.insert_text((90, 102 + 20 * k), f'item {k} 12 34', fontname='helv', fontsize=8)
+    for k in range(4):
+        draw_mark(page, '\u25cf', 100 + 40 * k, 200 + 15 * k, BLACK)  # a scatter of glyphs with no frame or ticks
+    plot_page = doc.new_page(width=612, height=792)
+    draw_plot(plot_page, _marker_spec())
+    draw_mark(plot_page, '\u25cf', 150, 400, BLACK)  # a bullet below the plot, past its labels
+    doc.save(tmp_path / 'n.pdf')
+    pdf = read_pdf(tmp_path / 'n.pdf')
+    assert plots(pdf.page(1)) == []
+    (plot,) = plots(pdf.page(2))
+    (dots,) = [m for m in plot.markers if m.glyph == '\u25cf']
+    assert len(dots.x) == len(DOTS)
+
+
+def test_marker_glyphs_joined_into_one_span_refuse_the_frame(tmp_path):
+    """Two dots set side by side on one baseline read as one span, whose glyphs' places are not stated: refused."""
+    spec = _marker_spec()
+
+    def pair(page):
+        x, y = to_page(spec, 30, 90)
+        draw_mark(page, '\u25cf', x, y, BLACK)
+        draw_mark(page, '\u25cf', x + MARK_SIZE, y, BLACK)  # starts where the first one ends: one span
+
+    page = _page_with(tmp_path, spec, pair)
+    assert any(s.text.replace(' ', '') == '\u25cf\u25cf' for s in page.spans)  # the premise: the reader joined them
+    with pytest.raises(JoinedMarkers, match='page 1'):
+        plots(page)
+
+
 def test_a_plot_a_hidden_layer_draws_is_read_only_when_asked(tmp_path):
     spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=[('mT', 450.0, 120.0, 8.0)])
     page = hidden_layer(read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1))
@@ -887,3 +1050,15 @@ def test_a_plot_the_colorant_none_paints_is_read_only_when_asked(tmp_path):
     (plot,) = plots(inkless, include_inkless=True)
     assert plot.curves[0].y == pytest.approx(XS, abs=0.5)
     assert [s.text for s in outline_text(inkless, include_inkless=True)] == ['mT']
+
+
+def test_markers_a_hidden_layer_draws_are_read_only_when_asked(tmp_path):
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', _marker_spec())).page(1)
+    marks = {'\u25cf', '\u25b2'}
+    page = dataclasses.replace(
+        page, spans=tuple(dataclasses.replace(s, hidden=True) if s.text in marks else s for s in page.spans)
+    )
+    (plot,) = plots(page)
+    assert plot.markers == ()
+    (shown,) = plots(page, include_hidden=True)
+    assert sorted(len(m.x) for m in shown.markers) == [len(TRIANGLES), len(DOTS)]

@@ -1,7 +1,7 @@
 """One capture: grab a frame, scroll, wait for the view to settle, stitch on -- until the view stops moving.
 
 The source is two callables, ``grab() -> frame`` and ``scroll()``, so the loop knows nothing of windows or screens
-(`document_lab.capture.desktop` supplies them on Windows). The end is the first scroll that moves nothing; the caps
+(`document_lab.capture.desktop` supplies them, on any OS). The end is the first scroll that moves nothing; the caps
 in :class:`Limits`, the ``aborted`` callback (the CLI binds Esc) and a frame that cannot be
 stitched stop it earlier. There is no cap by default: a view as long as it scrolls is captured.
 
@@ -349,9 +349,9 @@ def capture(
     capped at half the one that lost it; one that cannot be recovered is told to ``lost`` and ends the capture -- or,
     ``wait_when_lost``, waits (told to ``lost`` with the way back) until the user brings the view back over what was
     captured, and goes on scrolling from there; only ``aborted`` ends it then.
-    ``progress`` sees the stitcher after every frame it placed. A ``scroll`` that raises ``OSError`` (Windows refused
-    the input) stops it as ``blocked: <reason>``, what was stitched kept. While ``paused`` it neither scrolls nor
-    grabs; after, it goes on from wherever the view overlaps what was captured (:func:`_rejoin`).
+    ``progress`` sees the stitcher after every frame it placed. A ``scroll`` that raises ``OSError`` (the desktop
+    refused the input) stops it as ``blocked: <reason>``, what was stitched kept. While ``paused`` it neither scrolls
+    nor grabs; after, it goes on from wherever the view overlaps what was captured (:func:`_rejoin`).
     """
     first = grab()
     stitcher = Stitcher(first, match, drop_overlays=drop_overlays, history=_HISTORY * len(first))

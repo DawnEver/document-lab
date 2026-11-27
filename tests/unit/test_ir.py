@@ -75,10 +75,11 @@ OTHER_ROOTS = ['own verbatim', '//server/share/', '//?/UNC/server/share/'] if os
 @pytest.mark.parametrize('root', ['own', *OTHER_ROOTS])
 @pytest.mark.parametrize('name', ['plain.pdf', 'a space, a #hash, 100% and \u00fc.pdf', 'dir/\u4e2d\u6587 name.pdf'])
 def test_a_file_uri_is_the_paths_uri(tmp_path, root, name):
+    """A verbatim (``//?/``) path names the file its plain form names (3.15's ``as_uri``; older ones keep ``%3F``)."""
     anchor = tmp_path.anchor.replace(os.sep, '/')
     start = {'own': anchor, 'own verbatim': '//?/' + anchor}.get(root, root)
-    path = Path(start + name)
-    assert file_uri(path) == path.as_uri()
+    plain = {'own verbatim': anchor, '//?/UNC/server/share/': '//server/share/'}.get(root, start)
+    assert file_uri(Path(start + name)) == Path(plain + name).as_uri()
 
 
 def test_a_relative_path_has_no_file_uri():

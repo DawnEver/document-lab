@@ -280,6 +280,16 @@ def test_a_page_without_rules_has_no_grid(tmp_path):
     assert grids(page) == ()
 
 
+def test_a_cell_reads_a_stated_space_as_a_space_and_a_zero_width_space_over_a_rule_breaks_no_grid(tmp_path):
+    page = _page(tmp_path, draw_table)
+    stated = tuple(dataclasses.replace(s, text='al\u00a0\u200bpha') if s.text == 'alpha' else s for s in page.spans)
+    rule = table_cell_rect(1, 0).x1
+    across = stated[0].provenance.at(bbox=BBox(rule - 3, 425, rule + 3, 434))
+    gap = dataclasses.replace(stated[0], text='\u200b', provenance=across)
+    (table,) = tables(dataclasses.replace(page, spans=(*stated, gap)))
+    assert table.rows[1] == ('al pha', '1.25', 'mm')
+
+
 # A scanned page: its rules come from its picture (`ink.rulings`), its words from OCR. Here the words are the drawn
 # text's own, placed where the scan turns them (each box's center turned, its size kept), so every expected value is
 # known and Tesseract is not needed; the ``ocr`` part runs the same tables through it.

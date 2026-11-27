@@ -10,7 +10,7 @@ use pdf::{Event, File, Object};
 
 /// Every text glyph a page draws, as its text.
 fn text(file: &File, page: &pdf::Page) -> String {
-    file.interpret(page)
+    file.interpret(page, false)
         .unwrap()
         .events
         .iter()
@@ -48,7 +48,7 @@ fn image_pages_read_back_as_written() {
         pages.iter().map(pdf::Page::size).collect::<Vec<_>>(),
         [(30.0, 15.5), (60.0, 31.0)]
     );
-    let events = file.interpret(&pages[1]).unwrap().events;
+    let events = file.interpret(&pages[1], false).unwrap().events;
     let [Event::Image(placed)] = events.as_slice() else {
         panic!("{events:?}")
     };
@@ -81,7 +81,7 @@ fn encoded_samples_are_written_as_given_with_their_filter() {
     writer.image_page(&image, (10.0, 10.0)).unwrap();
     let file = File::open(writer.finish().unwrap(), b"").unwrap();
     let page = &file.pages().unwrap()[0];
-    let events = file.interpret(page).unwrap().events;
+    let events = file.interpret(page, false).unwrap().events;
     let [Event::Image(placed)] = events.as_slice() else {
         panic!("{events:?}")
     };
@@ -166,7 +166,7 @@ fn a_link_to_another_page_is_not_followed_into_the_whole_tree() {
 
 /// Each span a page draws: its text, its box in page space, and its render mode.
 fn spans(file: &File, page: &pdf::Page) -> Vec<(String, [f64; 4], i64)> {
-    pdf::spans::spans(&file.interpret(page).unwrap().events)
+    pdf::spans::spans(&file.interpret(page, false).unwrap().events)
         .into_iter()
         .map(|s| {
             let b = s.bbox;
@@ -223,7 +223,7 @@ fn a_text_layer_reads_back_invisible_over_its_words() {
         assert!(near(*bbox, [b.x0, b.y0, b.x1, b.y1]), "{bbox:?} for {text}");
         assert_eq!(*mode, 3);
     }
-    let events = copy.interpret(&pages[0]).unwrap().events;
+    let events = copy.interpret(&pages[0], false).unwrap().events;
     assert!(events.iter().any(|e| matches!(e, Event::Path(_)))); // what the page drew is drawn still
 }
 
@@ -241,14 +241,20 @@ fn a_word_turned_lies_along_its_baseline_over_where_it_is_seen() {
         (180.0, [80.0, 45.0, 120.0, 55.0], (-1.0, 0.0)),
     ] {
         let (copy, pages) = laid(&source, &[turned(angle)]);
-        let events = copy.interpret(&pages[0]).unwrap().events;
+        let events = copy.interpret(&pages[0], false).unwrap().events;
         let found = pdf::spans::spans(&events);
         assert_eq!(found.len(), 1, "{found:?}");
         let b = found[0].bbox;
         assert_eq!(found[0].text, "sideways");
-        assert!(near([b.x0, b.y0, b.x1, b.y1], expected), "{b:?} turned {angle}");
+        assert!(
+            near([b.x0, b.y0, b.x1, b.y1], expected),
+            "{b:?} turned {angle}"
+        );
         let (dx, dy) = found[0].direction;
-        assert!((dx - direction.0).abs() + (dy - direction.1).abs() < 1e-9, "{dx} {dy} turned {angle}");
+        assert!(
+            (dx - direction.0).abs() + (dy - direction.1).abs() < 1e-9,
+            "{dx} {dy} turned {angle}"
+        );
     }
 }
 

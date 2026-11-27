@@ -1,9 +1,9 @@
 //! `document_lab._pdf`: the `pdf` crate, exposed to Python as plain values -- no PDF logic of its own.
 //!
-//! `open(data, password)` reads a file; its `page(number, curve_samples=, flatness=)` returns what the page draws
-//! as tuples and columns, which `document_lab.pdf` turns into the IR, and its `image(object)` an image's samples.
-//! `create(path, level)` writes a PDF of image pages, or of pages copied from a `Reader` (`document_lab.capture`),
-//! perhaps with a text layer laid over them (`document_lab.ocr`).
+//! `open(data, password)` reads a file; its `page(number, annotations=, curve_samples=, flatness=)` returns what
+//! the page draws as tuples and columns, which `document_lab.pdf` turns into the IR, and its `image(object)` an
+//! image's samples. `create(path, level)` writes a PDF of image pages, or of pages copied from a `Reader`
+//! (`document_lab.capture`), perhaps with a text layer laid over them (`document_lab.ocr`).
 //!
 //! A refusal raises by its kind: [`Refused`] and its kinds when the reader refuses the input, `ValueError` for a
 //! request it cannot honor, `OSError` when writing fails.
@@ -12,10 +12,11 @@ use std::fs;
 use std::io::BufWriter;
 use std::path::PathBuf;
 
+use pdf::color::Pattern;
 use pdf::error::Kind;
-use pdf::geometry::Rect;
+use pdf::geometry::{Point, Rect};
 use pdf::image::Placement;
-use pdf::interpret::{Event, PathEvent};
+use pdf::interpret::{Event, Layer, PathEvent, Segment};
 use pdf::paths::{Flattening, Polylines};
 use pdf::writer::Image;
 use pyo3::create_exception;
@@ -56,9 +57,11 @@ create_exception!(
 
 /// A box as `(x0, y0, x1, y1)`.
 type Box4 = (f64, f64, f64, f64);
+/// The layer an event is drawn in: hidden by optional content, and the subtype of the annotation drawing it.
+type LayerRow = (bool, Option<String>);
 /// A span: text, font name (no subset tag), size, bold, box, render mode, the number it shares with the spans its
-/// words run on into with no space between (None: none), whether it is written vertically, and the unit vector its
-/// baseline runs along (page space, y down).
+/// words run on into with no space between (None: none), whether it is written vertically, the unit vector its
+/// baseline runs along (page space, y down), and its layer.
 type SpanRow = (
     String,
     String,
@@ -69,6 +72,7 @@ type SpanRow = (
     Option<usize>,
     bool,
     (f64, f64),
+    LayerRow,
 );
 /// What a page paints as paths, as columns -- `document_lab.pdf` takes each buffer whole with `numpy.frombuffer`,
 /// no Python object per point. Buffers are native-endian; an entry per subpath (`pdf::paths::Polylines`) unless
@@ -79,6 +83,9 @@ type SpanRow = (
 /// - closed: `uint8`, 1 when closed back to its start;
 /// - group: `int64`, the painted path it is a subpath of: its index in the styles;
 /// - styles: a [`StyleRow`] per painted path, in drawing order -- what its subpaths share.
+///
+/// A shading painted with `sh` is a painted path of one closed subpath, the rectangle of its box, filled with a
+/// `shading`.
 type PathColumns<'py> = (
     Bound<'py, PyBytes>,
     Bound<'py, PyBytes>,
@@ -87,12 +94,30 @@ type PathColumns<'py> = (
     Bound<'py, PyBytes>,
     Vec<StyleRow>,
 );
-/// How a painted path is painted: stroke color, line width, dashes, dash phase, fill color, even-odd.
-type StyleRow = (Option<Vec<f64>>, f64, Vec<f64>, f64, Option<Vec<f64>>, bool);
+/// How a painted path is painted: stroke color, line width, dashes, dash phase, fill color, even-odd, the fill's
+/// pattern (`tiling`, `shading`; None: one color), and its layer.
+type StyleRow = (
+    Option<Vec<f64>>,
+    f64,
+    Vec<f64>,
+    f64,
+    Option<Vec<f64>>,
+    bool,
+    Option<&'static str>,
+    LayerRow,
+);
 /// An image: box, sample width and height, object number (None inline), the matrix `(a, b, c, d, e, f)` from its
-/// unit square to page space, and how it shows its samples (`pdf::image::Placement`: turned, rows reversed, columns
-/// reversed; None when it is skewed).
-type ImageRow = (Box4, i64, i64, Option<u32>, [f64; 6], Option<PlacementRow>);
+/// unit square to page space, how it shows its samples (`pdf::image::Placement`: turned, rows reversed, columns
+/// reversed; None when it is skewed), and its layer.
+type ImageRow = (
+    Box4,
+    i64,
+    i64,
+    Option<u32>,
+    [f64; 6],
+    Option<PlacementRow>,
+    LayerRow,
+);
 /// An image placed square to the page: whether its rows run down the page, and its rows and columns shown reversed.
 type PlacementRow = (bool, bool, bool);
 /// What a page draws: spans, paths (as columns), images, warnings.
@@ -147,14 +172,15 @@ impl Reader {
             .collect()
     }
 
-    /// What page `number` (1-based) draws: (spans, paths, images, warnings); each curve flattened into
-    /// `curve_samples` segments, or into as few as keep within `flatness` points of it -- one of the two
-    /// (`pdf::paths::Flattening`).
-    #[pyo3(signature = (number, *, curve_samples = None, flatness = None))]
+    /// What page `number` (1-based) draws, its annotations' appearances too when `annotations`: (spans, paths,
+    /// images, warnings); each curve flattened into `curve_samples` segments, or into as few as keep within
+    /// `flatness` points of it -- one of the two (`pdf::paths::Flattening`).
+    #[pyo3(signature = (number, *, annotations, curve_samples = None, flatness = None))]
     fn page<'py>(
         &self,
         py: Python<'py>,
         number: usize,
+        annotations: bool,
         curve_samples: Option<usize>,
         flatness: Option<f64>,
     ) -> PyResult<PageRows<'py>> {
@@ -169,8 +195,10 @@ impl Reader {
             }
         };
         let page = self.at(number)?;
-        let pdf::Content { events, warnings } =
-            self.file.interpret(page).map_err(|e| refused(&e))?;
+        let pdf::Content { events, warnings } = self
+            .file
+            .interpret(page, annotations)
+            .map_err(|e| refused(&e))?;
         let spans = pdf::spans::spans(&events)
             .into_iter()
             .map(|s| {
@@ -185,6 +213,7 @@ impl Reader {
                     s.unspaced,
                     s.vertical,
                     s.direction,
+                    layer(&s.layer),
                 )
             })
             .collect();
@@ -208,6 +237,21 @@ impl Reader {
                         image.matrix.0,
                         Placement::of(&image.matrix)
                             .map(|p| (p.turned, p.rows_reversed, p.columns_reversed)),
+                        layer(&image.layer),
+                    ));
+                }
+                Event::Shading(shading) => {
+                    lines.add(&rectangle(shading.bbox), flattening);
+                    groups.resize(lines.len(), styles.len());
+                    styles.push((
+                        None,
+                        0.0,
+                        Vec::new(),
+                        0.0,
+                        Some(Vec::new()),
+                        false,
+                        Some(pattern(Pattern::Shading)),
+                        layer(&shading.layer),
                     ));
                 }
                 Event::Text(_) => {}
@@ -396,6 +440,19 @@ fn box4(r: Rect) -> Box4 {
     (r.x0, r.y0, r.x1, r.y1)
 }
 
+/// A layer as its row.
+fn layer(l: &Layer) -> LayerRow {
+    (l.hidden, l.annotation.clone())
+}
+
+/// A pattern's kind, by name.
+fn pattern(p: Pattern) -> &'static str {
+    match p {
+        Pattern::Tiling => "tiling",
+        Pattern::Shading => "shading",
+    }
+}
+
 /// How `path` is painted.
 fn style(path: &PathEvent) -> StyleRow {
     let stroke = path.stroke.as_ref();
@@ -406,7 +463,24 @@ fn style(path: &PathEvent) -> StyleRow {
         stroke.map_or(0.0, |s| s.dash_phase),
         path.fill.as_ref().map(|f| f.color.rgb_or_components()),
         path.fill.as_ref().is_some_and(|f| f.even_odd),
+        path.fill
+            .as_ref()
+            .and_then(|f| f.color.pattern)
+            .map(pattern),
+        layer(&path.layer),
     )
+}
+
+/// The closed rectangle of `r`, as a path's segments.
+fn rectangle(r: Rect) -> [Segment; 5] {
+    let corner = |x, y| Point { x, y };
+    [
+        Segment::MoveTo(corner(r.x0, r.y0)),
+        Segment::LineTo(corner(r.x1, r.y0)),
+        Segment::LineTo(corner(r.x1, r.y1)),
+        Segment::LineTo(corner(r.x0, r.y1)),
+        Segment::Close,
+    ]
 }
 
 /// `lines` as [`PathColumns`], subpath `i` of the painted path `groups[i]`.

@@ -2,13 +2,16 @@
 side by side right to left.
 """
 
+import math
+
 import pymupdf
+import pytest
 
 from document_lab import layout
 from document_lab.ir import BBox, Page, Provenance, TextSpan
 from document_lab.layout import lines
 from document_lab.pdf import read_pdf
-from tests.synthetic import ACTUAL_TEXT_LINES, actual_text_pdf
+from tests.synthetic import ACTUAL_TEXT_LINES, actual_text_pdf, layer_pdf
 
 
 def _line_texts(path):
@@ -181,3 +184,114 @@ def test_a_sideways_stamp_on_every_page_is_furniture_never_also_a_running_line(t
     for run, stamped in zip(layout.running(read), stamps, strict=True):
         assert [ln.text for ln in run.head] == ['Data and Signal Line Chokes']
         assert not stamped & {id(s) for ln in (*run.head, *run.foot) for s in ln.spans}
+
+
+#: A page whose caption and notes are turned sideways beside a landscape table (left out), between upright lines:
+#: each line ``(text, baseline origin, degrees turned clockwise)``, set word by word as an OCR lays its words.
+SIDEWAYS = (
+    ('The table below is printed sideways, as a standard prints a landscape table.', (72, 72), 0),
+    ('Table 3 - Magnetic properties and densities', (100, 700), -90),  # read bottom to top, the next line right
+    ('of the sintered magnets', (114, 700), -90),
+    ('Beside the caption', (150, 560), 0),  # upright, its top between the caption lines' tops
+    ('Notes read top to bottom', (390, 150), 90),  # read top to bottom, the next line left
+    ('and their next line', (376, 150), 90),
+    ('Both turned runs read along their own lines, each placed as a block.', (72, 760), 0),
+)
+
+
+def _sideways_words(size: float = 10) -> list[tuple[str, tuple[float, float], tuple[float, float, float, float], int]]:
+    """Each word of :data:`SIDEWAYS`: its text, its baseline origin, its box and its turn."""
+    out = []
+    for line, origin, turn in SIDEWAYS:
+        x, y = origin
+        dx, dy = round(math.cos(math.radians(turn))), round(math.sin(math.radians(turn)))
+        up = (dy, -dx)  # toward the glyphs' tops
+        for word in line.split():
+            length = pymupdf.get_text_length(word, fontsize=size)
+            xs = [x + a * dx + b * size * up[0] for a in (0, length) for b in (-0.2, 0.8)]
+            ys = [y + a * dy + b * size * up[1] for a in (0, length) for b in (-0.2, 0.8)]
+            out.append((word, (x, y), (min(xs), min(ys), max(xs), max(ys)), turn))
+            step = pymupdf.get_text_length(word + ' ', fontsize=size)
+            x, y = x + step * dx, y + step * dy
+    return out
+
+
+def _sideways_pdf(path, kind: str):
+    if kind == 'layer':  # a scan's text layer: invisible words over their boxes
+        return layer_pdf(path, [(word, box, turn, False) for word, _, box, turn in _sideways_words()])
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=612, height=792)
+        for word, origin, _, turn in _sideways_words():
+            page.insert_text(origin, word, fontname='helv', fontsize=10, rotate=-turn % 360)
+        doc.save(path)
+    return path
+
+
+@pytest.mark.parametrize('kind', ['vector', 'layer'])
+def test_text_turned_sideways_reads_along_its_own_lines_each_run_placed_as_a_block(tmp_path, kind):
+    page = read_pdf(_sideways_pdf(tmp_path / 'sideways.pdf', kind)).page(1)
+    assert {s.direction for s in page.spans} == {(1.0, 0.0), (0.0, -1.0), (0.0, 1.0)}
+    read = [ln.text for ln in layout.ordered(layout.lines(page, weighted=False))]
+    assert read == [text for text, _, _ in SIDEWAYS]
+    # The planted wrong reading: the turned words read as if upright, top to bottom -- what a reader of every span
+    # as left to right makes of them -- is told from the true one.
+    planted = [' '.join(reversed(text.split())) if turn == -90 else text for text, _, turn in SIDEWAYS]
+    assert read != planted
+    caption, notes = (next(b for b in layout.blocks(page) if b.text.startswith(start)) for start in ('Table', 'Notes'))
+    assert (caption.text, notes.text) == (
+        'Table 3 - Magnetic properties and densities\nof the sintered magnets',
+        'Notes read top to bottom\nand their next line',
+    )
+
+
+#: Four columns of vertical writing, right to left (Chinese: the stator winding of a hydro generator heats and
+#: vibrates in service, so its insulation is inspected).
+COLUMNS = (
+    '\u6c34\u7535\u673a\u7ec4\u7684\u5b9a\u5b50\u7ed5',
+    '\u7ec4\u5728\u8fd0\u884c\u65f6\u4ea7\u751f\u70ed',
+    '\u91cf\u548c\u632f\u52a8\u56e0\u6b64\u9700\u8981',
+    '\u5b9a\u671f\u68c0\u67e5\u7edd\u7f18\u72b6\u6001',
+)
+#: Each column's words as Tesseract boxes them in a 24 pt column (the chi_sim_vert round trip, tests/ocr): its
+#: characters; how far its box stops short of its cells at the top and at the foot (its ink); its half width across;
+#: its center's offset across. The second starts 22 pt below the first (more than its box is wide); the third's box
+#: is 32 pt across a 24 pt column, off its center.
+OCR_WORDS = ((2, 6.8, 8.8, 10.1, 0.6), (1, 13.2, 1.2, 11.0, 1.1), (3, 2.0, 2.0, 16.0, -3.6), (2, 3.0, 3.0, 10.8, 0.0))
+EM, PITCH, MARGIN = 24.0, 38.4, 40.0  # the font size, column middle to middle (1.6 em), the page's margin
+
+
+def _ocr_columns_pdf(path):
+    width, height = len(COLUMNS) * PITCH + 2 * MARGIN, max(map(len, COLUMNS)) * EM + 2 * MARGIN
+    words = []
+    for i, column in enumerate(COLUMNS):
+        middle, start = width - MARGIN - EM / 2 - PITCH * i, 0
+        for chars, top, foot, half, offset in OCR_WORDS:
+            y0, y1 = MARGIN + EM * start + top, MARGIN + EM * (start + chars) - foot
+            box = (middle + offset - half, y0, middle + offset + half, y1)
+            words.append((column[start : start + chars], box, 0, True))
+            start += chars
+    return layer_pdf(path, words, width, height)
+
+
+def test_ocr_d_vertical_columns_read_right_to_left_however_wide_their_boxes_run(tmp_path):
+    page = read_pdf(_ocr_columns_pdf(tmp_path / 'columns.pdf')).page(1)
+    assert all(s.vertical for s in page.spans)
+    found = layout.lines(page, weighted=False)
+    assert len(found) == len(COLUMNS)  # each column one line, however far apart its words' boxes stand
+    read = [ln.text.replace(' ', '') for ln in layout.ordered(found)]
+    assert read == list(COLUMNS)
+    assert [b.text.replace(' ', '') for b in layout.blocks(page)] == ['\n'.join(COLUMNS)]
+    # The planted wrong reading: the page's halves read left one first (columns 3, 4, 1, 2).
+    assert read != [*COLUMNS[2:], *COLUMNS[:2]]
+
+
+def test_a_caption_turned_sideways_is_one_paragraph_of_the_page_markdown(tmp_path):
+    from document_lab.markdown import page_markdowns  # noqa: PLC0415
+
+    (text,) = page_markdowns(read_pdf(_sideways_pdf(tmp_path / 'sideways.pdf', 'layer')))
+    paragraphs = text.split('\n\n')
+    caption = ' '.join(text for text, _, turn in SIDEWAYS if turn == -90)
+    assert caption in paragraphs
+    assert ' '.join(text for text, _, turn in SIDEWAYS if turn == 90) in paragraphs
+    # The planted wrong truth: the caption run on into the upright line beside it.
+    assert f'{caption} Beside the caption' not in paragraphs

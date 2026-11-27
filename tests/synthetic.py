@@ -556,6 +556,30 @@ def text_pdf(path: Path, pages: Sequence[Sequence[Run]], bars: Sequence[Sequence
     return path
 
 
+#: A word of a text layer: its text, its box as the page shows it (points), the degrees its baseline is turned clockwise
+#: as seen (-90: read bottom to top) and whether it is written vertically (read down a column).
+type LayerWord = tuple[str, tuple[float, float, float, float], float, bool]
+
+
+def layer_pdf(path: Path, words: Sequence[LayerWord], width: float = 612, height: float = 792) -> Path:
+    """A blank page with a text layer laid by our own writer, as `document_lab.ocr` lays Tesseract's words: each word
+    invisible over its box, along its turn -- boxes as loose or as tight as an OCR's, every one known."""
+    from document_lab import _pdf  # noqa: PLC0415 -- the writer `document_lab.ocr` lays its layers with
+
+    with pymupdf.open() as doc:
+        doc.new_page(width=width, height=height)
+        reader = _pdf.open(doc.tobytes(), b'')
+    laid = []
+    for text, (x0, y0, x1, y1), turn, vertical in words:
+        across, down = (y1 - y0, x1 - x0) if turn % 180 else (x1 - x0, y1 - y0)  # the writer turns its box about
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2  # the center, from the word's own frame
+        laid.append((text, (cx - across / 2, cy - down / 2, cx + across / 2, cy + down / 2), float(turn), vertical))
+    writer = _pdf.create(path)
+    writer.copy_page_with_text(reader, 1, laid)
+    writer.close()
+    return path
+
+
 #: Lines top to bottom, each ``(before, drawn, actual, after)``: ``drawn`` is shown, marked with ``/ActualText``
 #: ``actual``. A drawn space stated a zero-width space, a no-break space, a word joiner; the control: ``XY`` stated
 #: the letters ``fi`` of its ligature, a replacement that is no space.

@@ -1,7 +1,8 @@
 """Numbers read from glyph SHAPES -- outlines drawn as paths, or ink in an image -- where a page has no text for them.
 
-A glyph is a bitmap. A digit is the reference digit (``REFERENCE_FONT``, rendered by PyMuPDF) whose shape it is
-nearest: both are cropped to their ink, sampled on a ``GRID`` of ink fractions, and compared by Euclidean distance
+A glyph is a bitmap. A digit is the reference digit (``REFERENCE_FONT``, URW's Nimbus Sans -- the Helvetica MuPDF
+draws, fetched on first use by :mod:`document_lab.fonts` -- set by the own renderer, ``_pdf.specimen``) whose shape it
+is nearest: both are cropped to their ink, sampled on a ``GRID`` of ink fractions, and compared by Euclidean distance
 plus ``ASPECT_WEIGHT`` times the difference of their width-to-height ratios. A glyph is read only when its nearest
 digit is within ``ACCEPT`` AND the second nearest is ``MARGIN`` farther; otherwise it raises
 :class:`UnreadableGlyph` -- a near tie is a guess, and a guessed tick label silently rescales a whole axis.
@@ -20,7 +21,7 @@ letter is read by shape alone (:func:`_word_chars`). A refusal names the charact
 (:attr:`UnreadableGlyph.candidates`): when they are one letter's two cases, the glyph is a letter all the same
 (:func:`has_letter`).
 
-The references are a :class:`Font`. ``HELVETICA`` renders them; ``STROKE`` strokes the polylines of
+The references are a :class:`Font`. ``SANS`` sets them; ``STROKE`` strokes the polylines of
 :mod:`document_lab.strokefont` (the stroke-font lettering of TDK SIFERRIT sheets) with :func:`stroke`, which is also
 how a stroked glyph's own ink is made. Every reading takes the font it compares against; a character whose
 reference lies within ``TWIN`` of another's in that font is refused, never read.
@@ -29,12 +30,13 @@ reference lies within ``TWIN`` of another's in that font is refused, never read.
 from __future__ import annotations
 
 import functools
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 import numpy as np
-import pymupdf
 
+from document_lab import _pdf, fonts
 from document_lab.strokefont import TEMPLATES
 
 if TYPE_CHECKING:
@@ -42,7 +44,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     'ALPHABET',
-    'HELVETICA',
+    'SANS',
     'STROKE',
     'Font',
     'Glyph',
@@ -55,17 +57,22 @@ __all__ = [
     'stroke',
 ]
 
-#: The font the reference digits are rendered in (PyMuPDF's built-in Helvetica).
-REFERENCE_FONT: Final = 'helv'
+#: The font the references are set in, by its name in :data:`document_lab.fonts.FONTS`: Nimbus Sans, the Helvetica
+#: PyMuPDF rendered them in before (the renderer's Foxit substitute has no ``Ω``; TeX Gyre's sans draws its ``Ω`` and
+#: the dot of its ``i`` otherwise, which then read 2.9 and 3.1 from a Helvetica one, refused).
+REFERENCE_FONT: Final = 'nimbus-sans'
 #: The characters :func:`read_word` reads.
 ALPHABET: Final = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzµΩ'
-#: The height above the baseline (ems) of a ``REFERENCE_FONT`` capital, ascender or digit (0.73 measured).
+#: The height above the baseline (ems) of a ``REFERENCE_FONT`` capital, ascender or digit (0.73 measured, as on
+#: PyMuPDF's Helvetica before).
 ASCENT: Final = 0.73
 #: Weight of a glyph's top and bottom (ems from the baseline) in a word reading's distance.
 PLACE_WEIGHT: Final = 8.0
-#: Two characters whose references (nearest phases, with place) are this close are one shape to the reader: at 32
-#: rows ``I``/``l`` are 1.65 apart, anti-aliasing noise, and the nearest distinct pair ``O``/``Q`` 1.91 (2026-11-10).
-TWIN: Final = 1.8
+#: Two characters whose references (nearest phases, with place) are this close are one shape to the reader. Over 14
+#: to 64 rows (measured 2026-11-27), ``I``/``l`` lie farther apart than this at 5 heights and ``O``/``Q`` within it
+#: at 4; PyMuPDF's references at 1.8 had left ``I``/``l`` apart at 15 heights and twinned ``O``/``Q`` or ``C``/``O``
+#: at 15. At 32 rows ``I``/``l`` are 1.45 apart, the nearest distinct pair ``O``/``Q`` 1.59.
+TWIN: Final = 1.5
 #: A minus' center sits at least this far (ems) above the baseline; a point (as wide as tall) sits on it.
 MINUS_FLOOR: Final = 0.12
 #: A mark taller than wide whose bottom sits at least this far (ems) above the baseline is a prime (``mu'``).
@@ -185,8 +192,8 @@ class Font:
         raise NotImplementedError
 
 
-class _Helvetica(Font):
-    """``REFERENCE_FONT`` rendered by PyMuPDF: every ``ALPHABET`` character."""
+class _Sans(Font):
+    """``REFERENCE_FONT`` set by the own renderer: every ``ALPHABET`` character."""
 
     name = REFERENCE_FONT
 
@@ -222,12 +229,12 @@ class _Stroke(Font):
 
 
 #: The reference font text and filled outlines are read against.
-HELVETICA: Final[Font] = _Helvetica()
+SANS: Final[Font] = _Sans()
 #: The stroke font TDK SIFERRIT sheets letter their plots in (:mod:`document_lab.strokefont`).
 STROKE: Final[Font] = _Stroke()
 
 
-def read_glyph(ink: np.ndarray, font: Font = HELVETICA) -> str:
+def read_glyph(ink: np.ndarray, font: Font = SANS) -> str:
     """The digit ``ink`` (darkness 0..1, or bool) shows; raises :class:`UnreadableGlyph` when none is clearly best.
 
     A glyph nearer a letter of ``font`` than any digit is that letter (a ``C`` is no ``0``), unless the font draws
@@ -256,7 +263,7 @@ def read_glyph(ink: np.ndarray, font: Font = HELVETICA) -> str:
     return digit
 
 
-def read_word(glyphs: Sequence[Glyph], font: Font = HELVETICA) -> str:
+def read_word(glyphs: Sequence[Glyph], font: Font = SANS) -> str:
     """The text a row of glyphs spells (left to right) over ``ALPHABET`` plus ``-`` and ``.`` marks.
 
     Raises :class:`UnreadableGlyph` when a glyph matches no character clearly.
@@ -269,7 +276,7 @@ def read_word(glyphs: Sequence[Glyph], font: Font = HELVETICA) -> str:
     return text
 
 
-def has_letter(glyphs: Sequence[Glyph], font: Font = HELVETICA) -> bool:
+def has_letter(glyphs: Sequence[Glyph], font: Font = SANS) -> bool:
     """Whether a glyph of the row reads clearly as a letter, however the rest read: the row is a word, not a number.
 
     A glyph refused only for its case (a lone ``C``, which by shape alone is a ``c``) is a letter too; one refused
@@ -396,7 +403,7 @@ def _twins(rows: int, font: Font, *, placed: bool = True) -> dict[str, tuple[str
     return {a: tuple(b for b in refs if b != a and distance(a, b) <= TWIN) for a in refs}
 
 
-def read_number(glyphs: Sequence[Glyph], font: Font = HELVETICA) -> float:
+def read_number(glyphs: Sequence[Glyph], font: Font = SANS) -> float:
     """The number a row of glyphs spells (left to right); raises :class:`UnreadableGlyph` when it spells none."""
     ordered = sorted(glyphs, key=lambda g: g.box[0])
     tall = max(g.box[3] - g.box[1] for g in ordered)
@@ -501,18 +508,15 @@ def _digit_height() -> float:
     return _crop(_render('0', 100.0, (0.0, 0.0))).shape[0] / 100.0
 
 
-@functools.cache
-def _reference_font() -> pymupdf.Font:
-    """``REFERENCE_FONT`` as a font object."""
-    return pymupdf.Font(REFERENCE_FONT)
-
-
 def _render(text: str, size: float, offset: tuple[float, float]) -> np.ndarray:
-    """``text`` at ``size`` (one pixel per point), shifted by ``offset`` pixels, as darkness."""
-    with pymupdf.open() as doc:
-        page = doc.new_page(width=size * 2 + 10, height=size * 2 + 10)
-        writer = pymupdf.TextWriter(page.rect)  # a font object draws every glyph it has (``Ω``), not only Latin-1
-        writer.append((5 + offset[0], size * 1.5 + offset[1]), text, font=_reference_font(), fontsize=size)
-        writer.write_text(page)
-        pix = page.get_pixmap(dpi=72, colorspace=pymupdf.csGRAY)
-    return 1 - np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w) / 255
+    """``text`` at ``size`` pixels an em, shifted by ``offset`` pixels, as darkness.
+
+    The canvas is a square ``2 size + 10`` pixels a side, the baseline starting at ``(5, 1.5 size)`` rounded to the
+    whole pixel: unshifted, a flat bottom or top lies on a pixel's edge, as a vector glyph's ink is rasterized
+    (:func:`rasterize`), and the shifts sample the phases between (not snapped to a glyph grid, as PyMuPDF's were:
+    nine phases read images of glyphs closer than its two).
+    """
+    side = math.ceil(size * 2 + 10)
+    origin = (5 + offset[0], round(size * 1.5) + offset[1])
+    ink = _pdf.specimen(fonts.program(REFERENCE_FONT), text, size, origin, side, side)
+    return np.frombuffer(ink, dtype=np.uint8).reshape(side, side) / 255

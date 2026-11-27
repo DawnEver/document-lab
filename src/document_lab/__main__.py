@@ -3,7 +3,7 @@
 ``capture`` and ``capture-merge`` make a PDF of page images from the screen, ``capture-files`` one for each PDF its
 viewer shows; ``ocr`` lays a text layer over one;
 ``pages`` writes any PDF as a markdown file and an image per page (standards, manuals); ``paper`` writes a paper as
-sections with its figures.
+sections with its figures; ``fonts`` lists the fonts fetched on first use, ``fonts --fetch`` fetches them ahead.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from lab_commons.log import emit
 
+from document_lab import fonts
 from document_lab.capture import cli as capture_cli
 from document_lab.formula import MODELS
 
@@ -79,6 +80,13 @@ def _parser() -> argparse.ArgumentParser:
     paper.add_argument('--renderer', **_RENDERER)
     paper.add_argument('--no-outline', action='store_true', help=_NO_OUTLINE)
     _formulas_option(paper)
+    fonts = sub.add_parser(
+        'fonts',
+        help='the fonts document-lab downloads on first use (renderer fallbacks, the glyph reference) and which the '
+        'cache holds; DOCUMENT_LAB_OFFLINE=1 forbids downloading',
+    )
+    fonts.add_argument('names', nargs='*', help='the fonts (default: all)')
+    fonts.add_argument('--fetch', action='store_true', help='download each the cache lacks now, for later offline use')
     return parser
 
 
@@ -171,6 +179,28 @@ def _paper(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fonts(args: argparse.Namespace) -> int:
+    unknown = sorted(set(args.names) - set(fonts.FONTS))
+    if unknown:
+        return _refused(ValueError(f'no font {", ".join(unknown)}: one of {", ".join(fonts.FONTS)}'))
+    failed = 0
+    cache = fonts.used().cache
+    emit(f'cache: {cache}')
+    for name in args.names or fonts.FONTS:
+        font = fonts.FONTS[name]
+        held = (cache / f'{font.sha256}{font.suffix}').is_file()
+        if args.fetch and not held:
+            try:
+                fonts.fetch(name)
+            except fonts.FontUnavailable as refused:
+                emit(f'refused: {refused}')
+                failed += 1
+                continue
+            held = True
+        emit(f'{name}: {"held" if held else "not held"}, {font.size / 1e6:.1f} MB, {font.license}')
+    return 2 if failed else 0
+
+
 #: Disagreements between a stated outline and the inferred headings named one by one before the rest are counted.
 _SHOWN_DISAGREEMENTS = 5
 
@@ -199,11 +229,13 @@ _RUN = {
     'ocr': _ocr,
     'pages': _pages,
     'paper': _paper,
+    'fonts': _fonts,
 }
 
 
 def main(argv: list[str] | None = None) -> int:
     """Parse ``argv`` and run its subcommand; the exit status."""
+    fonts.use(fonts.Fonts.of(os.environ))  # where fetched fonts are kept, whether they may be downloaded
     parser = _parser()
     args = parser.parse_args(argv)
     if getattr(args, 'formula_model', None) is not None and args.formulas is None:

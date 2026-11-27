@@ -19,6 +19,9 @@ from document_lab.glyphs import (
 )
 from document_lab.strokefont import TEMPLATES
 
+#: Glyph shapes are read against document_lab.glyphs' reference font, fetched first (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures('reference_font')
+
 
 def _ink(text: str, *, size: float = 24, font: str = 'helv', dpi: int = 72) -> np.ndarray:
     with pymupdf.open() as doc:

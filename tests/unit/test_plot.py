@@ -25,6 +25,9 @@ from tests.synthetic import (
     to_page,
 )
 
+#: Glyph shapes are read against document_lab.glyphs' reference font, fetched first (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures('reference_font')
+
 XS = [float(x) for x in range(0, 101, 10)]
 
 

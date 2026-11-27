@@ -5,8 +5,10 @@ links beside them; what the document states beside its pages -- outline, page la
 files -- on the :class:`Document`. Pixels are the reader's only as an image's own samples (no codec is decoded):
 :func:`read_raster` takes a region that is one image whole from them, and draws any other with a renderer -- PyMuPDF
 (the reference, the default) or document-lab's own (``renderer='own'``: the ``render`` crate, drawing from this
-reader's interpreter, text from its fonts' outlines; it refuses a region holding what it does not draw yet, by name --
-D37 of task document-lab-pdf-reader); an embedded file's bytes are :func:`read_attachment`'s.
+reader's interpreter, text from its fonts' outlines -- a font the file does not embed and no built-in substitute
+stands for from a fallback :mod:`document_lab.fonts` fetches on first use; it refuses a region holding what it does
+not draw yet, by name -- D37 of task document-lab-pdf-reader); an embedded file's bytes are
+:func:`read_attachment`'s.
 
 What the reader refuses raises a :class:`Refused` of its kind -- :class:`NotPdf`, :class:`Locked` (the password
 opens no access), :class:`Unsupported`, :class:`Malformed` -- each a ``ValueError``.
@@ -24,7 +26,7 @@ from typing import Final, Literal, overload
 import numpy as np
 import pymupdf
 
-from document_lab import _pdf
+from document_lab import _pdf, fonts
 from document_lab._pdf import Locked, Malformed, NotPdf, Refused, Unsupported
 from document_lab.ir import (
     Action,
@@ -423,7 +425,8 @@ def read_raster(
 
     Raises:
         Unsupported: ``renderer='own'`` and the region holds what it does not draw yet (a shading, a glyph of a font
-            it has no program for, ...).
+            it has no program for, or whose fallback cannot be had: :class:`document_lab.fonts.FontUnavailable`'s
+            message, ...).
 
     """
     if renderer not in ('pymupdf', 'own'):
@@ -431,7 +434,7 @@ def read_raster(
         raise ValueError(msg)
     path = Path(path)
     data = path.read_bytes()  # rendered and cited alike: the pixels are those of the bytes hashed
-    reader = _pdf.open(data, password.encode())
+    reader = _pdf.open(data, password.encode(), fonts=fonts.program)
     spans, paths, images, _ = reader.page(page, annotations=True, curve_samples=1)
     spans = [row for row in spans if not row[_SPAN_LAYER][0]]  # text is text whatever its color: hidden only
     under = [row for row in images if not any(row[_IMAGE_LAYER][:2]) and _meets(row[0], bbox)]

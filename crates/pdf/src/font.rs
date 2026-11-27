@@ -291,13 +291,13 @@ pub struct Font {
     /// Its identity.
     pub info: Rc<FontInfo>,
     pub(crate) kind: Kind,
-    to_unicode: Option<CMap>,
+    pub(crate) to_unicode: Option<CMap>,
     /// The embedded TrueType program's glyph text, the last word on a glyph's text.
     glyph_text: Option<GlyphText>,
     /// A `CIDFontType2`'s CID-to-glyph map (None: the identity).
     pub(crate) cid_to_gid: Option<Vec<u16>>,
     /// The symbol font it is, by its name or its program's: its private-use text is read as the symbol shown.
-    symbols: Option<Symbols>,
+    pub(crate) symbols: Option<Symbols>,
     /// Its glyphs' shapes.
     pub(crate) shapes: Shapes,
     /// From glyph space to text space (`[0.001 0 0 0.001 0 0]` but for Type 3 fonts).
@@ -597,7 +597,7 @@ impl Symbols {
 
     /// The character code `code` shows: Symbol's and Zapf Dingbats' by their glyph names' text, the Microsoft fonts'
     /// by their tables.
-    fn character(self, code: u8) -> Option<char> {
+    pub(crate) fn character(self, code: u8) -> Option<char> {
         let table: &[(u8, char)] = match self {
             Self::Symbol => return pdf_encoding::SYMBOL.get(code).map(glyph_of_table),
             Self::ZapfDingbats => return pdf_encoding::ZDINGBAT.get(code).map(glyph_of_table),
@@ -723,8 +723,7 @@ impl File {
             descriptor.as_ref(),
             program_weight,
         )?;
-        let source =
-            self.shape_source(dict, &info, cid_font.is_some(), symbols, program.as_ref())?;
+        let source = self.shape_source(dict, &info, &kind, symbols, program.as_ref())?;
         Ok(Font {
             kind,
             to_unicode,
@@ -775,14 +774,15 @@ impl File {
         Ok((ascent, descent))
     }
 
-    /// Where the glyph shapes of the font `dict` describes, of identity `info`, come from: a Type 3 font's
+    /// Where the glyph shapes of the font `dict` describes, of identity `info` and `kind`, come from: a Type 3 font's
     /// procedures, the program it embeds, else its substitute -- for a simple font, by its name or descriptor
-    /// ([`shape::substitute`]) -- else nowhere, why named.
+    /// ([`shape::substitute`]) -- else its fallbacks -- a CJK composite font's, a Microsoft symbol font's
+    /// ([`shape::fallback`]) -- else nowhere, why named.
     fn shape_source(
         &self,
         dict: &Dict,
         info: &FontInfo,
-        composite: bool,
+        kind: &Kind,
         symbols: Option<Symbols>,
         program: Option<&Program>,
     ) -> Result<Source> {
@@ -810,11 +810,21 @@ impl File {
         }
         let standard = base14(&info.name).map(|m| m.name);
         let italic = shape::italic(info.flags, info.italic_angle, info.name_without_subset());
+        let composite = match kind {
+            Kind::Composite { collection, .. } => Some(collection.map(|c| c.ordering)),
+            Kind::Simple { .. } => None,
+        };
         let substitute = shape::substitute(standard, symbols, info.flags, info.bold(), italic);
-        Ok(match (composite, substitute) {
-            (false, Some((substitute, stretched))) => Source::Substitute {
+        let fallback = shape::fallback(composite.flatten(), symbols, info.flags);
+        Ok(match (composite, substitute, fallback) {
+            (None, Some((substitute, stretched)), _) => Source::Substitute {
                 substitute,
                 stretched,
+            },
+            (_, _, Some(chain)) => Source::Fallback {
+                fallbacks: self.fallbacks.clone(),
+                chain,
+                stretched: composite.is_none(),
             },
             _ => Source::Unavailable(
                 format!("font {} is not embedded and has no substitute", info.name).into(),

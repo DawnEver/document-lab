@@ -7,8 +7,13 @@
 //! substitute, `PDFium`'s Foxit fonts (BSD-3-Clause, `src/fonts`); any other simple font that embeds none is drawn
 //! with the Foxit font its descriptor's flags choose (fixed pitch, serif, else sans; bold, italic), each glyph
 //! stretched across the width the file states for it, as `MuPDF` draws a substituted font. A symbol font other
-//! than Symbol and Zapf Dingbats, and a composite font, that embeds none has no substitute: its glyphs are
-//! [`Shape::Missing`], by name. A Type 3 glyph is its procedure (`/CharProcs`), which the interpreter runs.
+//! than Symbol and Zapf Dingbats, and a composite font, that embeds none has no substitute: a CJK composite font
+//! (its `CID`s of one of Adobe's CJK collections) and a Microsoft symbol font (Wingdings, Webdings) are drawn with
+//! redistributable fallback programs not shipped here ([`FALLBACKS`]), each fetched by name when a glyph first
+//! needs it (the file's [`Fetch`], [`crate::File::fetch_fallbacks`]) and reached through each glyph's character. A
+//! glyph none can draw -- any other font's, a fallback that cannot be had, a character none holds -- is
+//! [`Shape::Missing`], by name, never guessed. A Type 3 glyph is its procedure (`/CharProcs`), which the
+//! interpreter runs.
 //!
 //! Which glyph a code selects is the font's logic, not the program's (9.6.5, 9.7.4.2): in a simple font, the glyph
 //! its encoding names -- by name in a Type 1 or CFF program, then by another name of the same character, by the
@@ -57,6 +62,13 @@ pub(crate) enum Source {
     Procedures {
         procedures: Dict,
         resources: Option<Dict>,
+    },
+    /// Fallback programs fetched when first needed ([`FALLBACKS`]), tried in turn for each glyph's character;
+    /// `stretched`: its glyphs stretched across the widths the file states.
+    Fallback {
+        fallbacks: Fallbacks,
+        chain: &'static [&'static str],
+        stretched: bool,
     },
     /// None: why, in words.
     Unavailable(Rc<str>),
@@ -150,6 +162,104 @@ pub(crate) fn substitute(
     Some((substitute, true))
 }
 
+/// Every fallback program a font may be drawn with, by name: Noto Sans and Noto Serif CJK for each of Adobe's CJK
+/// collections (Simplified and Traditional Chinese, Japanese, Korean), and Noto Sans Symbols 2, Noto Sans Symbols and
+/// Noto Sans Math for the Microsoft symbol fonts' characters. None ships here: each is fetched by name, when a glyph
+/// first needs it, through the file's [`Fetch`] (`document_lab.fonts` pins each name's download).
+pub const FALLBACKS: [&str; 11] = [
+    "noto-sans-sc",
+    "noto-sans-tc",
+    "noto-sans-jp",
+    "noto-sans-kr",
+    "noto-serif-sc",
+    "noto-serif-tc",
+    "noto-serif-jp",
+    "noto-serif-kr",
+    "noto-sans-symbols-2",
+    "noto-sans-symbols",
+    "noto-sans-math",
+];
+
+/// The fallbacks a Microsoft symbol font's characters are drawn from, in turn (together they hold every character
+/// of Wingdings 1-3 and Webdings but U+2042 and U+2E3F).
+const SYMBOL_CHAIN: [&str; 3] = ["noto-sans-symbols-2", "noto-sans-symbols", "noto-sans-math"];
+
+/// Fetches the fallback program a name of [`FALLBACKS`] names: its bytes, or why it cannot be had, in words.
+pub type Fetch = dyn Fn(&str) -> std::result::Result<Vec<u8>, String>;
+
+/// The fallback programs a file draws with: each fetched once, when a glyph first needs it, and kept, as is why it
+/// could not be (a failure is not retried while the file is open).
+#[derive(Clone, Default)]
+pub(crate) struct Fallbacks(Rc<RefCell<Fetched>>);
+
+#[derive(Default)]
+struct Fetched {
+    fetch: Option<Rc<Fetch>>,
+    programs: HashMap<&'static str, Result<skrifa::Font, Rc<str>>>,
+}
+
+impl std::fmt::Debug for Fallbacks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Fallbacks").finish_non_exhaustive()
+    }
+}
+
+impl Fallbacks {
+    /// Fetch through `fetch` from now on; what was fetched before is fetched again.
+    pub(crate) fn set(&self, fetch: Rc<Fetch>) {
+        let mut fetched = self.0.borrow_mut();
+        fetched.fetch = Some(fetch);
+        fetched.programs.clear();
+    }
+
+    /// The program `name` names, fetched and read once; why not, in words.
+    fn program(&self, name: &'static str) -> Result<skrifa::Font, Rc<str>> {
+        if let Some(program) = self.0.borrow().programs.get(name) {
+            return program.clone();
+        }
+        let fetch = self.0.borrow().fetch.clone(); // not borrowed while it runs: it may take long, or read the file
+        let program = match fetch {
+            None => {
+                Err(format!("{name} is not at hand: nothing fetches fallback fonts here").into())
+            }
+            Some(fetch) => fetch(name).map_err(Rc::from).and_then(|data| {
+                skrifa::Font::new(data, 0)
+                    .ok_or_else(|| format!("{name} was fetched but does not read").into())
+            }),
+        };
+        self.0.borrow_mut().programs.insert(name, program.clone());
+        program
+    }
+}
+
+/// The fallbacks a font that embeds no program and has no substitute is drawn with, in turn: a composite font's by
+/// the collection its `CID`s are of (`ordering`), in Noto Serif CJK when its descriptor flags it serif, else Noto
+/// Sans CJK, as `MuPDF` chooses; a Microsoft symbol font's by its characters. None for any other font.
+pub(crate) fn fallback(
+    ordering: Option<&str>,
+    symbols: Option<Symbols>,
+    flags: i64,
+) -> Option<&'static [&'static str]> {
+    const fn one(name: &'static &'static str) -> &'static [&'static str] {
+        std::slice::from_ref(name)
+    }
+    let serif = flags & SERIF_FLAG != 0;
+    let at = |sans: usize| Some(one(&FALLBACKS[if serif { sans + 4 } else { sans }]));
+    match (ordering, symbols) {
+        (Some("GB1"), _) => at(0),
+        (Some("CNS1"), _) => at(1),
+        (Some("Japan1"), _) => at(2),
+        (Some("Korea1" | "KR"), _) => at(3),
+        (
+            None,
+            Some(
+                Symbols::Wingdings | Symbols::Wingdings2 | Symbols::Wingdings3 | Symbols::Webdings,
+            ),
+        ) => Some(&SYMBOL_CHAIN),
+        _ => None,
+    }
+}
+
 /// Whether a font's descriptor or name says it is italic.
 pub(crate) fn italic(flags: i64, italic_angle: Option<f64>, name: &str) -> bool {
     flags & ITALIC != 0
@@ -196,6 +306,9 @@ impl Shapes {
                     Source::Procedures { .. } => {
                         return Err("a Type 3 font has no program".into());
                     }
+                    Source::Fallback { .. } => {
+                        return Err("a font drawn from fallbacks has no one program".into());
+                    }
                     Source::Unavailable(why) => return Err(Rc::clone(why)),
                 };
                 skrifa::Font::new(data, 0)
@@ -237,14 +350,109 @@ impl Font {
     }
 
     fn make_shape(&self, code: u32) -> Shape {
-        if matches!(self.shapes.source, Source::Procedures { .. }) {
-            return Shape::Procedure;
+        match &self.shapes.source {
+            Source::Procedures { .. } => return Shape::Procedure,
+            Source::Fallback {
+                fallbacks,
+                chain,
+                stretched,
+            } => return self.fallback_shape(code, fallbacks, chain, *stretched),
+            _ => {}
         }
         let program = match self.shapes.program(self) {
             Ok(program) => program,
             Err(why) => return Shape::Missing(why),
         };
-        let glyph = self.glyph(program, code);
+        let stretched = matches!(
+            self.shapes.source,
+            Source::Substitute {
+                stretched: true,
+                ..
+            }
+        );
+        self.drawn(program, self.glyph(program, code), code, stretched)
+    }
+
+    /// The shape of the glyph `code` selects drawn from fallbacks: the first program of `chain` holding a glyph for
+    /// the character the code stands for (by its collection's text of its `CID`, a symbol font's table, its glyph
+    /// name, its `ToUnicode`), fetched when first needed. Missing, by name, when a program of the chain cannot be
+    /// had before one holds the character, when none does, or when the code stands for no one character; a space
+    /// none holds draws nothing.
+    fn fallback_shape(
+        &self,
+        code: u32,
+        fallbacks: &Fallbacks,
+        chain: &'static [&'static str],
+        stretched: bool,
+    ) -> Shape {
+        let name = &self.info.name;
+        let Some(c) = self.character(code) else {
+            return Shape::Missing(
+                format!("font {name} is not embedded: a code stands for no character its fallbacks could draw")
+                    .into(),
+            );
+        };
+        for &fallback in chain {
+            let program = match fallbacks.program(fallback) {
+                Ok(program) => program,
+                Err(why) => {
+                    return Shape::Missing(
+                        format!("font {name} is not embedded and its fallback {why}").into(),
+                    );
+                }
+            };
+            if let Some(glyph) = program.charmap().map_unicode(c) {
+                return self.drawn(&program, glyph, code, stretched);
+            }
+        }
+        if c.is_whitespace() {
+            return Shape::Outline(Rc::from([]));
+        }
+        Shape::Missing(
+            format!(
+                "font {name} is not embedded and a character it shows is in none of its fallbacks ({})",
+                chain.join(", ")
+            )
+            .into(),
+        )
+    }
+
+    /// The one character `code` stands for, for drawing it from a fallback: a composite font's by its collection's
+    /// text of the code's `CID`, a symbol font's by its table, a simple font's by its glyph name, else by its
+    /// `ToUnicode`.
+    fn character(&self, code: u32) -> Option<char> {
+        let one = |text: &str| {
+            let mut chars = text.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => Some(c),
+                _ => None,
+            }
+        };
+        let stated = || {
+            self.to_unicode
+                .as_ref()
+                .and_then(|c| c.text(code))
+                .and_then(one)
+        };
+        match &self.kind {
+            Kind::Composite {
+                cmap, collection, ..
+            } => collection
+                .and_then(|c| c.text(cmap.cid(code)))
+                .as_deref()
+                .and_then(one)
+                .or_else(stated),
+            Kind::Simple { .. } => u8::try_from(code)
+                .ok()
+                .and_then(|b| self.symbols.and_then(|s| s.character(b)))
+                .or_else(|| self.glyph_name(code).as_deref().and_then(unicode_of))
+                .or_else(stated),
+        }
+    }
+
+    /// The outline of `glyph` in `program`, drawn for `code`: in text space, an em being the program's units per em;
+    /// when `stretched`, across the width the file states for the code.
+    fn drawn(&self, program: &skrifa::Font, glyph: GlyphId, code: u32, stretched: bool) -> Shape {
         let Some(outline) = program.outline_glyphs().get(glyph) else {
             return Shape::Outline(Rc::from([])); // a glyph id past the program's glyphs draws nothing
         };
@@ -261,9 +469,7 @@ impl Font {
         };
         let em = f64::from(program.units_per_em().max(1));
         let mut across = 1.0 / em;
-        if let Source::Substitute {
-            stretched: true, ..
-        } = self.shapes.source
+        if stretched
             && let (Some(stated), Some(advance)) = (self.stated_width(code), drawn.h_advance)
             && stated > 0.0
             && advance > 0.0
@@ -304,6 +510,36 @@ impl Font {
             }
         }
     }
+}
+
+/// The outline of the character `c` in the font program `program` (any kind `skrifa` reads, its glyph reached by
+/// its Unicode `cmap`) and its advance: in ems, y up, the origin on the baseline.
+///
+/// # Errors
+///
+/// Refuses a program that does not read, a character it holds no glyph for and a glyph that does not draw.
+pub fn character(program: &[u8], c: char) -> crate::Result<(Vec<Segment>, f64)> {
+    let font = skrifa::Font::new(program.to_vec(), 0)
+        .ok_or_else(|| crate::Error::invalid("the font program does not read"))?;
+    let missing = || crate::Error::invalid(format!("the font program has no glyph for {c:?}"));
+    let glyph = font.charmap().map_unicode(c).ok_or_else(missing)?;
+    let outline = font.outline_glyphs().get(glyph).ok_or_else(missing)?;
+    let mut pen = Pen::default();
+    let drawn = outline
+        .draw(&DrawOptions::new(), DrawMemory::Scratch, &mut pen)
+        .map_err(|e| crate::Error::invalid(format!("the glyph for {c:?} does not draw: {e}")))?;
+    let em = f64::from(font.units_per_em().max(1));
+    let outline = pen
+        .segments
+        .into_iter()
+        .map(|s| {
+            s.mapped(|p| Point {
+                x: p.x / em,
+                y: p.y / em,
+            })
+        })
+        .collect();
+    Ok((outline, drawn.h_advance.map_or(0.0, f64::from) / em))
 }
 
 /// The glyph a simple font's `code`, of glyph name `name`, selects in a Type 1 or CFF program (or a substitute): by

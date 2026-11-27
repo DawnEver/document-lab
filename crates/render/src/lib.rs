@@ -19,11 +19,13 @@
 //! nothing and are not drawn.
 //!
 //! Layers: [`codec`] (image codecs to samples) -> [`image`] (an image's samples to pixels) and [`clip`] (clipping
-//! paths to masks) -> this module (the page painted).
+//! paths to masks) -> this module (the page painted). Apart from a page, [`specimen`] sets characters of a font
+//! program on their own.
 
 pub mod clip;
 pub mod codec;
 pub mod image;
+pub mod specimen;
 
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;

@@ -77,14 +77,18 @@ def own(data: bytes, dpi: float, page: int = 1) -> tuple[np.ndarray, dict[str, i
 
 
 def blurred_difference(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Each pixel's largest channel difference between ``a`` and ``b`` after a 3 x 3 box blur of each."""
+    """Each pixel's largest channel difference between ``a`` and ``b`` after a 3 x 3 box blur of each.
 
-    def blur(image: np.ndarray) -> np.ndarray:
-        padded = np.pad(image.astype(np.float32), ((1, 1), (1, 1), (0, 0)), mode='edge')
-        h, w = image.shape[:2]
-        return sum(padded[i : i + h, j : j + w] for i in range(3) for j in range(3)) / 9
-
-    return np.abs(blur(a) - blur(b)).max(axis=2)
+    The blur is linear, so it is taken of the difference -- in 16 bits, a page at 150 dpi being millions of pixels.
+    """
+    difference = a.astype(np.int16) - b.astype(np.int16)
+    padded = np.pad(difference, ((1, 1), (1, 1), (0, 0)), mode='edge')
+    h, w = difference.shape[:2]
+    total = np.zeros_like(difference)
+    for i in range(3):
+        for j in range(3):
+            total += padded[i : i + h, j : j + w]
+    return np.abs(total).max(axis=2).astype(np.float32) / 9
 
 
 def inked(a: np.ndarray, b: np.ndarray) -> np.ndarray:

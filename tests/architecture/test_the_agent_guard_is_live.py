@@ -28,6 +28,7 @@ _SHIPPED: Final = frozenset(
         'CI-CRON-NEEDS-CONSENT',  # gained 2026-11-17 with dev-lab b9875921
         'COMMIT-HOOKS-RUN',  # gained 2026-11-13 with dev-lab 6cc2d023
         'CONSENT-CODE-FROM-THE-USER',
+        'ENVIRONMENT-THROUGH-DEP',  # gained 2026-11-27 with dev-lab e27f4c76 (gpu-part)
         'FAMILY-REPO-IS-CHECKED-OUT',  # gained 2026-11-21 with dev-lab 5e4e0334
         'FORGE-WRITE-VIA-CLI',
         'FORGE-WRITE-VIA-GH-API',

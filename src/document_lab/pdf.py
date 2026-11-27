@@ -41,8 +41,6 @@ VECTOR_DPI: Final = 300.0
 WHOLE_IMAGE_SLACK: Final = 0.25
 #: The text rendering mode that neither fills nor strokes (an OCR layer): text that shows nothing.
 INVISIBLE_TEXT: Final = 3
-#: A matrix entry at most this (points) is zero: the image is square to the page.
-_SQUARE: Final = 1e-6
 #: Gray depths whose levels spread over 0..255 exactly (255 is a multiple of each level count less one).
 _GRAY_BITS: Final = frozenset({1, 2, 4, 8})
 #: Families whose samples are gray or RGB as they stand. An ``ICCBased`` one is the gray or RGB of its component
@@ -83,7 +81,7 @@ def _page(reader: _pdf.Reader, number: int, size: tuple[float, float], here: Pro
         height=size[1],
         spans=tuple(_span(row, here) for row in spans),
         paths=tuple(_path(row, here) for row in paths),
-        figures=tuple(Figure(here.at(bbox=BBox(*box)), w, h, image) for box, w, h, image, _ in images),
+        figures=tuple(Figure(here.at(bbox=BBox(*box)), w, h, image) for box, w, h, image, *_ in images),
         warnings=tuple(warnings),
     )
 
@@ -148,7 +146,7 @@ def _meets(box: tuple[float, float, float, float], bbox: BBox) -> bool:
 
 def _native(image: tuple) -> float:
     """An image row's finest resolution (dpi): its samples over its placed sides' lengths; 0 when it has no area."""
-    _, width, height, _, (a, b, c, d, _, _) = image
+    _, width, height, _, (a, b, c, d, _, _), _ = image
     across, down = math.hypot(a, b), math.hypot(c, d)
     return 72 * max(width / across, height / down) if across and down else 0.0
 
@@ -172,10 +170,10 @@ def _samples(reader: _pdf.Reader, under: list, bbox: BBox, dpi: float) -> np.nda
     """
     if len(under) != 1:
         return None
-    box, width, height, number, (a, b, c, d, _, _) = under[0]
-    turned = abs(a) <= _SQUARE and abs(d) <= _SQUARE  # its rows run down the page, its columns across
-    if number is None or not (turned or (abs(b) <= _SQUARE and abs(c) <= _SQUARE)):
+    box, width, height, number, _, placement = under[0]
+    if number is None or placement is None:  # inline, or skewed
         return None
+    turned, rows_reversed, columns_reversed = placement  # as the reader places its samples
     across, down = (height, width) if turned else (width, height)
     slack = WHOLE_IMAGE_SLACK * 72 / dpi
     sides = (across * 72 / dpi - (bbox.x1 - bbox.x0), down * 72 / dpi - (bbox.y1 - bbox.y0))
@@ -185,13 +183,9 @@ def _samples(reader: _pdf.Reader, under: list, bbox: BBox, dpi: float) -> np.nda
     rows = _rgb(reader.image(number))
     if rows is None:
         return None
-    # A sample (row i, column j) sits at u = (j + 1/2) / width, v = 1 - (i + 1/2) / height of the image's unit
-    # square, mapped to the page (y down) by x = a u + c v + e, y = b u + d v + f.
     if turned:
-        rows, down_flipped, across_flipped = rows.transpose(1, 0, 2), b < 0, c > 0
-    else:
-        down_flipped, across_flipped = d > 0, a < 0
-    return np.array(rows[:: -1 if down_flipped else 1, :: -1 if across_flipped else 1])
+        rows = rows.transpose(1, 0, 2)
+    return np.array(rows[:: -1 if rows_reversed else 1, :: -1 if columns_reversed else 1])
 
 
 def _rgb(samples: tuple) -> np.ndarray | None:
@@ -201,7 +195,7 @@ def _rgb(samples: tuple) -> np.ndarray | None:
     unmasked, mapped as stated by default (no ``/Decode``, or ``[0 1]`` for each component), holding every row. A
     codec, Indexed, CMYK, 16 bits, another ``/Decode`` or a mask is the renderer's.
     """
-    width, height, space, components, bits, data, codec, decode, masked = samples
+    width, height, space, components, bits, data, codec, decode, masked, _ = samples
     remapped = decode is not None and decode != [0.0, 1.0] * components
     if codec is not None or masked or remapped or space not in _GRAY_OR_RGB:
         return None

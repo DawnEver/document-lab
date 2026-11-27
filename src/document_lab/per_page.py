@@ -326,7 +326,8 @@ def write_pages(
     LaTeX after its link, read by ``formula_model`` (`document_lab.formula`); refused by
     :class:`document_lab.formula.FormulaUnavailable` before anything is written when that model cannot run. Every
     step reads the page as its default view shows it (`document_lab.ir.Page.shown`): its pictures, ruled tables,
-    regions, tags, running heads, headings and markdown; ``include_hidden``: what hidden layers draw is read too,
+    regions, tags, running heads, headings and markdown, and how the tags agree with layout
+    (`document_lab.agreement`); ``include_hidden``: what hidden layers draw is read too,
     ``include_in_background_color``: the text filled in the color under it.
     """
     transcribe = None if formulas is None else formula.transcriber(formulas, model=formula_model)
@@ -342,7 +343,7 @@ def write_pages(
         ruled.append(_tables(page, pixels, scale))
     drawn = _without_furniture(drawn, body)
     shown = {'include_hidden': include_hidden, 'include_in_background_color': include_in_background_color}
-    compared = compare(read, drawn)
+    compared = compare(read, drawn, **shown)
     found = [
         regions(page, face, drawings, structure=read.structure, tagged=tagged, **shown)
         for page, drawings in zip(read.pages, drawn, strict=True)

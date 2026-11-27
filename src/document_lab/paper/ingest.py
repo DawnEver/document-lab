@@ -115,9 +115,9 @@ def ingest(
     (`document_lab.paper.convert.convert`). ``formulas``: ``latex`` writes each equation crop's LaTeX under its image,
     read by ``formula_model`` (`document_lab.formula`); refused by :class:`document_lab.formula.FormulaUnavailable`
     before anything is written when that model cannot run. Every step reading text reads the paper as its default
-    view shows it (`document_lab.ir.Page.shown`): its markdown, running heads and tags, its captions and
-    equations; ``include_hidden``: what hidden layers draw is read too, ``include_in_background_color``: the text
-    filled in the color under it.
+    view shows it (`document_lab.ir.Page.shown`): its markdown and running heads, its tags and how they agree with
+    layout (`document_lab.agreement`), its captions and equations; ``include_hidden``: what hidden layers draw is
+    read too, ``include_in_background_color``: the text filled in the color under it.
     """
     transcribe = None if formulas is None else formula.transcriber(formulas, model=formula_model)
     pdf = pdf.resolve()
@@ -131,7 +131,11 @@ def ingest(
         include_hidden=include_hidden,
         include_in_background_color=include_in_background_color,
     )
-    compared = compare(read_pdf(pdf)) if choice.tool == 'ir' else None
+    compared = (
+        compare(read_pdf(pdf), include_hidden=include_hidden, include_in_background_color=include_in_background_color)
+        if choice.tool == 'ir'
+        else None
+    )
     disagreements = compared.disagreements if compared is not None else ()
     stated = frozenset(structure.named) if structure is not None else frozenset()
     main, appended = clean_sections(split_sections(md_text), stated=stated)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pymupdf
 import pytest
 
 from document_lab import layout, tags
@@ -229,6 +230,46 @@ def test_the_comparison_names_where_the_tags_and_the_inference_disagree(tmp_path
         "heading inferred, not tagged: page 1 '## 2 Methods'",
     )
     assert compare(read_pdf(mixed_pdf(tmp_path / 'm.pdf'))) is None
+
+
+#: Each way a page draws text its default view does not show, and the option that reads it (`document_lab.ir`).
+UNSHOWN = {'hidden': 'include_hidden', 'in_background_color': 'include_in_background_color'}
+
+
+@pytest.mark.parametrize('kind', UNSHOWN)
+def test_the_comparison_reads_the_page_as_the_headings_it_compares_do(tmp_path, kind):
+    heading = shown(20, 60, 'Background')
+    # On a layer turned off in the default view, or white on the white page.
+    heading = f'/OC /off BDC {heading} EMC' if kind == 'hidden' else f'q 1 1 1 rg {heading} Q'
+    content = ' '.join(
+        [
+            marked('H1', 0, heading),
+            marked('P', 1, shown(20, 90, '2 Methods', font='F2')),
+            marked('P', 2, shown(20, 120, WORDS)),
+        ]
+    )
+    tree = {
+        'root': '<< /K [{h} {a} {b}] >>',
+        'h': '<< /S /H1 /Pg {page1} /K 0 >>',
+        'a': '<< /S /P /Pg {page1} /K 1 >>',
+        'b': '<< /S /P /Pg {page1} /K 2 >>',
+    }
+    path = tagged_pdf(tmp_path / 't.pdf', [content], tree)
+    if kind == 'hidden':
+        pdf = pymupdf.open(path)
+        off = pdf.add_ocg('Off', on=False)
+        pdf.xref_set_key(pdf[0].xref, 'Resources/Properties', f'<< /off {off} 0 R >>')
+        pdf.saveIncr()
+        pdf.close()
+    doc = read_pdf(path)
+    own, other = UNSHOWN[kind], next(o for o in UNSHOWN.values() if o != UNSHOWN[kind])
+    inferred = ("heading inferred, not tagged: page 1 '## 2 Methods'",)
+    for options, notes in (
+        ({}, inferred),
+        ({other: True}, inferred),  # the planted control: the other option reads none of it
+        ({own: True}, ("heading tagged, not inferred: page 1 '## Background'", *inferred)),
+    ):
+        assert compare(doc, **options).disagreements == notes, options
 
 
 def test_pages_use_the_tags_by_default_and_report_disagreement(tmp_path):

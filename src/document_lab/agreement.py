@@ -67,9 +67,9 @@ def _heading_text(line: str) -> str:
     return re.sub(r'[\s.:;,]+$', '', ' '.join(line.lstrip('#').split()).casefold())
 
 
-def _headings(doc: Document, notes: list[str]) -> Tally:
-    tagged = {(p, _heading_text(h)): h for p, h in headings(doc, outline=False).written}
-    inferred = {(p, _heading_text(h)): h for p, h in headings(doc, outline=False, tagged=()).written}
+def _headings(doc: Document, notes: list[str], shown: dict[str, bool]) -> Tally:
+    tagged = {(p, _heading_text(h)): h for p, h in headings(doc, outline=False, **shown).written}
+    inferred = {(p, _heading_text(h)): h for p, h in headings(doc, outline=False, tagged=(), **shown).written}
     for keys, other, what in ((tagged, inferred, 'tagged, not inferred'), (inferred, tagged, 'inferred, not tagged')):
         missing = [k for k in keys if k not in other]
         notes += [f'heading {what}: page {p} {keys[p, t]!r}' for p, t in missing[:EXAMPLES]]
@@ -79,9 +79,10 @@ def _headings(doc: Document, notes: list[str]) -> Tally:
 
 
 def _order(doc: Document, reading: tags.Reading) -> float | None:
+    """Of every two lines the tags order on ``doc``'s pages as shown, the share layout orders alike."""
     alike = pairs = 0
     weighted = any(span.bold for span in doc.spans())
-    for page in doc.shown().pages:
+    for page in doc.pages:
         inferred = layout.ordered(layout.lines(page, weighted=weighted))
         ranked = [(reading.rank_of(ln), i) for i, ln in enumerate(inferred) if reading.rank_of(ln) is not None]
         ranked.sort()
@@ -97,24 +98,34 @@ def _matched(found: list[Region], others: list[Region]) -> int:
     return sum(any(overlap(r.bbox, o.bbox) >= SAME_REGION for o in others) for r in found)
 
 
-def compare(doc: Document, drawings: Sequence[Sequence[Drawing]] | None = None) -> Comparison | None:
+def compare(
+    doc: Document,
+    drawings: Sequence[Sequence[Drawing]] | None = None,
+    *,
+    include_hidden: bool = False,
+    include_in_background_color: bool = False,
+) -> Comparison | None:
     """``doc``'s tags against layout's inference; None when it has no tags.
 
-    ``drawings``: each page's, as `document_lab.regions` takes them.
+    ``drawings``: each page's, as `document_lab.regions` takes them. Both sides read ``doc`` as its default view shows
+    it (`document_lab.ir.Page.shown`); ``include_hidden``, ``include_in_background_color``: what they read beside, as
+    for the headings and regions compared (`document_lab.markdown.headings`, `document_lab.regions.regions`).
     """
     reading = tags.reading(doc)
     if doc.structure is None:
         return None
+    shown = {'include_hidden': include_hidden, 'include_in_background_color': include_in_background_color}
+    doc = doc.shown(**shown)
     notes: list[str] = []
-    heads = _headings(doc, notes)
+    heads = _headings(doc, notes, shown)
     face = layout.body_face(doc)
     counts = {'table': [0, 0, 0], 'figure': [0, 0, 0]}
     for i, page in enumerate(doc.pages):
         if not tags.covers(doc.structure, page.number):
             continue
         drawn = drawings[i] if drawings is not None else ()
-        inferred = regions(page, face, drawn)
-        stated = regions(page, face, drawn, structure=doc.structure)
+        inferred = regions(page, face, drawn, **shown)
+        stated = regions(page, face, drawn, structure=doc.structure, **shown)
         for kind, count in counts.items():
             mine = [r for r in stated if r.kind == kind]
             theirs = [r for r in inferred if r.kind == kind]

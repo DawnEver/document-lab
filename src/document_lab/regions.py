@@ -22,9 +22,11 @@ number or row of cells told is a region too -- a ruled table of two columns, a f
 (``Untitled figure N``), an equation without a number (``Untitled equation N``). Regions still read no pixels: a
 drawing is its box and what it is drawn with.
 
-A tagged PDF states its tables and figures (`document_lab.tags`): given its structure, a page the tags cover takes
-them from its ``Table`` and ``Figure`` elements in place of the inferred ones (equations are still inferred), each
-region the box of what its element covers there; a page they cover nothing on is inferred as an untagged one is.
+A tagged PDF states its tables and figures (`document_lab.tags`; the ``tables`` and ``figures`` uses, each its own
+option): given its structure, a page the tags cover takes them from its ``Table`` and ``Figure`` elements in place
+of the inferred ones (equations are still inferred), each
+region the box of what its element covers there; a page they cover nothing on is inferred as an untagged one is,
+and so are the tables (figures) of a document whose tags have no ``Table`` (``Figure``) element at all.
 A tagged region's label is its caption's (``Fig. 3``, ``Table 2`` -- a ``Caption`` among its kids or next to it), else
 an inferred region's of its kind it overlaps, else ``Untitled ...``; a figure keeps its ``/Alt``.
 """
@@ -39,7 +41,7 @@ from document_lab import layout, tags
 from document_lab.ir import BBox
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Sequence
 
     from document_lab.ink import Drawing
     from document_lab.ir import Page, Structure
@@ -354,12 +356,22 @@ def _bands_of(page: _Page, lines: list[layout.Line]) -> list[list[layout.Line]]:
     return bands
 
 
-def _tagged(page: _Page, structure: Structure, inferred: list[Region]) -> list[Region]:
-    """The page's tagged tables and figures, labeled (see the module), and its inferred equations."""
-    found = [r for r in inferred if r.kind == 'equation']
+def _tagged(page: _Page, structure: Structure, inferred: list[Region], uses: frozenset[str]) -> list[Region]:
+    """The page's tables and figures the tags give (``uses``), labeled (see the module); the rest inferred.
+
+    A kind the tags never state is inferred: their silence is not a statement.
+    """
+    stated_kinds = {
+        kind
+        for kind, role in (('table', 'Table'), ('figure', 'Figure'))
+        if f'{kind}s' in uses and tags.states(structure, role)
+    }
+    found = [r for r in inferred if r.kind not in stated_kinds]
     untitled = {'table': 0, 'figure': 0}
     pad = PAD * page.body
     for stated in tags.regions(structure, page.page.number):
+        if stated.kind not in stated_kinds:
+            continue
         box = BBox(
             max(stated.bbox.x0 - pad, 0.0),
             max(stated.bbox.y0 - pad, 0.0),
@@ -386,14 +398,17 @@ def regions(
     *,
     include_hidden: bool = False,
     structure: Structure | None = None,
+    tagged: Collection[str] = tags.USES,
 ) -> list[Region]:
     """The figures, tables and equations of ``page`` (``body``: the document's body size), top to bottom.
 
     ``drawings``: the page's drawn ink (`document_lab.ink`), when the caller holds its picture;
     without them a region is told by its words alone. ``include_hidden``: what hidden layers draw counts too (see
     `document_lab.ir`). ``structure``: a tagged document's (:attr:`~document_lab.ir.Document.structure`), whose
-    tables and figures stand in for the inferred ones on a page it covers (see the module); None infers them all.
+    tables and figures -- as ``tagged`` names (``tables``, ``figures``) -- stand in for the inferred ones on a page it
+    covers (see the module); None infers them all.
     """
+    uses = tags.checked(tagged)
     page = page.shown(include_hidden=include_hidden)
     if not page.spans or body <= 0:
         return []
@@ -407,6 +422,6 @@ def regions(
             found.append(_equation(judged, line, f'({number.group(1)})'))
     found += _untitled_tables(judged, found)
     found += _drawn(judged, drawings, found)
-    if structure is not None and tags.covers(structure, page.number):
-        found = _tagged(judged, structure, found)
+    if structure is not None and uses & {'tables', 'figures'} and tags.covers(structure, page.number):
+        found = _tagged(judged, structure, found, uses)
     return sorted(found, key=lambda r: r.bbox.y0)

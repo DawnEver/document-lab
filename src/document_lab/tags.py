@@ -2,9 +2,17 @@
 
 A tagged PDF (ISO 32000-2 14.7-14.8) states what document-lab otherwise infers from where text stands
 (`document_lab.layout`). This module reads :attr:`~document_lab.ir.Document.structure` into those terms for the
-modules that infer them, each taking it as an option (on by default; the inferred kept as the alternative;
-`document_lab.agreement` sets the two side by side). Roles are judged by the standard role each maps to; a title is
-also an element whose role as stated is ``Title`` (a word processor maps its title style to ``P``).
+modules that infer them. Each use is an option of its own (:data:`USES`, all on by default; the inferred kept as the
+alternative; `document_lab.agreement` sets the two side by side): ``order`` (reading order), ``headings``,
+``paragraphs`` (`document_lab.markdown`), ``tables`` and ``figures`` (`document_lab.regions`). Roles are judged by
+the standard role each maps to; a title is also an element whose role as stated is ``Title`` (a word processor maps
+its title style to ``P``).
+
+Silence is not a statement: tags that state no heading anywhere leave the headings to inference, tags that state
+no title leave the title to it, and tags with no ``Table`` (``Figure``) element anywhere leave the tables (figures)
+to it (:attr:`Reading.heads`, :attr:`Reading.titled`, :func:`states`). Tags read in the wild state a heading as a
+paragraph, a whole page as a figure, a stamp as a heading; `document_lab.agreement` reports where they part from
+the inference.
 
 - :func:`reading` -- each span the tags cover, its place in the stated order and its block: the innermost element
   of a paragraph's kind holding it (:data:`BLOCKS`: a paragraph, heading, list item, table cell, caption, ...), else
@@ -31,11 +39,36 @@ from document_lab import layout
 from document_lab.ir import Element, MarkedContent, Provenance, Table
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Collection, Iterator
 
     from document_lab.ir import BBox, Document, Structure, TextSpan
 
-__all__ = ['BLOCKS', 'Reading', 'TaggedRegion', 'covers', 'heading_level', 'reading', 'regions', 'tables']
+__all__ = [
+    'BLOCKS',
+    'USES',
+    'Reading',
+    'TaggedRegion',
+    'checked',
+    'covers',
+    'heading_level',
+    'reading',
+    'regions',
+    'states',
+    'tables',
+]
+
+#: What a tagged PDF's tags may give in place of the inference, each its own option.
+USES: Final = frozenset({'order', 'headings', 'paragraphs', 'tables', 'figures'})
+
+
+def checked(uses: Collection[str]) -> frozenset[str]:
+    """``uses`` as a set, each one of :data:`USES`; an unknown one is refused by name."""
+    unknown = sorted(set(uses) - USES)
+    if unknown:
+        msg = f'unknown use(s) of the tags: {", ".join(unknown)}; the uses are {", ".join(sorted(USES))}'
+        raise ValueError(msg)
+    return frozenset(uses)
+
 
 #: The standard roles a block of text is set in: what a paragraph is, in tags.
 BLOCKS: Final = frozenset(
@@ -89,6 +122,16 @@ class Reading:
     rank: dict[TextSpan, int]
     block: dict[TextSpan, Element]
     levels: dict[Element, int]
+
+    @property
+    def heads(self) -> bool:
+        """Whether the tags state any heading: tags stating none leave the headings to inference."""
+        return bool(self.levels)
+
+    @property
+    def titled(self) -> bool:
+        """Whether the tags state a title (a heading of level 1): tags stating none leave the title to inference."""
+        return 1 in self.levels.values()
 
     def _first(self, line: layout.Line) -> TextSpan | None:
         ranked = [s for s in line.spans if s in self.rank]
@@ -245,6 +288,11 @@ def _caption(element: Element, siblings: tuple[Element, ...]) -> str | None:
     at = next(i for i, k in enumerate(siblings) if k is element)
     near = [siblings[i] for i in (at - 1, at + 1) if 0 <= i < len(siblings)]
     return next((k.text for k in near if k.standard == 'Caption'), None)
+
+
+def states(structure: Structure, role: str) -> bool:
+    """Whether ``structure`` has an element of the standard ``role`` anywhere: tags with none are silent on it."""
+    return any(element.standard == role for element in structure.elements())
 
 
 def covers(structure: Structure, page: int) -> bool:

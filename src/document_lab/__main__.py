@@ -18,6 +18,21 @@ from document_lab.capture import cli as capture_cli
 __all__ = ['main']
 
 
+_ALL = 'order,headings,paragraphs,tables,figures'
+_TAGS_HELP = f"what a tagged PDF's tags give in place of inference, comma-separated (default {_ALL}; 'none' infers all)"
+
+
+def _uses(text: str) -> frozenset[str]:
+    """``--tags``: the uses named, ``none`` for none; an unknown one is refused by name."""
+    from document_lab.tags import checked  # noqa: PLC0415 -- the parser loads no reader
+
+    names = () if text == 'none' else [t.strip() for t in text.split(',') if t.strip()]
+    try:
+        return checked(names)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog='document-lab', description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
@@ -34,12 +49,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     pages.add_argument('pdf', type=Path)
     pages.add_argument('out', type=Path, help='the directory to write the pages into, or a .zip archive')
-    pages.add_argument('--untagged', action='store_true', help="infer a tagged PDF's structure as an untagged one's")
+    pages.add_argument('--tags', type=_uses, default=_ALL, help=_TAGS_HELP)
     paper = sub.add_parser('paper', help='a paper PDF to per-section markdown and cropped figures')
     paper.add_argument('pdf', type=Path)
     paper.add_argument('out', type=Path, help='the directory to write the paper layout into')
     paper.add_argument('--tool', choices=('marker', 'ir'), help='force a converter (default: best available)')
-    paper.add_argument('--untagged', action='store_true', help="infer a tagged PDF's sections as an untagged one's")
+    paper.add_argument('--tags', type=_uses, default=_ALL, help=_TAGS_HELP)
     return parser
 
 
@@ -54,7 +69,7 @@ def _ocr(args: argparse.Namespace) -> int:
 def _pages(args: argparse.Namespace) -> int:
     from document_lab.per_page import write_pages  # noqa: PLC0415
 
-    done = write_pages(args.pdf, args.out, tagged=not args.untagged)
+    done = write_pages(args.pdf, args.out, tagged=args.tags)
     emit(f'{done.out}: {done.pages} page(s)')
     _disagreements(done.disagreements)
     if len(done.textless) == done.pages:
@@ -68,7 +83,7 @@ def _pages(args: argparse.Namespace) -> int:
 def _paper(args: argparse.Namespace) -> int:
     from document_lab.paper.ingest import ingest  # noqa: PLC0415
 
-    done = ingest(args.pdf, args.out, tool=args.tool, tagged=not args.untagged)
+    done = ingest(args.pdf, args.out, tool=args.tool, tagged=args.tags)
     emit(
         f'{args.out}: {done.sections} sections, {done.figures} figures, {done.tables} tables '
         f'({done.tool}); {len(done.appended)} appended paper(s)'
@@ -78,9 +93,9 @@ def _paper(args: argparse.Namespace) -> int:
 
 
 def _disagreements(notes: tuple[str, ...]) -> None:
-    """Where a tagged PDF's tags and the inference disagree, each in a line: the tags were used (``--untagged`` not)."""
+    """Where a tagged PDF's tags and the inference disagree, each in a line (``--tags`` chooses which is used)."""
     if notes:
-        emit(f'the tags and the inference disagree ({len(notes)}; --untagged infers instead):')
+        emit(f'the tags and the inference disagree ({len(notes)}; --tags chooses which is used):')
         for note in notes:
             emit(f'  {note}')
 

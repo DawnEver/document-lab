@@ -32,7 +32,7 @@ def test_markdown_reads_lines_in_the_order_the_tags_state(tmp_path):
         {'root': '<< /K [{a} {b}] >>', 'a': '<< /S /P /Pg {page1} /K 1 >>', 'b': '<< /S /P /Pg {page1} /K 0 >>'},
     )
     assert to_markdown(doc) == 'Drawn second, read first.\n\nDrawn first, read second.\n'
-    assert to_markdown(doc, tagged=False) == 'Drawn first, read second.\n\nDrawn second, read first.\n'
+    assert to_markdown(doc, tagged=()) == 'Drawn first, read second.\n\nDrawn second, read first.\n'
 
 
 def test_a_line_heads_as_its_tag_says_and_no_other_does(tmp_path):
@@ -57,8 +57,8 @@ def test_a_line_heads_as_its_tag_says_and_no_other_does(tmp_path):
     doc = _doc(tmp_path, content, tree)
     assert [h for _, h in headings(doc)] == ['# A plain title', '## Background', '### Detail']
     # Inferred alone, the bold numbered line heads and the plain heading does not.
-    assert '## 2 Methods' in [h for _, h in headings(doc, tagged=False)]
-    assert '## Background' not in [h for _, h in headings(doc, tagged=False)]
+    assert '## 2 Methods' in [h for _, h in headings(doc, tagged=())]
+    assert '## Background' not in [h for _, h in headings(doc, tagged=())]
 
 
 def test_an_h_heads_one_level_below_the_sections_it_is_in(tmp_path):
@@ -93,7 +93,7 @@ def test_the_lines_of_one_tagged_block_are_one_paragraph_and_of_two_are_two(tmp_
     assert page_markdowns(doc) == [
         'One paragraph whose second line stands far below.\n\nAnother paragraph,\n\nset close under it.\n'
     ]
-    assert page_markdowns(doc, tagged=False) == [
+    assert page_markdowns(doc, tagged=()) == [
         'One paragraph whose second line stands far below. Another paragraph, set close under it.\n'
     ]
 
@@ -223,5 +223,58 @@ def test_pages_use_the_tags_by_default_and_report_disagreement(tmp_path):
     done = write_pages(path, tmp_path / 'tagged')
     assert done.disagreements == ("heading tagged, not inferred: page 1 '## Background'",)
     assert '## Background' in (tmp_path / 'tagged' / 'page-001.md').read_text(encoding='utf-8')
-    write_pages(path, tmp_path / 'untagged', tagged=False)
+    write_pages(path, tmp_path / 'untagged', tagged=())
     assert '## Background' not in (tmp_path / 'untagged' / 'page-001.md').read_text(encoding='utf-8')
+
+
+def test_each_use_of_the_tags_is_its_own_option(tmp_path):
+    content = ' '.join(
+        [
+            marked('P', 0, shown(20, 50, 'Drawn first, read second.')),
+            marked('H1', 1, shown(20, 150, 'Background')),
+        ]
+    )
+    doc = _doc(
+        tmp_path,
+        content,
+        {'root': '<< /K [{h} {p}] >>', 'h': '<< /S /H1 /Pg {page1} /K 1 >>', 'p': '<< /S /P /Pg {page1} /K 0 >>'},
+    )
+    assert to_markdown(doc, tagged={'headings'}) == 'Drawn first, read second.\n\n## Background\n'
+    assert to_markdown(doc, tagged={'order'}) == 'Background\n\nDrawn first, read second.\n'
+    with pytest.raises(ValueError, match=r'unknown use.*color'):
+        to_markdown(doc, tagged={'order', 'color'})
+
+
+def test_tags_stating_no_heading_leave_the_headings_and_the_title_to_inference(tmp_path):
+    content = ' '.join(
+        [
+            marked('P', 0, shown(20, 40, 'A Large Title', size=24)),
+            marked('P', 1, shown(20, 80, 'IV. RESULTS') + ' ' + shown(20, 92, WORDS)),
+        ]
+    )
+    tree = {'root': '<< /K [{t} {p}] >>', 't': '<< /S /P /Pg {page1} /K 0 >>', 'p': '<< /S /P /Pg {page1} /K 1 >>'}
+    # The heading the rules find heads no tagged block: the rest of its paragraph stands apart.
+    assert page_markdowns(_doc(tmp_path, content, tree)) == [f'# A Large Title\n\n## IV. RESULTS\n\n{WORDS}\n']
+
+
+def test_tags_stating_headings_but_no_title_leave_the_title_to_inference(tmp_path):
+    content = ' '.join(
+        [
+            marked('P', 0, shown(20, 40, 'A Large Title', size=24)),
+            marked('H1', 1, shown(20, 80, 'Stated heading')),
+            marked('P', 2, shown(20, 110, 'IV. NOT A HEADING HERE')),
+        ]
+    )
+    tree = {
+        'root': '<< /K [{t} {h} {p}] >>',
+        't': '<< /S /P /Pg {page1} /K 0 >>',
+        'h': '<< /S /H1 /Pg {page1} /K 1 >>',
+        'p': '<< /S /P /Pg {page1} /K 2 >>',
+    }
+    assert [h for _, h in headings(_doc(tmp_path, content, tree))] == ['# A Large Title', '## Stated heading']
+
+
+def test_regions_take_from_the_tags_only_the_kinds_asked_and_stated(tmp_path):
+    doc = _table_doc(tmp_path)
+    assert [r.label for r in regions(doc.page(1), 10.0, structure=doc.structure, tagged={'figures'})] != ['Table 4']
+    assert [r.label for r in regions(doc.page(1), 10.0, structure=doc.structure, tagged={'tables'})] == ['Table 4']

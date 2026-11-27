@@ -23,8 +23,10 @@ from document_lab.paper.output import write_paper_output
 from document_lab.paper.sections import clean_sections, split_sections
 from document_lab.paper.text import slug
 from document_lab.pdf import read_pdf
+from document_lab.tags import USES
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
     from pathlib import Path
 
     from document_lab.paper.convert import Tool
@@ -82,10 +84,10 @@ def _scanned_pages(pdf: Path, out_dir: Path) -> int:
     return len(inked)
 
 
-def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None, tagged: bool = True) -> Ingested:
+def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None, tagged: Collection[str] = USES) -> Ingested:
     """Convert ``pdf`` (with ``tool``, else the best available) and write its paper layout into ``out_dir``.
 
-    ``tagged``: a tagged PDF's sections are its tagged headings (`document_lab.convert`); False infers them.
+    ``tagged``: what a tagged PDF's tags give its markdown, and so its sections (`document_lab.paper.convert`).
     """
     pdf = pdf.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)

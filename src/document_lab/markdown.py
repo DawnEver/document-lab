@@ -1,9 +1,12 @@
 """A document's markdown written from document_lab's own IR: headings and paragraphs from its lines.
 
 Lines and their reading order are `document_lab.layout`'s -- or, for a tagged PDF, what its tags state
-(`document_lab.tags`, the ``tagged`` option, on by default): lines in the stated order, a line heading as its tag
-says (``Title`` ``#``, ``H1`` ``##``, ...) and the lines of one tagged block (a paragraph, a list item, a cell) one
-paragraph. A line the tags do not cover -- an artifact, a document tagged in part -- is read as an untagged one is:
+(`document_lab.tags`; the ``tagged`` uses, all on by default): ``order``, lines in the stated order; ``headings``, a
+line heading as its tag says (``Title`` ``#``, ``H1`` ``##``, ...); ``paragraphs``, the lines of one tagged block (a
+paragraph, a list item, a cell) one paragraph, a block rejoined across a break only with its own element. Tags
+stating no heading at all leave every line's heading to the rules below, tags stating no title the title, and a
+heading those rules find heads no tagged block. A line the tags do not cover -- an artifact, a document tagged in
+part -- is read as an untagged one is:
 
 - Headings: the largest text on page 1 is the title (``#``); a line that is a Roman-numbered upper-case heading
   (``II. METHOD``), a standalone ``REFERENCES``/``ACKNOWLEDGMENT``/``APPENDIX``/``CONCLUSION``, or an all-bold
@@ -27,6 +30,8 @@ from typing import TYPE_CHECKING, Final
 from document_lab import layout, tags
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     from document_lab.ir import Document, Element, Page
 
 #: A block of markdown, and the tagged element it is set from (None: inferred).
@@ -56,17 +61,17 @@ _TOC_ENTRY: Final = re.compile(r'^(?=.*[A-Za-z]).*?(?:(?:\.\s?){4,}|\u2026{2,}|\
 TOC_LINES: Final = 3
 
 
-def to_markdown(doc: Document, *, include_hidden: bool = False, tagged: bool = True) -> str:
+def to_markdown(doc: Document, *, include_hidden: bool = False, tagged: Collection[str] = tags.USES) -> str:
     """The document as markdown, page after page: a paragraph a page break cut is joined again.
 
-    ``include_hidden``: the text hidden layers draw is written too (see `document_lab.ir`). ``tagged``: a tagged
-    PDF's reading order, headings and paragraphs are its tags' (see the module); False infers them from layout alone.
+    ``include_hidden``: the text hidden layers draw is written too (see `document_lab.ir`). ``tagged``: what a tagged
+    PDF's tags give (``order``, ``headings``, ``paragraphs``; see the module); none infers it all from layout.
     """
     blocks = _blocks(doc, include_hidden=include_hidden, tagged=tagged)
     return '\n\n'.join(_rejoin([block for page in blocks for block in page])) + '\n'
 
 
-def page_markdowns(doc: Document, *, include_hidden: bool = False, tagged: bool = True) -> list[str]:
+def page_markdowns(doc: Document, *, include_hidden: bool = False, tagged: Collection[str] = tags.USES) -> list[str]:
     """Each page's own markdown, in order (empty for a page without text).
 
     Body size and title are judged over the whole document; nothing is joined across a page break: a page stands alone.
@@ -78,7 +83,9 @@ def page_markdowns(doc: Document, *, include_hidden: bool = False, tagged: bool 
     ]
 
 
-def headings(doc: Document, *, include_hidden: bool = False, tagged: bool = True) -> list[tuple[int, str]]:
+def headings(
+    doc: Document, *, include_hidden: bool = False, tagged: Collection[str] = tags.USES
+) -> list[tuple[int, str]]:
     """Each heading :func:`page_markdowns` writes, as ``(page, heading line)`` in order."""
     return [
         (number, line)
@@ -88,13 +95,14 @@ def headings(doc: Document, *, include_hidden: bool = False, tagged: bool = True
     ]
 
 
-def _blocks(doc: Document, *, include_hidden: bool, tagged: bool) -> list[list[_Block]]:
-    reading = tags.reading(doc) if tagged else None
+def _blocks(doc: Document, *, include_hidden: bool, tagged: Collection[str]) -> list[list[_Block]]:
+    uses = tags.checked(tagged) & {'order', 'headings', 'paragraphs'}
+    reading = tags.reading(doc) if uses else None
     doc = doc.shown(include_hidden=include_hidden)
     weighted = any(span.bold for span in doc.spans())
     body = layout.body_size(doc)
     title_size = max((s.size for s in doc.pages[0].spans), default=0.0) if doc.pages else 0.0
-    return [_page_blocks(page, body, title_size, weighted=weighted, reading=reading) for page in doc.pages]
+    return [_page_blocks(page, body, title_size, weighted=weighted, reading=reading, uses=uses) for page in doc.pages]
 
 
 def _rejoin(blocks: list[_Block]) -> list[str]:
@@ -151,7 +159,13 @@ def _joined(text: str, line: str) -> str:
 
 
 def _page_blocks(
-    page: Page, body: float, title_size: float | None, *, weighted: bool, reading: tags.Reading | None
+    page: Page,
+    body: float,
+    title_size: float | None,
+    *,
+    weighted: bool,
+    reading: tags.Reading | None,
+    uses: frozenset[str],
 ) -> list[_Block]:
     blocks: list[str] = []
     owners: list[Element | None] = []  # the tagged element each block is set from
@@ -177,11 +191,18 @@ def _page_blocks(
             title.clear()
 
     found = layout.lines(page, weighted=weighted)
-    lines = reading.ordered(found) if reading is not None else layout.ordered(found)
+    lines = reading.ordered(found) if reading is not None and 'order' in uses else layout.ordered(found)
     contents = sum(bool(_TOC_ENTRY.match(line.text)) for line in lines) >= TOC_LINES
+    stated_heads = reading is not None and 'headings' in uses and reading.heads
+    paragraphs = reading is not None and 'paragraphs' in uses
     for line in lines:
-        block = reading.block_of(line) if reading is not None else None
-        if block is not None and block is held and (title or paragraph or blocks):
+        covered = reading is not None and reading.block_of(line) is not None
+        block = reading.block_of(line) if paragraphs else None
+        before = reading.block_of(previous) if paragraphs and previous is not None else None
+        inferred = None if contents else _heading(line, body, title_size, weighted=weighted)
+        # A line goes on its tagged block -- unless the tags state no heading and this line heads by the rules.
+        goes_on = stated_heads or inferred is None
+        if goes_on and block is not None and block is held and (title or paragraph or blocks):
             if title:
                 title.append(line.text)
             elif paragraph:
@@ -190,32 +211,37 @@ def _page_blocks(
                 blocks[-1] = _joined(blocks[-1], line.text)  # a tagged heading's further line
             previous = line
             continue
-        tagged, held = block is not None, block
-        if tagged:
-            level = reading.level(line)
-            heading = f'{"#" * level} {line.text}' if level else None
+        held = block
+        level = reading.level(line) if covered and stated_heads else None
+        if level:
+            heading = f'{"#" * level} {line.text}'
+        elif covered and stated_heads:
+            titled = reading.titled or inferred is None or not inferred.startswith('# ')
+            heading = None if titled else inferred  # the tags state no title: the title is inferred
         else:
-            heading = None if contents else _heading(line, body, title_size, weighted=weighted)
+            heading = inferred
+        if heading and not level:
+            held = None  # a heading inferred heads no tagged block: the block's next line starts afresh
         if heading and heading.startswith('# '):
             if not title:
-                began['title'] = block
+                began['title'] = held
             title.append(line.text)  # a title wraps over several lines
             previous = line
             continue
         end_title()
         if heading:
             end_paragraph()
-            put(heading, block)
+            put(heading, held)
             previous = line
             continue
-        if not tagged and _continues_heading(blocks, previous, line):
+        if not (covered and stated_heads) and _continues_heading(blocks, previous, line):
             blocks[-1] = f'{blocks[-1]} {line.text}'
             previous = line
             continue
         joined = (
-            not tagged
+            block is None
+            and before is None
             and previous is not None
-            and (reading is None or reading.block_of(previous) is None)
             and previous.column == line.column
             and -OVERLAP * line.size <= line.y0 - previous.y1 <= PARAGRAPH_GAP * line.size
         )

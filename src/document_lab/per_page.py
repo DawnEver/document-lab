@@ -15,7 +15,7 @@ headings each opens and the regions it holds. A page without text is written all
 named in :attr:`Paged.textless` -- never silently dropped.
 
 A tagged PDF's tags give its reading order, headings, paragraphs, tables and figures (`document_lab.tags`; the
-``tagged`` option, on by default -- False infers them all); where its tags and the inference disagree is reported
+``tagged`` uses, all on by default -- none infers them all); where its tags and the inference disagree is reported
 (`document_lab.agreement`, :attr:`Paged.disagreements`).
 
 The PDF itself goes with them, so the layout stands alone. ``out`` is a directory, or -- ending ``.zip`` -- one
@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Final
 import numpy as np
 import pymupdf
 
-from document_lab import layout
+from document_lab import layout, tags
 from document_lab.agreement import compare
 from document_lab.ink import Drawing, drawings
 from document_lab.ir import BBox
@@ -43,7 +43,7 @@ from document_lab.pdf import read_pdf
 from document_lab.regions import Region, regions
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Collection, Iterator
     from pathlib import Path
 
     from document_lab.ir import Page
@@ -164,15 +164,14 @@ def _clauses(markdown: str) -> str:
     return '; '.join(line.lstrip('#').strip() for line in markdown.splitlines() if line.startswith('##'))
 
 
-def write_pages(pdf: Path, out: Path, *, tagged: bool = True) -> Paged:
+def write_pages(pdf: Path, out: Path, *, tagged: Collection[str] = tags.USES) -> Paged:
     """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive.
 
-    ``tagged``: a tagged PDF's tags give what they state (see the module); False infers it all from layout.
+    ``tagged``: what a tagged PDF's tags give (`document_lab.tags.USES`); none infers it all from layout.
     """
     read = read_pdf(pdf)
     body = layout.body_size(read)
     texts = page_markdowns(read, tagged=tagged)
-    structure = read.structure if tagged else None
     width = max(3, len(str(len(texts))))
     index = [f'# {pdf.stem}', '']
     textless = []
@@ -188,7 +187,8 @@ def write_pages(pdf: Path, out: Path, *, tagged: bool = True) -> Paged:
             pix, scale = _picture(doc, page)
             put(f'{name}.png', pix.tobytes('png'))
             links = []
-            for region in (found := regions(page, body, drawn[number - 1], structure=structure)):
+            found = regions(page, body, drawn[number - 1], structure=read.structure, tagged=tagged)
+            for region in found:
                 file = _file(name, region)
                 put(file, _cut(pix, scale, region).tobytes('png'))
                 more = ' (continues on the next page)' if region.bbox.y1 >= page.height - _FOOT else ''

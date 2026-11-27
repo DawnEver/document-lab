@@ -124,11 +124,11 @@ def vertical_run(pdf: Path, page: int, area: tuple[float, float, float, float], 
     """
     x0, y0, x1, y1 = area
     spans = sorted(
-        (row[5][1], row[0], row[5][2] - row[5][0], row[2], row[7])
+        (row[4][1], row[0], row[4][2] - row[4][0], row[2], row[7])  # box, text, width, size, vertical
         for row in _rows(pdf)[page][0]
         if row[1].endswith('-Identity-V')
-        and x0 <= (row[5][0] + row[5][2]) / 2 <= x1
-        and y0 <= (row[5][1] + row[5][3]) / 2 <= y1
+        and x0 <= (row[4][0] + row[4][2]) / 2 <= x1
+        and y0 <= (row[4][1] + row[4][3]) / 2 <= y1
     )
     found = ' '.join(t for _y, t, _w, _s, _v in spans)
     out = [] if found == text else [f'page {page} states {found!r} down the column, not {text!r}']

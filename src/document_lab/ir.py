@@ -96,6 +96,10 @@ class TextSpan:
     font: str
     provenance: Provenance
     bold: bool = False
+    #: The number it shares, on its page, with the spans it continues or that continue it, no word gap between: a
+    #: change of font, size or baseline inside a word (the ``2`` of ``H2O``). None: it continues none and none
+    #: continues it. Its source decides where a word gap is; a reader setting spans into lines spaces them by it.
+    unspaced: int | None = None
     #: Written vertically (its font's writing mode, WMode 1): its glyphs stand upright and advance down a column, its
     #: text reads top to bottom, its box is the column's. Text turned sideways is not this: it is written
     #: horizontally along a turned baseline.

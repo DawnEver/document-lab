@@ -1,10 +1,30 @@
-//! The one error type: what went wrong and, when known, the byte offset it went wrong at.
+//! The one error type: what kind of refusal, what went wrong and, when known, the byte offset it went wrong at.
 
 use std::fmt;
 
-/// A refusal: the input is not what a PDF must be here, or uses what this reader does not read.
+/// What kind of refusal an [`Error`] is: what a caller may do about it differs by kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// The input is no PDF at all (no `%PDF-` header).
+    NotPdf,
+    /// The file is encrypted and the password given -- none, or a wrong one -- opens no access.
+    Password,
+    /// The file uses what this reader does not read (a security handler, a filter, an encryption version).
+    Unsupported,
+    /// The input is not what a PDF must be here.
+    Malformed,
+    /// A caller's request this crate cannot honor: an object that is not what was asked for, a value the writer
+    /// may not write.
+    Invalid,
+    /// Writing the output failed.
+    Io,
+}
+
+/// A refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
+    /// What kind of refusal it is.
+    pub kind: Kind,
     /// The byte offset in the file (or in the decoded stream being parsed), when one applies.
     pub offset: Option<usize>,
     /// What is wrong, in words.
@@ -12,20 +32,36 @@ pub struct Error {
 }
 
 impl Error {
-    /// An error at `offset`.
-    pub fn at(offset: usize, message: impl Into<String>) -> Self {
+    /// A refusal of `kind` with no offset.
+    pub fn new(kind: Kind, message: impl Into<String>) -> Self {
         Self {
-            offset: Some(offset),
+            kind,
+            offset: None,
             message: message.into(),
         }
     }
 
-    /// An error with no offset.
-    pub fn new(message: impl Into<String>) -> Self {
+    /// Malformed input.
+    pub fn malformed(message: impl Into<String>) -> Self {
+        Self::new(Kind::Malformed, message)
+    }
+
+    /// Malformed input at byte `offset`.
+    pub fn malformed_at(offset: usize, message: impl Into<String>) -> Self {
         Self {
-            offset: None,
-            message: message.into(),
+            offset: Some(offset),
+            ..Self::malformed(message)
         }
+    }
+
+    /// What this reader does not read.
+    pub fn unsupported(message: impl Into<String>) -> Self {
+        Self::new(Kind::Unsupported, message)
+    }
+
+    /// A caller's request this crate cannot honor.
+    pub fn invalid(message: impl Into<String>) -> Self {
+        Self::new(Kind::Invalid, message)
     }
 }
 

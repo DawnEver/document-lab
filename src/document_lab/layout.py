@@ -1,7 +1,9 @@
 """A page's spans as lines in reading order: what every layout of a page -- its markdown, its regions -- starts from.
 
 - Lines: spans on one baseline, each starting within :data:`LINE_GAP` font sizes of the line's right end; a column
-  gutter is wider, so two columns' lines at one height stay two lines. In an unweighted document (no bold span:
+  gutter is wider, so two columns' lines at one height stay two lines. A line's text spaces two neighboring spans
+  apart unless they share an ``unspaced`` number (:class:`~document_lab.ir.TextSpan`): where a word gap is, is
+  the spans' source's to say, never measured here. In an unweighted document (no bold span:
   OCR'd text carries no weight) a bare clause number or bullet takes the text set apart beside it, within
   :data:`CLAUSE_GAP` font sizes, as a standard sets ``4.1    General``.
 - Columns: a line is FULL width (crossing the page middle) or in the LEFT or RIGHT column; :func:`ordered` reads the
@@ -35,7 +37,6 @@ __all__ = [
     'CLAUSE_GAP',
     'GUTTER',
     'LINE_GAP',
-    'WORD_GAP',
     'Block',
     'Line',
     'blocks',
@@ -45,8 +46,6 @@ __all__ = [
     'wordy',
 ]
 
-#: A gap between spans wider than this many font sizes is a space.
-WORD_GAP: Final = 0.15
 #: A span further right of a line than this many font sizes starts another line (a column gutter).
 LINE_GAP: Final = 1.0
 #: Unweighted: a bare clause number (``4.1``) or bullet takes the text beside it within this many font sizes.
@@ -75,15 +74,15 @@ class Line:
 
     @property
     def text(self) -> str:
-        """The spans' text left to right (top to bottom, written vertically), a space where they stand apart."""
+        """The spans' text left to right (vertically, top to bottom), spaced but where they share ``unspaced``."""
         parts: list[str] = []
-        end = None
-        for span in sorted(self.spans, key=lambda s: _along(s.provenance.bbox, vertical=self.vertical)[0]):
-            start, stop = _along(span.provenance.bbox, vertical=self.vertical)
-            if end is not None and start - end > WORD_GAP * span.size:
+        before = None
+        start = (lambda b: b.y0) if self.vertical else (lambda b: b.x0)
+        for span in sorted(self.spans, key=lambda s: start(s.provenance.bbox)):
+            if before is not None and (span.unspaced is None or span.unspaced != before.unspaced):
                 parts.append(' ')
             parts.append(span.text)
-            end = stop
+            before = span
         return ' '.join(''.join(parts).split())
 
     @property
@@ -150,11 +149,6 @@ def lines(page: Page, *, weighted: bool) -> list[Line]:
 def _column(x0: float, x1: float, mid: float) -> str:
     """The page column a line (or a vertical block) from ``x0`` to ``x1`` stands in: L, R or F (across ``mid``)."""
     return 'L' if x1 <= mid + GUTTER else 'R' if x0 >= mid - GUTTER else 'F'
-
-
-def _along(box: BBox, *, vertical: bool) -> tuple[float, float]:
-    """Where a box starts and ends along its line: left to right, or top to bottom when written vertically."""
-    return (box.y0, box.y1) if vertical else (box.x0, box.x1)
 
 
 def _columns_down(spans: Iterable[TextSpan]) -> list[Line]:

@@ -2,12 +2,14 @@
 
 What a page draws comes back as text spans, vector paths and image figures, each with its box in page space. Pixels
 are not the reader's: :func:`read_raster` renders a region with PyMuPDF (D4 of task document-lab-pdf-reader).
+
+What the reader refuses raises a :class:`Refused` of its kind -- :class:`NotPdf`, :class:`Locked` (the password
+opens no access), :class:`Unsupported`, :class:`Malformed` -- each a ``ValueError``.
 """
 
 from __future__ import annotations
 
 import hashlib
-import re
 from pathlib import Path
 from typing import Final
 
@@ -15,20 +17,24 @@ import numpy as np
 import pymupdf
 
 from document_lab import _pdf
+from document_lab._pdf import Locked, Malformed, NotPdf, Refused, Unsupported
 from document_lab.ir import BBox, Document, Figure, Page, Provenance, Raster, TextSpan, VectorPath
 
-__all__ = ['CURVE_SAMPLES', 'read_pdf', 'read_raster']
+__all__ = [
+    'CURVE_SAMPLES',
+    'Locked',
+    'Malformed',
+    'NotPdf',
+    'Refused',
+    'Unsupported',
+    'read_pdf',
+    'read_raster',
+]
 
 #: Points per cubic Bezier segment when a curve is flattened.
 CURVE_SAMPLES: Final = 8
 #: The resolution (dpi) a region holding no image renders at.
 VECTOR_DPI: Final = 300.0
-#: A font descriptor's ``ForceBold`` flag (bit 19).
-FORCE_BOLD: Final = 1 << 18
-#: A font weight at least this is bold (600 is semibold).
-BOLD_WEIGHT: Final = 600
-#: A subset font's name prefix (``ABCDEF+``), which names the subset and not the font.
-_SUBSET: Final = re.compile(r'^[A-Z]{6}\+')
 
 
 def read_pdf(path: Path | str, *, password: str = '', curve_samples: int = CURVE_SAMPLES) -> Document:
@@ -37,7 +43,10 @@ def read_pdf(path: Path | str, *, password: str = '', curve_samples: int = CURVE
     ``curve_samples``: the points each curve of a vector path is flattened to.
 
     Raises:
-        ValueError: the file is no PDF, or is encrypted and ``password`` opens it for no one.
+        NotPdf: the file is no PDF.
+        Locked: it is encrypted and ``password`` opens it for no one.
+        Unsupported: it uses what the reader does not read.
+        Malformed: it is not what a PDF must be.
 
     """
     path = Path(path)
@@ -66,10 +75,8 @@ def _page(reader: _pdf.Reader, number: int, size: tuple[float, float], here: Pro
 
 
 def _span(row: tuple, here: Provenance) -> TextSpan:
-    text, font, size, flags, weight, box, _mode, vertical = row
-    name = _SUBSET.sub('', font)
-    bold = bool(flags & FORCE_BOLD) or (weight or 0) >= BOLD_WEIGHT or 'bold' in name.lower()
-    return TextSpan(text, size, name, here.at(bbox=BBox(*box)), bold, vertical)
+    text, font, size, bold, box, _mode, unspaced, vertical = row
+    return TextSpan(text, size, font, here.at(bbox=BBox(*box)), bold, unspaced, vertical)
 
 
 def _path(row: tuple, here: Provenance) -> VectorPath:

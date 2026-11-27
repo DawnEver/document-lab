@@ -1,16 +1,39 @@
-"""Layout of vertical writing: a column is a line read top to bottom, columns side by side read right to left."""
+"""Layout: a line spaces its spans by their source's word gaps; vertical writing reads a column top to bottom, columns
+side by side right to left.
+"""
+
+import pymupdf
 
 from document_lab import layout
 from document_lab.ir import BBox, Page, Provenance, TextSpan
+from document_lab.layout import lines
+from document_lab.pdf import read_pdf
+
+
+def _line_texts(path):
+    return [line.text for line in lines(read_pdf(path).page(1), weighted=True)]
+
+
+def test_a_line_spaces_its_spans_apart_but_where_one_continues_a_word(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page()
+    bold = pymupdf.get_text_length('Head', fontname='hebo', fontsize=10)
+    page.insert_text((72, 72), 'Head', fontname='hebo', fontsize=10)
+    page.insert_text((72 + bold, 72), 'line one', fontname='helv', fontsize=10)
+    page.insert_text((72, 100), 'Bold', fontname='hebo', fontsize=10)
+    page.insert_text((72 + pymupdf.get_text_length('Bold ', fontname='hebo', fontsize=10), 100), 'plain', fontsize=10)
+    doc.save(tmp_path / 'w.pdf')
+    assert sorted(_line_texts(tmp_path / 'w.pdf')) == ['Bold plain', 'Headline one']
+
 
 SRC = Provenance('0' * 64, 'file:///synthetic.pdf', page=1)
 SIZE = 10.0
 
 
-def _vertical(text: str, x: float, top: float) -> TextSpan:
+def _vertical(text: str, x: float, top: float, unspaced: int | None = None) -> TextSpan:
     """``text`` down a column centered on ``x`` from ``top``, an em a character."""
     box = BBox(x - SIZE / 2, top, x + SIZE / 2, top + SIZE * len(text))
-    return TextSpan(text, SIZE, 'Song', SRC.at(bbox=box), vertical=True)
+    return TextSpan(text, SIZE, 'Song', SRC.at(bbox=box), unspaced=unspaced, vertical=True)
 
 
 def _flat(text: str, x0: float, y0: float) -> TextSpan:
@@ -22,8 +45,10 @@ def _page(*spans: TextSpan) -> Page:
 
 
 def test_spans_down_one_column_are_one_line_read_top_to_bottom():
-    # Drawn bottom first: the line still reads top to bottom; a gap over WORD_GAP ems is a space.
-    page = _page(_vertical('CD', 500, 120), _vertical('AB', 500, 100), _vertical('EF', 500, 147))
+    # Drawn bottom first: the line still reads top to bottom, spaced but where spans continue one word.
+    page = _page(
+        _vertical('CD', 500, 120, unspaced=1), _vertical('AB', 500, 100, unspaced=1), _vertical('EF', 500, 147)
+    )
     (line,) = layout.lines(page, weighted=True)
     assert (line.vertical, line.text, line.column) == (True, 'ABCD EF', 'R')
     assert (line.x0, line.y0, line.x1, line.y1) == (495, 100, 505, 167)

@@ -175,7 +175,10 @@ pages as placed without it).
 - Windows: the UB Mannheim installer (https://github.com/UB-Mannheim/tesseract/wiki), choosing the languages you
   read; then add its folder to PATH, or set `TESSDATA_PREFIX` to its `tessdata`.
 - macOS: `brew install tesseract tesseract-lang`.
-- Debian/Ubuntu: `apt install tesseract-ocr tesseract-ocr-<lang>` (e.g. `tesseract-ocr-chi-sim`).
+- Debian 12+ / Ubuntu 24.04+: `apt install tesseract-ocr tesseract-ocr-<lang>` (e.g. `tesseract-ocr-chi-sim`).
+  Ubuntu 22.04's own package is 4.1 and is refused (5.3 is the first to write PAGE XML, which states each word's
+  writing direction): add `ppa:alex-p/tesseract-ocr5` first, then the same `apt install`.
+- Any system: `tesseract --version` says what `ocr` will find.
 
 ## Tests
 

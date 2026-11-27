@@ -487,9 +487,9 @@ def _same(a: tuple[float, ...], b: tuple[float, ...]) -> bool:
     return all(abs(x - y) <= PLACED for x, y in zip(a, b, strict=True))
 
 
-def _images(ours: list, theirs: pymupdf.Page) -> dict[str, int]:
-    """Our placements against PyMuPDF's: how many, invented and clipped (as the module says)."""
-    unmatched = [tuple(i['bbox']) for i in theirs.get_image_info()]
+def _images(ours: list, theirs: pymupdf.Page, to: _Mapping) -> dict[str, int]:
+    """Our placements against PyMuPDF's, turned to the page as displayed: how many, invented and clipped."""
+    unmatched = [to.box(*i['bbox']) for i in theirs.get_image_info()]
     invented = 0
     for box in (tuple(b) for b in ours):
         match = next((p for p in unmatched if _same(box, p)), None)
@@ -548,7 +548,7 @@ def compare(path: Path, reference_path: Path | None = None, plant: Plant | None 
                     unknown=unknown,
                     located=located,
                     edges=tuple(edges),
-                    **_images([f.provenance.bbox for f in ours.figures], theirs),
+                    **_images([f.provenance.bbox for f in ours.figures], theirs, to),
                     paths=len(drawn),
                     colored=sum(any(c is not None and len(c) == 3 for c in (d.fill, d.stroke)) for d in drawn),
                     unmatched=unmatched,

@@ -7,7 +7,7 @@ import pytest
 from document_lab import _pdf
 from document_lab.ir import BBox
 from document_lab.pdf import CURVE_SAMPLES, Locked, Malformed, NotPdf, Refused, Unsupported, read_pdf, read_raster
-from tests.synthetic import RED, image_pdf, mixed_pdf, table_cell_rect
+from tests.synthetic import RED, icc_profile, image_pdf, mixed_pdf, rgb_in_srgb, table_cell_rect
 
 
 @pytest.fixture
@@ -286,6 +286,25 @@ def test_an_ocr_layer_over_the_image_does_not_hide_its_samples(tmp_path, monkeyp
     assert np.array_equal(_whole_page(path), SAMPLES)
 
 
+# Adobe RGB (1998): its primaries and white (CIE xy) and its gamma (its specification, 4.3.4).
+ADOBE = {'primaries': ((0.64, 0.33), (0.21, 0.71), (0.15, 0.06)), 'white': (0.3127, 0.3290), 'gamma': 563 / 256}
+
+
+def test_an_icc_based_image_is_its_samples_through_its_profile(tmp_path, monkeypatch):
+    path = image_pdf(
+        tmp_path / 'adobe.pdf',
+        SAMPLES.tobytes(),
+        RGB.replace(' /ColorSpace /DeviceRGB', ''),
+        size=(60, 40),
+        profile=(icc_profile(**ADOBE), 3),
+    )
+    truth = rgb_in_srgb(SAMPLES, **ADOBE)  # by the formulas, apart from any color management
+    assert np.abs(truth.astype(int) - SAMPLES).max() > 20  # the planted premise: the profile changes what shows
+    assert np.abs(_shown(path).astype(int) - truth).max() <= 2  # PyMuPDF, color-managed, corroborates the truth
+    _refuse_rendering(monkeypatch)
+    assert np.abs(_whole_page(path).astype(int) - truth).max() <= 1
+
+
 def _jpeg() -> bytes:
     return pymupdf.Pixmap(pymupdf.csRGB, 60, 40, SAMPLES.tobytes(), 0).tobytes('jpeg')
 
@@ -424,6 +443,40 @@ def test_annotations_are_read_only_when_asked_and_cite_their_subtype(tmp_path):
     assert spans == {'body': None, 'note': 'FreeText'}
     (note,) = [s for s in read_pdf(tmp_path / 'a.pdf', annotations=True).spans() if s.text == 'note']
     assert 72 <= note.provenance.bbox.x0 < note.provenance.bbox.x1 <= 272  # inside the annotation's rectangle
+
+
+_NONE = '[/Separation /None /DeviceRGB << /FunctionType 2 /Domain [0 1] /C0 [1 1 1] /C1 [1 0 0] /N 1 >>]'
+
+
+def test_what_the_colorant_none_paints_is_read_flagged_inkless(tmp_path):
+    page = _raw_page(
+        tmp_path,
+        '<< /ColorSpace << /N NONE >> >>',
+        b'0 0 1 rg 0 0 5 5 re f /N cs 1 sc 10 10 5 5 re f 0 1 0 RG 20 20 5 5 re B',
+        {'NONE': _NONE},
+    )
+    found = [(p.fill, p.stroke, p.inkless, p.hidden) for p in page.paths]
+    assert found == [
+        ((0, 0, 1), None, False, False),
+        ((1,), None, True, False),  # no RGB: it marks nothing; its tint is kept
+        (None, (0, 1, 0), False, False),  # `B`: the stroke marks, the fill does not -- two paintings
+        ((1,), None, True, False),
+    ]
+    assert [p.group for p in page.paths] == [0, 1, 2, 3]
+    assert [p.fill for p in page.shown().paths] == [(0, 0, 1), None]
+    assert len(page.shown(include_hidden=True).paths) == 2  # a hidden layer's content is another matter
+    assert page.shown(include_inkless=True) == page
+
+
+def test_an_uncolored_tiling_pattern_fills_in_its_tint(tmp_path):
+    tiling = '<< /PatternType 1 /PaintType 2 /TilingType 1 /BBox [0 0 4 4] /XStep 4 /YStep 4 /Resources << >> >>'
+    page = _raw_page(
+        tmp_path,
+        '<< /Pattern << /T TILING >> >>',
+        b'[/Pattern /DeviceGray] cs 0.25 /T scn 10 10 30 30 re f',
+        {'TILING': tiling},
+    )
+    assert [(p.fill, p.pattern) for p in page.paths] == [((0.25, 0.25, 0.25), 'tiling')]
 
 
 def test_a_page_is_read_when_first_asked_for_and_kept(tmp_path, monkeypatch):

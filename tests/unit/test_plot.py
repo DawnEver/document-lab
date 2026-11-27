@@ -1066,6 +1066,17 @@ def test_a_plot_a_hidden_layer_draws_is_read_only_when_asked(tmp_path):
     assert [s.text for s in outline_text(page, include_hidden=True)] == ['mT']
 
 
+def test_a_plot_the_colorant_none_paints_is_read_only_when_asked(tmp_path):
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=[('mT', 450.0, 120.0, 8.0)])
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1)
+    inkless = dataclasses.replace(page, paths=tuple(dataclasses.replace(p, inkless=True) for p in page.paths))
+    assert (plots(inkless), outline_text(inkless)) == ([], [])
+    assert plots(inkless, include_hidden=True) == []  # what marks nothing is no hidden layer's
+    (plot,) = plots(inkless, include_inkless=True)
+    assert plot.curves[0].y == pytest.approx(XS, abs=0.5)
+    assert [s.text for s in outline_text(inkless, include_inkless=True)] == ['mT']
+
+
 def test_markers_a_hidden_layer_draws_are_read_only_when_asked(tmp_path):
     page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', _marker_spec())).page(1)
     marks = {'\u25cf', '\u25b2'}

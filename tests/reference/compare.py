@@ -27,8 +27,10 @@ of PyMuPDF's taken once. One of ours whose fill or stroke no drawing matches is 
 PyMuPDF's no path of ours takes is ``unreported`` when it can show -- its box meets the page and its clip as PyMuPDF
 bounds them (the reader leaves out a path its clip box misses, `pdf::interpret`) -- and is no Type 3 glyph's ink
 (:class:`_Theirs`). A pattern's paint is not compared: ours states it with no components, PyMuPDF draws a clip and a
-shading. A color is compared when both state RGB (ours keeps a separation's tint), PyMuPDF's color management off:
-both then convert a device color by ISO 32000's formulas, while with it on PyMuPDF converts through ICC profiles.
+shading. A color is compared when both state RGB (ours keeps a separation's tint), against PyMuPDF's color with its
+color management off and on: off, both convert a device color by ISO 32000's formulas; on, both convert an
+``ICCBased`` color through its profile (the reader by moxcms, PyMuPDF by lcms2) -- and the reader converts each space
+the one way, so a color matches either.
 
 Images are compared by where they are placed. PyMuPDF lists every placement, seen or not; the reader leaves out what
 its clip hides, and its clip is a box holding the true one (`pdf::interpret`), so it leaves out only what cannot show.
@@ -328,6 +330,8 @@ class _Drawn(NamedTuple):
     dashes: tuple[float, ...]
     fill: tuple[float, ...] | None
     even_odd: bool
+    #: PyMuPDF's: its stroke and fill colors with its color management on (``stroke`` and ``fill`` are with it off).
+    managed: tuple[tuple[float, ...] | None, tuple[float, ...] | None] = (None, None)
 
 
 def _ours(paths: Sequence[VectorPath]) -> list[_Drawn]:
@@ -399,6 +403,14 @@ class _Theirs:
         self.drawn: list[_Drawn] = []
         self.shows: list[bool] = []
         page.get_cdrawings(extended=True, callback=self.take)
+        managed: list[tuple[tuple[float, ...] | None, tuple[float, ...] | None]] = []
+        pymupdf.TOOLS.set_icc(on=True)  # read again, colors through their profiles
+        try:
+            page.get_cdrawings(extended=True, callback=lambda d: managed.extend(self._paints(d)))
+        finally:
+            pymupdf.TOOLS.set_icc(on=False)  # back to the comparison's own reading (`compare`)
+        if len(managed) == len(self.drawn):
+            self.drawn = [d._replace(managed=m) for d, m in zip(self.drawn, managed, strict=True)]
 
     def _glyph(self, box: _Box) -> bool:
         cell = (int(box[0] // _CHARACTER_CELL), int(box[1] // _CHARACTER_CELL))
@@ -414,6 +426,14 @@ class _Theirs:
         if color is None:
             return None
         return tuple((c + 0.5) % 1 for c in color) if self.plant.recolor else tuple(color)
+
+    def _paints(self, drawing: dict) -> list[tuple[tuple[float, ...] | None, tuple[float, ...] | None]]:
+        """A drawing's stroke and fill colors, as :meth:`take` takes it (none for a clip, a group, an empty path)."""
+        kind = drawing['type']
+        if kind in {'clip', 'group'} or not _flattened(drawing['items']):
+            return []
+        stroked, filled = 's' in kind, 'f' in kind
+        return [(self._color(drawing['color']) if stroked else None, self._color(drawing['fill']) if filled else None)]
 
     def take(self, drawing: dict) -> None:
         level = drawing['level']
@@ -488,10 +508,16 @@ def _paints(ours: _Drawn, theirs: _Drawn, role: int) -> bool:
     """Whether ``theirs`` paints ``ours``'s fill (``role`` 0) or stroke (1): the same box, the same paint."""
     if not _close(ours.box, theirs.box, DRAWN):
         return False
+    managed_stroke, managed_fill = theirs.managed
     if role == 0:
-        return ours.even_odd == theirs.even_odd and _same_color(ours.fill, theirs.fill)
+        return ours.even_odd == theirs.even_odd and (
+            _same_color(ours.fill, theirs.fill) or (managed_fill is not None and _same_color(ours.fill, managed_fill))
+        )
     return (
-        _same_color(ours.stroke, theirs.stroke)
+        (
+            _same_color(ours.stroke, theirs.stroke)
+            or (managed_stroke is not None and _same_color(ours.stroke, managed_stroke))
+        )
         and abs(ours.width - theirs.width) <= PAINTED
         and _close(ours.dashes, theirs.dashes, PAINTED)
     )
@@ -520,9 +546,9 @@ def _images(ours: list, theirs: pymupdf.Page, to: _Mapping) -> dict[str, int]:
 
 
 @contextmanager
-def _device_colors() -> Iterator[None]:
-    """PyMuPDF's color management off, then back to MuPDF's default (on, when built with ICC)."""
-    pymupdf.TOOLS.set_icc(on=False)
+def _color_management(*, on: bool) -> Iterator[None]:
+    """PyMuPDF's color management ``on`` or off, then back to MuPDF's default (on, when built with ICC)."""
+    pymupdf.TOOLS.set_icc(on=on)
     try:
         yield
     finally:
@@ -536,7 +562,7 @@ def compare(path: Path, reference_path: Path | None = None, plant: Plant | None 
     the planted controls the checks must report.
     """
     plant = plant or Plant()
-    with _device_colors(), pymupdf.open(reference_path or path) as reference:
+    with _color_management(on=False), pymupdf.open(reference_path or path) as reference:
         if reference.needs_pass:
             try:
                 read_pdf(path)

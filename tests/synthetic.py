@@ -461,6 +461,7 @@ def image_pdf(
     deflate: bool = True,
     rotate: int = 0,
     soft_mask: bytes | None = None,
+    profile: tuple[bytes, int] | None = None,
     over: Callable[[pymupdf.Page], object] | None = None,
 ) -> Path:
     """A one-page PDF of ``size`` points placing one image XObject, saved to ``path``.
@@ -468,7 +469,8 @@ def image_pdf(
     ``image`` is the image dictionary's own entries (``/Width 4 /Height 2 /ColorSpace /DeviceGray ...``), ``stored``
     its stream: deflated when ``deflate``, else stored as given (a codec's ``/Filter`` stated in ``image``).
     ``matrix`` is the ``cm`` placing it (PDF space, y up; default the whole page, upright); ``rotate`` the page's
-    ``/Rotate``; ``soft_mask`` the 8-bit gray samples of an ``/SMask`` its size; ``over`` draws on the page after.
+    ``/Rotate``; ``soft_mask`` the 8-bit gray samples of an ``/SMask`` its size; ``profile`` an ICC profile and its
+    component count, the image's ``/ColorSpace`` an ``ICCBased`` space of it; ``over`` draws on the page after.
     """
     doc = pymupdf.open()
     page = doc.new_page(width=size[0], height=size[1])
@@ -479,6 +481,11 @@ def image_pdf(
         doc.update_object(mask, f'<< /Type /XObject /Subtype /Image {entries} >>')
         doc.update_stream(mask, soft_mask)
         image += f' /SMask {mask} 0 R'
+    if profile is not None:
+        icc = doc.get_new_xref()
+        doc.update_object(icc, f'<< /N {profile[1]} >>')
+        doc.update_stream(icc, profile[0])
+        image += f' /ColorSpace [/ICCBased {icc} 0 R]'
     xobject = doc.get_new_xref()
     doc.update_object(xobject, f'<< /Type /XObject /Subtype /Image {image} >>')
     doc.update_stream(xobject, stored, compress=deflate)
@@ -497,6 +504,89 @@ def image_pdf(
     doc.save(path)
     doc.close()
     return path
+
+
+#: CIE XYZ (D65) to linear sRGB (IEC 61966-2-1).
+XYZ_TO_SRGB = np.array(
+    [
+        [3.2404542, -1.5371385, -0.4985314],
+        [-0.9692660, 1.8760108, 0.0415560],
+        [0.0556434, -0.2040259, 1.0572252],
+    ]
+)
+#: The Bradford cone response matrix.
+BRADFORD = np.array([[0.8951, 0.2664, -0.1614], [-0.7502, 1.7135, 0.0367], [0.0389, -0.0685, 1.0296]])
+#: The ICC profile connection space's white, D50 (ICC.1 7.2.16).
+D50 = np.array([0.9642, 1.0, 0.8249])
+
+
+def _to_xyz(primaries: Sequence[tuple[float, float]], white: tuple[float, float]) -> np.ndarray:
+    """The matrix from linear RGB to CIE XYZ (its white's) of RGB ``primaries`` and ``white`` given as CIE xy."""
+    xyz = lambda x, y: np.array([x / y, 1.0, (1 - x - y) / y])  # noqa: E731 -- a formula
+    columns = np.column_stack([xyz(*p) for p in primaries])
+    return columns * np.linalg.solve(columns, xyz(*white))
+
+
+def rgb_in_srgb(
+    samples: np.ndarray, *, primaries: Sequence[tuple[float, float]], white: tuple[float, float], gamma: float
+) -> np.ndarray:
+    """8-bit samples of the RGB space of ``primaries``, ``white`` and a pure ``gamma`` as 8-bit sRGB, by the formulas.
+
+    The white must be D65's (sRGB's): no adaptation is made. The truth a color-managed reading is held to.
+    """
+    linear = (samples / 255.0) ** gamma @ (XYZ_TO_SRGB @ _to_xyz(primaries, white)).T
+    linear = np.clip(linear, 0.0, 1.0)
+    encoded = np.where(linear <= 0.0031308, 12.92 * linear, 1.055 * linear ** (1 / 2.4) - 0.055)
+    return np.round(encoded * 255).astype(np.uint8)
+
+
+def icc_profile(*, primaries: Sequence[tuple[float, float]], white: tuple[float, float], gamma: float) -> bytes:
+    """An ICC v2 RGB display profile, matrix and TRC (ICC.1:2001-04), of ``primaries`` and ``white`` (CIE xy) and a
+    pure ``gamma`` for each channel: its colorants Bradford-adapted to D50, its white point D50 as v2 states it.
+    """
+    to_xyz = _to_xyz(primaries, white)
+    source = BRADFORD @ np.array([white[0] / white[1], 1.0, (1 - white[0] - white[1]) / white[1]])
+    adapt = np.linalg.inv(BRADFORD) @ np.diag(BRADFORD @ D50 / source) @ BRADFORD
+    colorants = adapt @ to_xyz
+
+    def s15(values: Sequence[float]) -> bytes:
+        return b''.join(round(v * 65536).to_bytes(4, 'big', signed=True) for v in values)
+
+    def xyz(values: Sequence[float]) -> bytes:
+        return b'XYZ ' + bytes(4) + s15(values)
+
+    curve = b'curv' + bytes(4) + (1).to_bytes(4, 'big') + round(gamma * 256).to_bytes(2, 'big') + bytes(2)
+    text = b'Synthetic RGB'
+    description = b'desc' + bytes(4) + (len(text) + 1).to_bytes(4, 'big') + text + bytes(1) + bytes(8) + bytes(3 + 67)
+    tags = [
+        (b'desc', description),
+        (b'cprt', b'text' + bytes(4) + b'No copyright\0'),
+        (b'wtpt', xyz(D50)),
+        (b'rXYZ', xyz(colorants[:, 0])),
+        (b'gXYZ', xyz(colorants[:, 1])),
+        (b'bXYZ', xyz(colorants[:, 2])),
+        (b'rTRC', curve),
+        (b'gTRC', curve),
+        (b'bTRC', curve),
+    ]
+    table, data, offset = b'', b'', 128 + 4 + 12 * len(tags)
+    for signature, body in tags:
+        table += signature + (offset + len(data)).to_bytes(4, 'big') + len(body).to_bytes(4, 'big')
+        data += body + bytes(-len(body) % 4)
+    size = offset + len(data)
+    header = (
+        size.to_bytes(4, 'big')
+        + bytes(4)
+        + bytes([2, 0x10, 0, 0])
+        + b'mntrRGB XYZ '
+        + bytes(12)
+        + b'acsp'
+        + bytes(24)
+        + bytes(4)  # perceptual
+        + s15(D50)
+        + bytes(4 + 16 + 28)
+    )
+    return header + len(tags).to_bytes(4, 'big') + table + data
 
 
 def fax_g4(white: np.ndarray) -> bytes:

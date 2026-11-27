@@ -292,16 +292,24 @@ fn a_shading_painted_with_sh_covers_the_clip_within_its_bbox() {
 }
 
 #[test]
-fn a_fill_with_a_pattern_says_which_pattern_it_is() {
-    let tiling = common::stream(
-        "/PatternType 1 /PaintType 2 /TilingType 1 /BBox [0 0 4 4] /XStep 4 /YStep 4 /Resources << >>",
-        "0 0 2 2 re f",
-    );
+fn a_fill_with_a_pattern_says_which_pattern_it_is_and_an_uncolored_tilings_tint() {
+    let tiling = |paint: u8| {
+        common::stream(
+            &format!(
+                "/PatternType 1 /PaintType {paint} /TilingType 1 /BBox [0 0 4 4] /XStep 4 /YStep 4 /Resources << >>"
+            ),
+            "0 0 2 2 re f",
+        )
+    };
     let (content, _) = events(
-        "/Resources << /Pattern << /G 7 0 R /T 6 0 R >> >>",
-        "/Pattern cs /G scn 10 10 30 30 re f [/Pattern /DeviceRGB] cs 1 0 0 /T scn 50 10 5 5 re f \
-         /Missing scn 0 0 1 1 re f",
-        &[AXIAL, &tiling, "<< /PatternType 2 /Shading 5 0 R >>"],
+        "/Resources << /Pattern << /G 7 0 R /T 6 0 R /C 8 0 R >> >>",
+        "/Pattern cs /G scn 10 10 30 30 re f [/Pattern /DeviceCMYK] cs 0 1 1 0 /T scn 50 10 5 5 re f          /Missing scn 0 0 1 1 re f /Pattern cs /C scn 0 0 2 2 re f",
+        &[
+            AXIAL,
+            &tiling(2),
+            "<< /PatternType 2 /Shading 5 0 R >>",
+            &tiling(1),
+        ],
     );
     let fills: Vec<_> = paths(&content)
         .iter()
@@ -310,12 +318,15 @@ fn a_fill_with_a_pattern_says_which_pattern_it_is() {
             (color.pattern, color.components.clone(), color.rgb)
         })
         .collect();
+    let uncolored = Some(Pattern::Tiling { uncolored: true });
     assert_eq!(
         fills,
         [
             (Some(Pattern::Shading), vec![], None),
-            (Some(Pattern::Tiling), vec![1.0, 0.0, 0.0], None),
-            (Some(Pattern::Tiling), vec![1.0, 0.0, 0.0], None), // the unreadable `scn` is skipped
+            // The tint, in the pattern space's base: CMYK (0, 1, 1, 0) is red.
+            (uncolored, vec![0.0, 1.0, 1.0, 0.0], Some([1.0, 0.0, 0.0])),
+            (uncolored, vec![0.0, 1.0, 1.0, 0.0], Some([1.0, 0.0, 0.0])), // the unreadable `scn` is skipped
+            (Some(Pattern::Tiling { uncolored: false }), vec![], None), // a colored pattern paints its own colors
         ]
     );
     assert_eq!(content.warnings.len(), 1, "{:?}", content.warnings);

@@ -2,7 +2,7 @@
 //! `(a x + c y + e, b x + d y + f)`.
 
 /// A point.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Point {
     /// Horizontal.
     pub x: f64,
@@ -156,5 +156,31 @@ mod tests {
             Point { x: 22.0, y: 2.0 }
         );
         assert!((Matrix([3.0, 0.0, 0.0, 3.0, 5.0, 5.0]).scale() - 3.0).abs() < 1e-12);
+    }
+}
+
+/// One piece of a path: in page space on the interpreter's events, in text space on a glyph's outline.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Segment {
+    /// Start a subpath.
+    MoveTo(Point),
+    /// A straight line.
+    LineTo(Point),
+    /// A cubic Bezier curve: two control points, then its end.
+    CurveTo(Point, Point, Point),
+    /// Close the subpath back to its start.
+    Close,
+}
+
+impl Segment {
+    /// The segment with each of its points mapped by `map`.
+    #[must_use]
+    pub fn mapped(self, map: impl Fn(Point) -> Point) -> Self {
+        match self {
+            Self::MoveTo(p) => Self::MoveTo(map(p)),
+            Self::LineTo(p) => Self::LineTo(map(p)),
+            Self::CurveTo(a, b, p) => Self::CurveTo(map(a), map(b), map(p)),
+            Self::Close => Self::Close,
+        }
     }
 }

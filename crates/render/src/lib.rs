@@ -1,19 +1,21 @@
 //! document-lab's own renderer: what a page draws, from `pdf`'s content interpreter, as 8-bit pixels.
 //!
-//! [`render`] interprets a page ([`pdf::File::interpret`]) and paints its events in order onto a white (or
+//! [`render`] interprets a page for drawing ([`pdf::File::drawing`]) and paints its events in order onto a white (or
 //! transparent) canvas: paths filled and stroked as the graphics state says (width, caps, joins, miter limit,
 //! dashes, the nonzero or even-odd rule, a stroke under a matrix that scales unevenly stroked in user space), images
-//! placed by their matrix in every color space the reader converts ([`image`]), each mark clipped by the chain of
-//! clipping paths in force ([`clip`]) and composited with its constant alpha and blend mode, anti-aliased by
-//! `tiny-skia`. The pixel grid is the page's: pixel `(i, j)` covers page space `[i, i + 1] x [j, j + 1]` divided by
+//! placed by their matrix in every color space the reader converts ([`image`]), text as its glyphs' outlines
+//! ([`pdf::shape`]) placed by each glyph's text rendering matrix and filled, stroked or both as its render mode says
+//! (a Type 3 glyph by its procedure's own events), each mark clipped by the chain of clipping paths in force
+//! ([`clip`]: a text clip by its glyphs' outlines) and composited with its constant alpha and blend mode,
+//! anti-aliased by `tiny-skia`. The pixel grid is the page's: pixel `(i, j)` covers page space `[i, i + 1] x [j, j + 1]` divided by
 //! the scale, and a region is drawn on the pixels it touches -- so a region's pixels are the whole page's there, but
 //! for the anti-aliasing of a curve's edge, which differs by a few coverage steps where the region's edge cuts it.
 //!
-//! What is not drawn yet is never silently missing. Text is drawn from stage 2 (font outlines): [`Options::text`]
-//! must be false, and true is refused by name. What else in the region the renderer cannot draw as the file states
-//! it is counted by kind in [`Raster::undrawn`] -- a shading or a pattern (stage 3), a soft mask (drawn without it),
-//! a text clip (approximated by its glyphs' boxes), an image in a codec not decoded here (JPX, JBIG2) or that does not
-//! decode -- for the caller to refuse or accept. Hidden optional content and what the colorant `None` paints mark
+//! What is not drawn yet is never silently missing. What in the region the renderer cannot draw as the file states it
+//! is counted by kind in [`Raster::undrawn`] -- a shading or a pattern (stage 3), a soft mask (drawn without it), a
+//! glyph whose shape cannot be read (a font that embeds no program and has no substitute, by name), a text clip
+//! holding such a glyph (by its box), an image in a codec not decoded here (JPX, JBIG2) or that does not decode --
+//! for the caller to refuse or accept. Hidden optional content and what the colorant `None` paints mark
 //! nothing and are not drawn.
 //!
 //! Layers: [`codec`] (image codecs to samples) -> [`image`] (an image's samples to pixels) and [`clip`] (clipping
@@ -27,10 +29,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use pdf::color::Color;
-use pdf::geometry::{Matrix, Point, Rect};
+use pdf::geometry::{Matrix, Point, Rect, Segment};
 use pdf::interpret::{
-    Blend, Compositing, Event, ImageEvent, Layer, PathEvent, Segment, ShadingEvent, Stroke,
+    Blend, Compositing, Event, ImageEvent, Layer, PathEvent, ShadingEvent, Stroke, TextEvent,
 };
+use pdf::shape::Shape;
 use pdf::{Error, File, Page, Result};
 use tiny_skia::{
     BlendMode, FillRule, FilterQuality, LineCap, LineJoin, Paint, PathBuilder, Pixmap, SpreadMode,
@@ -47,7 +50,7 @@ pub struct Options {
     pub region: Option<Rect>,
     /// Pixels per point: the resolution over 72 dpi.
     pub scale: f64,
-    /// Whether text is drawn. Only false is accepted until stage 2 draws glyphs from their font outlines.
+    /// Whether text is drawn: false leaves every glyph out (a page's line art and images alone).
     pub text: bool,
     /// Whether each annotation's appearance is drawn after the page's content.
     pub annotations: bool,
@@ -75,14 +78,9 @@ pub struct Raster {
 ///
 /// # Errors
 ///
-/// Refuses text (`options.text`: stage 2), a scale that is not positive and finite, a region outside the page or
-/// of more than 2^28 pixels, and what [`File::interpret`] refuses.
+/// Refuses a scale that is not positive and finite, a region outside the page or of more than 2^28 pixels, and what
+/// [`File::drawing`] refuses.
 pub fn render(file: &File, page: &Page, options: &Options) -> Result<Raster> {
-    if options.text {
-        return Err(Error::unsupported(
-            "drawing text is stage 2 of the renderer (glyphs from font outlines); render with text off",
-        ));
-    }
     let (width, height) = page.size();
     let whole = Rect {
         x0: 0.0,
@@ -97,9 +95,14 @@ pub fn render(file: &File, page: &Page, options: &Options) -> Result<Raster> {
             options.scale
         )));
     }
-    let grid = Grid::of(region, options.scale)
+    let grid = Grid::of(region, options.scale, page.to_page_space())
         .ok_or_else(|| Error::invalid("the region holds no pixel of the page"))?;
-    let content = file.interpret(page, options.annotations)?;
+    // Without text, no Type 3 glyph's procedure is run either.
+    let content = if options.text {
+        file.drawing(page, options.annotations, &|m| grid.glyph_placed(m))?
+    } else {
+        file.interpret(page, options.annotations)?
+    };
     let mut canvas = Canvas {
         file,
         pixmap: Pixmap::new(grid.width, grid.height)
@@ -127,12 +130,15 @@ pub(crate) struct Grid {
     pub(crate) top: f64,
     pub(crate) width: u32,
     pub(crate) height: u32,
+    /// The page's matrix from user space to page space.
+    user: Matrix,
 }
 
 impl Grid {
     /// The whole pixels `region` touches at `scale` (an edge within a thousandth of a pixel of a pixel's edge is on
-    /// it, so a region drawn at whole pixels gets exactly those), or None when it touches none.
-    fn of(region: Rect, scale: f64) -> Option<Self> {
+    /// it, so a region drawn at whole pixels gets exactly those), or None when it touches none; `user` is the page's
+    /// matrix from user space to page space.
+    fn of(region: Rect, scale: f64, user: Matrix) -> Option<Self> {
         const SNAP: f64 = 1e-3;
         let (left, top) = (
             (region.x0 * scale + SNAP).floor(),
@@ -157,6 +163,7 @@ impl Grid {
             top,
             width: width as u32,
             height: height as u32,
+            user,
         })
     }
 
@@ -178,6 +185,48 @@ impl Grid {
     /// `p` (page space) in pixel space.
     pub(crate) fn point(&self, p: Point) -> Point {
         self.matrix().apply(p)
+    }
+
+    /// A glyph's text rendering `matrix` (to page space) with its origin moved onto the pixel grid `MuPDF` places
+    /// glyphs on (its glyph cache's, measured 2026-11-27 by moving a glyph in sixteenths of a pixel): across, to the
+    /// nearest quarter of a pixel for a glyph under 24 pixels an em, half for one under 48, whole from 48; down, to
+    /// the nearest whole pixel.
+    pub(crate) fn glyph_placed(&self, matrix: Matrix) -> Matrix {
+        let [xx, xy, yx, yy, tx, ty] = matrix.0;
+        let size = (xx * yy - xy * yx).abs().sqrt() * self.scale;
+        let steps = if size >= 48.0 {
+            1.0
+        } else if size >= 24.0 {
+            2.0
+        } else {
+            4.0
+        };
+        let snap = |v: f64, steps: f64| (v * steps + 0.5).floor() / steps;
+        let (across, down) = self.device(Point { x: tx, y: ty });
+        let (dx, dy) = (snap(across, steps) - across, snap(down, 1.0) - down);
+        Matrix([xx, xy, yx, yy, tx + dx / self.scale, ty + dy / self.scale])
+    }
+
+    /// Where `MuPDF` reckons the page-space point `p` falls on the canvas: from user space through the page's matrix
+    /// scaled, in single precision as it computes -- an origin on a half pixel (a baseline at 90 points, 150 dpi:
+    /// 30 points up a 120-point page) rounds as its float sum falls, not as the exact one would.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "MuPDF's single precision, on purpose"
+    )]
+    fn device(&self, point: Point) -> (f64, f64) {
+        let [xx, xy, yx, yy, tx, ty] = self.user.0;
+        // The page's matrix is a quarter turn with a flip: its inverse is exact.
+        let det = xx * yy - xy * yx;
+        let (px, py) = (point.x - tx, point.y - ty);
+        let (ux, uy) = ((yy * px - yx * py) / det, (xx * py - xy * px) / det);
+        let scale = self.scale as f32;
+        let scaled = self.user.0.map(|v| v as f32 * scale);
+        let (ux, uy) = (ux as f32, uy as f32);
+        (
+            f64::from(ux * scaled[0] + uy * scaled[2] + scaled[4]) - self.left,
+            f64::from(ux * scaled[1] + uy * scaled[3] + scaled[5]) - self.top,
+        )
     }
 
     /// `r` (page space) in pixel space.
@@ -206,7 +255,8 @@ impl Canvas<'_> {
             Event::Path(path) if shows(&path.layer) => self.path(path),
             Event::Image(image) if shows(&image.layer) => self.image(image),
             Event::Shading(shading) if shows(&shading.layer) => self.shading(shading),
-            _ => {} // hidden, inkless, or text (refused unless off)
+            Event::Text(text) if shows(&text.layer) => self.text(text),
+            _ => {} // hidden or inkless
         }
     }
 
@@ -424,6 +474,94 @@ impl Canvas<'_> {
         };
         self.pixmap
             .fill_rect(rect, &paint, transform(pixels.matrix), mask.as_deref());
+    }
+
+    /// The glyphs `text` shows, as its render mode says (9.3.6): 0 and 4 filled, 1 and 5 stroked, 2 and 6 both
+    /// (the clip of modes 4-7 is the interpreter's), 3 and 7 not painted. Their outlines are filled together by the
+    /// nonzero rule, or one by one when they are composited otherwise than opaquely over what lies below (so two
+    /// that overlap show it). A Type 3 glyph is drawn by its procedure's own events; a glyph meeting the region
+    /// whose shape is missing is counted.
+    fn text(&mut self, text: &TextEvent) {
+        let (fills, strokes) = match text.render_mode {
+            0 | 4 => (true, false),
+            1 | 5 => (false, true),
+            2 | 6 => (true, true),
+            _ => return,
+        };
+        let mut glyphs: Vec<Vec<Segment>> = Vec::with_capacity(text.glyphs.len());
+        for glyph in &text.glyphs {
+            match text.font.shape(glyph.code) {
+                Shape::Outline(outline) if !outline.is_empty() => {
+                    let matrix = self.grid.glyph_placed(glyph.matrix);
+                    glyphs.push(
+                        outline
+                            .iter()
+                            .map(|s| s.mapped(|p| matrix.apply(p)))
+                            .collect(),
+                    );
+                }
+                Shape::Missing(why) if self.meets(glyph.bbox) => self.undrawn(&why),
+                _ => {} // nothing to draw: a space, a Type 3 glyph (its procedure draws it), one off the region
+            }
+        }
+        let opaque = text.compositing.blend == Blend::Normal
+            && (!fills || text.compositing.fill_alpha >= 1.0)
+            && (!strokes || text.compositing.stroke_alpha >= 1.0);
+        let groups: Vec<Vec<Segment>> = if opaque {
+            vec![glyphs.concat()]
+        } else {
+            glyphs
+        };
+        for segments in &groups {
+            self.glyphs(segments, text, fills, strokes);
+        }
+    }
+
+    /// Glyph outlines `segments` (page space) painted as `text` says: filled when `fills`, stroked when `strokes`.
+    fn glyphs(&mut self, segments: &[Segment], text: &TextEvent, fills: bool, strokes: bool) {
+        let Some(around) = bounds(segments) else {
+            return;
+        };
+        let reach = if strokes {
+            text.stroke.width * text.stroke.miter_limit.max(1.0) + text.stroke.width
+        } else {
+            0.0
+        };
+        let reach_box = Rect {
+            x0: around.x0 - reach,
+            y0: around.y0 - reach,
+            x1: around.x1 + reach,
+            y1: around.y1 + reach,
+        };
+        if !self.meets(reach_box) {
+            return;
+        }
+        let mask = match self
+            .clips
+            .mask(text.clip.as_ref(), &self.grid, &mut self.undrawn)
+        {
+            Left::Nothing => return,
+            Left::All => None,
+            Left::Mask(mask) => Some(mask),
+        };
+        let blend = self.composited(text.compositing);
+        if fills && let Some(rgb) = self.paint_color(&text.fill, "text fill") {
+            let Some(outline) = build(segments, &|p| self.grid.point(p)) else {
+                return;
+            };
+            let paint = paint(rgb, text.compositing.fill_alpha, blend);
+            self.pixmap.fill_path(
+                &outline,
+                &paint,
+                FillRule::Winding,
+                Transform::identity(),
+                mask.as_deref(),
+            );
+        }
+        if strokes && let Some(rgb) = self.paint_color(&text.stroke.color, "text stroke") {
+            let paint = paint(rgb, text.compositing.stroke_alpha, blend);
+            self.stroke(segments, &text.stroke, &paint, mask.as_deref());
+        }
     }
 
     fn shading(&mut self, shading: &ShadingEvent) {

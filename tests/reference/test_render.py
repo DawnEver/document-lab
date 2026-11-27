@@ -1,24 +1,27 @@
-"""The ``reference`` part, rendering: the own renderer (stage 1 -- paths, clips, images; no text) accepted against
-PyMuPDF's renders of the real PDFs ``DOCUMENT_LAB_REFERENCE_PDFS`` names, the text taken out of PyMuPDF's.
+"""The ``reference`` part, rendering: the own renderer (paths, clips, images, text from font outlines) accepted
+against PyMuPDF's renders of the real PDFs ``DOCUMENT_LAB_REFERENCE_PDFS`` names.
 
-Every :data:`STEP`-th page of each document, its first among them, is drawn by the own renderer with text off and by
-PyMuPDF from a copy of the page whose text PyMuPDF itself removed (a redaction over the page that removes text and
-keeps images and line art), both at :data:`DPI`, and compared whole as ``tests/rendering.py`` says: a page agrees
-when at most :data:`PAGE_SHARE` of the pixels either inks are off by more than its ``PIXEL_TOLERANCE`` levels after
-the blur. (Masking text by its spans' boxes instead left glyph ink outside them -- TeX's extensible brackets -- that
-read as differences on every mathematical page.) PyMuPDF draws a page two ways, color-managed (``ICCBased`` through
-its profile, ``DeviceCMYK`` through a press profile) or not (every space by the standard's formulas); the reader
-converts ``ICCBased`` the first way and ``DeviceCMYK`` the second (`tests/unit/test_render.py`), so a page agrees
-with whichever agrees better. A page holding what the own renderer does not draw yet (``undrawn``: a shading, a
-pattern, a transparency group composited with an alpha) is not compared. The planted control: each document's compared
-page with the most dark ink, held to its own reference turned upside down and moved a few pixels, must be reported.
+Every :data:`STEP`-th page of each document, its first among them, is drawn whole by both, text and annotations
+too, at :data:`DPI`, and compared as ``tests/rendering.py`` says: a page agrees when at most :data:`PAGE_SHARE` of
+the pixels either inks are off by more than its ``PIXEL_TOLERANCE`` levels after the blur. PyMuPDF draws a page two
+ways, color-managed (``ICCBased`` through its profile, ``DeviceCMYK`` through a press profile) or not (every space by
+the standard's formulas); the reader converts ``ICCBased`` the first way and ``DeviceCMYK`` the second
+(`tests/unit/test_render.py`), so a page agrees with whichever agrees better. A page holding what the own renderer
+does not draw yet (``undrawn``: a shading, a pattern, a transparency group composited with an alpha, a glyph of a
+font it has no program for) is not compared. The planted control: each document's compared page with the most dark
+ink, held to its own reference turned upside down and moved a few pixels, must be reported.
 
-Measured on 2026-11-27 over 283 local PDFs, every 5th page (1414 pages; 7 holding what stage 1 does not draw --
-3 patterns, 2 shadings, 2 alpha-composited groups): of the 1407 compared, 82 % have at most 0.5 % of their inked
-pixels off, 93.5 % at most 2 %, 99.1 % at most 5 %; the worst 23.5 %. What remains is anti-aliasing: MuPDF leaves
-faint seams between fills that abut, the own renderer none, and a finely striped image sampled a fraction of a pixel
-apart. :data:`PAGE_SHARE` guards against what is not: the faults this comparison found -- CMYK JPEGs inverted twice
-(88 % off), a page held to the wrong color mode (50 %) -- are far above it.
+A standard font a document does not embed is drawn with PDFium's Foxit substitute where PyMuPDF draws URW's, two
+designs (``tests/unit/test_render_text.py`` holds the substitution itself to PyMuPDF drawing the Foxit program):
+its glyphs' edges differ, which the measurement below includes.
+
+Measured on 2026-11-27 over 283 local PDFs, every 10th page (774 pages; 5 holding what is not drawn -- 2 patterns,
+a shading, an alpha-composited group, a Chinese font not embedded): of the 769 compared, 78.0 % have at most 0.5 %
+of their inked pixels off, 93.5 % at most 2 %, 99.3 % at most 5 %; the worst 14.2 % (finely striped plots sampled
+a fraction of a pixel apart); the 84 pages with a font not embedded 70.2 %, 91.7 % and 100 %, worst 3.8 %.
+:data:`PAGE_SHARE` guards against what is not anti-aliasing or a substitute's design: the faults this comparison
+found -- CMYK JPEGs inverted twice (88 % off), a page held to the wrong color mode (50 %) -- are far above it, as are
+glyphs placed a fraction of a pixel off MuPDF's grid (25-45 % on synthetic pages of text).
 """
 
 from __future__ import annotations
@@ -58,27 +61,20 @@ def _document(pdf: Path) -> tuple[bytes, _pdf.Reader]:
 
 
 def _reference(data: bytes, number: int, *, managed: bool) -> np.ndarray:
-    """Page ``number`` of ``data`` rendered by PyMuPDF with its text removed by PyMuPDF; color-managed or not."""
+    """Page ``number`` of ``data`` rendered by PyMuPDF, color-managed or not."""
     pymupdf.TOOLS.set_icc(managed)
     try:
         with pymupdf.open(stream=data, filetype='pdf') as doc:
-            page = doc[number - 1]
-            page.add_redact_annot(page.rect)
-            page.apply_redactions(
-                images=pymupdf.PDF_REDACT_IMAGE_NONE,
-                graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
-                text=pymupdf.PDF_REDACT_TEXT_REMOVE,
-            )
-            pix = page.get_pixmap(dpi=DPI, colorspace=pymupdf.csRGB, alpha=False, annots=True)
+            pix = doc[number - 1].get_pixmap(dpi=DPI, colorspace=pymupdf.csRGB, alpha=False, annots=True)
             return _pixels(pix.samples, pix.w, pix.h).copy()
     finally:
         pymupdf.TOOLS.set_icc(True)
 
 
 def _own(pdf: Path, number: int) -> np.ndarray | None:
-    """Page ``number`` drawn by the own renderer, no text; None when it holds what stage 1 does not draw."""
+    """Page ``number`` drawn by the own renderer; None when it holds what the own renderer does not draw yet."""
     width, height, _, pixels, undrawn = _document(pdf)[1].render(
-        number, None, DPI / 72, text=False, annotations=True, alpha=False
+        number, None, DPI / 72, text=True, annotations=True, alpha=False
     )
     return None if undrawn else _pixels(pixels, width, height)
 
@@ -135,8 +131,8 @@ def test_a_misplaced_reference_is_reported(pdf):
     """The planted control: the compared page the own renderer draws most dark ink on, held to its reference turned
     upside down and moved by :data:`PLANTED_SHIFT` pixels.
 
-    A document whose compared pages draw less than :data:`PLANTED_INK` of their pixels dark without their text (prose
-    alone; a page of faint scanned paper), or that the own renderer leaves undrawn, has nothing to tell apart.
+    A document whose compared pages draw less than :data:`PLANTED_INK` of their pixels dark (a page of faint
+    scanned paper), or that the own renderer leaves undrawn, has nothing to tell apart.
     """
     _needs_documents()
     assert pdf is not None

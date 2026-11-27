@@ -152,7 +152,7 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
         open = Some(Open {
             span: Span {
                 text: piece.to_string(),
-                font: Rc::clone(&text.font),
+                font: Rc::clone(&text.font.info),
                 size: text.size,
                 bbox: glyph.bbox,
                 render_mode: text.render_mode,
@@ -271,7 +271,7 @@ fn sits_on(accent: &Placed, letter: &Placed) -> bool {
 /// before it.
 fn join(open: &Open, text: &TextEvent, origin: Point, direction: (f64, f64)) -> Option<bool> {
     let size = open.span.size.max(f64::MIN_POSITIVE);
-    if open.span.font != text.font
+    if open.span.font != text.font.info
         || (open.span.size - text.size).abs() > 0.01 * size
         || open.span.render_mode != text.render_mode
         || open.span.fill != fill_of(text)

@@ -22,7 +22,7 @@ __all__ = ['main']
 _RENDERER = {
     'choices': ('pymupdf', 'own'),
     'default': 'pymupdf',
-    'help': "what draws the pictures: pymupdf (default) or own (document-lab's renderer: no text until its stage 2)",
+    'help': "what draws the pictures: pymupdf (default) or own (document-lab's renderer; refuses what it cannot draw)",
 }
 
 

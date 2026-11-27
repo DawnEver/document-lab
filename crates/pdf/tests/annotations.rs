@@ -56,8 +56,8 @@ fn paths(content: &Content) -> Vec<(Rect, Option<String>)> {
                     p.segments
                         .iter()
                         .filter_map(|s| match s {
-                            pdf::interpret::Segment::MoveTo(q)
-                            | pdf::interpret::Segment::LineTo(q) => Some((q.x, q.y)),
+                            pdf::geometry::Segment::MoveTo(q)
+                            | pdf::geometry::Segment::LineTo(q) => Some((q.x, q.y)),
                             _ => None,
                         })
                         .unzip();

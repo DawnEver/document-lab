@@ -1,8 +1,8 @@
 //! Glyphs to spans: runs of text in one font and size along one baseline -- or down one column, when the font writes
 //! vertically -- the unit a page's text is read in.
 //!
-//! Consecutive glyphs join while their font, size, writing mode and direction hold and each starts where the last
-//! ended: on its baseline (within [`BASELINE`] sizes) and no further on than [`BREAK`] sizes. A gap wider than
+//! Consecutive glyphs join while their font, size, fill, writing mode and direction hold and each starts where the
+//! last ended: on its baseline (within [`BASELINE`] sizes) and no further on than [`BREAK`] sizes. A gap wider than
 //! [`SPACE`] sizes with no space glyph in it reads as a space, as the eye reads it. Text events are taken in
 //! drawing order, so a span never joins glyphs drawn apart, nor glyphs of two layers (hidden, an annotation's), and
 //! a vertical span's text reads top to bottom.
@@ -15,6 +15,7 @@
 
 use std::rc::Rc;
 
+use crate::color::Color;
 use crate::font::FontInfo;
 use crate::geometry::{Point, Rect};
 use crate::interpret::{Event, Layer, TextEvent};
@@ -54,6 +55,13 @@ pub struct Span {
     /// a change of font, size or baseline inside a word (`Head` set bold in `Headline`; the `2` of `H2O`). None
     /// when it continues no span and none continues it.
     pub unspaced: Option<usize>,
+    /// The color its glyphs are filled with; None when its rendering mode does not fill (stroke, invisible, clip).
+    pub fill: Option<Color>,
+}
+
+/// The fill of glyphs shown in `text`: its fill color when its rendering mode fills (0, 2, 4, 6).
+fn fill_of(text: &TextEvent) -> Option<Color> {
+    matches!(text.render_mode, 0 | 2 | 4 | 6).then(|| text.fill.clone())
 }
 
 struct Open {
@@ -120,6 +128,7 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
                     vertical: text.vertical,
                     direction,
                     unspaced: None,
+                    fill: fill_of(text),
                 },
                 origin: glyph.origin,
                 end: glyph.end,
@@ -175,6 +184,7 @@ fn join(open: &Open, text: &TextEvent, origin: Point, direction: (f64, f64)) -> 
     if open.span.font != text.font
         || (open.span.size - text.size).abs() > 0.01 * size
         || open.span.render_mode != text.render_mode
+        || open.span.fill != fill_of(text)
         || open.span.layer != text.layer
         || open.span.vertical != text.vertical
         || (open.span.direction.0 - direction.0).abs() + (open.span.direction.1 - direction.1).abs()

@@ -13,12 +13,12 @@ consumer's vocabulary here -- schemas live in consumers. Modules and usage: `REA
 - Dependency arrow: `paper`, `ai` -> `extract`; `paper` -> `markdown`, `regions`, `pdf`; `per_page` -> `markdown`, `regions`,
   `ink`, `pdf`, `png`; `markdown`, `regions`, `tables` -> `layout` -> `ir`; `ink` -> `ir` (`regions` takes its drawings as boxes, never pixels);
   `extract` -> `plot`, `pdf`, `html` -> `numbers`, `ir`; `plot` -> `glyphs` -> `strokefont`; `strokes` -> `plot`, `ir`; `ocr` imports
-  nothing of ours; `capture` is apart (`cli` -> `session` -> `stitch`; `cli` -> `desktop`, `export`, `ocr`, `files` ->
+  only `_pdf`; `capture` is apart (`cli` -> `session` -> `stitch`; `cli` -> `desktop`, `export`, `ocr`, `files` ->
   `win32`, `export`; `desktop` -> `win32` | `quartz` | `x11` (one per OS, chosen at run time) -> `screen`; `join` ->
   `export`, `stitch`; `export` -> `png`), imported only by `__main__`; `png` imports nothing of ours. PDF bytes are
-  `_pdf`'s (the Rust crates): `pdf` reads through it, `capture` (`export`, `join`, `files`) reads and writes through
-  it; PyMuPDF only renders pixels (`pdf.read_raster`, `paper`, `glyphs`) and serves `ocr`. OCR is `ocr`'s alone: no
-  other module calls Tesseract. The base imports
+  `_pdf`'s (the Rust crates): `pdf` reads through it, `capture` (`export`, `join`, `files`) and `ocr` read and write
+  through it; PyMuPDF only renders pixels (`pdf.read_raster`, `paper`, `glyphs`). OCR is `ocr`'s alone: no other
+  module runs the `tesseract` executable, which is the user's to install, never bundled. The base imports
   without `ai_lab` (`tests/unit/test_ai.py` proves it in a subprocess).
 - A test that needs expected values builds a SYNTHETIC PDF (`tests/synthetic.py`); no real PDF is ever committed
   (the repo is public). Three real papers, held locally (`DOCUMENT_LAB_PAPERS=<dir>`, the `papers` part), are checked

@@ -2,7 +2,8 @@
 //!
 //! `open(data, password)` reads a file; its `page(number, curve_samples)` returns what the page draws as tuples,
 //! which `document_lab.pdf` turns into the IR, and its `image(object)` an image's samples. `create(path)` writes a
-//! PDF of image pages, or of pages copied from a `Reader` (`document_lab.capture`).
+//! PDF of image pages, or of pages copied from a `Reader` (`document_lab.capture`), perhaps with a text layer laid
+//! over them (`document_lab.ocr`).
 //!
 //! A refusal raises by its kind: [`Refused`] and its kinds when the reader refuses the input, `ValueError` for a
 //! request it cannot honor, `OSError` when writing fails.
@@ -264,6 +265,36 @@ impl Writer {
         let page = reader.at(number)?;
         self.open()?
             .copy_page(&reader.file, page)
+            .map_err(|e| refused(&e))
+    }
+
+    /// Add page `number` (1-based) of `reader` as the next page, with `words` -- `(text, (x0, y0, x1, y1))`, each
+    /// box in page space -- laid over it as an invisible text layer.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "pyo3 hands a list over owned"
+    )]
+    fn copy_page_with_text(
+        &mut self,
+        reader: &Reader,
+        number: usize,
+        words: Vec<(String, Box4)>,
+    ) -> PyResult<()> {
+        let page = reader.at(number)?;
+        let words: Vec<pdf::writer::Word> = words
+            .iter()
+            .map(|(text, (x0, y0, x1, y1))| pdf::writer::Word {
+                text,
+                bbox: Rect {
+                    x0: *x0,
+                    y0: *y0,
+                    x1: *x1,
+                    y1: *y1,
+                },
+            })
+            .collect();
+        self.open()?
+            .copy_page_with_text(&reader.file, page, &words)
             .map_err(|e| refused(&e))
     }
 

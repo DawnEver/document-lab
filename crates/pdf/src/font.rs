@@ -76,34 +76,30 @@ impl FontInfo {
 }
 
 impl FontInfo {
-    /// The facts of the font named `name`, of `subtype`, its descriptor and embedded program stating them.
+    /// The facts of the font named `name`, of `subtype`, its descriptor (its values resolved in `file`) and
+    /// embedded program stating them.
+    ///
+    /// Refuses a reference in the descriptor that does not resolve.
     fn new(
+        file: &File,
         name: String,
         subtype: String,
         descriptor: Option<&Dict>,
         program: Option<&Program>,
-    ) -> Self {
-        let number = |key: &[u8]| {
-            descriptor
-                .and_then(|d| d.get(key))
-                .and_then(Object::as_number)
-        };
-        Self {
+    ) -> Result<Self> {
+        Ok(Self {
             name,
             subtype,
-            flags: descriptor
-                .and_then(|d| d.get(b"Flags"))
-                .and_then(Object::as_integer)
-                .unwrap_or(0),
-            descriptor_weight: number(b"FontWeight"),
+            flags: file.flags(descriptor)?,
+            descriptor_weight: file.number(descriptor, b"FontWeight")?,
             program_weight: program.and_then(Program::weight),
-            italic_angle: number(b"ItalicAngle"),
+            italic_angle: file.number(descriptor, b"ItalicAngle")?,
             embedded: descriptor.is_some_and(|d| {
                 [&b"FontFile"[..], b"FontFile2", b"FontFile3"]
                     .iter()
                     .any(|k| d.get(k).is_some())
             }),
-        }
+        })
     }
 }
 
@@ -468,15 +464,16 @@ impl File {
     ///
     /// Refuses a reference in it that does not resolve.
     pub fn font(&self, dict: &Dict) -> Result<Font> {
-        let name_of = |key: &[u8]| {
-            dict.get(key)
-                .and_then(Object::as_name)
-                .map(|n| String::from_utf8_lossy(n).into_owned())
+        let name_of = |key: &[u8]| -> Result<Option<String>> {
+            Ok(self
+                .get(dict, key)?
+                .and_then(|o| o.as_name().map(|n| String::from_utf8_lossy(n).into_owned())))
         };
-        let subtype = name_of(b"Subtype").unwrap_or_default();
-        let base_name = name_of(b"BaseFont")
-            .or_else(|| name_of(b"Name"))
-            .unwrap_or_default();
+        let subtype = name_of(b"Subtype")?.unwrap_or_default();
+        let base_name = match name_of(b"BaseFont")? {
+            Some(name) => name,
+            None => name_of(b"Name")?.unwrap_or_default(),
+        };
         let to_unicode = match self.get(dict, b"ToUnicode")? {
             Some(Object::Stream(s)) => self
                 .decode(&s)
@@ -514,12 +511,7 @@ impl File {
         } else {
             GLYPH_SPACE
         };
-        let number = |key: &[u8]| {
-            descriptor
-                .as_ref()
-                .and_then(|d| d.get(key))
-                .and_then(Object::as_number)
-        };
+        let number = |key: &[u8]| self.number(descriptor.as_ref(), key);
         let standard = base14(&base_name);
         let bbox = match &descriptor {
             Some(d) => self.rect(d, b"FontBBox")?,
@@ -530,12 +522,12 @@ impl File {
         // the size (the proportions of a Latin text face).
         // (In glyph space: a Type 3 font's is its own, through its matrix.)
         let unit = 0.001 / matrix.0[3].abs().max(f64::MIN_POSITIVE);
-        let ascent = number(b"Ascent")
+        let ascent = number(b"Ascent")?
             .filter(|a| *a > 0.0)
             .or(standard.map(|m| m.ascent))
             .or(bbox.map(|b| b.y1))
             .unwrap_or(800.0 * unit);
-        let descent = number(b"Descent")
+        let descent = number(b"Descent")?
             .filter(|d| *d < 0.0)
             .or(standard.map(|m| m.descent))
             .or(bbox.map(|b| b.y0))
@@ -545,7 +537,13 @@ impl File {
             None => None,
         };
         Ok(Font {
-            info: FontInfo::new(base_name, subtype, descriptor.as_ref(), program.as_ref()),
+            info: FontInfo::new(
+                self,
+                base_name,
+                subtype,
+                descriptor.as_ref(),
+                program.as_ref(),
+            )?,
             kind,
             to_unicode,
             program: match program {
@@ -565,6 +563,13 @@ impl File {
             return Ok(None);
         };
         let decoded = |stream: &Stream| self.decode(stream).ok().and_then(|d| d.into_bytes().ok());
+        let open_type = |stream: &Stream| -> Result<bool> {
+            Ok(self
+                .get(&stream.dict, b"Subtype")?
+                .as_ref()
+                .and_then(Object::as_name)
+                == Some(b"OpenType"))
+        };
         Ok(
             match (
                 self.get(descriptor, b"FontFile")?,
@@ -572,11 +577,7 @@ impl File {
                 self.get(descriptor, b"FontFile3")?,
             ) {
                 (_, Some(Object::Stream(s)), _) => decoded(&s).map(Program::Sfnt),
-                (_, _, Some(Object::Stream(s)))
-                    if s.dict.get(b"Subtype").and_then(Object::as_name) == Some(b"OpenType") =>
-                {
-                    decoded(&s).map(Program::Sfnt)
-                }
+                (_, _, Some(Object::Stream(s))) if open_type(&s)? => decoded(&s).map(Program::Sfnt),
                 (Some(Object::Stream(s)), ..) => decoded(&s).map(Program::Type1),
                 _ => None,
             },
@@ -613,6 +614,23 @@ impl File {
         })
     }
 
+    /// The number `descriptor[key]` holds, resolved; None when there is no descriptor or no number.
+    fn number(&self, descriptor: Option<&Dict>, key: &[u8]) -> Result<Option<f64>> {
+        Ok(match descriptor {
+            Some(d) => self.get(d, key)?.as_ref().and_then(Object::as_number),
+            None => None,
+        })
+    }
+
+    /// The descriptor's `/Flags`, resolved; 0 when absent.
+    fn flags(&self, descriptor: Option<&Dict>) -> Result<i64> {
+        Ok(match descriptor {
+            Some(d) => self.get(d, b"Flags")?.as_ref().and_then(Object::as_integer),
+            None => None,
+        }
+        .unwrap_or(0))
+    }
+
     fn descriptor(&self, dict: &Dict) -> Result<Option<Dict>> {
         Ok(match self.get(dict, b"FontDescriptor")? {
             Some(Object::Dict(d)) => Some(d),
@@ -644,10 +662,7 @@ impl File {
                 .collect(),
             _ => Vec::new(),
         };
-        let missing = descriptor
-            .and_then(|d| d.get(b"MissingWidth"))
-            .and_then(Object::as_number)
-            .unwrap_or(0.0);
+        let missing = self.number(descriptor, b"MissingWidth")?.unwrap_or(0.0);
         let standard = base14(name);
         let encoding = self.simple_encoding(dict, subtype, standard, descriptor, program)?;
         Ok(Kind::Simple {
@@ -669,10 +684,7 @@ impl File {
         descriptor: Option<&Dict>,
         program: Option<&Program>,
     ) -> Result<Vec<Option<String>>> {
-        let symbolic = descriptor
-            .and_then(|d| d.get(b"Flags"))
-            .and_then(Object::as_integer)
-            .is_some_and(|f| f & 4 != 0);
+        let symbolic = self.flags(descriptor)? & 4 != 0;
         // The base encoding: the one named, else the font's own -- Symbol's and ZapfDingbats' built in, Standard
         // for any other Type 1, and for a symbolic TrueType none at all (its codes are its glyphs).
         let builtin: &pdf_encoding::ForwardMap = match standard.map(|m| m.name) {
@@ -958,6 +970,14 @@ mod tests {
         );
         assert!(base14("CMR10").is_none());
     }
+
+    #[test]
+    fn a_standard_font_measures_its_ligatures() {
+        let times = base14("Times-Roman").unwrap();
+        assert_eq!(standard_width(times, Some("\u{FB01}")), Some(556.0));
+        assert_eq!(standard_width(times, Some("\u{FB02}")), Some(556.0));
+    }
+
     fn info(name: &str) -> FontInfo {
         FontInfo {
             name: name.to_string(),

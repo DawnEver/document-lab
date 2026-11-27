@@ -154,7 +154,7 @@ breakglass = ["app:5704921", "role:admin"]  # the ops App merges break-glass; ad
 # exceeds the 500 KB large-files bound because the `gpu` extra (marker-pdf -> torch) resolves in it; the size check guards against
 # committed blobs, which a lock is not.
 [tool.dev_lab.env]
-entry = ["src/document_lab/capture/cli.py"]
+entry = ["src/document_lab/__main__.py", "src/document_lab/capture/cli.py"]
 pending = []
 
 [tool.dev_lab.hooks]

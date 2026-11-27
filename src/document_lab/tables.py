@@ -14,11 +14,22 @@ is closed and no rule runs on past it -- a side no rule closes is closed where E
 open at its sides), never where only some do -- each cell is a rectangle with no rule inside it, it has two rows and
 two columns or more, no drawing (a curve, a slant) runs from cell to cell, no text crosses a rule and two cells or
 more hold text (a label and its value). Else :func:`grids` names it a :class:`NotATable`, with the reason.
+
+A scanned page has no vector rules, only a picture and, once OCR'd, words. Its rules are handed over as boxes found
+in its pixels (``rulings``, :func:`document_lab.ink.rulings`); this module reads no pixels. They join the page's own
+rules and the same grid makes the same table, its words the OCR's. A scan fed askew is read in the frame its skew
+turns back: its words and paths are turned with the rules, and each box found is turned forth to where the page shows
+it. OCR's own reading of the picture is weighed too: a rule lying within one word's box is that word's ink, and a
+word reading only strokes that a rule runs through is the rule read as text.
+
+A table set without rules -- columns parted by white space alone -- is no grid here, scanned or not.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
+import math
 from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
@@ -32,9 +43,10 @@ from document_lab.layout import lines
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
+    from document_lab.ink import Rulings
     from document_lab.ir import Provenance, TextSpan, VectorPath
 
-__all__ = ['THIN', 'TOLERANCE', 'NotATable', 'grids', 'tables']
+__all__ = ['STROKES', 'THIN', 'TOLERANCE', 'WORD_INK', 'NotATable', 'grids', 'tables']
 
 #: Points within which a grid's rules are one line, a gap along a rule is no gap, and a rule meets another (PyMuPDF's
 #: snap and join tolerance: a double rule is one line).
@@ -45,6 +57,10 @@ THIN: Final = 2.0
 LEVEL: Final = 0.5
 #: A color whose every RGB component is at least this shows nothing on white (a tint or ink: at most 1 - this).
 WHITE: Final = 0.95
+#: A picture's rule within this many points of one word's box all round is that word's ink (the tops of ``mm``).
+WORD_INK: Final = 1.0
+#: Characters a picture's rule reads as, OCR'd: a word of these alone that a rule runs through is that rule.
+STROKES: Final = frozenset('|!Il1[]_-\N{EN DASH}\N{EM DASH}')
 #: Touch tests between level and upright rules are made this many level rules at a time (memory, not results).
 _CHUNK: Final = 512
 
@@ -59,27 +75,126 @@ class NotATable:
     reason: str
 
 
-def tables(page: Page, *, tolerance: float = TOLERANCE) -> tuple[Table, ...]:
-    """The ruled tables of ``page``, top to bottom, each cited as ``table[i]`` and each cell by its own box."""
-    return tuple(g for g in grids(page, tolerance=tolerance) if isinstance(g, Table))
+def tables(page: Page, *, rulings: Rulings | None = None, tolerance: float = TOLERANCE) -> tuple[Table, ...]:
+    """The ruled tables of ``page``, top to bottom, each cited as ``table[i]`` and each cell by its own box.
+
+    ``rulings``: the rules of the page's picture (a scan's, :func:`document_lab.ink.rulings`), as :func:`grids` takes
+    them.
+    """
+    return tuple(g for g in grids(page, rulings=rulings, tolerance=tolerance) if isinstance(g, Table))
 
 
-def grids(page: Page, *, tolerance: float = TOLERANCE) -> tuple[Table | NotATable, ...]:
-    """Every grid of rules on ``page``, top to bottom: a :class:`Table`, or a :class:`NotATable` saying why not."""
-    level, upright, drawings = _rules(page.paths)
+def grids(page: Page, *, rulings: Rulings | None = None, tolerance: float = TOLERANCE) -> tuple[Table | NotATable, ...]:
+    """Every grid of rules on ``page``, top to bottom: a :class:`Table`, or a :class:`NotATable` saying why not.
+
+    ``rulings``: the rules of the page's picture (:func:`document_lab.ink.rulings`), boxes in the frame its skew
+    turns back. They join the page's own rules (each box level when wider than high) -- but for one lying within
+    :data:`WORD_INK` of a single word's box, which is that word's ink (the tops of ``mm`` side by side) -- and the
+    page is read in that frame: its text and paths turned back about its center by the skew, each box found turned
+    forth -- its center where the page shows it, its size as in the frame. A word reading only :data:`STROKES` that
+    one of these rules runs through is that rule as OCR read it, and no cell's text.
+    """
+    skew = 0.0 if rulings is None or rulings.skew is None else rulings.skew
+    seen = _turned_page(page, -skew) if skew else page
+    level, upright, drawings = _rules(seen.paths)
+    words = [s.provenance.bbox for s in seen.spans if s.text.strip() and s.provenance.bbox is not None]
+    pictured = [
+        b for b in (() if rulings is None else rulings.rules) if not any(_within(b, w, WORD_INK) for w in words)
+    ]
+    if pictured:
+        seen = dataclasses.replace(seen, spans=tuple(s for s in seen.spans if not _reads_as_rule(s, pictured)))
+    for box in pictured:
+        if box.width >= box.height:
+            level.append(((box.y0 + box.y1) / 2, box.x0, box.x1))
+        else:
+            upright.append(((box.x0 + box.x1) / 2, box.y0, box.y1))
     found: list[Table | NotATable] = []
     for touching_h, touching_v in _connected(_merge(level, tolerance), _merge(upright, tolerance), tolerance):
         h, v = _snap(touching_h, tolerance), _snap(touching_v, tolerance)
         if len({s[0] for s in h}) > 1 and len({s[0] for s in v}) > 1:
-            found.append(_grid(page, h, v, drawings, tolerance))
+            found.append(_grid(seen, h, v, drawings, tolerance))
     found.sort(key=lambda g: (_bbox(g).y0, _bbox(g).x0))
     numbered: list[Table | NotATable] = []
     for grid in found:
         if isinstance(grid, Table):
             index = sum(isinstance(g, Table) for g in numbered)
             grid = Table(grid.rows, grid.cell_bboxes, grid.provenance.at(locator=f'table[{index}]'))  # noqa: PLW2901
-        numbered.append(grid)
+        numbered.append(_turned_grid(grid, skew, page) if skew else grid)
     return tuple(numbered)
+
+
+def _reads_as_rule(span: TextSpan, rules: list[BBox]) -> bool:
+    """Whether ``span`` reads only :data:`STROKES` and one of ``rules`` runs through its box (along it, across it)."""
+    own = span.provenance.bbox
+    if own is None or not span.text.strip() or not set(span.text.strip()) <= STROKES:
+        return False
+    for rule in rules:
+        x, y = (rule.x0 + rule.x1) / 2, (rule.y0 + rule.y1) / 2
+        level = rule.width >= rule.height
+        if (
+            (own.y0 <= y <= own.y1 and rule.x0 < own.x1 and own.x0 < rule.x1)
+            if level
+            else (own.x0 <= x <= own.x1 and rule.y0 < own.y1 and own.y0 < rule.y1)
+        ):
+            return True
+    return False
+
+
+def _within(box: BBox, outer: BBox, margin: float) -> bool:
+    """Whether ``box`` lies inside ``outer`` grown by ``margin`` on every side."""
+    return (
+        box.x0 >= outer.x0 - margin
+        and box.y0 >= outer.y0 - margin
+        and box.x1 <= outer.x1 + margin
+        and box.y1 <= outer.y1 + margin
+    )
+
+
+def _turn(x: float, y: float, degrees: float, page: Page) -> tuple[float, float]:
+    """The point turned by ``degrees`` (clockwise as seen, y down) about the page's center."""
+    angle = math.radians(degrees)
+    cx, cy = page.width / 2, page.height / 2
+    dx, dy = x - cx, y - cy
+    return cx + dx * math.cos(angle) - dy * math.sin(angle), cy + dx * math.sin(angle) + dy * math.cos(angle)
+
+
+def _turned_box(box: BBox, degrees: float, page: Page) -> BBox:
+    """``box`` moved as its center turns by ``degrees`` about the page's center, its size kept."""
+    x, y = _turn((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2, degrees, page)
+    return BBox(x - box.width / 2, y - box.height / 2, x + box.width / 2, y + box.height / 2)
+
+
+def _turned_page(page: Page, degrees: float) -> Page:
+    """``page`` with its spans' boxes and its paths' points turned by ``degrees`` about its center."""
+    spans = tuple(
+        dataclasses.replace(s, provenance=s.provenance.at(bbox=_turned_box(s.provenance.bbox, degrees, page)))
+        for s in page.spans
+        if s.provenance.bbox is not None
+    )
+    paths = tuple(
+        dataclasses.replace(
+            p,
+            points=tuple(_turn(float(x), float(y), degrees, page) for x, y in p.points),
+            provenance=p.provenance.at(bbox=_turned_box(p.provenance.bbox, degrees, page)),
+        )
+        if p.provenance.bbox is not None
+        else p
+        for p in page.paths
+    )
+    return dataclasses.replace(page, spans=spans, paths=paths)
+
+
+def _turned_grid(grid: Table | NotATable, degrees: float, page: Page) -> Table | NotATable:
+    """``grid``'s boxes turned forth by ``degrees``: as the page shows them."""
+    if isinstance(grid, NotATable):
+        return NotATable(_turned_box(grid.bbox, degrees, page), grid.reason)
+    cells = None
+    if grid.cell_bboxes is not None:
+        cells = tuple(
+            tuple(None if b is None else _turned_box(b, degrees, page) for b in row) for row in grid.cell_bboxes
+        )
+    box = grid.provenance.bbox
+    return Table(grid.rows, cells, grid.provenance.at(bbox=None if box is None else _turned_box(box, degrees, page)))
 
 
 def _bbox(grid: Table | NotATable) -> BBox:
@@ -402,7 +517,7 @@ def _table(page: Page, slots: _Slots, drawings: list[VectorPath], tolerance: flo
     if sum(bool(t) for t in texts) < 2:  # noqa: PLR2004 -- a label and what it labels
         msg = 'fewer than two cells hold text (a drawn grid, a plot)'
         raise _Broken(msg)
-    here: Provenance = page.paths[0].provenance.at(bbox=box)
+    here: Provenance = page.spans[0].provenance.at(bbox=box)  # two cells hold text: the page has spans
     return Table(
         tuple(tuple(texts[cell_of[r][c]] for c in range(cols)) for r in range(rows)),
         tuple(tuple(boxes[cell_of[r][c]] for c in range(cols)) for r in range(rows)),

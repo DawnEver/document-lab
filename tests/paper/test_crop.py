@@ -176,7 +176,7 @@ def test_a_reference_in_prose_is_no_equation_number_and_two_numbers_refuse(tmp_p
 
 
 def test_a_formula_row_set_flush_left_is_no_prose(tmp_path):
-    """A multline display opens flush left with a variable's letters (``cos hweTs``); its number closes it below."""
+    """A display broken over lines opens flush left with a variable's letters (``cos hweTs``); its number ends it."""
     formula = [math(50, 210, 'cos hweTs'), math(64, 224, '= 1 - x2 + x4 - x6'), number(288, 238, 25)]
     left = [*column(50, 250, range(100, 200, 12)), *formula, *column(50, 250, range(256, 340, 12))]
     doc = read(tmp_path, left)

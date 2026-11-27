@@ -521,6 +521,47 @@ def draw_ruled_table(
                 page.insert_text((rect.x0 + 4, rect.y1 - 6), text, fontname='helv', fontsize=9)
 
 
+#: Booktabs' rules: the top and bottom rules heavier than the one under the header (0.08 em and 0.05 em at 10 pt).
+TOP_RULE, MID_RULE = 0.8, 0.5
+
+
+def draw_booktabs(
+    page: pymupdf.Page,
+    rows: Sequence[Sequence[str]] = TABLE_ROWS,
+    *,
+    at: tuple[float, float] = TABLE_ORIGIN,
+    filled: bool = True,
+    rules: Sequence[int] | None = None,
+) -> pymupdf.Rect:
+    """``rows`` as booktabs sets them: no rule down, a top rule, one under the header row, a bottom rule.
+
+    Rules are thin filled bars, as pdfLaTeX draws them (or ``filled`` False, stroked lines), across every column;
+    columns are parted by white space alone, each cell's text set :data:`TABLE_CELL` apart from ``at``. ``rules``:
+    the row boundaries ruled (0 the top, ``len(rows)`` the bottom), by default top, under the header and bottom.
+    Returns the box from the top rule to the bottom one.
+    """
+    x0, y0 = at
+    w, h = TABLE_CELL
+    right = x0 + len(rows[0]) * w
+    for r in (0, 1, len(rows)) if rules is None else rules:
+        thick = MID_RULE if 0 < r < len(rows) else TOP_RULE
+        _rule(page, pymupdf.Point(x0, y0 + r * h), pymupdf.Point(right, y0 + r * h), filled=filled, width=thick)
+    for r, row in enumerate(rows):
+        for c, text in enumerate(row):
+            if text:
+                page.insert_text((x0 + c * w + 4, y0 + (r + 1) * h - 6), text, fontname='helv', fontsize=9)
+    return pymupdf.Rect(x0, y0, right, y0 + len(rows) * h)
+
+
+#: A list set between rules, as booktabs rules a table: a heading, then each item after its enumerator.
+LIST_ROWS = (
+    ('Steps', ''),
+    ('1.', 'Mount the stator on the bench'),
+    ('2.', 'Couple the load machine'),
+    ('3.', 'Record the winding temperature'),
+)
+
+
 def mixed_pdf(path: Path) -> Path:
     """Page 1: a heading, a table and a raster image with a caption; page 2: one red polyline."""
     doc = pymupdf.open()

@@ -1,4 +1,4 @@
-"""A page's figures, tables and equations as regions, found from its text alone.
+"""A page's figures, tables and equations as regions, found from its text.
 
 Nothing here reads pixels: an OCR'd capture is one picture with words over it, so a region is told by its words.
 A figure's caption (``Figure 2 - ...``) is below it: the figure runs up from the caption to the nearest prose above.
@@ -8,10 +8,11 @@ width or :data:`PROSE_WORDS` words long. A mention in prose (``Table 7, item 1d`
 no caption. A figure or table spans the text width; its label is the caption's, as read.
 
 An equation number ending a line right of :data:`NUMBER_RIGHT` of its column -- alone, or after a formula (``(3)``,
-``(A.1)``) -- is an equation, cut out by :func:`equation`: its formula's lines from the number to the prose around
-it, in the number's column on a page set in two columns there (a left column's number stands short of the page's
-middle), across both when the formula does; a formula OCR'd reads as noise and is taken all the same. One function
-crops every numbered equation -- a paper's (`document_lab.paper`) and a captured standard's -- so each is cut alike.
+``(A.1)``) -- is an equation, cut out by :func:`equation`: its formula's lines from the number to the prose around it,
+in the number's column on a page set in two columns there (a left column's number stands short of the page's middle),
+across both when the formula does, with the bars and small images set among its lines; a formula OCR'd reads as noise
+and is taken all the same. One function crops every numbered equation -- a paper's (`document_lab.paper`) and a captured
+standard's -- so each is cut alike.
 
 A table without a caption (a standard's normative-reference annex, a list set in columns) is told by its rows:
 :data:`TABLE_ROWS` or more bands of :data:`ROW_CELLS` or more cells side by side, set near the body size, no prose
@@ -39,13 +40,14 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Literal
 
 from document_lab import layout
-from document_lab.ir import BBox, Table, union
+from document_lab.ir import BBox, union
+from document_lab.tables import SHORT_CELL, aligned
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from document_lab.ink import Drawing
-    from document_lab.ir import Page, TextSpan
+    from document_lab.ir import Page, Table, TextSpan
 
 __all__ = ['Region', 'equation', 'regions']
 
@@ -89,8 +91,6 @@ TABLE_ROWS: Final = 2
 ROW_CELLS: Final = 3
 ROW_SIZE: Final = 1.5
 ROW_GAP: Final = 3.0
-#: A table's row has a short cell -- at most this many words -- among its cells; columns of prose do not.
-SHORT_CELL: Final = 3
 #: A cell reads at least this many letters or digits (or is a dash); fewer is a speck OCR read.
 CELL_CHARS: Final = 2
 #: The PDF text render mode of an OCR layer: its glyphs invisible over the picture they were read from.
@@ -100,8 +100,6 @@ _DASHES: Final = frozenset('-\N{HYPHEN}\N{EN DASH}\N{EM DASH}\N{MINUS SIGN}')
 DRAWN_MIN: Final = 1.5
 #: ...and draws a straight stroke at least this many body sizes long: words OCR missed are glyphs, none so long.
 DRAWN_STROKE: Final = 1.5
-#: A table's columns stand at least this many body sizes apart: wider than a word space, as no cell's words are.
-COLUMN_GAP: Final = 0.5
 #: A drawing of at least this many rules across it, only words off them and TABLE_ROWS lines of text in it, is a table
 #: even where lines long enough to be prose cross it (a data sheet's names and values, its rows ruled apart; a
 #: striped icon holds no text).
@@ -425,70 +423,13 @@ def _bands_of(page: _Page, lines: list[layout.Line]) -> list[list[layout.Line]]:
 
 
 def _cells(page: _Page, region: Region) -> Table | None:
-    """The cells of table ``region`` as its text sets them: columns apart by white space, rows by baseline.
+    """The cells of table ``region`` as its text sets them (`document_lab.tables.aligned`).
 
-    Its text is the spans whose middle lies in it, below its caption. A column is a run across the region that some
-    span covers, apart from the next by :data:`COLUMN_GAP` body sizes that no span of any row crosses; a row is spans
-    whose middles lie within half a body size. A row with nothing in the first column carries on the cells of the row
-    above (a value wrapped onto a second line). A cell's text is its spans as a line (`document_lab.layout`). None
-    when the text does not make two rows of two columns.
+    Its text is the spans whose middle lies in it, below its caption.
     """
     caption = next((ln for ln in page.lines if (c := _caption(ln)) and c[1] == region.label), None)
     box, below = region.bbox, caption.y1 if caption is not None else region.bbox.y0
-    spans = [
-        s
-        for s in page.page.spans
-        if s.text.strip() and not s.vertical and box.x0 <= s.center[0] <= box.x1 and below < s.center[1] <= box.y1
-    ]
-    columns = _columns(spans, COLUMN_GAP * page.body)
-    rows: list[list[list[TextSpan]]] = []
-    for band in _span_bands(spans, page.body / 2):
-        row: list[list[TextSpan]] = [[] for _ in columns]
-        for s in band:
-            row[next(i for i, (x0, x1) in enumerate(columns) if x0 <= s.provenance.bbox.x0 <= x1)].append(s)
-        if rows and not row[0]:  # no first cell: the row above, carried on
-            for cell, more in zip(rows[-1], row, strict=True):
-                cell.append(more)
-        else:
-            rows.append([[cell] for cell in row])
-    if len(rows) < TABLE_ROWS or len(columns) < 2:  # noqa: PLR2004 -- a label and its value
-        return None
-
-    def text(lines: list[list[TextSpan]]) -> str:
-        return ' '.join(layout.Line(line, '').text for line in lines if line)
-
-    def bbox(lines: list[list[TextSpan]]) -> BBox | None:
-        boxes = [s.provenance.bbox for line in lines for s in line]
-        return union(boxes) if boxes else None
-
-    return Table(
-        tuple(tuple(text(cell) for cell in row) for row in rows),
-        tuple(tuple(bbox(cell) for cell in row) for row in rows),
-        spans[0].provenance.at(bbox=union([s.provenance.bbox for s in spans])),
-    )
-
-
-def _columns(spans: list[TextSpan], gap: float) -> list[tuple[float, float]]:
-    """The runs across the page ``spans`` cover, left to right, each apart from the next by ``gap`` points or more."""
-    runs: list[list[float]] = []
-    for s in sorted(spans, key=lambda s: s.provenance.bbox.x0):
-        b = s.provenance.bbox
-        if runs and b.x0 - runs[-1][1] < gap:
-            runs[-1][1] = max(runs[-1][1], b.x1)
-        else:
-            runs.append([b.x0, b.x1])
-    return [(x0, x1) for x0, x1 in runs]
-
-
-def _span_bands(spans: list[TextSpan], reach: float) -> list[list[TextSpan]]:
-    """``spans`` in bands top to bottom: each span within ``reach`` points down of its band's first middle."""
-    bands: list[list[TextSpan]] = []
-    for s in sorted(spans, key=lambda s: s.center[1]):
-        if bands and s.center[1] - bands[-1][0].center[1] <= reach:
-            bands[-1].append(s)
-        else:
-            bands.append([s])
-    return bands
+    return aligned([s for s in page.page.spans if box.x0 <= s.center[0] <= box.x1 and below < s.center[1] <= box.y1])
 
 
 def equation(page: Page, number: str, face: tuple[str, float]) -> BBox | None:

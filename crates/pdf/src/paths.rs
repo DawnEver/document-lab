@@ -9,7 +9,7 @@
 //! hundreds of thousands of subpaths, and one buffer hands over whole (`document_lab._pdf`).
 
 use crate::geometry::Point;
-use crate::interpret::Segment;
+use crate::geometry::Segment;
 
 /// The most segments one curve is flattened to: a bound on what absurd coordinates can cost, far past any
 /// curve a page draws within a flatness of a hundredth of a point.

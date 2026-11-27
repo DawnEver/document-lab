@@ -1,6 +1,6 @@
 //! Fonts (ISO 32000-2 section 9.5-9.10), read for what text needs: how a string splits into codes, each code's
-//! width and Unicode text, the font's ascent and descent, and whether it is bold ([`FontInfo::bold`]). Glyph
-//! outlines are not read.
+//! width and Unicode text, the font's ascent and descent, and whether it is bold ([`FontInfo::bold`]); and for what
+//! drawing it needs, each code's glyph shape ([`Font::shape`], [`crate::shape`]).
 
 use crate::base14::{FONTS, Metrics};
 use crate::cid2unicode::Collection;
@@ -10,7 +10,9 @@ use crate::file::File;
 use crate::fontfile::{self, GlyphText};
 use crate::geometry::Matrix;
 use crate::object::{Dict, Object, Stream};
+use crate::shape::{self, Shapes, Source};
 use crate::symbol_tables::{CORPORATE_USE, WEBDINGS, WINGDINGS, WINGDINGS_2, WINGDINGS_3};
+use std::rc::Rc;
 
 /// What identifies a font to a reader: its name, the descriptor's facts and what its program says of itself.
 #[derive(Debug, Clone, PartialEq)]
@@ -207,22 +209,28 @@ pub(crate) fn style_weight<'a>(words: impl IntoIterator<Item = &'a str>) -> Opti
     found
 }
 
+/// A value for each one-byte code of a simple font, None for a code it gives none.
+type ByCode = Vec<Option<String>>;
+
 /// How codes become glyphs.
 #[derive(Debug, Clone)]
-enum Kind {
-    /// One byte per code; widths by code; Unicode by the encoding.
+pub(crate) enum Kind {
+    /// One byte per code; widths by code; Unicode by the encoding; glyphs by its names.
     Simple {
         first: i64,
         widths: Vec<f64>,
         missing: f64,
         encoding: Vec<Option<String>>,
+        /// Each code's glyph name, as its encoding states it; None where the program's own encoding selects.
+        names: Vec<Option<String>>,
         base14: Option<&'static Metrics>,
     },
-    /// Codes by a `CMap`, widths by `CID`; vertical displacements by `CID` when the `CMap` writes vertically.
+    /// Codes by a `CMap`, widths by `CID`; vertical displacements and position vectors by `CID` when the `CMap`
+    /// writes vertically.
     Composite {
         cmap: CMap,
         widths: CidMetric,
-        vertical: Option<CidMetric>,
+        vertical: Option<Box<Vertical>>,
         code_text: CodeText,
         /// Adobe's text of the `CID`s, of the collection a predefined `CMap` is of, or for Identity and an embedded
         /// `CMap` the one the `CIDFont`'s `/CIDSystemInfo` names, when Adobe's tables cover it. The ordering decides,
@@ -236,7 +244,7 @@ enum Kind {
 /// One metric of a composite font's glyphs by `CID`, in glyph space (9.7.4.3): `/W`'s widths and `/DW`, or a
 /// vertical font's displacements w1y from `/W2` and `/DW2`.
 #[derive(Debug, Clone)]
-struct CidMetric {
+pub(crate) struct CidMetric {
     /// (first `CID`, last `CID`, value) runs, in the order stated: the first run holding a `CID` gives its value.
     runs: Vec<(u32, u32, f64)>,
     /// The value of a `CID` no run holds.
@@ -245,16 +253,30 @@ struct CidMetric {
 
 impl CidMetric {
     fn of(&self, cid: u32) -> f64 {
+        self.find(cid).unwrap_or(self.default)
+    }
+
+    fn find(&self, cid: u32) -> Option<f64> {
         self.runs
             .iter()
             .find(|(lo, hi, _)| (*lo..=*hi).contains(&cid))
-            .map_or(self.default, |run| run.2)
+            .map(|run| run.2)
     }
+}
+
+/// A vertical font's metrics by `CID` (9.7.4.3), in glyph space: the displacement w1y, and the position vector
+/// (vx, vy) from the horizontal origin to the vertical one, which places the glyph's outline -- `/W2`'s, else vx
+/// half the glyph's width and vy `/DW2`'s first number.
+#[derive(Debug, Clone)]
+pub(crate) struct Vertical {
+    displacement: CidMetric,
+    across: CidMetric,
+    down: CidMetric,
 }
 
 /// What a composite font's codes are, as text, when no `ToUnicode` `CMap` says.
 #[derive(Debug, Clone, Copy)]
-enum CodeText {
+pub(crate) enum CodeText {
     /// Nothing: the codes select glyphs only.
     Unknown,
     /// UTF-16 code units (a predefined `Uni...-UCS2-` or `-UTF16-` `CMap`).
@@ -267,15 +289,17 @@ enum CodeText {
 #[derive(Debug, Clone)]
 pub struct Font {
     /// Its identity.
-    pub info: FontInfo,
-    kind: Kind,
+    pub info: Rc<FontInfo>,
+    pub(crate) kind: Kind,
     to_unicode: Option<CMap>,
     /// The embedded TrueType program's glyph text, the last word on a glyph's text.
-    program: Option<GlyphText>,
+    glyph_text: Option<GlyphText>,
     /// A `CIDFontType2`'s CID-to-glyph map (None: the identity).
-    cid_to_gid: Option<Vec<u16>>,
+    pub(crate) cid_to_gid: Option<Vec<u16>>,
     /// The symbol font it is, by its name or its program's: its private-use text is read as the symbol shown.
     symbols: Option<Symbols>,
+    /// Its glyphs' shapes.
+    pub(crate) shapes: Shapes,
     /// From glyph space to text space (`[0.001 0 0 0.001 0 0]` but for Type 3 fonts).
     pub matrix: Matrix,
     /// The ascent in glyph space.
@@ -300,9 +324,19 @@ pub struct Code {
     /// Its vertical advance w1y in text space units of one font size (negative: down the column), when its font
     /// writes vertically.
     pub vertical_advance: Option<f64>,
+    /// Its position vector (vx, vy) in text space units of one font size, when its font writes vertically: where
+    /// its horizontal origin, which its outline is drawn from, lies before its vertical origin.
+    pub position: Option<(f64, f64)>,
 }
 
 const GLYPH_SPACE: Matrix = Matrix([0.001, 0.0, 0.0, 0.001, 0.0, 0.0]);
+
+/// A font is equal to itself alone: a font dictionary read once is one font, shared through the file's cache.
+impl PartialEq for Font {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
 
 impl Font {
     /// Whether the font writes vertically: its `CMap`'s writing mode is 1 (a predefined vertical `CMap`, `Identity-V`,
@@ -318,6 +352,31 @@ impl Font {
         )
     }
 
+    /// The glyph name a simple font's encoding gives `code`; None for a composite font, or where the program's own
+    /// encoding selects its glyph.
+    pub(crate) fn glyph_name(&self, code: u32) -> Option<String> {
+        match &self.kind {
+            Kind::Simple { names, .. } => names.get(usize::try_from(code).ok()?)?.clone(),
+            Kind::Composite { .. } => None,
+        }
+    }
+
+    /// Whether its descriptor flags it symbolic (Table 121 bit 3): its characters are outside the standard Latin
+    /// set, and a TrueType program's codes select its glyphs directly.
+    pub(crate) fn symbolic(&self) -> bool {
+        self.info.flags & 4 != 0
+    }
+
+    /// The width a simple font's `/Widths` states for `code`, in text space units of one font size; None when it
+    /// states none.
+    pub(crate) fn stated_width(&self, code: u32) -> Option<f64> {
+        let Kind::Simple { first, widths, .. } = &self.kind else {
+            return None;
+        };
+        let index = usize::try_from(i64::from(code) - first).ok()?;
+        widths.get(index).map(|w| w * self.matrix.0[0])
+    }
+
     /// Split `bytes` into codes, each with its text and advances.
     #[must_use]
     pub fn codes(&self, bytes: &[u8]) -> Vec<Code> {
@@ -328,6 +387,7 @@ impl Font {
                 widths,
                 missing,
                 encoding,
+                names,
                 base14,
             } => bytes
                 .iter()
@@ -340,7 +400,7 @@ impl Font {
                         .map(str::to_string)
                         .or_else(|| encoding[usize::from(b)].clone())
                         .or_else(|| {
-                            let program = self.program.as_ref()?;
+                            let program = self.glyph_text.as_ref()?;
                             program.text(program.glyph_of_code(code)?)
                         });
                     let text = match self.symbols {
@@ -351,8 +411,18 @@ impl Font {
                         .ok()
                         .and_then(|i| widths.get(i))
                         .copied();
+                    // A standard font's width is its glyph's: the one the code's glyph name names (in the Adobe Glyph
+                    // List, or ITC Zapf Dingbats' list), else its text's.
+                    let glyph = names[usize::from(b)].as_deref().and_then(|n| {
+                        glyph_text(n)
+                            .or_else(|| skrifa::raw::ps::agl::name_to_char(n).map(String::from))
+                    });
                     let width = stated
-                        .or_else(|| base14.and_then(|m| standard_width(m, text.as_deref())))
+                        .or_else(|| {
+                            base14.and_then(|m| {
+                                standard_width(m, glyph.as_deref().or(text.as_deref()))
+                            })
+                        })
                         .unwrap_or(*missing);
                     Code {
                         code,
@@ -360,6 +430,7 @@ impl Font {
                         text,
                         width: width * units,
                         vertical_advance: None,
+                        position: None,
                     }
                 })
                 .collect(),
@@ -388,7 +459,7 @@ impl Font {
                                 Some(map) => *map.get(usize::try_from(cid).ok()?)?,
                                 None => u16::try_from(cid).ok()?,
                             };
-                            self.program.as_ref()?.text(gid)
+                            self.glyph_text.as_ref()?.text(gid)
                         })
                         .or_else(|| collection.and_then(|c| c.text(cid)))
                         .or_else(|| legacy_text(*code_text, code, len));
@@ -396,12 +467,17 @@ impl Font {
                         Some(symbols) => symbols.text(text, None),
                         None => text,
                     };
+                    let width = widths.of(cid);
                     Code {
                         code,
                         bytes: len,
                         text,
-                        width: widths.of(cid) * units,
-                        vertical_advance: vertical.as_ref().map(|v| v.of(cid) * units),
+                        width: width * units,
+                        vertical_advance: vertical.as_ref().map(|v| v.displacement.of(cid) * units),
+                        position: vertical.as_ref().map(|v| {
+                            let across = v.across.find(cid).unwrap_or(width / 2.0);
+                            (across * units, v.down.of(cid) * units)
+                        }),
                     }
                 })
                 .collect(),
@@ -481,7 +557,7 @@ fn base14(name: &str) -> Option<&'static Metrics> {
 /// states only as private-use code points -- U+F000 plus the code, the (3,0) Microsoft Symbol `cmap`'s convention a
 /// symbolic TrueType font follows (ISO 32000-2 9.6.5.4), written into `ToUnicode` `CMap`s as found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Symbols {
+pub(crate) enum Symbols {
     /// Symbol: Annex D.5's encoding.
     Symbol,
     /// ITC Zapf Dingbats: Annex D.6's encoding.
@@ -628,43 +704,31 @@ impl File {
         } else {
             GLYPH_SPACE
         };
-        let number = |key: &[u8]| self.number(descriptor.as_ref(), key);
-        let standard = base14(&base_name);
-        let bbox = match &descriptor {
-            Some(d) => self.rect(d, b"FontBBox")?,
-            None if subtype == "Type3" => self.rect(dict, b"FontBBox")?,
-            None => None,
-        };
-        // Ascent and descent: the descriptor's, else the standard font's, else the font box's, else 0.8 and -0.2 of
-        // the size (the proportions of a Latin text face).
-        // (In glyph space: a Type 3 font's is its own, through its matrix.)
-        let unit = 0.001 / matrix.0[3].abs().max(f64::MIN_POSITIVE);
-        let ascent = number(b"Ascent")?
-            .filter(|a| *a > 0.0)
-            .or(standard.map(|m| m.ascent))
-            .or(bbox.map(|b| b.y1))
-            .unwrap_or(800.0 * unit);
-        let descent = number(b"Descent")?
-            .filter(|d| *d < 0.0)
-            .or(standard.map(|m| m.descent))
-            .or(bbox.map(|b| b.y0))
-            .unwrap_or(-200.0 * unit);
+        let (ascent, descent) = self.extent(
+            dict,
+            descriptor.as_ref(),
+            &subtype,
+            base14(&base_name),
+            matrix,
+        )?;
         let cid_to_gid = match &cid_font {
             Some(cid_font) => self.cid_to_gid(cid_font)?,
             None => None,
         };
         let (program_weight, warnings) = program_weight(program.as_ref());
+        let info = FontInfo::new(
+            self,
+            base_name,
+            subtype,
+            descriptor.as_ref(),
+            program_weight,
+        )?;
+        let source =
+            self.shape_source(dict, &info, cid_font.is_some(), symbols, program.as_ref())?;
         Ok(Font {
-            info: FontInfo::new(
-                self,
-                base_name,
-                subtype,
-                descriptor.as_ref(),
-                program_weight,
-            )?,
             kind,
             to_unicode,
-            program: match program {
+            glyph_text: match program {
                 Some(Program::Sfnt(data)) => Some(GlyphText::parse(&data)),
                 _ => None,
             },
@@ -674,6 +738,87 @@ impl File {
             ascent,
             descent,
             warnings,
+            shapes: Shapes::new(source),
+            info: Rc::new(info),
+        })
+    }
+
+    /// The ascent and descent, in glyph space (a Type 3 font's its own, through its `matrix`), of the font `dict`
+    /// describes, of `subtype`, its `descriptor` and the `standard` font it names: the descriptor's, else the
+    /// standard font's, else the font box's, else 0.8 and -0.2 of the size (the proportions of a Latin text face).
+    fn extent(
+        &self,
+        dict: &Dict,
+        descriptor: Option<&Dict>,
+        subtype: &str,
+        standard: Option<&Metrics>,
+        matrix: Matrix,
+    ) -> Result<(f64, f64)> {
+        let bbox = match descriptor {
+            Some(d) => self.rect(d, b"FontBBox")?,
+            None if subtype == "Type3" => self.rect(dict, b"FontBBox")?,
+            None => None,
+        };
+        let unit = 0.001 / matrix.0[3].abs().max(f64::MIN_POSITIVE);
+        let ascent = self
+            .number(descriptor, b"Ascent")?
+            .filter(|a| *a > 0.0)
+            .or(standard.map(|m| m.ascent))
+            .or(bbox.map(|b| b.y1))
+            .unwrap_or(800.0 * unit);
+        let descent = self
+            .number(descriptor, b"Descent")?
+            .filter(|d| *d < 0.0)
+            .or(standard.map(|m| m.descent))
+            .or(bbox.map(|b| b.y0))
+            .unwrap_or(-200.0 * unit);
+        Ok((ascent, descent))
+    }
+
+    /// Where the glyph shapes of the font `dict` describes, of identity `info`, come from: a Type 3 font's
+    /// procedures, the program it embeds, else its substitute -- for a simple font, by its name or descriptor
+    /// ([`shape::substitute`]) -- else nowhere, why named.
+    fn shape_source(
+        &self,
+        dict: &Dict,
+        info: &FontInfo,
+        composite: bool,
+        symbols: Option<Symbols>,
+        program: Option<&Program>,
+    ) -> Result<Source> {
+        if info.subtype == "Type3" {
+            let procedures = match self.get(dict, b"CharProcs")? {
+                Some(Object::Dict(d)) => d,
+                _ => Dict::new(),
+            };
+            let resources = match self.get(dict, b"Resources")? {
+                Some(Object::Dict(d)) => Some(d),
+                _ => None,
+            };
+            return Ok(Source::Procedures {
+                procedures,
+                resources,
+            });
+        }
+        if let Some(program) = program {
+            return Ok(Source::Embedded(Rc::from(program.data())));
+        }
+        if info.embedded {
+            return Ok(Source::Unavailable(
+                format!("font {}: its embedded program does not decode", info.name).into(),
+            ));
+        }
+        let standard = base14(&info.name).map(|m| m.name);
+        let italic = shape::italic(info.flags, info.italic_angle, info.name_without_subset());
+        let substitute = shape::substitute(standard, symbols, info.flags, info.bold(), italic);
+        Ok(match (composite, substitute) {
+            (false, Some((substitute, stretched))) => Source::Substitute {
+                substitute,
+                stretched,
+            },
+            _ => Source::Unavailable(
+                format!("font {} is not embedded and has no substitute", info.name).into(),
+            ),
         })
     }
 
@@ -795,18 +940,22 @@ impl File {
         };
         let missing = self.number(descriptor, b"MissingWidth")?.unwrap_or(0.0);
         let standard = base14(name);
-        let encoding = self.simple_encoding(dict, subtype, symbols, descriptor, program)?;
+        let (encoding, names) =
+            self.simple_encoding(dict, subtype, symbols, descriptor, program)?;
         Ok(Kind::Simple {
             first,
             widths,
             missing,
             encoding,
+            names,
             base14: standard,
         })
     }
 
-    /// A simple font's text by code: its base encoding (named, built into its program, or by its kind) with its
-    /// `/Differences` over it.
+    /// A simple font's text and glyph names by code: its base encoding (named, built into its program, or by its
+    /// kind) with its `/Differences` over it. A code's name is None where the program's own encoding selects its
+    /// glyph: no base encoding is named and the font is a symbolic TrueType font, or embeds a Type 1 or CFF program
+    /// (9.6.5.2: its built-in encoding is the base).
     fn simple_encoding(
         &self,
         dict: &Dict,
@@ -814,7 +963,7 @@ impl File {
         symbols: Option<Symbols>,
         descriptor: Option<&Dict>,
         program: Option<&Program>,
-    ) -> Result<Vec<Option<String>>> {
+    ) -> Result<(ByCode, ByCode)> {
         let symbolic = self.flags(descriptor)? & 4 != 0;
         let (base_name, differences) = match self.get(dict, b"Encoding")? {
             Some(Object::Name(n)) => (Some(n), None),
@@ -849,13 +998,40 @@ impl File {
                 None => table(&pdf_encoding::STANDARD),
             },
         };
+        // The glyph names: the base encoding's characters' names; with no base named, none where the program's own
+        // encoding is the base (a symbolic TrueType font, an embedded Type 1 or CFF program). Symbol and Zapf
+        // Dingbats embedding no program are drawn by their built-in encodings (Annex D.5, D.6) whatever base is
+        // named, as viewers draw them: a base named for one (`WinAnsiEncoding`) names glyphs it does not have.
+        let own_base = base_name.is_none()
+            && ((subtype == "TrueType" && symbolic)
+                || matches!(program, Some(Program::Type1(_) | Program::Cff(_))));
+        let built_in = match symbols {
+            Some(s @ (Symbols::Symbol | Symbols::ZapfDingbats)) if program.is_none() => Some(s),
+            _ => None,
+        };
+        let name_of = |text: Option<String>| {
+            let text = text?;
+            let mut chars = text.chars();
+            let (Some(c), None) = (chars.next(), chars.next()) else {
+                return None;
+            };
+            let mut buffer = [0u8; 64];
+            skrifa::raw::ps::agl::char_to_name(c, &mut buffer).map(str::to_string)
+        };
+        let mut names: Vec<Option<String>> = match built_in {
+            Some(symbols) => (0..=255u8)
+                .map(|b| name_of(symbols.character(b).map(String::from)))
+                .collect(),
+            None if own_base => vec![None; 256],
+            None => encoding.iter().cloned().map(name_of).collect(),
+        };
         // An embedded Type 1 program with no base encoding named: the program's own encoding is the base.
         if base_name.is_none()
             && matches!(subtype, "Type1" | "MMType1")
             && let Some(Program::Type1(program)) = program
-            && let Some(names) = fontfile::type1_encoding(program)
+            && let Some(builtin) = fontfile::type1_encoding(program)
         {
-            for (slot, name) in encoding.iter_mut().zip(names) {
+            for (slot, name) in encoding.iter_mut().zip(builtin) {
                 *slot = name.and_then(|n| glyph_text(&n));
             }
         }
@@ -866,7 +1042,9 @@ impl File {
                     Object::Integer(i) => code = usize::try_from(i).unwrap_or(256),
                     Object::Name(glyph) => {
                         if code < 256 {
-                            encoding[code] = glyph_text(&String::from_utf8_lossy(&glyph));
+                            let glyph = String::from_utf8_lossy(&glyph).into_owned();
+                            encoding[code] = glyph_text(&glyph);
+                            names[code] = Some(glyph);
                         }
                         code += 1;
                     }
@@ -874,7 +1052,7 @@ impl File {
                 }
             }
         }
-        Ok(encoding)
+        Ok((encoding, names))
     }
 
     fn composite(&self, dict: &Dict, cid_font: &Dict) -> Result<Kind> {
@@ -926,15 +1104,20 @@ impl File {
             .get(cid_font, b"DW")?
             .and_then(|o| o.as_number())
             .unwrap_or(1000.0);
-        let widths = self.cid_metric(cid_font, b"W", 1, width)?;
+        let widths = self.cid_metric(cid_font, b"W", 1, 0, width)?;
         let vertical = if vertical {
             // `/DW2` is [vy w1y], [880 -1000] when absent.
-            let displacement = match self.get(cid_font, b"DW2")? {
-                Some(Object::Array(dw2)) => dw2.get(1).and_then(Object::as_number),
-                _ => None,
-            }
-            .unwrap_or(-1000.0);
-            Some(self.cid_metric(cid_font, b"W2", 3, displacement)?)
+            let dw2 = match self.get(cid_font, b"DW2")? {
+                Some(Object::Array(dw2)) => dw2,
+                _ => Vec::new(),
+            };
+            let stated =
+                |i: usize, default: f64| dw2.get(i).and_then(Object::as_number).unwrap_or(default);
+            Some(Box::new(Vertical {
+                displacement: self.cid_metric(cid_font, b"W2", 3, 0, stated(1, -1000.0))?,
+                across: self.cid_metric(cid_font, b"W2", 3, 1, 0.0)?,
+                down: self.cid_metric(cid_font, b"W2", 3, 2, stated(0, 880.0))?,
+            }))
         } else {
             None
         };
@@ -948,14 +1131,14 @@ impl File {
     }
 
     /// The metric `key` of a `CIDFont` states, `default` for any `CID` it does not list: `/W`, one number a `CID`
-    /// (its width w0), or `/W2`, three (w1y vx vy), of which the displacement w1y is read. (The position vector
-    /// (vx, vy) places the glyph's outline off its vertical origin; text is placed by the origin and the
-    /// displacement, so it is not read.) A list is `c [v ...]`, a run `c_first c_last v`.
+    /// (its width w0), or `/W2`, three (w1y vx vy), of which the one at `index` is read. A list is `c [v ...]`, a
+    /// run `c_first c_last v...`.
     fn cid_metric(
         &self,
         cid_font: &Dict,
         key: &[u8],
         per: usize,
+        index: usize,
         default: f64,
     ) -> Result<CidMetric> {
         let mut runs = Vec::new();
@@ -972,7 +1155,10 @@ impl File {
                 match &items[i + 1] {
                     Object::Array(list) => {
                         for (cid, values) in (first..).zip(list.chunks(per)) {
-                            let value = self.resolve(&values[0])?.as_number().unwrap_or(default);
+                            let value = match values.get(index) {
+                                Some(v) => self.resolve(v)?.as_number().unwrap_or(default),
+                                None => default,
+                            };
                             runs.push((cid, cid, value));
                         }
                         i += 2;
@@ -980,7 +1166,7 @@ impl File {
                     last => {
                         let (Some(last), Some(value)) = (
                             last.as_integer().and_then(|v| u32::try_from(v).ok()),
-                            items.get(i + 2).and_then(Object::as_number),
+                            items.get(i + 2 + index).and_then(Object::as_number),
                         ) else {
                             break;
                         };
@@ -1032,6 +1218,13 @@ fn program_weight(program: Option<&Program>) -> (Option<f64>, Vec<String>) {
 }
 
 impl Program {
+    /// Its bytes, decoded.
+    fn data(&self) -> &[u8] {
+        match self {
+            Self::Type1(data) | Self::Sfnt(data) | Self::Cff(data) => data,
+        }
+    }
+
     /// The PostScript name the program states of itself (a TrueType/OpenType program's; a Type 1's or a bare CFF's is
     /// not read).
     fn postscript_name(&self) -> Option<String> {

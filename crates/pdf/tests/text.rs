@@ -49,7 +49,7 @@ fn a_standard_font_places_each_glyph_by_its_width() {
     let (events, _) = texts("BT /F1 10 Tf 1 0 0 1 10 50 Tm (AB) Tj ET", HELVETICA, &[]);
     let event = &events[0];
     assert_eq!(
-        (text(event), event.font.name.as_str(), event.size),
+        (text(event), event.font.info.name.as_str(), event.size),
         ("AB".to_string(), "Helvetica", 10.0)
     );
     let (a, b) = (&event.glyphs[0], &event.glyphs[1]);
@@ -80,7 +80,7 @@ fn a_font_names_and_measures_itself_through_references() {
         ],
     );
     let event = &events[0];
-    let info = &event.font;
+    let info = &event.font.info;
     assert_eq!(
         (text(event), info.name.as_str(), info.subtype.as_str()),
         ("AB".to_string(), "Helvetica", "Type1")
@@ -714,8 +714,12 @@ fn a_cff_program_s_weight_string_makes_its_font_bold() {
         &font,
         &[&descriptor, &program],
     );
-    assert_eq!(events[0].font.program_weight, Some(700.0), "{warnings:?}");
-    assert!(events[0].font.bold());
+    assert_eq!(
+        events[0].font.info.program_weight,
+        Some(700.0),
+        "{warnings:?}"
+    );
+    assert!(events[0].font.info.bold());
 }
 
 #[test]
@@ -727,10 +731,40 @@ fn a_malformed_cff_program_is_a_warning_and_its_text_still_reads() {
         &[&descriptor, &program],
     );
     assert_eq!(text(&events[0]), "A");
-    assert!(!events[0].font.bold());
+    assert!(!events[0].font.info.bold());
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(
         warnings[0].contains("/F1 (ABCDEF+F1)") && warnings[0].contains("CFF"),
         "{warnings:?}"
     );
+}
+
+/// The width across a glyph's outline, in ems.
+fn outline_width(event: &TextEvent) -> f64 {
+    let pdf::shape::Shape::Outline(outline) = event.font.shape(event.glyphs[0].code) else {
+        panic!("no outline");
+    };
+    let xs: Vec<f64> = outline
+        .iter()
+        .filter_map(|s| match s {
+            pdf::geometry::Segment::MoveTo(p)
+            | pdf::geometry::Segment::LineTo(p)
+            | pdf::geometry::Segment::CurveTo(_, _, p) => Some(p.x),
+            pdf::geometry::Segment::Close => None,
+        })
+        .collect();
+    xs.iter().copied().fold(f64::MIN, f64::max) - xs.iter().copied().fold(f64::MAX, f64::min)
+}
+
+#[test]
+fn a_font_not_embedded_is_drawn_by_a_substitute_stretched_to_its_widths_unless_standard() {
+    let standard = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FirstChar 72 /LastChar 72 /Widths [1444] >>";
+    let other = "<< /Type /Font /Subtype /TrueType /BaseFont /Calibri /FirstChar 72 /LastChar 72 /Widths [1444] \
+                 /FontDescriptor << /Type /FontDescriptor /FontName /Calibri /Flags 32 >> >>";
+    let (helvetica, _) = texts("BT /F1 10 Tf (H) Tj ET", standard, &[]);
+    let (calibri, _) = texts("BT /F1 10 Tf (H) Tj ET", other, &[]);
+    // Helvetica's H is 722 units wide: a standard font's substitute is as it is; another's is stretched to the
+    // width the file states for it, twice the substitute's own.
+    let ratio = outline_width(&calibri[0]) / outline_width(&helvetica[0]);
+    assert!((ratio - 1444.0 / 722.0).abs() < 1e-6, "{ratio}");
 }

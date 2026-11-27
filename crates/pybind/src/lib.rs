@@ -22,9 +22,9 @@ use pdf::color::Pattern;
 use pdf::destination::{Action, Destination, Targets};
 use pdf::error::Kind;
 use pdf::forms::{Field, Value};
-use pdf::geometry::{Point, Rect};
+use pdf::geometry::{Point, Rect, Segment};
 use pdf::image::Placement;
-use pdf::interpret::{Event, Layer, PathEvent, Segment};
+use pdf::interpret::{Event, Layer, PathEvent};
 use pdf::metadata::{Metadata, Newer};
 use pdf::outline::Item;
 use pdf::paths::{Flattening, Polylines};
@@ -457,7 +457,7 @@ impl Reader {
     }
 
     /// The `region` (page space; None: the whole page) of page `number` drawn by the own renderer (`render`) at
-    /// `scale` pixels a point -- text only when `text` (refused until stage 2), annotations' appearances when
+    /// `scale` pixels a point -- text only when `text`, annotations' appearances when
     /// `annotations`, on transparency when `alpha` (else white): (width, height, channels, pixels, undrawn), the
     /// pixels rows top-down, `undrawn` each kind of mark in the region not drawn as the file states it and how many.
     #[pyo3(signature = (number, region, scale, *, text, annotations, alpha))]

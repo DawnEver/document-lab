@@ -16,6 +16,10 @@
 //! An accent drawn as a glyph of its own over (or under) a letter, as TeX without T1 encoding draws `ü` (`u` and
 //! `¨`), is one glyph with it before spans are made: the two composed as [`crate::accents`] says, the letter's
 //! place in the drawing order kept, its box spanning both. One set on no letter stays as it is (a lone `¨`).
+//!
+//! A fill change splits a run (a scan's glyphs each a grey of their own, a colored digit): the piece after it says it
+//! [continues the run](Span::continues_run) of the span before it, so a reader setting spans into lines reads the
+//! run whole without judging again where it goes on.
 
 use std::borrow::Cow;
 use std::rc::Rc;
@@ -63,6 +67,9 @@ pub struct Span {
     pub unspaced: Option<usize>,
     /// The color its glyphs are filled with; None when its rendering mode does not fill (stroke, invisible, clip).
     pub fill: Option<Color>,
+    /// Whether it continues the run of the span before it: its first glyph would have joined that span but for a
+    /// change of fill (see the module).
+    pub continues_run: bool,
 }
 
 /// The fill of glyphs shown in `text`: its fill color when its rendering mode fills (0, 2, 4, 6).
@@ -128,9 +135,13 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
             open.as_ref().map_or(along, |o| o.span.direction)
         };
         let piece = glyph.text.as_ref();
+        let step = open
+            .as_ref()
+            .and_then(|o| join(o, text, glyph.origin, direction));
         let joined = open
             .as_mut()
-            .and_then(|o| join(o, text, glyph.origin, direction).map(|gap| (o, gap)));
+            .zip(step)
+            .filter(|(o, _)| o.span.fill == fill_of(text));
         if let Some((o, gap)) = joined {
             if gap && !o.span.text.ends_with(' ') && !piece.starts_with(' ') {
                 o.span.text.push(' ');
@@ -161,6 +172,7 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
                 direction,
                 unspaced: None,
                 fill: fill_of(text),
+                continues_run: step.is_some(),
             },
             origin: glyph.origin,
             end: glyph.end,
@@ -168,15 +180,32 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
         });
     }
     out.extend(open);
+    finished(out)
+}
+
+/// The spans `out` opened, finished: each its [`Span::unspaced`] number, a blank one left out -- the next continuing
+/// the run of the span kept before it only when every span between went on with that run --, trailing white-space
+/// trimmed.
+fn finished(out: Vec<Open>) -> Vec<Span> {
     let unspaced = unspaced(&out);
+    let mut runs_on = false;
     out.into_iter()
         .zip(unspaced)
-        .filter(|(o, _)| !o.span.text.trim().is_empty())
-        .map(|(o, unspaced)| {
+        .filter_map(|(o, unspaced)| {
+            if o.span.text.trim().is_empty() {
+                runs_on &= o.span.continues_run;
+                return None;
+            }
+            let continues_run = o.span.continues_run && runs_on;
+            runs_on = true;
             let mut span = o.span;
             let trimmed = span.text.trim_end().len();
             span.text.truncate(trimmed);
-            Span { unspaced, ..span }
+            Some(Span {
+                unspaced,
+                continues_run,
+                ..span
+            })
         })
         .collect()
 }
@@ -267,14 +296,13 @@ fn sits_on(accent: &Placed, letter: &Placed) -> bool {
         && (-BASELINE * size..=RISE * size).contains(&rise)
 }
 
-/// Whether the glyph at `origin` continues `open`: None when it starts another span, else whether a space lies
-/// before it.
+/// Whether the glyph at `origin` continues the run `open` ends, whatever its fill: None when it starts another run,
+/// else whether a space lies before it. It joins `open` when its fill is `open`'s too.
 fn join(open: &Open, text: &TextEvent, origin: Point, direction: (f64, f64)) -> Option<bool> {
     let size = open.span.size.max(f64::MIN_POSITIVE);
     if open.span.font != text.font
         || (open.span.size - text.size).abs() > 0.01 * size
         || open.span.render_mode != text.render_mode
-        || open.span.fill != fill_of(text)
         || open.span.layer != text.layer
         || open.span.vertical != text.vertical
         || (open.span.direction.0 - direction.0).abs() + (open.span.direction.1 - direction.1).abs()

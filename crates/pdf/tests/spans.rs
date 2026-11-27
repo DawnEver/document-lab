@@ -234,3 +234,49 @@ fn an_accent_beside_or_far_above_a_letter_stays_an_accent() {
         ["\u{B4}", "u"]
     );
 }
+
+/// Each span's text and whether it continues the run of the span before it.
+fn runs(content: &str) -> Vec<(String, bool)> {
+    page_spans(content)
+        .into_iter()
+        .map(|s| (s.text, s.continues_run))
+        .collect()
+}
+
+#[test]
+fn a_piece_a_fill_change_splits_off_continues_the_run_before_it() {
+    let pieces = |a: &str, b: &str, c: &str| {
+        vec![
+            (a.to_string(), false),
+            (b.to_string(), true),
+            (c.to_string(), true),
+        ]
+    };
+    assert_eq!(
+        runs("BT /F1 10 Tf 10 50 Td (one) Tj 1 0 0 rg (two) Tj 0 g (three) Tj ET"),
+        pieces("one", "two", "three")
+    );
+    // A blank piece in a fill of its own is left out; the run goes on through it.
+    assert_eq!(
+        runs("BT /F1 10 Tf 10 50 Td (one) Tj 1 0 0 rg ( ) Tj 0 0 1 rg (two) Tj ET"),
+        [("one".to_string(), false), ("two".to_string(), true)]
+    );
+}
+
+#[test]
+fn a_fill_change_with_another_break_starts_a_run() {
+    // The planted wrong truths: a fill change together with a font change, a new line, a far jump, or a blank
+    // piece set apart before the next.
+    for content in [
+        "BT /F1 10 Tf 10 50 Td (one) Tj /F2 10 Tf 1 0 0 rg (two) Tj ET",
+        "BT /F1 10 Tf 10 50 Td (one) Tj 1 0 0 rg 0 -12 Td (two) Tj ET",
+        "BT /F1 10 Tf 10 50 Td (one) Tj 1 0 0 rg 100 0 Td (two) Tj ET",
+        "BT /F1 10 Tf 10 50 Td (one) Tj 1 0 0 rg 100 0 Td ( ) Tj 0 0 1 rg (two) Tj ET",
+    ] {
+        assert_eq!(
+            runs(content),
+            [("one".to_string(), false), ("two".to_string(), false)],
+            "{content}"
+        );
+    }
+}

@@ -188,6 +188,10 @@ class TextSpan:
     #: The color its glyphs are filled with; None when they are not filled (stroked or invisible text) or the source
     #: states no fill.
     fill: tuple[float, ...] | None = None
+    #: It continues the run of the span before it on its page: its source set them as one run, which it split where
+    #: the fill changes (a scan's glyphs each a grey of their own, a colored digit). False: it starts a run, or its
+    #: source states no runs.
+    continues_run: bool = False
 
     @property
     def center(self) -> tuple[float, float]:

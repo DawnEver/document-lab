@@ -20,8 +20,8 @@ overrides = [
 
 [[package]]
 name = "ai-lab"
-version = "0.0.1.dev456+g919a55130"
-source = { git = "https://github.com/DawnEver/ai-lab.git#919a5513044c00c8363fb4b5a955f6bdc369f254" }
+version = "0.0.1.dev458+g92c7a763f"
+source = { git = "https://github.com/DawnEver/ai-lab.git#92c7a763f7a415b9e8811f3c8e187d1d346fb96d" }
 dependencies = [
     { name = "lab-commons", extra = ["paths"] },
 ]

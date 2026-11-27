@@ -11,6 +11,7 @@ from document_lab.ir import BBox, Page
 from document_lab.pdf import read_pdf
 from document_lab.tables import NotATable, grids, tables
 from tests.synthetic import (
+    LIST_ROWS,
     MERGED,
     MERGED_ROWS,
     RED,
@@ -20,6 +21,7 @@ from tests.synthetic import (
     PlotSpec,
     broken_rules,
     double_border,
+    draw_booktabs,
     draw_plot,
     draw_ruled_table,
     draw_sideways_table,
@@ -435,3 +437,127 @@ def test_a_table_printed_sideways_reads_in_the_frame_its_text_stands_upright_in(
     assert _sideways_differences(table, -turn)  # a planted wrong truth: turned the other way
     mirrored = dataclasses.replace(table, rows=tuple(row[::-1] for row in table.rows))
     assert _sideways_differences(mirrored, turn)  # ... and its cells read in another order
+
+
+def _booktabs(page, rows=TABLE_ROWS, **options):
+    return draw_booktabs(page, rows, **options)
+
+
+@pytest.mark.parametrize('filled', [True, False], ids=['thin filled bars', 'stroked lines'])
+def test_a_table_ruled_by_its_rows_alone_reads_its_columns_from_its_text(tmp_path, filled):
+    """Booktabs: a top rule, one under the header, a bottom rule, nothing down -- white space parts its columns."""
+    page = _page(tmp_path, lambda p: _booktabs(p, filled=filled))
+    (table,) = tables(page)
+    assert table.rows == TABLE_ROWS
+    assert tuple(table.provenance.bbox) == _box(table_cell_rect(0, 0) | table_cell_rect(3, 2))
+    assert table.provenance.locator == 'table[0]'
+    value = next(s for s in page.spans if s.text == '1.25').provenance.bbox
+    assert table.cell_bboxes[1][1] == value  # a cell's box is its text's: no rule bounds it
+    assert table_differences(table, TABLE_ROWS)[1] == []
+
+
+def test_a_scan_s_table_ruled_by_its_rows_alone_reads_from_its_picture_rules(tmp_path):
+    whole = table_cell_rect(0, 0) | table_cell_rect(3, 2)
+    level = tuple(BBox(whole.x0, y - 0.4, whole.x1, y + 0.4) for y in (whole.y0, whole.y0 + 20, whole.y1))
+    (table,) = tables(_text_only(tmp_path), rulings=Rulings(0.0, level))
+    assert table.rows == TABLE_ROWS
+    assert tables(_text_only(tmp_path), rulings=Rulings(0.0, level[::2])) == ()  # planted: two rules make no stack
+
+
+def test_a_partial_rule_under_a_header_s_columns_breaks_no_table(tmp_path):
+    """A ``cmidrule`` under two of the header's columns: a rule of its own extent, no row of the stack."""
+
+    def cmidrule(page):
+        page.draw_rect(pymupdf.Rect(196, 416, 428, 416.4), color=None, fill=(0, 0, 0))
+
+    (table,) = tables(_page(tmp_path, _booktabs, cmidrule))
+    assert table.rows == TABLE_ROWS
+
+
+def test_a_ground_under_a_table_ruled_by_its_rows_is_not_drawn_in_it(tmp_path):
+    """A page's tint, or a panel behind the table: painted under the whole stack, no figure's ink."""
+
+    def ground(page):
+        page.draw_rect(page.rect, color=None, fill=(0.9, 0.9, 0.85))
+
+    (table,) = tables(_page(tmp_path, ground, _booktabs))
+    assert table.rows == TABLE_ROWS
+    shaded_row = pymupdf.Rect(72, 420, 432, 440)  # planted: shading one row is drawn in it
+
+    (refused,) = grids(_page(tmp_path, ground, _booktabs, lambda p: p.draw_rect(shaded_row, color=None, fill=RED)))
+    assert isinstance(refused, NotATable)
+
+
+def test_a_header_over_two_columns_parts_no_columns_of_the_body(tmp_path):
+    """A header set across the columns below it: the body's white space parts the columns, the header's cell in the
+    column it starts in. Columns read from all the text, it once ran the two columns of values together."""
+    rows = (('Machine', 'Rated speed at base and top', ''), ('A', '2100', '10000'), ('B', '1500', '8000'))
+    (table,) = tables(_page(tmp_path, lambda p: _booktabs(p, rows)))
+    assert table.rows == rows
+    assert table.rows != (('Machine', 'Rated speed at base and top'), ('A', '2100 10000'), ('B', '1500 8000'))
+
+
+def _fraction_bars(width):
+    """Three fractions stacked, their bars ``width`` points long and one under the other, a sign beside each."""
+
+    def draw(page):
+        for y, (top, bottom) in zip((420, 444, 468), (('U', '2'), ('V', '3'), ('W', '4')), strict=True):
+            page.draw_rect(pymupdf.Rect(300, y - 0.2, 300 + width, y + 0.2), color=None, fill=(0, 0, 0))
+            page.insert_text((302, y - 3), top, fontname='helv', fontsize=9)
+            page.insert_text((302 + width - 8, y + 10), bottom, fontname='helv', fontsize=9)
+
+    return draw
+
+
+def test_fraction_bars_stacked_alike_are_no_table(tmp_path):
+    """A formula's fractions, one under the other, their bars one length: a stack of rules round short cells."""
+    page = _page(tmp_path, _fraction_bars(30))
+    assert tables(page) == ()
+    (grid,) = grids(page)
+    assert 'short' in grid.reason
+    assert tables(_page(tmp_path, _fraction_bars(90)))  # planted: rules a table's length make one
+
+
+def test_two_tables_ruled_by_their_rows_one_under_the_other_are_two(tmp_path):
+    def two(page):
+        _booktabs(page)
+        page.insert_text((72, 506), 'Table 2. Second set of values', fontname='helv', fontsize=9)
+        _booktabs(page, at=(72.0, 520.0))
+
+    found = tables(_page(tmp_path, two))
+    assert [t.rows for t in found] == [TABLE_ROWS, TABLE_ROWS]
+    assert [t.provenance.locator for t in found] == ['table[0]', 'table[1]']
+
+
+def _figure_between_rules(page):
+    """A plot set between rules, as some journals frame a figure: a legend's two labels, tick values, a curve."""
+    _booktabs(page, (('Model A', 'Model B', ''), ('0.5', '', ''), ('1.0', '', ''), ('1.5', '', '')))
+    page.draw_polyline([(110, 470), (200, 440), (300, 455), (420, 425)], color=RED, width=1)
+
+
+def _prose_between_rules(page):
+    """Two columns of prose under a running head's rule, a section's rule and the foot's: no table."""
+    words = ('the', 'rated', 'output', 'is', 'the', 'mechanical', 'power', 'at', 'the', 'shaft', 'expressed', 'in')
+    for i, y in enumerate((415, 426, 437, 456, 467, 478)):
+        for x in (72, 260):
+            line = ' '.join(words[(i + x) % 5 :][:5])
+            page.insert_text((x, y), line, fontname='helv', fontsize=9)
+    for y in (400, 446, 485):
+        page.draw_rect(pymupdf.Rect(72, y - 0.4, 432, y + 0.4), color=None, fill=(0, 0, 0))
+
+
+@pytest.mark.parametrize(
+    ('draw', 'reason'),
+    [
+        (lambda p: _booktabs(p, LIST_ROWS), 'a list'),
+        (_figure_between_rules, 'drawn in it'),
+        (_prose_between_rules, 'prose'),
+    ],
+    ids=['a list', 'a figure', 'prose'],
+)
+def test_rules_round_a_list_a_figure_or_prose_are_no_table(tmp_path, draw, reason):
+    page = _page(tmp_path, draw)
+    assert tables(page) == ()
+    (grid,) = grids(page)
+    assert isinstance(grid, NotATable)
+    assert reason in grid.reason

@@ -11,7 +11,7 @@ consumer's vocabulary here -- schemas live in consumers. Modules and usage: `REA
 ## Rules here
 
 - Dependency arrow: `paper`, `ai` -> `extract`; `paper` -> `markdown`, `regions`, `pdf`; `per_page` -> `markdown`, `regions`,
-  `tables`, `ink`, `pdf`, `png`; `markdown`, `regions`, `tables` -> `layout` -> `ir`; `ink` -> `ir` (`regions` takes its drawings, `tables` a scan's rulings, as boxes, never pixels);
+  `tables`, `ink`, `pdf`, `png`; `regions` -> `tables`; `markdown`, `regions`, `tables` -> `layout` -> `ir`; `ink` -> `ir` (`regions` takes its drawings, `tables` a scan's rulings, as boxes, never pixels);
   `extract` -> `plot`, `pdf`, `html` -> `numbers` -> `ir`; `plot` -> `glyphs` -> `strokefont`; `strokes` -> `plot`, `ir`; `ocr` -> `ink`, `pdf`
   (a picture measured: its skew; a codec decoded to be turned); `capture` is apart (`cli` -> `session` -> `stitch`; `cli` -> `desktop`, `export`, `ocr`, `files` ->
   `win32`, `export`; `desktop` -> `win32` | `quartz` | `x11` (one per OS, chosen at run time) -> `screen`; `join` ->

@@ -2,7 +2,8 @@
 
 mod common;
 
-use pdf::color::Pattern;
+use pdf::color::PatternKind;
+use pdf::geometry::Matrix;
 use pdf::geometry::Segment;
 use pdf::geometry::{Point, Rect};
 use pdf::interpret::{ImageEvent, PathEvent};
@@ -316,20 +317,34 @@ fn a_fill_with_a_pattern_says_which_pattern_it_is_and_an_uncolored_tilings_tint(
         .iter()
         .map(|p| {
             let color = &p.fill.as_ref().unwrap().color;
-            (color.pattern, color.components.clone(), color.rgb)
+            (
+                color.pattern.as_ref().map(|p| p.kind),
+                color.components.clone(),
+                color.rgb,
+            )
         })
         .collect();
-    let uncolored = Some(Pattern::Tiling { uncolored: true });
+    let uncolored = Some(PatternKind::Tiling { uncolored: true });
     assert_eq!(
         fills,
         [
-            (Some(Pattern::Shading), vec![], None),
+            (Some(PatternKind::Shading), vec![], None),
             // The tint, in the pattern space's base: CMYK (0, 1, 1, 0) is red.
             (uncolored, vec![0.0, 1.0, 1.0, 0.0], Some([1.0, 0.0, 0.0])),
             (uncolored, vec![0.0, 1.0, 1.0, 0.0], Some([1.0, 0.0, 0.0])), // the unreadable `scn` is skipped
-            (Some(Pattern::Tiling { uncolored: false }), vec![], None), // a colored pattern paints its own colors
+            (Some(PatternKind::Tiling { uncolored: false }), vec![], None), // a colored pattern paints its own colors
         ]
     );
+    // Pattern space is the page's default space (y up, 100 high), whatever the CTM.
+    let first = paths(&content)[0]
+        .fill
+        .as_ref()
+        .unwrap()
+        .color
+        .pattern
+        .clone()
+        .unwrap();
+    assert_eq!(first.matrix, Matrix([1.0, 0.0, 0.0, -1.0, 0.0, 100.0]));
     assert_eq!(content.warnings.len(), 1, "{:?}", content.warnings);
     assert!(content.warnings[0].contains("Missing"));
 }
@@ -454,23 +469,39 @@ fn a_text_object_clips_to_its_clipping_glyphs_outlines() {
 #[test]
 fn a_graphics_state_sets_alphas_blend_mode_soft_mask_and_miter_limit() {
     use pdf::interpret::Blend;
+    let group = common::stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Group << /S /Transparency /CS /DeviceGray >>",
+        "0.5 g 0 0 5 5 re f",
+    );
     let (content, _) = events(
-        "/Resources << /ExtGState << /G1 << /ca 0.5 /CA 0.25 /BM [/Bogus /Multiply] /SMask << /S /Luminosity >> /ML 3 >> /G2 << /SMask /None >> >> >>",
-        "/G1 gs 0 0 5 5 re B /G2 gs 2 M 0 0 5 5 re S",
-        &[],
+        "/Resources << /ExtGState << /G1 << /ca 0.5 /CA 0.25 /BM [/Bogus /Multiply] /SMask << /S /Luminosity /G 5 0 R /BC [0.25] >> /ML 3 >> /G2 << /SMask /None >> /G3 << /SMask << /S /Luminosity >> >> >> >>",
+        "2 0 0 2 0 0 cm /G1 gs 0 0 5 5 re B /G2 gs 2 M 0 0 5 5 re S /G3 gs",
+        &[&group],
     );
     let found = paths(&content);
-    let c = found[0].compositing;
+    let c = &found[0].compositing;
     assert_eq!(
-        (c.fill_alpha, c.stroke_alpha, c.blend, c.soft_mask),
-        (0.5, 0.25, Blend::Multiply, true)
+        (c.fill_alpha, c.stroke_alpha, c.blend),
+        (0.5, 0.25, Blend::Multiply)
     );
+    let mask = c.soft_mask.as_ref().expect("a soft mask in force");
+    assert!(mask.luminosity);
+    assert_eq!(mask.object, Some(5));
+    assert_eq!(mask.backdrop, [0.25]);
+    // The group's space is the user space where the mask was set: the CTM then.
+    assert_eq!(mask.matrix, Matrix([2.0, 0.0, 0.0, -2.0, 0.0, 100.0]));
     assert_eq!(found[0].stroke.as_ref().unwrap().miter_limit, 3.0);
     assert!(
-        !found[1].compositing.soft_mask,
+        found[1].compositing.soft_mask.is_none(),
         "/SMask /None ends the soft mask"
     );
     assert_eq!(found[1].stroke.as_ref().unwrap().miter_limit, 2.0);
+    assert_eq!(content.warnings.len(), 1, "{:?}", content.warnings);
+    assert!(
+        content.warnings[0].contains("/G is not a Form"),
+        "a mask with no group is named: {:?}",
+        content.warnings
+    );
 }
 
 #[test]
@@ -502,12 +533,30 @@ fn a_transparency_group_entered_with_an_alpha_starts_its_marks_afresh_and_flags_
         &[&group],
     );
     let found = paths(&content);
+    let plain = found[0].compositing.group.as_ref().expect("a group");
+    assert!(!plain.isolated && !plain.knockout);
     assert!(
-        !found[0].compositing.grouped,
-        "a group entered opaque is plain content"
+        !found[0].compositing.in_composited_group(),
+        "a group entered opaque composites as its marks do"
     );
-    let inside = found[1].compositing;
-    assert_eq!((inside.fill_alpha, inside.grouped), (1.0, true));
+    let inside = &found[1].compositing;
+    assert_eq!(inside.fill_alpha, 1.0, "a group's marks start afresh");
+    assert!(inside.in_composited_group());
+    let group = inside.group.as_ref().unwrap();
+    assert_eq!(group.compositing.fill_alpha, 0.35);
+    assert_eq!(
+        group.bbox,
+        Rect {
+            x0: 0.0,
+            y0: 90.0,
+            x1: 10.0,
+            y1: 100.0
+        }
+    );
+    assert_ne!(
+        found[0].compositing.group, found[1].compositing.group,
+        "each painting is a group of its own"
+    );
     assert_eq!(found[2].compositing.fill_alpha, 0.35);
-    assert!(!found[2].compositing.grouped);
+    assert!(found[2].compositing.group.is_none());
 }

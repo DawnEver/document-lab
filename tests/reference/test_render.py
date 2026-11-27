@@ -1,5 +1,6 @@
-"""The ``reference`` part, rendering: the own renderer (paths, clips, images, text from font outlines) accepted
-against PyMuPDF's renders of the real PDFs ``DOCUMENT_LAB_REFERENCE_PDFS`` names.
+"""The ``reference`` part, rendering: the own renderer (paths, clips, images, text from font outlines, shadings,
+patterns, soft masks and transparency groups) accepted against PyMuPDF's renders of the real PDFs
+``DOCUMENT_LAB_REFERENCE_PDFS`` names.
 
 Every :data:`STEP`-th page of each document, its first among them, is drawn whole by both, text and annotations
 too, at :data:`DPI`, and compared as ``tests/rendering.py`` says: a page agrees when at most :data:`PAGE_SHARE` of
@@ -7,8 +8,8 @@ the pixels either inks are off by more than its ``PIXEL_TOLERANCE`` levels after
 ways, color-managed (``ICCBased`` through its profile, ``DeviceCMYK`` through a press profile) or not (every space by
 the standard's formulas); the reader converts ``ICCBased`` the first way and ``DeviceCMYK`` the second
 (`tests/unit/test_render.py`), so a page agrees with whichever agrees better. A page holding what the own renderer
-does not draw yet (``undrawn``: a shading, a pattern, a transparency group composited with an alpha, a glyph of a
-font it has no program for) is not compared. The planted control: each document's compared page with the most dark
+cannot draw (``undrawn``: a glyph of a font it has no program for, a JPX or JBIG2 image, a shading or pattern that
+does not read) is not compared. The planted control: each document's compared page with the most dark
 ink, held to its own reference turned upside down and moved a few pixels, must be reported.
 
 A standard font a document does not embed is drawn with PDFium's Foxit substitute where PyMuPDF draws URW's, two
@@ -72,7 +73,7 @@ def _reference(data: bytes, number: int, *, managed: bool) -> np.ndarray:
 
 
 def _own(pdf: Path, number: int) -> np.ndarray | None:
-    """Page ``number`` drawn by the own renderer; None when it holds what the own renderer does not draw yet."""
+    """Page ``number`` drawn by the own renderer; None when it holds what the own renderer cannot draw."""
     width, height, _, pixels, undrawn = _document(pdf)[1].render(
         number, None, DPI / 72, text=True, annotations=True, alpha=False
     )
@@ -82,7 +83,7 @@ def _own(pdf: Path, number: int) -> np.ndarray | None:
 def off_share(pdf: Path, number: int, *, misplaced: bool = False) -> float | None:
     """The share of page ``number``'s compared pixels the own render has off from PyMuPDF's -- turned upside down and
     moved by :data:`PLANTED_SHIFT` pixels when ``misplaced``: a planted wrong reference; None when the page holds what
-    the own renderer does not draw yet.
+    the own renderer cannot draw.
     """
     own = _own(pdf, number)
     if own is None:

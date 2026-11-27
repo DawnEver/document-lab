@@ -6,41 +6,50 @@
 //! placed by their matrix in every color space the reader converts ([`image`]), text as its glyphs' outlines
 //! ([`pdf::shape`]) placed by each glyph's text rendering matrix and filled, stroked or both as its render mode says
 //! (a Type 3 glyph by its procedure's own events), each mark clipped by the chain of clipping paths in force
-//! ([`clip`]: a text clip by its glyphs' outlines) and composited with its constant alpha and blend mode,
-//! anti-aliased by `tiny-skia`. The pixel grid is the page's: pixel `(i, j)` covers page space `[i, i + 1] x [j, j + 1]` divided by
+//! ([`clip`]: a text clip by its glyphs' outlines) and composited with its constant alpha, blend mode and soft mask,
+//! anti-aliased by `tiny-skia`. A fill, stroke or glyph in a pattern paints the pattern ([`paint`]: a shading
+//! pattern's colors, a tiling pattern's cell repeated), and `sh` paints a shading over the clip ([`shade`]). A
+//! transparency group's marks are composited together, then their result onto what lies below, and a soft mask's
+//! group is drawn to give it ([`transparency`]). The pixel grid is the page's: pixel `(i, j)` covers page space `[i, i + 1] x [j, j + 1]` divided by
 //! the scale, and a region is drawn on the pixels it touches -- so a region's pixels are the whole page's there, but
 //! for the anti-aliasing of a curve's edge, which differs by a few coverage steps where the region's edge cuts it.
 //!
-//! What is not drawn yet is never silently missing. What in the region the renderer cannot draw as the file states it
-//! is counted by kind in [`Raster::undrawn`] -- a shading or a pattern (stage 3), a soft mask (drawn without it), a
-//! glyph whose shape cannot be read (a font that embeds no program and has no substitute, by name), a text clip
-//! holding such a glyph (by its box), an image in a codec not decoded here (JPX, JBIG2) or that does not decode --
-//! for the caller to refuse or accept. Hidden optional content and what the colorant `None` paints mark
+//! What is not drawn is never silently missing. What in the region the renderer cannot draw as the file states it
+//! is counted by kind in [`Raster::undrawn`] -- a glyph whose shape cannot be read (a font that embeds no program
+//! and has no substitute, by name), a text clip holding such a glyph (by its box), an image in a codec not decoded
+//! here (JPX, JBIG2) or that does not decode, a shading, pattern or soft mask that does not read (by why), a stencil
+//! mask painting a pattern -- for the caller to refuse or accept. Hidden optional content and what the colorant `None` paints mark
 //! nothing and are not drawn.
 //!
-//! Layers: [`codec`] (image codecs to samples) -> [`image`] (an image's samples to pixels) and [`clip`] (clipping
-//! paths to masks) -> this module (the page painted).
+//! Layers: [`codec`] (image codecs to samples) -> [`image`] (an image's samples to pixels), [`clip`] (clipping
+//! paths to masks) and [`shade`] (a shading's colors to pixels) -> this module (the page painted), [`paint`] (what a
+//! color paints with) and [`transparency`] (groups and soft masks).
 
 pub mod clip;
 pub mod codec;
 pub mod image;
+mod paint;
+mod shade;
+mod transparency;
 
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
-use pdf::color::Color;
 use pdf::geometry::{Matrix, Point, Rect, Segment};
 use pdf::interpret::{
-    Blend, Compositing, Event, ImageEvent, Layer, PathEvent, ShadingEvent, Stroke, TextEvent,
+    Blend, Clip, Event, Group, ImageEvent, Layer, PathEvent, ShadingEvent, SoftMask, Stroke,
+    TextEvent,
 };
+use pdf::object::Object;
 use pdf::shape::Shape;
 use pdf::{Error, File, Page, Result};
 use tiny_skia::{
-    BlendMode, FillRule, FilterQuality, LineCap, LineJoin, Paint, PathBuilder, Pixmap, SpreadMode,
-    StrokeDash, Transform,
+    BlendMode, FillRule, FilterQuality, IntRect, LineCap, LineJoin, Mask, Paint, PathBuilder,
+    Pixmap, PixmapPaint, SpreadMode, StrokeDash, Transform,
 };
 
 use crate::clip::{Clips, Left};
+use crate::paint::Source;
 
 /// What to draw and how.
 #[derive(Debug, Clone, PartialEq)]
@@ -103,21 +112,21 @@ pub fn render(file: &File, page: &Page, options: &Options) -> Result<Raster> {
     } else {
         file.interpret(page, options.annotations)?
     };
+    let mut pixmap = Pixmap::new(grid.width, grid.height)
+        .ok_or_else(|| Error::invalid("the region is too large to draw"))?;
+    if !options.alpha {
+        pixmap.fill(tiny_skia::Color::WHITE);
+    }
     let mut canvas = Canvas {
         file,
-        pixmap: Pixmap::new(grid.width, grid.height)
-            .ok_or_else(|| Error::invalid("the region is too large to draw"))?,
+        pixmap,
         grid,
         clips: Clips::default(),
-        images: HashMap::new(),
-        undrawn: BTreeMap::new(),
+        masks: HashMap::new(),
+        knockout: None,
+        kept: Kept::default(),
     };
-    if !options.alpha {
-        canvas.pixmap.fill(tiny_skia::Color::WHITE);
-    }
-    for event in &content.events {
-        canvas.event(event);
-    }
+    canvas.draw(&content.events, None);
     Ok(canvas.finish(options.alpha))
 }
 
@@ -165,6 +174,51 @@ impl Grid {
             height: height as u32,
             user,
         })
+    }
+
+    /// A canvas of `width` x `height` pixels whose page space is its pixel space: a tiling pattern's tile.
+    fn tile(width: u32, height: u32) -> Self {
+        Self {
+            scale: 1.0,
+            left: 0.0,
+            top: 0.0,
+            width,
+            height,
+            user: Matrix::IDENTITY,
+        }
+    }
+
+    /// The grid of the pixels `area` of this canvas: the same page space, on fewer pixels.
+    fn sub(&self, area: IntRect) -> Self {
+        Self {
+            left: self.left + f64::from(area.x()),
+            top: self.top + f64::from(area.y()),
+            width: area.width(),
+            height: area.height(),
+            ..*self
+        }
+    }
+
+    /// The page space the canvas's pixels cover.
+    fn page_box(&self) -> Rect {
+        Rect {
+            x0: self.left / self.scale,
+            y0: self.top / self.scale,
+            x1: (self.left + f64::from(self.width)) / self.scale,
+            y1: (self.top + f64::from(self.height)) / self.scale,
+        }
+    }
+
+    /// The whole pixels of the canvas `r` (page space) touches; None when it touches none.
+    fn pixels(&self, r: Rect) -> Option<IntRect> {
+        let b = self.rect(r).intersect(self.bounds());
+        let (x0, y0) = (b.x0.floor(), b.y0.floor());
+        let (x1, y1) = (b.x1.ceil(), b.y1.ceil());
+        if !(x0 < x1 && y0 < y1) {
+            return None;
+        }
+        #[expect(clippy::cast_possible_truncation, reason = "within the canvas")]
+        IntRect::from_ltrb(x0 as i32, y0 as i32, x1 as i32, y1 as i32)
     }
 
     /// The matrix from page space to the canvas's pixels.
@@ -238,18 +292,75 @@ impl Grid {
     }
 }
 
-/// A page being painted.
+/// A page being painted -- or a transparency group, a soft mask's group, a tiling pattern's tile, each on a canvas
+/// of its own.
 struct Canvas<'a> {
     file: &'a File,
     pixmap: Pixmap,
     grid: Grid,
     clips: Clips,
+    /// Each soft mask made on this canvas, by what names it; None: it could not be made (counted).
+    masks: HashMap<transparency::MaskKey, Option<Rc<Mask>>>,
+    /// In a knockout group: the group's backdrop, which each of its marks is composited onto.
+    knockout: Option<Rc<Pixmap>>,
+    kept: Kept,
+}
+
+/// What every canvas of a page shares: what was read once, and what was not drawn.
+#[derive(Default)]
+struct Kept {
     /// Each image `XObject` decoded so far (not a stencil mask: its pixels are the fill color's), by its number.
     images: HashMap<u32, Rc<std::result::Result<image::Decoded, String>>>,
     undrawn: BTreeMap<String, usize>,
+    /// How deep the canvas being drawn lies in patterns' cells and soft masks' groups.
+    nesting: usize,
 }
 
-impl Canvas<'_> {
+impl<'a> Canvas<'a> {
+    /// A canvas of `pixmap` on `grid`, sharing what this one keeps until [`Self::adopt`] hands it back.
+    fn child(&mut self, grid: Grid, pixmap: Pixmap) -> Canvas<'a> {
+        Canvas {
+            file: self.file,
+            pixmap,
+            grid,
+            clips: Clips::default(),
+            masks: HashMap::new(),
+            knockout: None,
+            kept: std::mem::take(&mut self.kept),
+        }
+    }
+
+    /// `child`'s pixels, what it kept handed back.
+    fn adopt(&mut self, child: Canvas<'a>) -> Pixmap {
+        self.kept = child.kept;
+        child.pixmap
+    }
+
+    /// `events` drawn in order; a run of them in a transparency group directly within `within` (None: the page)
+    /// drawn as that group.
+    fn draw(&mut self, events: &[Event], within: Option<&Rc<Group>>) {
+        let mut i = 0;
+        while i < events.len() {
+            let event = &events[i];
+            let Some(group) = transparency::child_of(event.compositing().group.as_ref(), within)
+            else {
+                let alpha = transparency::alpha_of(event);
+                self.element(alpha, &|c: &mut Canvas<'a>| c.event(event));
+                i += 1;
+                continue;
+            };
+            let run = events[i..]
+                .iter()
+                .take_while(|e| transparency::holds(e.compositing().group.as_ref(), &group))
+                .count();
+            let marks = &events[i..i + run];
+            self.element(group.compositing.fill_alpha, &|c: &mut Canvas<'a>| {
+                c.group(&group, marks);
+            });
+            i += run;
+        }
+    }
+
     fn event(&mut self, event: &Event) {
         match event {
             Event::Path(path) if shows(&path.layer) => self.path(path),
@@ -262,7 +373,7 @@ impl Canvas<'_> {
 
     /// `what` meeting the region was not drawn as the file states it.
     fn undrawn(&mut self, what: &str) {
-        *self.undrawn.entry(what.to_string()).or_default() += 1;
+        *self.kept.undrawn.entry(what.to_string()).or_default() += 1;
     }
 
     /// Whether `bbox` (page space) meets the canvas.
@@ -270,15 +381,21 @@ impl Canvas<'_> {
         self.grid.rect(bbox).meets(self.grid.bounds())
     }
 
-    /// The compositing a mark is drawn with, its soft mask (not drawn) counted.
-    fn composited(&mut self, compositing: Compositing) -> BlendMode {
-        if compositing.soft_mask {
-            self.undrawn("soft mask (stage 3; drawn without it)");
+    /// What of the canvas a mark shows on: what the chain of clips `clip` leaves, times the soft mask `soft` (one
+    /// that cannot be made is counted, and the mark drawn without it).
+    fn coverage(&mut self, clip: Option<&Rc<Clip>>, soft: Option<&Rc<SoftMask>>) -> Left {
+        let left = self.clips.mask(clip, &self.grid, &mut self.kept.undrawn);
+        let Some(soft) = soft else {
+            return left;
+        };
+        let Some(mask) = self.soft_mask(soft) else {
+            return left;
+        };
+        match left {
+            Left::Nothing => Left::Nothing,
+            Left::All => Left::Mask(mask),
+            Left::Mask(clip) => Left::Mask(Rc::new(transparency::product(&clip, &mask))),
         }
-        if compositing.grouped {
-            self.undrawn("transparency group with alpha, blend mode or soft mask (stage 3; its marks drawn alone)");
-        }
-        blend_mode(compositing.blend)
     }
 
     fn path(&mut self, path: &PathEvent) {
@@ -298,22 +415,35 @@ impl Canvas<'_> {
         if !self.meets(reach_box) {
             return;
         }
-        let mask = match self
-            .clips
-            .mask(path.clip.as_ref(), &self.grid, &mut self.undrawn)
-        {
+        let compositing = &path.compositing;
+        let mask = match self.coverage(path.clip.as_ref(), compositing.soft_mask.as_ref()) {
             Left::Nothing => return, // clipped away whole
             Left::All => None,
             Left::Mask(mask) => Some(mask),
         };
-        let blend = self.composited(path.compositing);
+        let blend = blend_mode(compositing.blend);
         if let Some(fill) = &path.fill
-            && let Some(rgb) = self.paint_color(&fill.color, "fill")
+            && let Some(source) = self.source(&fill.color, "fill", bounds)
         {
+            let mut paint = source.paint(compositing.fill_alpha, blend);
+            // A pattern fills its path as a clip it is painted through: a rectangle square to the canvas on the
+            // whole pixels it touches, as a clip of one is.
+            let pixels = matches!(source, Source::Pixels { .. })
+                .then(|| clip::whole_pixels(&path.segments, &self.grid))
+                .flatten();
+            #[expect(clippy::cast_possible_truncation, reason = "pixel coordinates")]
+            if let Some(r) = pixels
+                && let Some(r) =
+                    tiny_skia::Rect::from_ltrb(r.x0 as f32, r.y0 as f32, r.x1 as f32, r.y1 as f32)
+            {
+                paint.anti_alias = false;
+                self.pixmap
+                    .fill_rect(r, &paint, Transform::identity(), mask.as_deref());
+                return self.stroked(path, reach_box, blend, mask.as_deref());
+            }
             let Some(outline) = build(&path.segments, &|p| self.grid.point(p)) else {
                 return;
             };
-            let paint = paint(rgb, path.compositing.fill_alpha, blend);
             let rule = if fill.even_odd {
                 FillRule::EvenOdd
             } else {
@@ -327,29 +457,22 @@ impl Canvas<'_> {
                 mask.as_deref(),
             );
         }
-        if let Some(stroke) = &path.stroke
-            && let Some(rgb) = self.paint_color(&stroke.color, "stroke")
-        {
-            let paint = paint(rgb, path.compositing.stroke_alpha, blend);
-            self.stroke(&path.segments, stroke, &paint, mask.as_deref());
-        }
+        self.stroked(path, reach_box, blend, mask.as_deref());
     }
 
-    /// The RGB `color` paints in, when it is one color the reader converts; else None, counted.
-    fn paint_color(&mut self, color: &Color, what: &str) -> Option<[f64; 3]> {
-        match (color.pattern, color.rgb) {
-            (Some(_), _) => {
-                self.undrawn(&format!("pattern {what} (stage 3)"));
-                None
-            }
-            (None, Some(rgb)) => Some(rgb),
-            (None, None) => {
-                self.undrawn(&format!(
-                    "{what} in a {} color with no RGB",
-                    String::from_utf8_lossy(&color.space)
-                ));
-                None
-            }
+    /// `path`'s stroke, when it has one, drawn within `reach_box` (page space).
+    fn stroked(
+        &mut self,
+        path: &PathEvent,
+        reach_box: Rect,
+        blend: BlendMode,
+        mask: Option<&Mask>,
+    ) {
+        if let Some(stroke) = &path.stroke
+            && let Some(source) = self.source(&stroke.color, "stroke", reach_box)
+        {
+            let paint = source.paint(path.compositing.stroke_alpha, blend);
+            self.stroke(&path.segments, stroke, &paint, mask);
         }
     }
 
@@ -407,22 +530,20 @@ impl Canvas<'_> {
         if !self.meets(event.bbox) {
             return;
         }
-        let mask = match self
-            .clips
-            .mask(event.clip.as_ref(), &self.grid, &mut self.undrawn)
-        {
+        let compositing = &event.compositing;
+        let mask = match self.coverage(event.clip.as_ref(), compositing.soft_mask.as_ref()) {
             Left::Nothing => return, // clipped away whole
             Left::All => None,
             Left::Mask(mask) => Some(mask),
         };
-        let decoded = if let Some(known) = event.object.and_then(|n| self.images.get(&n)) {
+        let decoded = if let Some(known) = event.object.and_then(|n| self.kept.images.get(&n)) {
             Rc::clone(known)
         } else {
             let decoded = Rc::new(image::decode(self.file, event));
             if let (Some(n), Ok(d)) = (event.object, decoded.as_ref())
                 && !d.stencil
             {
-                self.images.insert(n, Rc::clone(&decoded));
+                self.kept.images.insert(n, Rc::clone(&decoded));
             }
             decoded
         };
@@ -447,14 +568,14 @@ impl Canvas<'_> {
         let Some(pixmap) = pixels.pixmap(decoded) else {
             return;
         };
-        let blend = self.composited(event.compositing);
+        let blend = blend_mode(compositing.blend);
         let mut paint = Paint {
             blend_mode: blend,
             anti_alias: !pixels.grid_fitted,
             ..Paint::default()
         };
         #[expect(clippy::cast_possible_truncation, reason = "an alpha")]
-        let opacity = event.compositing.fill_alpha as f32;
+        let opacity = compositing.fill_alpha as f32;
         paint.shader = tiny_skia::Pattern::new(
             pixmap,
             SpreadMode::Pad,
@@ -472,6 +593,38 @@ impl Canvas<'_> {
         else {
             return;
         };
+        if decoded.stencil && event.fill.pattern.is_some() {
+            // A stencil painting a pattern: its coverage, then the pattern through it.
+            let Some(mut shape) = Pixmap::new(self.grid.width, self.grid.height) else {
+                return;
+            };
+            let shaping = Paint {
+                blend_mode: BlendMode::SourceOver,
+                ..paint.clone()
+            };
+            shape.fill_rect(rect, &shaping, transform(pixels.matrix), None);
+            let mut cover = Mask::from_pixmap(shape.as_ref(), tiny_skia::MaskType::Alpha);
+            if let Some(clip) = &mask {
+                cover = transparency::product(&cover, clip);
+            }
+            let Some(source) = self.source(&event.fill, "stencil mask", event.bbox) else {
+                return;
+            };
+            // The constant alpha is in the coverage already.
+            let paint = source.paint(1.0, blend);
+            #[expect(clippy::cast_precision_loss, reason = "a pixel count")]
+            let canvas = tiny_skia::Rect::from_xywh(
+                0.0,
+                0.0,
+                self.grid.width as f32,
+                self.grid.height as f32,
+            );
+            if let Some(canvas) = canvas {
+                self.pixmap
+                    .fill_rect(canvas, &paint, Transform::identity(), Some(&cover));
+            }
+            return;
+        }
         self.pixmap
             .fill_rect(rect, &paint, transform(pixels.matrix), mask.as_deref());
     }
@@ -536,20 +689,18 @@ impl Canvas<'_> {
         if !self.meets(reach_box) {
             return;
         }
-        let mask = match self
-            .clips
-            .mask(text.clip.as_ref(), &self.grid, &mut self.undrawn)
-        {
+        let compositing = &text.compositing;
+        let mask = match self.coverage(text.clip.as_ref(), compositing.soft_mask.as_ref()) {
             Left::Nothing => return,
             Left::All => None,
             Left::Mask(mask) => Some(mask),
         };
-        let blend = self.composited(text.compositing);
-        if fills && let Some(rgb) = self.paint_color(&text.fill, "text fill") {
+        let blend = blend_mode(compositing.blend);
+        if fills && let Some(source) = self.source(&text.fill, "text fill", around) {
             let Some(outline) = build(segments, &|p| self.grid.point(p)) else {
                 return;
             };
-            let paint = paint(rgb, text.compositing.fill_alpha, blend);
+            let paint = source.paint(compositing.fill_alpha, blend);
             self.pixmap.fill_path(
                 &outline,
                 &paint,
@@ -558,16 +709,61 @@ impl Canvas<'_> {
                 mask.as_deref(),
             );
         }
-        if strokes && let Some(rgb) = self.paint_color(&text.stroke.color, "text stroke") {
-            let paint = paint(rgb, text.compositing.stroke_alpha, blend);
+        if strokes && let Some(source) = self.source(&text.stroke.color, "text stroke", reach_box) {
+            let paint = source.paint(compositing.stroke_alpha, blend);
             self.stroke(segments, &text.stroke, &paint, mask.as_deref());
         }
     }
 
-    fn shading(&mut self, shading: &ShadingEvent) {
-        if self.meets(shading.bbox) {
-            self.undrawn("shading (stage 3)");
+    /// `sh`: the shading painted over the clip, within its `/BBox` (its `/Background` ignored, as 8.7.4.5.1 says).
+    fn shading(&mut self, event: &ShadingEvent) {
+        if !self.meets(event.bbox) {
+            return;
         }
+        let compositing = &event.compositing;
+        let mask = match self.coverage(event.clip.as_ref(), compositing.soft_mask.as_ref()) {
+            Left::Nothing => return,
+            Left::All => None,
+            Left::Mask(mask) => Some(mask),
+        };
+        let Some(area) = self.grid.pixels(event.bbox) else {
+            return;
+        };
+        let to_pixels = event.matrix.then(self.grid.matrix());
+        let pixels = match self.shaded(&event.shading, to_pixels, area, false, event.intent) {
+            Ok(pixels) => pixels,
+            Err(why) => {
+                self.undrawn(&format!("shading not drawn: {why}"));
+                return;
+            }
+        };
+        #[expect(clippy::cast_possible_truncation, reason = "an alpha")]
+        let paint = PixmapPaint {
+            opacity: compositing.fill_alpha as f32,
+            blend_mode: blend_mode(compositing.blend),
+            quality: FilterQuality::Nearest,
+        };
+        self.pixmap.draw_pixmap(
+            area.x(),
+            area.y(),
+            pixels.as_ref(),
+            &paint,
+            Transform::identity(),
+            mask.as_deref(),
+        );
+    }
+
+    /// The shading `object` sampled over `area` through `to_pixels` (see [`shade`]).
+    fn shaded(
+        &self,
+        object: &Object,
+        to_pixels: Matrix,
+        area: IntRect,
+        background: bool,
+        intent: pdf::icc::Intent,
+    ) -> std::result::Result<Pixmap, String> {
+        let shading = self.file.shading(object).map_err(|e| e.to_string())?;
+        shade::shade(&shading, to_pixels, area, background, intent)
     }
 
     fn finish(self, alpha: bool) -> Raster {
@@ -584,7 +780,7 @@ impl Canvas<'_> {
             height,
             channels,
             data,
-            undrawn: self.undrawn,
+            undrawn: self.kept.undrawn,
         }
     }
 }
@@ -672,26 +868,6 @@ fn dash(dashes: &[f64], phase: f64, scale: f64) -> Option<StrokeDash> {
         .collect();
     #[expect(clippy::cast_possible_truncation, reason = "a pixel length")]
     StrokeDash::new(lengths, (phase * scale) as f32)
-}
-
-/// A solid paint of `rgb` (0..=1) at `alpha`, blended by `blend`.
-fn paint(rgb: [f64; 3], alpha: f64, blend: BlendMode) -> Paint<'static> {
-    let mut paint = Paint {
-        anti_alias: true,
-        blend_mode: blend,
-        ..Paint::default()
-    };
-    #[expect(clippy::cast_possible_truncation, reason = "color components")]
-    paint.set_color(
-        tiny_skia::Color::from_rgba(
-            rgb[0] as f32,
-            rgb[1] as f32,
-            rgb[2] as f32,
-            alpha.clamp(0.0, 1.0) as f32,
-        )
-        .unwrap_or(tiny_skia::Color::BLACK),
-    );
-    paint
 }
 
 /// `tiny-skia`'s blend mode for `blend`.

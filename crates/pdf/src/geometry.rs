@@ -50,6 +50,24 @@ impl Matrix {
         (a * d - b * c).abs().sqrt()
     }
 
+    /// The matrix mapping back what this one maps; None when it maps a plane onto a line or a point.
+    #[must_use]
+    pub fn inverse(self) -> Option<Self> {
+        let [xx, xy, yx, yy, tx, ty] = self.0;
+        let det = xx * yy - xy * yx;
+        if det.abs() < 1e-12 || !det.is_finite() {
+            return None;
+        }
+        Some(Self([
+            yy / det,
+            -xy / det,
+            -yx / det,
+            xx / det,
+            (yx * ty - yy * tx) / det,
+            (xy * tx - xx * ty) / det,
+        ]))
+    }
+
     /// The matrix in a PDF array of six numbers, if `values` is one.
     #[must_use]
     pub fn from_numbers(values: &[f64]) -> Option<Self> {

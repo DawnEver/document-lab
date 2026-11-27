@@ -188,6 +188,12 @@ fn narrowed(within: Left, outline: &Outline, grid: &Grid) -> Left {
     }
 }
 
+/// The whole pixels the path `segments` (page space) covers when it is one rectangle square to the canvas -- widened
+/// to the whole pixels it touches, as such a clip is; None when it is not one, or covers no pixel.
+pub(crate) fn whole_pixels(segments: &[Segment], grid: &Grid) -> Option<Rect> {
+    snapped(rectangle(segments, grid)?, grid.bounds())
+}
+
 /// `r` (pixel space) widened to the whole pixels it touches, within `canvas`; None when it covers none.
 fn snapped(r: Rect, canvas: Rect) -> Option<Rect> {
     const SNAP: f64 = 1e-3;

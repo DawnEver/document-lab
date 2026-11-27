@@ -3,8 +3,10 @@
 //! The graphics state is tracked across `q`/`Q`, `cm`, colors, line style and Form `XObject`s; each painted path,
 //! each image placed, each string shown and each shading painted (`sh`) is an event, its geometry already in page
 //! space (points, y down). A fill or stroke with a pattern is a path event whose color names the pattern
-//! ([`crate::color::Pattern`]); a pattern's own content (a tiling cell, a shading's colors) is not interpreted, but
-//! an uncolored tiling pattern's tint is the color's, in the pattern space's base.
+//! ([`crate::color::Pattern`]: the pattern object, and its space mapped to page space through the default space of
+//! the content stream it is painted in); an uncolored tiling pattern's tint is the color's, in the pattern space's
+//! base. A pattern's own content is not interpreted with the page: a renderer draws a tiling cell through
+//! [`File::cell_drawing`] and reads a shading through [`crate::shading`].
 //!
 //! What is painted in the colorant `None` ([`crate::color::Space::paints`]) marks nothing (8.6.6.4) and is still an
 //! event, its [`Layer::inkless`] set, as hidden content is: a path filled or stroked in it -- a path whose fill marks
@@ -20,10 +22,12 @@
 //! paint: the clip's, within the shading's own `/BBox`, not the narrower area a non-extended gradient covers.
 //! Each event also carries the clip itself, for whoever draws it: the chain of clipping paths in force ([`Clip`]) --
 //! each `W`/`W*` path, each Form's `/BBox`, each text object's clipping glyphs (by their outlines) -- and how it is
-//! composited ([`Compositing`]: the constant alphas, blend mode and whether a soft mask is in force). A text event
+//! composited ([`Compositing`]: the constant alphas, the blend mode, the soft mask in force ([`SoftMask`]) and the
+//! chain of transparency groups it is drawn in ([`Group`]), innermost first, as the clip is a chain). A text event
 //! carries its font, each glyph's text rendering matrix and the stroke it is painted with: what drawing its glyphs'
 //! shapes needs ([`crate::shape`]). [`File::drawing`] interprets a page for a renderer: as [`File::interpret`]
-//! does, and each Type 3 glyph's procedure run in place after its text event, its marks events of their own.
+//! does, and each Type 3 glyph's procedure run in place after its text event, its marks events of their own. A soft
+//! mask's group is drawn alone through [`File::form_drawing`], under the matrix in force where the mask was set.
 //!
 //! Marked content (14.6) is tracked as a stack apart from the graphics state: `q`/`Q` neither saves nor ends it,
 //! and a Form's sequences end with the Form (one left open is closed there, with a warning). What optional
@@ -42,7 +46,8 @@
 //! appearance's resources when it has none, and give a font it names that its own resources lack. Its default
 //! appearance string (`/DA`) is not applied: it is the recipe for making an appearance, not part of drawing one.
 //!
-//! Not interpreted: a pattern's content and optional content usage ([`crate::optional`] says which). An operation
+//! Not interpreted with the page: a pattern's content and a soft mask's group (each drawn alone, above); optional
+//! content usage ([`crate::optional`] says which). An operation
 //! that cannot be read is skipped and named in [`Content::warnings`], never silently; a color whose space, profile
 //! or tint transform does not read is set by its components alone, with no RGB, and named there too -- never left in
 //! the space set before.
@@ -52,7 +57,7 @@
 
 use std::rc::Rc;
 
-use crate::color::{Color, Pattern, Space};
+use crate::color::{Color, Pattern, PatternKind, Space};
 use crate::content::{Operation, operations};
 use crate::error::{Error, Result};
 use crate::file::File;
@@ -124,8 +129,8 @@ pub enum Outline {
 }
 
 /// How a mark is composited onto what lies below it (11.3.5, 11.6.4): the graphics state's constant alphas, blend
-/// mode and soft mask.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// mode and soft mask, and the transparency group it is drawn in.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Compositing {
     /// The constant alpha (`/ca`) of filling: a fill, an image, a shading, text filled.
     pub fill_alpha: f64,
@@ -133,12 +138,12 @@ pub struct Compositing {
     pub stroke_alpha: f64,
     /// The blend mode (`/BM`).
     pub blend: Blend,
-    /// A soft mask (`/SMask` a dictionary) is in force: what shows is further masked by it.
-    pub soft_mask: bool,
-    /// It is drawn inside a transparency group (a Form with a `/Group`, 11.6.6) entered with a constant alpha below
-    /// 1, a blend mode other than `Normal` or a soft mask: the group's result, not each mark, is composited so. The
-    /// group's own marks start from the initial alphas, blend mode and soft mask, as the standard has them.
-    pub grouped: bool,
+    /// The soft mask in force (`/SMask` a dictionary): what shows is further masked by it.
+    pub soft_mask: Option<Rc<SoftMask>>,
+    /// The innermost transparency group it is drawn in (a Form with a `/Group`, 11.6.6), whose result -- not each
+    /// mark -- is composited onto what lies below as the group says; None: the page's. A group's own marks start
+    /// from the initial alphas, blend mode and soft mask, as the standard has them.
+    pub group: Option<Rc<Group>>,
 }
 
 impl Default for Compositing {
@@ -147,9 +152,114 @@ impl Default for Compositing {
             fill_alpha: 1.0,
             stroke_alpha: 1.0,
             blend: Blend::Normal,
-            soft_mask: false,
-            grouped: false,
+            soft_mask: None,
+            group: None,
         }
+    }
+}
+
+impl Compositing {
+    /// Whether a group it is drawn in, at any depth, is composited otherwise than opaquely: with a constant alpha
+    /// below 1, a blend mode other than `Normal` or a soft mask.
+    #[must_use]
+    pub fn in_composited_group(&self) -> bool {
+        let mut group = self.group.as_deref();
+        while let Some(g) = group {
+            if g.compositing.translucent() {
+                return true;
+            }
+            group = g.compositing.group.as_deref();
+        }
+        false
+    }
+
+    /// Whether what it composites shows otherwise than opaquely over what lies below: a constant alpha below 1, a
+    /// blend mode other than `Normal` or a soft mask.
+    #[must_use]
+    pub fn translucent(&self) -> bool {
+        self.fill_alpha < 1.0
+            || self.stroke_alpha < 1.0
+            || self.blend != Blend::Normal
+            || self.soft_mask.is_some()
+    }
+}
+
+/// A soft mask (11.6.5.2): a transparency group's drawing, read as each point's luminosity or alpha, through a
+/// transfer function, masks what is painted while it is in force.
+#[derive(Debug)]
+pub struct SoftMask {
+    /// Read as luminosity (`/S /Luminosity`), else as alpha (`/Alpha`).
+    pub luminosity: bool,
+    /// The group (`/G`): a Form `XObject`, drawn through [`File::form_drawing`].
+    pub group: Rc<Stream>,
+    /// Its object number, when it is an indirect object: what names one group set again and again.
+    pub object: Option<u32>,
+    /// The CTM where the mask was set: the group's space maps to page space through it, after its `/Matrix`.
+    pub matrix: Matrix,
+    /// The resources in force where it was set: the group's, when it has none of its own.
+    pub resources: Dict,
+    /// The backdrop's components (`/BC`) in the group's color space; empty when not stated (its initial color,
+    /// black).
+    pub backdrop: Vec<f64>,
+    /// The transfer function (`/TR`) from the luminosity or alpha to the mask's value; None for the identity.
+    pub transfer: Option<Object>,
+}
+
+impl PartialEq for SoftMask {
+    /// The same mask set: one read is shared by every mark painted under it.
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
+impl SoftMask {
+    /// The backdrop's RGB: `/BC` in the group's color space (`/Group /CS`), at `intent`; black when either is not
+    /// stated.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a color space that does not read, and a backdrop it gives no RGB.
+    pub fn backdrop_rgb(&self, file: &File, intent: Intent) -> Result<[f64; 3]> {
+        if self.backdrop.is_empty() {
+            return Ok([0.0; 3]);
+        }
+        let space = match file.get(&self.group.dict, b"Group")? {
+            Some(Object::Dict(group)) => match group.get(b"CS") {
+                Some(cs) => Some(file.color_space(cs, &self.resources)?),
+                None => None,
+            },
+            _ => None,
+        };
+        let Some(space) = space else {
+            return Ok([0.0; 3]);
+        };
+        space
+            .color(self.backdrop.clone(), intent)?
+            .rgb
+            .ok_or_else(|| Error::malformed("a soft mask's backdrop has no RGB"))
+    }
+}
+
+/// A transparency group (11.6.6): a Form whose marks are composited together, then their result onto what lies
+/// below.
+#[derive(Debug)]
+pub struct Group {
+    /// Isolated (`/I true`): its marks are composited onto a transparent backdrop, not onto what lies below.
+    pub isolated: bool,
+    /// Knockout (`/K true`): each of its marks is composited onto the group's backdrop, not onto the marks before
+    /// it.
+    pub knockout: bool,
+    /// How its result is composited: the alphas (the fill's), blend mode and soft mask in force where it was
+    /// painted, and the group it is painted in.
+    pub compositing: Compositing,
+    /// The box it may paint, in page space: the clip's where it was painted, within its `/BBox`.
+    pub bbox: Rect,
+}
+
+impl PartialEq for Group {
+    /// The same group painted: one Form painted twice is two groups.
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
     }
 }
 
@@ -353,11 +463,30 @@ pub enum Event {
     Shading(ShadingEvent),
 }
 
+impl Event {
+    /// How it is composited.
+    #[must_use]
+    pub fn compositing(&self) -> &Compositing {
+        match self {
+            Self::Path(e) => &e.compositing,
+            Self::Image(e) => &e.compositing,
+            Self::Text(e) => &e.compositing,
+            Self::Shading(e) => &e.compositing,
+        }
+    }
+}
+
 /// A shading painted with `sh`: a gradient across the clip.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShadingEvent {
     /// The box it may paint, in page space: the clip's, within the shading's `/BBox` when it has one.
     pub bbox: Rect,
+    /// The shading: its dictionary, or its stream (a mesh's), read by [`crate::shading`].
+    pub shading: Rc<Object>,
+    /// From the shading's space (the user space where it was painted) to page space: the CTM.
+    pub matrix: Matrix,
+    /// The rendering intent its colors convert at.
+    pub intent: Intent,
     /// The layer it is drawn in.
     pub layer: Layer,
     /// The clip in force; None: the page's alone.
@@ -394,6 +523,9 @@ pub struct Content {
 #[derive(Debug, Clone)]
 struct State {
     ctm: Matrix,
+    /// The matrix of the running content stream's default space (the page's, a Form's, a glyph procedure's, a
+    /// tiling cell's) to page space: where a pattern's space lies (8.7.2).
+    base: Matrix,
     stroke_space: Space,
     stroke_color: Color,
     fill_space: Space,
@@ -431,6 +563,7 @@ impl State {
     fn new(ctm: Matrix, clip: Rect) -> Self {
         Self {
             ctm,
+            base: ctm,
             clip,
             stroke_color: Color::black(),
             stroke_space: Space::Gray,
@@ -563,9 +696,24 @@ impl File {
             y1: height,
         };
         let initial = State::new(page.to_page_space(), shown);
-        let mut interpreter = Interpreter {
+        let mut interpreter = self.interpreter(initial.clone(), procedures)?;
+        interpreter.run(&data, &page.resources, 0);
+        interpreter.close_marked("the page");
+        if annotations {
+            interpreter.annotations(page, &initial);
+        }
+        Ok(interpreter.out)
+    }
+
+    /// An interpreter starting from `initial`, running Type 3 procedures when `procedures` places them.
+    fn interpreter<'a>(
+        &'a self,
+        initial: State,
+        procedures: Option<&'a dyn Fn(Matrix) -> Matrix>,
+    ) -> Result<Interpreter<'a>> {
+        Ok(Interpreter {
             file: self,
-            state: initial.clone(),
+            state: initial,
             stack: Vec::new(),
             path: Vec::new(),
             current: None,
@@ -585,12 +733,64 @@ impl File {
             annotation: None,
             form_resources: Dict::new(),
             out: Content::default(),
+        })
+    }
+
+    /// The Form `form` drawn alone, as a renderer draws a soft mask's group (11.6.5.2): as `Do` draws it --
+    /// through its `/Matrix`, clipped to its `/BBox`, its marks a transparency group's when it is one -- under `ctm`
+    /// from the initial graphics state, with its own resources (else `resources`), each Type 3 glyph's procedure run
+    /// in place as [`File::drawing`] runs it, placed by `place`. Nothing outside `clip` (page space) is seen.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a Form that does not decode; an operation that cannot be read is a warning instead.
+    pub fn form_drawing(
+        &self,
+        form: &Stream,
+        resources: &Dict,
+        ctm: Matrix,
+        clip: Rect,
+        place: &dyn Fn(Matrix) -> Matrix,
+    ) -> Result<Content> {
+        let mut interpreter = self.interpreter(State::new(ctm, clip), Some(place))?;
+        interpreter.form(form, resources, 0)?;
+        Ok(interpreter.out)
+    }
+
+    /// A tiling pattern's cell drawn alone (8.7.3.1): its content stream under `ctm` (from pattern space), clipped
+    /// to its `/BBox`, from the initial graphics state, with its own resources, each Type 3 glyph's procedure run in
+    /// place as [`File::drawing`] runs it, placed by `place`. An uncolored pattern's cell (`tint` given) paints in the
+    /// tint, its own color operators ignored. Nothing outside `clip` (page space) is seen.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a pattern that is not a stream, and a cell that does not decode.
+    pub fn cell_drawing(
+        &self,
+        pattern: &Object,
+        ctm: Matrix,
+        clip: Rect,
+        tint: Option<&Color>,
+        place: &dyn Fn(Matrix) -> Matrix,
+    ) -> Result<Content> {
+        let Object::Stream(cell) = pattern else {
+            return Err(Error::malformed(format!(
+                "a tiling pattern is a {}",
+                pattern.kind()
+            )));
         };
-        interpreter.run(&data, &page.resources, 0);
-        interpreter.close_marked("the page");
-        if annotations {
-            interpreter.annotations(page, &initial);
+        let mut initial = State::new(ctm, clip);
+        if let Some(tint) = tint {
+            // The tint alone: the color naming the pattern paints its cell in it.
+            let tint = Color {
+                pattern: None,
+                ..tint.clone()
+            };
+            (initial.fill_color, initial.stroke_color) = (tint.clone(), tint);
         }
+        let mut interpreter = self.interpreter(initial, Some(place))?;
+        interpreter.uncolored = tint.is_some();
+        interpreter.form_under(cell, Matrix::IDENTITY, &Dict::new(), 0)?;
         Ok(interpreter.out)
     }
 }
@@ -835,11 +1035,15 @@ impl Interpreter<'_> {
                 inkless,
                 ..self.layer()
             };
+            let matrix = self.state.ctm;
             self.out.events.push(Event::Shading(ShadingEvent {
                 bbox,
+                shading: Rc::new(shading),
+                matrix,
+                intent: self.state.intent,
                 layer,
                 clip: self.state.clips.clone(),
-                compositing: self.state.compositing,
+                compositing: self.state.compositing.clone(),
             }));
         }
         Ok(())
@@ -1234,7 +1438,7 @@ impl Interpreter<'_> {
             glyphs,
             layer: self.layer(),
             clip: self.state.clips.clone(),
-            compositing: self.state.compositing,
+            compositing: self.state.compositing.clone(),
         };
         let shown: Vec<(u32, Matrix)> = match self.procedures {
             Some(place) if paints && font.info.subtype == "Type3" => event
@@ -1311,6 +1515,7 @@ impl Interpreter<'_> {
             (self.in_procedure, self.uncolored),
         );
         self.state.ctm = font.matrix.then(matrix);
+        self.state.base = self.state.ctm;
         (self.in_procedure, self.uncolored) = (true, false);
         let floor = std::mem::replace(&mut self.marked_floor, self.marked.len());
         self.run(&data, own.as_ref().unwrap_or(resources), depth + 1);
@@ -1457,7 +1662,10 @@ impl Interpreter<'_> {
                 .last()
                 .and_then(Object::as_name)
                 .ok_or_else(|| Error::malformed("needs a pattern name"))?;
-            Some(self.file.pattern(name, resources)?)
+            Some(
+                self.file
+                    .pattern(name, resources, self.state.base, self.state.intent)?,
+            )
         } else {
             None
         };
@@ -1473,7 +1681,10 @@ impl Interpreter<'_> {
         components: Vec<f64>,
         pattern: Option<Pattern>,
     ) -> Color {
-        let tinted = matches!(pattern, None | Some(Pattern::Tiling { uncolored: true }));
+        let tinted = matches!(
+            pattern.as_ref().map(|p| p.kind),
+            None | Some(PatternKind::Tiling { uncolored: true })
+        );
         let mut color = if tinted {
             self.converted(operator, space, components)
         } else {
@@ -1484,7 +1695,11 @@ impl Interpreter<'_> {
                 pattern: None,
             }
         };
-        color.pattern = pattern;
+        // A pattern's colors convert at the intent in force, as a color's do.
+        color.pattern = pattern.map(|p| Pattern {
+            intent: self.state.intent,
+            ..p
+        });
         color
     }
 
@@ -1502,8 +1717,11 @@ impl Interpreter<'_> {
             } else {
                 (&self.state.fill_space, &self.state.fill_color)
             };
-            let (space, components, pattern) =
-                (space.clone(), color.components.clone(), color.pattern);
+            let (space, components, pattern) = (
+                space.clone(),
+                color.components.clone(),
+                color.pattern.clone(),
+            );
             let color = self.painted(b"ri", &space, components, pattern);
             if stroking {
                 self.state.stroke_color = color;
@@ -1582,7 +1800,7 @@ impl Interpreter<'_> {
                 ..self.layer()
             },
             clip: state.clips.clone(),
-            compositing: state.compositing,
+            compositing: state.compositing.clone(),
         };
         self.out.events.push(Event::Path(event));
     }
@@ -1632,11 +1850,6 @@ impl Interpreter<'_> {
             }
             _ => {}
         }
-        match self.file.get(&gs, b"SMask")? {
-            Some(Object::Dict(_)) => compositing.soft_mask = true,
-            Some(Object::Name(n)) if n == b"None" => compositing.soft_mask = false,
-            _ => {}
-        }
         if let Some(Object::Name(intent)) = self.file.get(&gs, b"RI")? {
             self.set_intent(&intent);
         }
@@ -1650,7 +1863,50 @@ impl Interpreter<'_> {
                 .collect();
             self.state.dash_phase = d.get(1).and_then(Object::as_number).unwrap_or(0.0);
         }
+        // Last: a mask that does not read skips no other entry.
+        match self.file.get(&gs, b"SMask")? {
+            Some(Object::Dict(mask)) => {
+                let soft_mask = self.soft_mask(&mask, resources)?;
+                self.state.compositing.soft_mask = Some(Rc::new(soft_mask));
+            }
+            Some(Object::Name(n)) if n == b"None" => self.state.compositing.soft_mask = None,
+            _ => {}
+        }
         Ok(())
+    }
+
+    /// The soft mask the dictionary `mask` states (11.6.5.2), set where the CTM is the state's and `resources` are
+    /// in force.
+    fn soft_mask(&self, mask: &Dict, resources: &Dict) -> Result<SoftMask> {
+        let luminosity = match self.file.get(mask, b"S")? {
+            Some(Object::Name(s)) if s == b"Luminosity" => true,
+            Some(Object::Name(s)) if s == b"Alpha" => false,
+            _ => {
+                return Err(Error::malformed(
+                    "a soft mask's /S is neither Luminosity nor Alpha",
+                ));
+            }
+        };
+        let Some(Object::Stream(group)) = self.file.get(mask, b"G")? else {
+            return Err(Error::malformed("a soft mask's /G is not a Form"));
+        };
+        let backdrop = match self.file.get(mask, b"BC")? {
+            Some(Object::Array(bc)) => bc.iter().filter_map(Object::as_number).collect(),
+            _ => Vec::new(),
+        };
+        let transfer = match self.file.get(mask, b"TR")? {
+            Some(Object::Name(n)) if n == b"Identity" => None,
+            other => other,
+        };
+        Ok(SoftMask {
+            luminosity,
+            group: Rc::new(group),
+            object: mask.get(b"G").and_then(Object::as_reference).map(|r| r.num),
+            matrix: self.state.ctm,
+            resources: resources.clone(),
+            backdrop,
+            transfer,
+        })
     }
 
     fn x_object(&mut self, operands: &[Object], resources: &Dict, depth: usize) -> Result<()> {
@@ -1699,10 +1955,22 @@ impl Interpreter<'_> {
     /// The Form `stream` drawn in the current state (8.10): through its `/Matrix`, clipped to its `/BBox`, with its
     /// own resources (else `resources`, its caller's); the state, the path and its marked content end with it.
     fn form(&mut self, stream: &Stream, resources: &Dict, depth: usize) -> Result<()> {
+        let matrix = self.form_matrix(&stream.dict)?;
+        self.form_under(stream, matrix, resources, depth)
+    }
+
+    /// The Form (or tiling cell) `stream` drawn as [`Self::form`] draws it, through `matrix` rather than its
+    /// `/Matrix`; when it is a transparency group (`/Group`), its marks are the group's.
+    fn form_under(
+        &mut self,
+        stream: &Stream,
+        matrix: Matrix,
+        resources: &Dict,
+        depth: usize,
+    ) -> Result<()> {
         if depth >= MAX_FORM_DEPTH {
             return Err(Error::malformed("Form XObjects nest too deep"));
         }
-        let matrix = self.form_matrix(&stream.dict)?;
         let own = match self.file.get(&stream.dict, b"Resources")? {
             Some(Object::Dict(r)) => r,
             _ => resources.clone(),
@@ -1716,18 +1984,7 @@ impl Interpreter<'_> {
             self.start,
         );
         self.state.ctm = matrix.then(self.state.ctm);
-        if self.file.get(&stream.dict, b"Group")?.is_some() {
-            let entered = self.state.compositing;
-            let composited = entered.fill_alpha < 1.0
-                || entered.stroke_alpha < 1.0
-                || entered.blend != Blend::Normal
-                || entered.soft_mask
-                || entered.grouped;
-            self.state.compositing = Compositing {
-                grouped: composited,
-                ..Compositing::default()
-            };
-        }
+        self.state.base = self.state.ctm;
         if let Some([x0, y0, x1, y1]) = four(self.file.get(&stream.dict, b"BBox")?) {
             let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| self.point(x, y));
             let shown = Rect::around(&corners).expect("four corners");
@@ -1739,6 +1996,24 @@ impl Interpreter<'_> {
                 segments,
                 even_odd: false,
             });
+        }
+        if let Some(Object::Dict(group)) = self.file.get(&stream.dict, b"Group")? {
+            let flag = |key: &[u8]| -> Result<bool> {
+                Ok(matches!(
+                    self.file.get(&group, key)?,
+                    Some(Object::Bool(true))
+                ))
+            };
+            let group = Group {
+                isolated: flag(b"I")?,
+                knockout: flag(b"K")?,
+                compositing: self.state.compositing.clone(),
+                bbox: self.state.clip,
+            };
+            self.state.compositing = Compositing {
+                group: Some(Rc::new(group)),
+                ..Compositing::default()
+            };
         }
         let floor = std::mem::replace(&mut self.marked_floor, self.marked.len());
         self.run(&data, &own, depth + 1);
@@ -1930,7 +2205,7 @@ impl Interpreter<'_> {
                 ..self.layer()
             },
             clip: self.state.clips.clone(),
-            compositing: self.state.compositing,
+            compositing: self.state.compositing.clone(),
         }));
     }
 }

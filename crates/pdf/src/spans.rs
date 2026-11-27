@@ -198,7 +198,7 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
                 in_background_color: false,
             },
             first: glyph.index,
-            compositing: text.compositing,
+            compositing: text.compositing.clone(),
             origin: glyph.origin,
             end: glyph.end,
             inked: inks(piece),
@@ -281,11 +281,11 @@ fn in_background_color(open: &Open, below: &[Event], marks: &[Option<Rect>]) -> 
     else {
         return false;
     };
-    if !opaque(open.compositing, open.compositing.fill_alpha) {
+    if !opaque(&open.compositing, open.compositing.fill_alpha) {
         return false;
     }
     let bbox = span.bbox;
-    let paints = |color: &Color, compositing: Compositing, alpha: f64| {
+    let paints = |color: &Color, compositing: &Compositing, alpha: f64| {
         opaque(compositing, alpha) && same_color(color, fill)
     };
     for (event, _) in below
@@ -302,10 +302,10 @@ fn in_background_color(open: &Open, below: &[Event], marks: &[Option<Rect>]) -> 
             }
             Event::Path(path) => {
                 let stroke = path.stroke.as_ref().is_none_or(|s| {
-                    paints(&s.color, path.compositing, path.compositing.stroke_alpha)
+                    paints(&s.color, &path.compositing, path.compositing.stroke_alpha)
                 });
                 let filled = path.fill.as_ref().is_none_or(|f| {
-                    paints(&f.color, path.compositing, path.compositing.fill_alpha)
+                    paints(&f.color, &path.compositing, path.compositing.fill_alpha)
                 });
                 if !(stroke && filled) {
                     return false;
@@ -327,7 +327,7 @@ fn in_background_color(open: &Open, below: &[Event], marks: &[Option<Rect>]) -> 
 /// outlines are not read here), but one in another color shows what is drawn over it (a black `!` on a white triangle).
 fn text_in(text: &TextEvent, fill: &Color, bbox: Rect) -> bool {
     let paints =
-        |color: &Color, alpha: f64| opaque(text.compositing, alpha) && same_color(color, fill);
+        |color: &Color, alpha: f64| opaque(&text.compositing, alpha) && same_color(color, fill);
     let fills = !matches!(text.render_mode, 0 | 2 | 4 | 6)
         || paints(&text.fill, text.compositing.fill_alpha);
     let strokes = !matches!(text.render_mode, 1 | 2 | 5 | 6)
@@ -346,11 +346,11 @@ fn overlaps(a: Rect, b: Rect) -> bool {
 
 /// Whether a mark composited so, at constant alpha `alpha`, paints its own color: alpha 1, `Normal`, no soft mask,
 /// in no transparency group composited otherwise.
-fn opaque(compositing: Compositing, alpha: f64) -> bool {
+fn opaque(compositing: &Compositing, alpha: f64) -> bool {
     alpha >= 1.0
         && compositing.blend == Blend::Normal
-        && !compositing.soft_mask
-        && !compositing.grouped
+        && compositing.soft_mask.is_none()
+        && !compositing.in_composited_group()
 }
 
 /// Whether two colors are one sRGB color exactly; a pattern, or a color with no sRGB, is no one color.

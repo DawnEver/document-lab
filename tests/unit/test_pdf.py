@@ -281,3 +281,20 @@ def test_part_of_an_image_or_another_resolution_is_rendered(tmp_path):
 def test_a_missing_file_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         read_pdf(tmp_path / 'absent.pdf')
+
+
+def test_vertical_writing_is_a_vertical_span_read_top_to_bottom_in_its_column(tmp_path):
+    # PyMuPDF sets the text with a predefined Unicode CMap; its -V twin (vertical, ISO 32000-2 9.7.5.2) is swapped in.
+    doc = pymupdf.open()
+    page = doc.new_page(width=200, height=200)
+    page.insert_text((100, 40), '\u4e00\u4e8c\u4e09', fontname='china-s', fontsize=10)
+    page.insert_text((20, 150), 'side', fontsize=10)
+    (cjk,) = [xref for xref, *_, encoding in page.get_fonts() if encoding == 'UniGB-UTF16-H']
+    doc.xref_set_key(cjk, 'Encoding', '/UniGB-UTF16-V')
+    doc.save(tmp_path / 'v.pdf')
+    spans = {s.text: s for s in read_pdf(tmp_path / 'v.pdf').page(1).spans}
+    column = spans['\u4e00\u4e8c\u4e09']
+    assert column.vertical
+    assert not spans['side'].vertical
+    # From the vertical origin (100, 40): an em across, centered on it; three ems (the default advance) down.
+    assert tuple(column.provenance.bbox) == pytest.approx((95, 40, 105, 70), abs=1e-6)

@@ -52,9 +52,9 @@ create_exception!(
 
 /// A box as `(x0, y0, x1, y1)`.
 type Box4 = (f64, f64, f64, f64);
-/// A span: text, font name (no subset tag), size, bold, box, render mode, and the number it shares with the spans
-/// its words run on into with no space between (None: none).
-type SpanRow = (String, String, f64, bool, Box4, i64, Option<usize>);
+/// A span: text, font name (no subset tag), size, bold, box, render mode, the number it shares with the spans its
+/// words run on into with no space between (None: none), and whether it is written vertically.
+type SpanRow = (String, String, f64, bool, Box4, i64, Option<usize>, bool);
 /// A path (one subpath): points, closed, stroke color, line width, dashes, dash phase, fill color, even-odd, and
 /// the index of the painted path it belongs to on its page.
 type PathRow = (
@@ -137,6 +137,7 @@ impl Reader {
                     box4(s.bbox),
                     s.render_mode,
                     s.unspaced,
+                    s.vertical,
                 )
             })
             .collect();

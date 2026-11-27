@@ -1,0 +1,328 @@
+"""The ``corpus`` part: real public PDFs (:mod:`tests.corpus.sources`) fetched at test time, read against in-code truth.
+
+Every source is read page by page against its golden pages (:mod:`tests.corpus.goldens`; how they are written:
+:mod:`tests.corpus.reading`), and against the feature it was chosen for, each truth read off the PDF itself -- its
+rendering, its own objects -- not off the reader. The IRS forms are encrypted here, with each security handler
+revision the reader decrypts, and must read as their originals. Every check is paired with a planted wrong truth it
+must report.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import re
+from collections.abc import Callable
+from functools import cache
+from pathlib import Path
+from typing import Any
+
+import pymupdf
+import pytest
+
+from document_lab import _pdf
+from document_lab.ir import BBox, Document
+from document_lab.pdf import read_pdf
+from tests.corpus.goldens import GOLDENS
+from tests.corpus.reading import Page, problems, summarize
+from tests.corpus.sources import SOURCES
+
+pytestmark = pytest.mark.corpus
+
+
+def test_every_source_has_goldens():
+    assert set(GOLDENS) == set(SOURCES)
+
+
+@pytest.mark.parametrize('pdf', sorted(SOURCES), indirect=True)
+def test_a_source_reads_as_its_golden_pages(pdf: Path, request: pytest.FixtureRequest):
+    assert problems(summarize(pdf), GOLDENS[request.node.callspec.params['pdf']]) == []
+
+
+def _one_page_changed(golden: tuple[Page, ...], **change: Any) -> tuple[Page, ...]:
+    middle = len(golden) // 2
+    return (*golden[:middle], golden[middle]._replace(**change), *golden[middle + 1 :])
+
+
+#: The planted wrong goldens: each falsifies one fact of a source's true pages.
+WRONG_GOLDEN: dict[str, Callable[[tuple[Page, ...]], tuple[Page, ...]]] = {
+    'a page dropped': lambda g: g[:-1],
+    'a page wider': lambda g: _one_page_changed(g, width=g[len(g) // 2].width + 0.01),
+    'other text': lambda g: _one_page_changed(g, text_sha256='0' * 64),
+    'a span more': lambda g: _one_page_changed(g, spans=g[len(g) // 2].spans + 1),
+    'a path more': lambda g: _one_page_changed(g, paths=g[len(g) // 2].paths + 1),
+    'an image more': lambda g: _one_page_changed(g, images=g[len(g) // 2].images + 1),
+}
+
+
+@pytest.mark.parametrize('wrong', sorted(WRONG_GOLDEN))
+@pytest.mark.parametrize('pdf', sorted(SOURCES), indirect=True)
+def test_a_wrong_golden_is_reported(pdf: Path, wrong: str, request: pytest.FixtureRequest):
+    golden = GOLDENS[request.node.callspec.params['pdf']]
+    assert problems(summarize(pdf), WRONG_GOLDEN[wrong](golden)), f'{wrong}: the golden check could not say no'
+
+
+# --- the features each source was chosen for -------------------------------------------------------------------------
+
+
+@cache
+def _read(pdf: Path) -> Document:
+    return read_pdf(pdf)
+
+
+def _text(pdf: Path, page: int) -> str:
+    return ' '.join(' '.join(span.text for span in _read(pdf).page(page).spans).split())
+
+
+def phrases_stated(pdf: Path, page: int, phrases: tuple[str, ...]) -> list[str]:
+    text = _text(pdf, page)
+    return [f'page {page} does not state {p!r}' for p in phrases if p not in text]
+
+
+def phrases_left_out(pdf: Path, page: int, phrases: tuple[str, ...]) -> list[str]:
+    text = _text(pdf, page)
+    return [f'page {page} states {p!r}' for p in phrases if p in text]
+
+
+def font_text(pdf: Path, font: str, text: str) -> list[str]:
+    found = ''.join(span.text for span in _read(pdf).spans() if span.font == font)
+    return [] if found == text else [f'the {font} spans state {found!r}, not {text!r}']
+
+
+def page_size(pdf: Path, page: int, size: tuple[float, float]) -> list[str]:
+    stated = _read(pdf).page(page)
+    found = (round(stated.width, 2), round(stated.height, 2))
+    return [] if found == size else [f'page {page} is {found} pt, not {size}']
+
+
+def ocr_layer(pdf: Path, modes: frozenset[int]) -> list[str]:
+    """Every page one scan under text in render modes ``modes`` (3: invisible)."""
+    out = []
+    for page in _read(pdf).pages:
+        found = {span.render_mode for span in page.spans}
+        if found != modes:
+            out.append(f'page {page.number} renders its text in modes {sorted(found)}, not {sorted(modes)}')
+        if not page.figures:
+            out.append(f'page {page.number} places no image')
+    return out
+
+
+def jpx_images(pdf: Path, page: int, objects: frozenset[int]) -> list[str]:
+    """The image XObjects ``page`` places that the reader hands over still JPX-encoded (D3: not decoded)."""
+    reader = _pdf.open(pdf.read_bytes(), b'')
+
+    def codec(image: int) -> str | None:
+        _width, _height, _space, _components, _bits, _data, still_in, _decode, _masked = reader.image(image)
+        return still_in
+
+    placed = {figure.image for figure in _read(pdf).page(page).figures if figure.image is not None}
+    found = {image for image in placed if codec(image) == 'JPXDecode'}
+    return [] if found == objects else [f'page {page} places JPX images {sorted(found)}, not {sorted(objects)}']
+
+
+#: The narrowest a vertical glyph's box may be, in ems: a CJK glyph is about one em wide.
+VERTICAL_MIN_WIDTH = 0.5
+
+
+def vertical_run(pdf: Path, page: int, area: tuple[float, float, float, float], text: str) -> list[str]:
+    """The spans of Identity-V fonts centered in ``area`` (x0, y0, x1, y1) are stated vertical and, read top to
+    bottom (a space between spans), state ``text``.
+    """
+    column = BBox(*area)
+    spans = sorted(
+        (span.provenance.bbox.y0, span.text, span.provenance.bbox.width, span.size, span.vertical)
+        for span in _read(pdf).page(page).spans
+        if span.font.endswith('-Identity-V') and column.contains(*span.center)
+    )
+    found = ' '.join(t for _y, t, _w, _s, _v in spans)
+    out = [] if found == text else [f'page {page} states {found!r} down the column, not {text!r}']
+    flat = [t for _y, t, _w, _s, vertical in spans if not vertical]
+    out += [f'page {page}: Identity-V spans {flat!r} not stated vertical'] if flat else []
+    narrow = [t for _y, t, width, size, _v in spans if width < VERTICAL_MIN_WIDTH * size]
+    return out + ([f'page {page}: vertical spans {narrow!r} under half an em wide'] if narrow else [])
+
+
+@dataclasses.dataclass(frozen=True)
+class Feature:
+    """A truth about ``source``, read off the PDF; ``check(pdf, *truth)`` lists what the reader departs from it."""
+
+    source: str
+    check: Callable[..., list[str]]
+    truth: tuple
+    wrong: tuple  # a planted wrong truth the check must report
+    known: str = ''  # a known failure: what the reader states instead (the residual), until it is fixed
+
+
+# The documents' own words, escaped: no CJK character is written in tracked source (NO-CJK-IN-TRACKED-SOURCE).
+#: 2608.20674 p4: "As a first step, ... the following summary ... please."
+_JA_STEP = '\u6700\u521d\u306e\u30b9\u30c6\u30c3\u30d7\u3068\u3057\u3066\uff0c\u4ee5\u4e0b\u306e\u8981\u65e8\u3092'
+_JA_LIST = '\u4f53\u8a00\u6b62\u3081\uff0c\u7b87\u6761\u66f8\u304d\u306e\u30ea\u30b9\u30c8\u306b\u5909\u63db'
+_JA_PLEASE = '\u3057\u3066\u304f\u3060\u3055\u3044\u3002'
+#: The JST survey's title: "user satisfaction survey of information services".
+_JA_SURVEY = '\u60c5\u5831\u30b5\u30fc\u30d3\u30b9\u5229\u7528\u8005\u306e\u6e80\u8db3\u5ea6\u8abf\u67fb'
+#: 2105.10459's title, "research on regional and urban-cluster development based on {night}-light remote sensing".
+_ZH_TITLE = (
+    '\u57fa\u4e8e{}\u5149\u9065\u611f\u5bf9\u4e8e\u533a\u57df\u548c'
+    '\u57ce\u5e02\u7fa4\u7684\u53d1\u5c55\u7684\u7814\u7a76'
+)
+
+FEATURES = {
+    'type3-glyphs-read': Feature(
+        'latex-type3-arxiv-2204.08094v1',
+        font_text,
+        ('DejaVuSansMono', 'EADGBe' * 8),  # the string names under the tablature figures (pages 4 and 6), as drawn
+        ('DejaVuSansMono', 'EADGBE' * 8),
+    ),
+    'cropped-page-is-its-crop-box': Feature(
+        'cjk-zh-vertical-arxiv-2301.01621v3',
+        page_size,
+        (24, (595.68, 841.92)),  # page 24's CropBox; its MediaBox is 603.84 x 847.92
+        (24, (603.84, 847.92)),
+    ),
+    'annotation-text-left-out-by-default': Feature(
+        'cjk-zh-vertical-arxiv-2301.01621v3',
+        phrases_left_out,
+        (1, ('Work supported by the National Natural Science Foundation of China',)),  # page 1's FreeText /Contents
+        (1, ('Grammar construction methods for extended deterministic expressions',)),  # page 1's title
+    ),
+    'vertical-cjk-reads-top-to-bottom': Feature(
+        'cjk-zh-vertical-arxiv-2301.01621v3',
+        vertical_run,
+        # Page 3's contents: the page numbers of its fifteen entries, set in an Identity-V font down the right-hand
+        # column (x 499-506 pt of ink, y 174-488 pt), as the page renders them: 1, 2, 2, 3, 3, 5, 6, 6, 8, 8, 9,
+        # then the units of 12, 14, 16, 17 (their tens are glyphs set beside them, x 494-499 pt, which the font's
+        # ToUnicode names U+006C 'l').
+        (3, (499.0, 170.0, 520.0, 500.0), '1 2 2 3 3 5 6 6 8 8 9 2 4 6 7'),
+        (3, (499.0, 170.0, 520.0, 500.0), '7 6 4 2 9 8 8 6 6 5 3 3 2 2 1'),
+    ),
+    'japanese-in-an-embedded-cid-font': Feature(
+        'cjk-ja-euc-h-arxiv-2608.20674v1',
+        phrases_stated,
+        (4, (_JA_STEP + _JA_LIST + _JA_PLEASE,)),
+        (4, (_JA_STEP + '\u8981\u7d04' + _JA_PLEASE,)),
+    ),
+    'japanese-powerpoint-and-its-license': Feature(
+        'cjk-ja-powerpoint-jst-survey2024',
+        phrases_stated,
+        (1, (_JA_SURVEY, 'https://creativecommons.org/licenses/by/4.0/deed.ja')),
+        (1, (_JA_SURVEY, 'https://creativecommons.org/licenses/by-sa/4.0/deed.ja')),
+    ),
+    'word-truetype-text': Feature(
+        'word-truetype-arxiv-2105.10459v1',
+        phrases_stated,
+        (1, (_ZH_TITLE.format('\u591c'), 'night-light remote sensing')),
+        (1, (_ZH_TITLE.format('\u65e5'), 'night-light remote sensing')),
+    ),
+    'scan-under-an-invisible-ocr-layer': Feature(
+        'scan-ocr-rotated-naca-tn670',
+        ocr_layer,
+        (frozenset({3}),),
+        (frozenset({0}),),
+    ),
+    'rotated-page-is-stated-as-displayed': Feature(
+        'scan-ocr-rotated-naca-tn670',
+        page_size,
+        (10, (744.0, 565.0)),  # page 10: /Rotate 90 over a 565 x 744 MediaBox
+        (10, (565.0, 744.0)),
+    ),
+    'jpx-images-handed-over-encoded': Feature(
+        'devicen-jpx-usgs-fs20213001',
+        jpx_images,
+        (1, frozenset({288, 295, 299, 303})),  # page 1's image XObjects filtered /JPXDecode
+        (1, frozenset({288, 295, 299})),
+    ),
+}
+
+
+def _feature_cases() -> list:
+    return [
+        pytest.param(
+            feature.source,
+            name,
+            id=name,
+            marks=[pytest.mark.xfail(strict=True, reason=feature.known)] if feature.known else [],
+        )
+        for name, feature in FEATURES.items()
+    ]
+
+
+@pytest.mark.parametrize(('pdf', 'name'), _feature_cases(), indirect=['pdf'])
+def test_a_source_has_the_feature_it_was_chosen_for(pdf: Path, name: str):
+    feature = FEATURES[name]
+    assert feature.check(pdf, *feature.truth) == []
+
+
+@pytest.mark.parametrize(('pdf', 'name'), [(f.source, n) for n, f in FEATURES.items()], indirect=['pdf'])
+def test_a_wrong_feature_truth_is_reported(pdf: Path, name: str):
+    feature = FEATURES[name]
+    assert feature.check(pdf, *feature.wrong), f'{name}: the check could not say no'
+
+
+# --- encryption: the IRS forms, encrypted here (the bytes are not reproducible: random salts), read as originals --
+
+
+#: Each form's encryption: PyMuPDF's method, and the /V and /R the security handler must then state.
+ENCRYPTIONS = {
+    'form-irs-f1040-2025': (pymupdf.PDF_ENCRYPT_AES_256, 5, 6),
+    'form-irs-fw4-2026': (pymupdf.PDF_ENCRYPT_AES_128, 4, 4),
+    'form-irs-fw9-2024': (pymupdf.PDF_ENCRYPT_RC4_128, 2, 3),
+}
+OWNER = 'document-lab-owner'
+USER = 'document-lab-user'
+WRONG_PASSWORD = 'not-the-password'  # noqa: S105 -- a password the files do not have
+
+
+@pytest.fixture
+def encrypted(pdf: Path, request: pytest.FixtureRequest, tmp_path: Path) -> Callable[[str], Path]:
+    """``pdf`` encrypted as :data:`ENCRYPTIONS` names, with user password ``user`` (empty: anyone opens it)."""
+    method, _v, _r = ENCRYPTIONS[request.node.callspec.params['pdf']]
+
+    def make(user: str) -> Path:
+        out = tmp_path / f'encrypted-{len(user)}.pdf'
+        with pymupdf.open(pdf) as doc:
+            doc.save(out, encryption=method, owner_pw=OWNER, user_pw=user, permissions=pymupdf.PDF_PERM_PRINT)
+        return out
+
+    return make
+
+
+def handler(path: Path, version: int, revision: int) -> list[str]:
+    """The file's standard security handler is /V ``version`` /R ``revision`` (PyMuPDF says 'Standard V5 R6 ...')."""
+    with pymupdf.open(path) as doc:
+        said = doc.metadata['encryption'] or 'none'
+    found = re.match(r'Standard V(\d+) R(\d+) ', said)
+    if found is None or (int(found[1]), int(found[2])) != (version, revision):
+        return [f'encrypted {said!r}, not Standard V{version} R{revision}']
+    return []
+
+
+FORMS = sorted(ENCRYPTIONS)
+
+
+@pytest.mark.parametrize('pdf', FORMS, indirect=True)
+def test_the_form_is_encrypted_as_named(encrypted, request: pytest.FixtureRequest):
+    _method, version, revision = ENCRYPTIONS[request.node.callspec.params['pdf']]
+    path = encrypted('')
+    assert handler(path, version, revision) == []
+    assert handler(path, version, revision + 1), 'the planted control: another revision must be reported'
+
+
+@pytest.mark.parametrize('pdf', FORMS, indirect=True)
+def test_an_encrypted_form_reads_as_its_original_with_the_empty_password(encrypted, request: pytest.FixtureRequest):
+    assert problems(summarize(encrypted('')), GOLDENS[request.node.callspec.params['pdf']]) == []
+
+
+@pytest.mark.parametrize('pdf', FORMS, indirect=True)
+def test_a_wrong_password_is_refused_and_the_owners_opens(encrypted, request: pytest.FixtureRequest):
+    path = encrypted('')
+    with pytest.raises(ValueError, match='password'):
+        read_pdf(path, password=WRONG_PASSWORD)
+    # The planted control: the refusal is the password's, not the file's -- the owner's password opens it.
+    assert problems(summarize(path, OWNER), GOLDENS[request.node.callspec.params['pdf']]) == []
+
+
+@pytest.mark.parametrize('pdf', FORMS, indirect=True)
+def test_a_user_password_once_set_is_required(encrypted, request: pytest.FixtureRequest):
+    path = encrypted(USER)
+    with pytest.raises(ValueError, match='password'):
+        read_pdf(path)
+    assert problems(summarize(path, USER), GOLDENS[request.node.callspec.params['pdf']]) == []

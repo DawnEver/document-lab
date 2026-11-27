@@ -6,13 +6,15 @@ build-backend = "maturin"
 name = "document_lab"
 # The version is the Cargo workspace's (`Cargo.toml`), read by maturin; a release tag must match it.
 dynamic = ["version"]
-license = "MIT"
-license-files = ["LICENSE"]
+# MIT, and BSD-3-Clause for Adobe's tables the reader embeds: CID-to-Unicode and the predefined CMaps (crates/pdf/src).
+license = "MIT AND BSD-3-Clause"
+license-files = ["LICENSE", "crates/pdf/src/cid2unicode/LICENSE.txt", "crates/pdf/src/cmaps/LICENSE.txt"]
 description = "Documents (PDF, HTML tables) to typed data that carries its provenance"
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "Mingyang Bao" }]
-# PyMuPDF reads the PDF (text, vector drawings, tables, images); numpy carries the digitised curves.
+# The package's own Rust crate (`document_lab._pdf`) reads PDFs and writes captures; PyMuPDF renders a region to
+# pixels and lays the OCR layer; numpy carries the digitised curves.
 # lab-commons supplies what the family already owns: the output location and logging.
 dependencies = [
     "lab-commons[paths] @ git+https://github.com/DawnEver/lab-commons.git",
@@ -29,7 +31,8 @@ gpu = ["marker-pdf"]
 ai = ["ai_lab @ git+https://github.com/DawnEver/ai-lab.git"]
 # `document_lab.capture` / `document-lab capture`: a window or screen region, scrolled and stitched, to a PDF, on
 # Windows, macOS and Linux (X11). ctypes drives the Windows desktop (user32) and the macOS one (Quartz), so they need
-# nothing; python-xlib speaks the X protocol on Linux, installed there alone. tkinter draws the overlay and the panel.
+# nothing; python-xlib speaks the X protocol on Linux, installed there alone. tkinter draws the overlay and the panel,
+# the package's own writer (`document_lab._pdf`) writes the PDF.
 capture = ["python-xlib; sys_platform == 'linux'"]
 # The family's development kit: rules registry, rendered configs, shared test bodies, verify entry.
 dev = [
@@ -64,10 +67,12 @@ markers = [
     "gpu: converts with marker-pdf on a CUDA GPU: its own part (tests/gpu), never tests/base",
     "vendor: reads the real document DOCUMENT_LAB_VENDOR_PDF names: its own part (tests/vendor), never tests/base",
     "papers: ingests the real papers in the directory DOCUMENT_LAB_PAPERS names: its own part (tests/paper/e2e), never tests/base",
+    "reference: reads the real PDFs DOCUMENT_LAB_REFERENCE_PDFS names, against PyMuPDF: its own part (tests/reference), never tests/base",
     "windows: drives a real window on the Windows desktop: its own part (tests/windows), never tests/base",
     "macos: drives a real window on the macOS desktop: its own part (tests/macos), never tests/base",
     "linux: drives a real window on an X11 desktop on Linux: its own part (tests/linux), never tests/base",
     "ocr: lays a Tesseract text layer over a capture: its own part (tests/ocr), never tests/base",
+    "corpus: reads real public PDFs fetched from their original URLs, pinned by sha256 (tests/corpus/sources.py): its own part (tests/corpus), never tests/base",
 ]
 
 [tool.ruff]
@@ -106,14 +111,17 @@ max_idle = "24 h"  # a branch idle 24 h is pruned when merged, alarmed when not
 [tool.dev_lab.parts]
 output = "output/logs"
 # No resource exists on a hosted runner: `gpu` needs a CUDA GPU and the gpu extra, `vendor` a vendor PDF and
-# `papers` the real papers, neither of which may be committed (the repo is public), `ocr` Tesseract with English data. This repo's tests run on GitHub Actions alone (user ruling
-# 2026-11-11), so no part here produces them: they stay marked, and a consumer's unified run selects them by marker.
-unproduced = ["gpu", "vendor", "papers", "ocr"]
+# `papers` the real papers and `reference` a corpus of real PDFs, none of which may be committed (the repo is
+# public), `ocr` Tesseract with English data. This repo's tests run on GitHub Actions alone (user ruling 2026-11-11),
+# so no part here produces them: they stay marked, and a consumer's unified run selects them by marker.
+unproduced = ["gpu", "vendor", "papers", "reference", "ocr"]
+# `corpus` needs the network a hosted runner has: its setup fetches every source (tests/corpus/sources.py), so a
+# source down or changed fails the job before any test runs -- posted `class=environment`, never the code's red.
 # The OS parts run on their own hosted runner (`windows`, `macos`, `linux`); the linux runner has no display, so its
 # setup starts a virtual one (Xvfb) with a window manager on it (openbox: the EWMH lists the capture reads) and names
 # it for the steps after it -- a process started in a step lives until the job ends (its output let go, so the step
 # does not wait on it).
-hosted = { linux = { setup = "sudo apt-get update && sudo apt-get install -y xvfb openbox && (Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp >/dev/null 2>&1 &) && sleep 2 && (DISPLAY=:99 openbox >/dev/null 2>&1 &) && sleep 2 && echo DISPLAY=:99 >> \"$GITHUB_ENV\"" } }
+hosted = { corpus = { setup = "uv run --no-sync python -m tests.corpus.sources" }, linux = { setup = "sudo apt-get update && sudo apt-get install -y xvfb openbox && (Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp >/dev/null 2>&1 &) && sleep 2 && (DISPLAY=:99 openbox >/dev/null 2>&1 &) && sleep 2 && echo DISPLAY=:99 >> \"$GITHUB_ENV\"" } }
 
 # The extras every environment carries: `dev` (the kit, pytest, ruff; it carries `ai`). `gpu` (marker-pdf -> torch)
 # is installed only for an environment whose need-set holds the `gpu` resource marker; `dev` carries `capture`.
@@ -123,7 +131,7 @@ needs = { gpu = "gpu" }
 
 [tool.lab_commons.tests]
 produce = ["-m", "dev_lab.dev.verify", "--part", "{part}"]
-resources = ["gpu", "vendor", "papers", "ocr", "windows", "macos", "linux"]
+resources = ["gpu", "vendor", "papers", "reference", "ocr", "windows", "macos", "linux", "corpus"]
 
 # The family branch flow: integrate/main coordinates; main moves only by `integrate promote` (fast-forward).
 [tool.dev_lab.integrator]
@@ -204,6 +212,8 @@ pruned_paths = ['.claude/worktrees']
 'output/logs' = []
 'output/logs/[0-9][0-9]/[0-9][0-9]/[0-9][0-9]/*' = ['.log', '.jsonl', '.json', '.gz', '.coverage', '.txt', '.csv', '.md', '.npz', '.png']
 'output/runcache' = ['.jsonl']
+'output/cache' = []
+'output/cache/corpus' = ['.pdf']  # the corpus part's fetched sources, each named by its sha256
 'scratch' = ['*']
 'scripts' = ['.py']
 'src' = ['.py']

@@ -1,9 +1,12 @@
 //! The content-stream interpreter (ISO 32000-2 sections 8-9): what a page draws, as events in page space.
 //!
 //! The graphics state is tracked across `q`/`Q`, `cm`, colors, line style and Form `XObject`s; each painted path
-//! and each image placed is an event, its geometry already in page space (points, y down). Clipping and
-//! shadings are not painted marks and give no event. An operation that cannot be read is skipped and named
-//! in [`Content::warnings`], never silently.
+//! and each image placed is an event, its geometry already in page space (points, y down). The clip is tracked as
+//! the box it lies in -- the page's crop box, narrowed by each clipping path's bounds and each Form's `/BBox` --
+//! and a mark wholly outside it is not seen: a path or image gives no event, a glyph is left out of its text event.
+//! A box is the clip's bounds, so a mark outside a curved clip but inside its bounds is kept, never one lost.
+//! Shadings are not painted marks and give no event. An operation that cannot be read is skipped and named in
+//! [`Content::warnings`], never silently.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -19,6 +22,10 @@ use crate::page::Page;
 
 /// How deep Form `XObject`s may nest before one is refused as a loop.
 const MAX_FORM_DEPTH: usize = 32;
+
+/// Half an em in text space units of one font size (500 units of a composite font's 1000-unit glyph space): half a
+/// vertical column's width across.
+const HALF_EM: f64 = 0.5;
 
 /// One piece of a path, in page space.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -94,11 +101,13 @@ pub struct Glyph {
     pub code: u32,
     /// Its text, when the font says what it is.
     pub text: Option<String>,
-    /// Where its baseline starts, in page space.
+    /// Where it starts along its line, in page space: its origin on the baseline, or its vertical origin (the top
+    /// of its place in a column) when its font writes vertically.
     pub origin: Point,
-    /// Where its baseline ends (its origin plus its width, before spacing), in page space.
+    /// Where it ends along its line (its origin plus its advance, before spacing), in page space.
     pub end: Point,
-    /// The box from the font's descent to its ascent across the glyph's advance, in page space.
+    /// Its box in page space: across its advance from the font's descent to its ascent, or when its font writes
+    /// vertically, down its advance and an em across, centered on its origin.
     pub bbox: Rect,
 }
 
@@ -115,7 +124,7 @@ pub struct TextEvent {
     pub fill: Color,
     /// The stroke color.
     pub stroke: Color,
-    /// Whether the font writes vertically (its glyphs are still placed along the baseline).
+    /// Whether the font writes vertically: its glyphs step down a column, each from its vertical origin.
     pub vertical: bool,
     /// The glyphs, in showing order.
     pub glyphs: Vec<Glyph>,
@@ -154,6 +163,8 @@ struct State {
     cap: i64,
     join: i64,
     text: TextState,
+    /// The box the clip lies in, page space.
+    clip: Rect,
 }
 
 /// The text state parameters (9.3), part of the graphics state.
@@ -170,9 +181,10 @@ struct TextState {
 }
 
 impl State {
-    fn new(ctm: Matrix) -> Self {
+    fn new(ctm: Matrix, clip: Rect) -> Self {
         Self {
             ctm,
+            clip,
             stroke_color: Space::Gray.initial(),
             stroke_space: Space::Gray,
             fill_color: Space::Gray.initial(),
@@ -203,6 +215,8 @@ struct Interpreter<'a> {
     path: Vec<Segment>,
     current: Option<Point>,
     start: Option<Point>,
+    /// A clipping path is set (`W`, `W*`): the path ends by narrowing the clip, after it is painted.
+    clipping: bool,
     /// The text matrix and the text line matrix (9.4.2), between `BT` and `ET`.
     text_matrix: Matrix,
     line_matrix: Matrix,
@@ -231,20 +245,28 @@ impl File {
                 }
             }
             Some(other) => {
-                return Err(Error::new(format!(
+                return Err(Error::malformed(format!(
                     "page {}: /Contents is a {}",
                     page.number,
                     other.kind()
                 )));
             }
         }
+        let (width, height) = page.size();
+        let shown = Rect {
+            x0: 0.0,
+            y0: 0.0,
+            x1: width,
+            y1: height,
+        };
         let mut interpreter = Interpreter {
             file: self,
-            state: State::new(page.to_page_space()),
+            state: State::new(page.to_page_space(), shown),
             stack: Vec::new(),
             path: Vec::new(),
             current: None,
             start: None,
+            clipping: false,
             text_matrix: Matrix::IDENTITY,
             line_matrix: Matrix::IDENTITY,
             fonts: HashMap::new(),
@@ -266,14 +288,14 @@ fn last(operands: &[Object], count: usize) -> Result<Vec<f64>> {
                 .map(Object::as_number)
                 .collect::<Option<Vec<f64>>>()
         })
-        .ok_or_else(|| Error::new(format!("needs {count} numbers")))
+        .ok_or_else(|| Error::malformed(format!("needs {count} numbers")))
 }
 
 /// The last operand, a string.
 fn string(operands: &[Object]) -> Result<&[u8]> {
     match operands.last() {
         Some(Object::String(s)) => Ok(s),
-        _ => Err(Error::new("needs a string")),
+        _ => Err(Error::malformed("needs a string")),
     }
 }
 
@@ -282,7 +304,7 @@ fn integer(operands: &[Object]) -> Result<i64> {
     operands
         .last()
         .and_then(Object::as_integer)
-        .ok_or_else(|| Error::new("needs an integer"))
+        .ok_or_else(|| Error::malformed("needs an integer"))
 }
 
 impl Interpreter<'_> {
@@ -335,7 +357,8 @@ impl Interpreter<'_> {
                     );
                 }
             }
-            _ => {} // text, clipping, shading, marked content and compatibility operators draw no path or image
+            b"W" | b"W*" => self.clipping = true,
+            _ => {} // shading, marked content and compatibility operators draw no path or image
         }
         Ok(())
     }
@@ -356,7 +379,7 @@ impl Interpreter<'_> {
             }
             b"cm" => {
                 let matrix = Matrix::from_numbers(&last(operands, 6)?)
-                    .ok_or_else(|| Error::new("needs 6 numbers"))?;
+                    .ok_or_else(|| Error::malformed("needs 6 numbers"))?;
                 self.state.ctm = matrix.then(self.state.ctm);
             }
             b"w" => self.state.line_width = last(operands, 1)?[0],
@@ -366,7 +389,7 @@ impl Interpreter<'_> {
                 let array = operands
                     .first()
                     .and_then(Object::as_array)
-                    .ok_or_else(|| Error::new("needs a dash array"))?;
+                    .ok_or_else(|| Error::malformed("needs a dash array"))?;
                 self.state.dashes = array.iter().filter_map(Object::as_number).collect();
                 self.state.dash_phase = operands.get(1).and_then(Object::as_number).unwrap_or(0.0);
             }
@@ -401,7 +424,9 @@ impl Interpreter<'_> {
             }
             b"v" => {
                 let v = last(operands, 4)?;
-                let c1 = self.current.ok_or_else(|| Error::new("no current point"))?;
+                let c1 = self
+                    .current
+                    .ok_or_else(|| Error::malformed("no current point"))?;
                 let (c2, to) = (self.point(v[0], v[1]), self.point(v[2], v[3]));
                 self.extend(Segment::CurveTo(c1, c2, to), to);
             }
@@ -481,7 +506,7 @@ impl Interpreter<'_> {
                 let name = operands
                     .first()
                     .and_then(Object::as_name)
-                    .ok_or_else(|| Error::new("needs a font name"))?;
+                    .ok_or_else(|| Error::malformed("needs a font name"))?;
                 let font = self.load_font(name, resources)?;
                 self.state.text.font = Some(font);
             }
@@ -496,7 +521,7 @@ impl Interpreter<'_> {
             }
             b"Tm" => {
                 let m = Matrix::from_numbers(&last(operands, 6)?)
-                    .ok_or_else(|| Error::new("needs 6 numbers"))?;
+                    .ok_or_else(|| Error::malformed("needs 6 numbers"))?;
                 (self.text_matrix, self.line_matrix) = (m, m);
             }
             b"T*" => {
@@ -520,15 +545,21 @@ impl Interpreter<'_> {
                 let items = operands
                     .last()
                     .and_then(Object::as_array)
-                    .ok_or_else(|| Error::new("needs an array"))?;
+                    .ok_or_else(|| Error::malformed("needs an array"))?;
                 let mut glyphs = Vec::new();
                 for item in items {
                     match item {
                         Object::String(s) => glyphs.extend(self.glyphs(s)),
                         other => {
-                            let adjust = other.as_number().unwrap_or(0.0);
+                            // A number is taken off the coordinate along the writing mode (9.4.3): a
+                            // positive one moves the next glyph left, or down a column.
+                            let adjust = other.as_number().unwrap_or(0.0) / 1000.0;
                             let text = &self.state.text;
-                            self.advance(-adjust / 1000.0 * text.size * text.scale);
+                            if text.font.as_ref().is_some_and(|f| f.vertical()) {
+                                self.advance(0.0, -adjust * text.size);
+                            } else {
+                                self.advance(-adjust * text.size * text.scale, 0.0);
+                            }
                         }
                     }
                 }
@@ -544,23 +575,23 @@ impl Interpreter<'_> {
         self.text_matrix = self.line_matrix;
     }
 
-    fn advance(&mut self, tx: f64) {
-        self.text_matrix = Matrix([1.0, 0.0, 0.0, 1.0, tx, 0.0]).then(self.text_matrix);
+    fn advance(&mut self, tx: f64, ty: f64) {
+        self.text_matrix = Matrix([1.0, 0.0, 0.0, 1.0, tx, ty]).then(self.text_matrix);
     }
 
     fn load_font(&mut self, name: &[u8], resources: &Dict) -> Result<Rc<Font>> {
         let Some(Object::Dict(fonts)) = self.file.get(resources, b"Font")? else {
-            return Err(Error::new("no /Font resources"));
+            return Err(Error::malformed("no /Font resources"));
         };
-        let reference = fonts
-            .get(name)
-            .ok_or_else(|| Error::new(format!("no font /{}", String::from_utf8_lossy(name))))?;
+        let reference = fonts.get(name).ok_or_else(|| {
+            Error::malformed(format!("no font /{}", String::from_utf8_lossy(name)))
+        })?;
         let number = reference.as_reference().map(|r| r.num);
         if let Some(font) = number.and_then(|n| self.fonts.get(&n)) {
             return Ok(Rc::clone(font));
         }
         let Object::Dict(dict) = self.file.resolve(reference)? else {
-            return Err(Error::new(format!(
+            return Err(Error::malformed(format!(
                 "font /{} is not a dictionary",
                 String::from_utf8_lossy(name)
             )));
@@ -591,47 +622,59 @@ impl Interpreter<'_> {
             let render = Matrix([text.size * text.scale, 0.0, 0.0, text.size, 0.0, text.rise])
                 .then(self.text_matrix)
                 .then(self.state.ctm);
-            let (ascent, descent) = (
-                font.ascent * font.matrix.0[3],
-                font.descent * font.matrix.0[3],
-            );
-            let corners = [
-                render.apply(Point { x: 0.0, y: descent }),
-                render.apply(Point {
-                    x: code.width,
-                    y: descent,
-                }),
-                render.apply(Point {
-                    x: code.width,
-                    y: ascent,
-                }),
-                render.apply(Point { x: 0.0, y: ascent }),
-            ];
             let space = if code.bytes == 1 && code.code == 32 {
                 text.word_spacing
             } else {
                 0.0
             };
-            let advance = (code.width * text.size + text.char_spacing + space) * text.scale;
+            // Horizontally: the box spans the advance w0 along the baseline, from the font's descent to its ascent
+            // across it. Vertically (9.7.4.3, 9.4.4): the origin is the vertical one; the box spans the advance w1y
+            // down the column and an em across it, centered on the origin; Tc and Tw step down unscaled by Tz.
+            let (end, corners, step) = match code.vertical_advance {
+                None => {
+                    let (ascent, descent) = (
+                        font.ascent * font.matrix.0[3],
+                        font.descent * font.matrix.0[3],
+                    );
+                    let corners = [
+                        (0.0, descent),
+                        (code.width, descent),
+                        (code.width, ascent),
+                        (0.0, ascent),
+                    ];
+                    let advance = (code.width * text.size + text.char_spacing + space) * text.scale;
+                    ((code.width, 0.0), corners, (advance, 0.0))
+                }
+                Some(down) => {
+                    let corners = [
+                        (-HALF_EM, 0.0),
+                        (HALF_EM, 0.0),
+                        (HALF_EM, down),
+                        (-HALF_EM, down),
+                    ];
+                    let advance = down * text.size + text.char_spacing + space;
+                    ((0.0, down), corners, (0.0, advance))
+                }
+            };
+            let at = |(x, y): (f64, f64)| render.apply(Point { x, y });
             out.push(Glyph {
                 code: code.code,
                 text: code.text,
-                origin: render.apply(Point { x: 0.0, y: 0.0 }),
-                end: render.apply(Point {
-                    x: code.width,
-                    y: 0.0,
-                }),
-                bbox: Rect::around(&corners).expect("four corners"),
+                origin: at((0.0, 0.0)),
+                end: at(end),
+                bbox: Rect::around(&corners.map(at)).expect("four corners"),
             });
-            self.advance(advance);
+            self.advance(step.0, step.1);
         }
         out
     }
 
-    fn text_event(&mut self, glyphs: Vec<Glyph>) {
+    fn text_event(&mut self, mut glyphs: Vec<Glyph>) {
         let Some(font) = &self.state.text.font else {
             return;
         };
+        let clip = self.state.clip;
+        glyphs.retain(|g| g.bbox.meets(clip));
         if glyphs.is_empty() {
             return;
         }
@@ -643,7 +686,7 @@ impl Interpreter<'_> {
             render_mode: text.render_mode,
             fill: self.state.fill_color.clone(),
             stroke: self.state.stroke_color.clone(),
-            vertical: font.vertical,
+            vertical: font.vertical(),
             glyphs,
         };
         self.out.events.push(Event::Text(event));
@@ -703,12 +746,24 @@ impl Interpreter<'_> {
     }
 
     fn end_path(&mut self) {
+        let bounds = bounds(&self.path);
+        self.ended(bounds);
+    }
+
+    /// The path, in `bounds`, has ended: when it clips, the clip narrows to them.
+    fn ended(&mut self, bounds: Option<Rect>) {
+        if std::mem::take(&mut self.clipping)
+            && let Some(bounds) = bounds
+        {
+            self.state.clip = self.state.clip.intersect(bounds);
+        }
         self.path.clear();
         (self.current, self.start) = (None, None);
     }
 
     fn paint(&mut self, stroke: bool, fill: Option<bool>) {
-        if !self.path.is_empty() {
+        let bounds = bounds(&self.path);
+        if bounds.is_some_and(|b| b.meets(self.state.clip)) {
             let state = &self.state;
             let scale = state.ctm.scale();
             let event = PathEvent {
@@ -728,20 +783,20 @@ impl Interpreter<'_> {
             };
             self.out.events.push(Event::Path(event));
         }
-        self.end_path();
+        self.ended(bounds);
     }
 
     fn ext_state(&mut self, operands: &[Object], resources: &Dict) -> Result<()> {
         let name = operands
             .first()
             .and_then(Object::as_name)
-            .ok_or_else(|| Error::new("needs a name"))?;
+            .ok_or_else(|| Error::malformed("needs a name"))?;
         let Some(Object::Dict(states)) = self.file.get(resources, b"ExtGState")? else {
-            return Err(Error::new("no /ExtGState resources"));
+            return Err(Error::malformed("no /ExtGState resources"));
         };
         let Some(Object::Dict(gs)) = states.get(name).map(|o| self.file.resolve(o)).transpose()?
         else {
-            return Err(Error::new(format!(
+            return Err(Error::malformed(format!(
                 "no graphics state /{}",
                 String::from_utf8_lossy(name)
             )));
@@ -772,15 +827,15 @@ impl Interpreter<'_> {
         let name = operands
             .first()
             .and_then(Object::as_name)
-            .ok_or_else(|| Error::new("needs a name"))?;
+            .ok_or_else(|| Error::malformed("needs a name"))?;
         let Some(Object::Dict(objects)) = self.file.get(resources, b"XObject")? else {
-            return Err(Error::new("no /XObject resources"));
+            return Err(Error::malformed("no /XObject resources"));
         };
-        let reference = objects
-            .get(name)
-            .ok_or_else(|| Error::new(format!("no XObject /{}", String::from_utf8_lossy(name))))?;
+        let reference = objects.get(name).ok_or_else(|| {
+            Error::malformed(format!("no XObject /{}", String::from_utf8_lossy(name)))
+        })?;
         let Object::Stream(stream) = self.file.resolve(reference)? else {
-            return Err(Error::new(format!(
+            return Err(Error::malformed(format!(
                 "XObject /{} is not a stream",
                 String::from_utf8_lossy(name)
             )));
@@ -802,7 +857,7 @@ impl Interpreter<'_> {
             }
             b"Form" => {
                 if depth >= MAX_FORM_DEPTH {
-                    return Err(Error::new("Form XObjects nest too deep"));
+                    return Err(Error::malformed("Form XObjects nest too deep"));
                 }
                 let matrix = match self.file.get(&stream.dict, b"Matrix")? {
                     Some(Object::Array(m)) => Matrix::from_numbers(
@@ -824,6 +879,15 @@ impl Interpreter<'_> {
                     self.start,
                 );
                 self.state.ctm = matrix.then(self.state.ctm);
+                if let Some(Object::Array(b)) = self.file.get(&stream.dict, b"BBox")?
+                    && let [x0, y0, x1, y1] =
+                        b.iter().filter_map(Object::as_number).collect::<Vec<_>>()[..]
+                {
+                    let corners =
+                        [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| self.point(x, y));
+                    let shown = Rect::around(&corners).expect("four corners");
+                    self.state.clip = self.state.clip.intersect(shown);
+                }
                 self.run(&data, &own, depth + 1);
                 self.state = saved.0;
                 self.stack.truncate(saved.1);
@@ -849,6 +913,9 @@ impl Interpreter<'_> {
             m.apply(Point { x: 0.0, y: 1.0 }),
         ];
         let bbox = Rect::around(&corners).expect("four corners");
+        if !bbox.meets(self.state.clip) {
+            return;
+        }
         self.out.events.push(Event::Image(ImageEvent {
             bbox,
             matrix: m,
@@ -858,6 +925,19 @@ impl Interpreter<'_> {
             inline,
         }));
     }
+}
+
+/// The box a path's points lie in -- a curve's control points too, so it holds the curve -- or None when empty.
+fn bounds(path: &[Segment]) -> Option<Rect> {
+    let points: Vec<Point> = path
+        .iter()
+        .flat_map(|s| match *s {
+            Segment::MoveTo(p) | Segment::LineTo(p) => vec![p],
+            Segment::CurveTo(a, b, p) => vec![a, b, p],
+            Segment::Close => vec![],
+        })
+        .collect();
+    Rect::around(&points)
 }
 
 fn numbers_in(operands: &[Object]) -> Vec<f64> {

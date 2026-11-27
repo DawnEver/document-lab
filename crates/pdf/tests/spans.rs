@@ -63,3 +63,81 @@ fn a_span_box_covers_its_glyphs_and_blank_text_is_no_span() {
     );
     assert_eq!(found[0].text, "AB");
 }
+
+#[test]
+fn a_vertical_run_is_its_own_span_read_top_to_bottom() {
+    // F1 Helvetica, F3 an Identity-V font (CIDs 1, 2 read U+4E00, U+4E8C).
+    let fonts = "/Resources << /Font << /F1 5 0 R /F3 6 0 R >> >>";
+    let vertical = "<< /Type /Font /Subtype /Type0 /BaseFont /Song-Identity-V /Encoding /Identity-V
+        /DescendantFonts [7 0 R] /ToUnicode 8 0 R >>";
+    let cid = "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /Song >>";
+    let to_unicode = common::stream(
+        "",
+        "1 begincodespacerange <0000> <FFFF> endcodespacerange 2 beginbfchar <0001> <4E00> <0002> <4E8C> endbfchar",
+    );
+    let content = "BT /F1 10 Tf 10 50 Td (side) Tj /F3 10 Tf 1 0 0 1 100 90 Tm <0001> Tj <0002> Tj <0001> Tj ET";
+    let file = File::open(
+        common::one_page(fonts, content, &[HELVETICA, vertical, cid, &to_unicode]),
+        b"",
+    )
+    .unwrap();
+    let page = file.pages().unwrap().remove(0);
+    let found = spans(&file.interpret(&page).unwrap().events);
+    let read: Vec<_> = found
+        .iter()
+        .map(|s| (s.text.as_str(), s.vertical))
+        .collect();
+    assert_eq!(read, [("side", false), ("\u{4E00}\u{4E8C}\u{4E00}", true)]);
+    let bbox = found[1].bbox;
+    assert!(
+        (bbox.x0 - 95.0).abs() < 1e-9
+            && (bbox.y0 - 10.0).abs() < 1e-9
+            && (bbox.x1 - 105.0).abs() < 1e-9
+            && (bbox.y1 - 40.0).abs() < 1e-9,
+        "{bbox:?}"
+    );
+}
+
+/// Each span's text, and whether it shares its unspaced number with the one before.
+fn joined(content: &str) -> Vec<(String, bool)> {
+    let found = page_spans(content);
+    let after: Vec<bool> = std::iter::once(false)
+        .chain(
+            found
+                .windows(2)
+                .map(|w| w[0].unspaced.is_some() && w[0].unspaced == w[1].unspaced),
+        )
+        .collect();
+    found.into_iter().map(|s| s.text).zip(after).collect()
+}
+
+#[test]
+fn spans_continuing_one_word_share_a_number() {
+    let pair = |a: &str, b: &str, glued: bool| vec![(a.to_string(), false), (b.to_string(), glued)];
+    // A change of font inside a word, and one at a word gap: a positioned gap, or a space glyph on either side.
+    assert_eq!(
+        joined("BT /F1 10 Tf 10 50 Td (Head) Tj /F2 10 Tf (line) Tj ET"),
+        pair("Head", "line", true)
+    );
+    assert_eq!(
+        joined("BT /F1 10 Tf 10 50 Td [(plain) -300] TJ /F2 10 Tf (bold) Tj ET"),
+        pair("plain", "bold", false)
+    );
+    assert_eq!(
+        joined("BT /F1 10 Tf 10 50 Td (plain ) Tj /F2 10 Tf (bold) Tj ET"),
+        pair("plain", "bold", false)
+    );
+    assert_eq!(
+        joined("BT /F1 10 Tf 10 50 Td (plain) Tj /F2 10 Tf ( bold) Tj ET"),
+        pair("plain", " bold", false)
+    );
+    // A subscript set lower in a smaller size continues its word; the next line does not.
+    assert_eq!(
+        joined("BT /F1 10 Tf 10 50 Td (H) Tj /F1 7 Tf -3 Ts (2) Tj ET"),
+        pair("H", "2", true)
+    );
+    assert_eq!(
+        joined("BT /F1 10 Tf 10 50 Td (up) Tj /F2 10 Tf 0 -12 Td (down) Tj ET"),
+        pair("up", "down", false)
+    );
+}

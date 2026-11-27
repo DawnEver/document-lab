@@ -25,7 +25,7 @@ def _pdf(path: Path, lines: list[str]) -> Path:
 def test_a_sheet_whose_every_fragment_is_noise_exports_as_one_section(tmp_path: Path) -> None:
     """A production drawing: short title-block fragments the paper filters discard one by one."""
     pdf = _pdf(tmp_path / 'RM-8S.pdf', ['Detail K', 'Scale 3:1', 'Drawing No. PY230225M28', 'Rev 00'])
-    done = ingest(pdf, tmp_path / 'out', tool='pymupdf')
+    done = ingest(pdf, tmp_path / 'out', tool='ir')
     assert done.sections == 1
     body = '\n'.join(p.read_text(encoding='utf-8') for p in (tmp_path / 'out' / 'md').glob('*.md'))
     assert 'PY230225M28' in body
@@ -34,7 +34,7 @@ def test_a_sheet_whose_every_fragment_is_noise_exports_as_one_section(tmp_path: 
 def test_planted_control_a_blank_page_still_refuses(tmp_path: Path) -> None:
     pdf = _pdf(tmp_path / 'blank.pdf', [])
     with pytest.raises(NoSections):
-        ingest(pdf, tmp_path / 'out', tool='pymupdf')
+        ingest(pdf, tmp_path / 'out', tool='ir')
 
 
 def test_a_scanned_sheet_with_no_text_layer_exports_its_pages_as_images(tmp_path: Path) -> None:
@@ -45,7 +45,7 @@ def test_a_scanned_sheet_with_no_text_layer_exports_its_pages_as_images(tmp_path
     for _ in range(2):
         doc.new_page().draw_rect(pymupdf.Rect(72, 72, 300, 200), color=(0, 0, 0), fill=(0.5, 0.5, 0.5))
     doc.save(pdf)
-    done = ingest(pdf, tmp_path / 'out', tool='pymupdf')
+    done = ingest(pdf, tmp_path / 'out', tool='ir')
     assert done.sections == 2
     pages = sorted((tmp_path / 'out' / 'img' / 'pages').glob('*.png'))
     assert [p.name for p in pages] == ['page-001.png', 'page-002.png']

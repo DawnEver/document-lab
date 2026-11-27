@@ -1,9 +1,9 @@
 """A captured image to a PDF or a PNG, written as its rows arrive: a capture of any length costs a page of memory.
 
 :class:`PdfWriter` cuts pages at a page height -- or, ``'auto'``, on the reader's own page separators
-(`document_lab.capture.pages`) -- one image per page, pixels kept losslessly; it saves every
-:data:`PAGES_PER_SAVE` pages incrementally, so the document is never held whole. :class:`PngWriter` compresses rows as
-they come and fills the height in at the end. Both write ``<name>.part`` beside the target and rename it into place
+(`document_lab.capture.pages`) -- one image per page, pixels kept losslessly (deflated); each page goes to the file
+as it is cut (`document_lab._pdf`'s writer), so the document is never held whole. :class:`PngWriter` compresses rows
+as they come and fills the height in at the end. Both write ``<name>.part`` beside the target and rename it into place
 when closed -- also when the capture stopped early -- so a reader never sees a half-written file under the real name.
 
 Sizes are in pixels; ``dpi`` turns them into PDF points (72 per inch). The pages are images only: a text layer
@@ -12,14 +12,13 @@ is `document_lab.ocr`'s, laid over the finished PDF.
 
 from __future__ import annotations
 
-import struct
 import zlib
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, Final, Literal, Self
+from typing import TYPE_CHECKING, Final, Literal, Self
 
 import numpy as np
-import pymupdf
 
+from document_lab import _pdf, png
 from document_lab.capture.pages import Rhythm, page_rhythm
 
 if TYPE_CHECKING:
@@ -27,20 +26,19 @@ if TYPE_CHECKING:
 
 __all__ = [
     'MAX_PAGE_PT',
-    'PAGES_PER_SAVE',
     'PageWriter',
     'PdfWriter',
     'PngWriter',
     'a4_page_height',
     'check_name',
     'check_page',
+    'image_page',
     'save_png',
     'to_pdf',
 ]
 
 MAX_PAGE_PT: Final = 14400  # the largest page side a PDF reader must accept (ISO 32000, 200 inches)
 SCREEN_DPI: Final = 96
-PAGES_PER_SAVE: Final = 16  # pages added between incremental saves: what a PDF holds in memory at most
 AUTO_LOOK: Final = 4  # A4 pages of rows 'auto' holds before it looks for the separators, and each time again
 AUTO_GIVE_UP: Final = 12  # A4 pages of rows after which 'auto' stops looking and cuts A4-shaped pages
 
@@ -50,10 +48,39 @@ def a4_page_height(width: int) -> int:
     return round(width * 297 / 210)
 
 
-def _pixmap(image: np.ndarray) -> pymupdf.Pixmap:
+def image_page(pdf: _pdf.Writer, image: np.ndarray, dpi: float) -> None:
+    """Add ``image`` (``(h, w, 3+)`` uint8) to ``pdf`` as a page of its own, ``dpi`` pixels to the inch, deflated."""
     rgb = np.ascontiguousarray(image[..., :3], dtype=np.uint8)
     height, width = rgb.shape[:2]
-    return pymupdf.Pixmap(pymupdf.csRGB, width, height, rgb.tobytes(), 0)
+    data = zlib.compress(rgb.tobytes())
+    deflated = 'FlateDecode'  # spelling-ignore-line: the PDF filter's own name
+    pdf.image_page(width, height, 'DeviceRGB', 8, deflated, data, width * 72 / dpi, height * 72 / dpi)
+
+
+class _Pages:
+    """Image pages written to ``<path>.part`` as they come -- created with the first -- and moved into place.
+
+    ``count``: the pages added, still said once closed.
+    """
+
+    def __init__(self, path: Path, dpi: float) -> None:
+        self.path, self.dpi, self.count = path, dpi, 0
+        self._pdf: _pdf.Writer | None = None
+
+    def add(self, image: np.ndarray) -> None:
+        if self._pdf is None:
+            self._pdf = _pdf.create(_part(self.path))
+        image_page(self._pdf, image, self.dpi)
+        self.count += 1
+
+    def close(self) -> Path | None:
+        """Finish the file and move it into place; the path, or None when no page was added (nothing written)."""
+        if self._pdf is None:
+            return None
+        self._pdf.close()
+        self._pdf = None
+        _part(self.path).replace(self.path)
+        return self.path
 
 
 def _part(path: Path) -> Path:
@@ -114,13 +141,16 @@ class PdfWriter:
         if self.step:
             check_page(width, self.step, dpi)
         self.rhythm: Rhythm | None = None
-        self.pages = 0
         self._rows: list[np.ndarray] = []
         self._held = 0
         self._written = 0  # rows already laid out on pages
         self._look = AUTO_LOOK * self.step  # held rows at which 'auto' next looks for the separators
-        self._doc: pymupdf.Document | None = None
-        self._saved = False
+        self._pages = _Pages(path, dpi)
+
+    @property
+    def pages(self) -> int:
+        """How many pages were laid out."""
+        return self._pages.count
 
     def __enter__(self) -> Self:
         """The writer, closed on leaving."""
@@ -162,7 +192,7 @@ class PdfWriter:
 
     def _lay_out(self) -> None:
         while (cut := self._next_cut()) is not None and self._written + self._held >= cut:
-            self._page(self._take(cut - self._written))
+            self._pages.add(self._take(cut - self._written))
 
     def _take(self, count: int) -> np.ndarray:
         held = np.concatenate(self._rows)
@@ -170,28 +200,8 @@ class PdfWriter:
         self._written += count
         return held[:count]
 
-    def _page(self, image: np.ndarray) -> None:
-        if self._doc is None:
-            self._doc = pymupdf.open(_part(self.path)) if self._saved else pymupdf.open()
-        pix = _pixmap(image)
-        rect = pymupdf.Rect(0, 0, pix.width * 72 / self.dpi, pix.height * 72 / self.dpi)
-        self._doc.new_page(width=rect.width, height=rect.height).insert_image(rect, pixmap=pix)
-        self.pages += 1
-        if self.pages % PAGES_PER_SAVE == 0:
-            self._save()
-
-    def _save(self) -> None:
-        if self._doc is None:
-            return
-        if self._saved:
-            self._doc.save(_part(self.path), incremental=True, deflate=True, encryption=pymupdf.PDF_ENCRYPT_KEEP)
-        else:
-            self._doc.save(_part(self.path), deflate=True)
-        self._doc.close()
-        self._doc, self._saved = None, True
-
     def close(self) -> Path | None:
-        """Lay out the last page, save, and move the PDF into place; the path, or None if nothing was written."""
+        """Lay out the last page and move the PDF into place; the path, or None if nothing was written."""
         if self.auto and self._held:
             self._find_rhythm(final=True)
             self._lay_out()
@@ -199,23 +209,14 @@ class PdfWriter:
             last = self._take(self._held)
             if not self.step:
                 check_page(self.width, len(last), self.dpi)
-            self._page(last)
-        self._save()
-        if not self._saved:
-            return None
-        _slim(_part(self.path))
-        _part(self.path).replace(self.path)
-        self._saved = False
-        return self.path
-
-
-_PNG: Final = b'\x89PNG\r\n\x1a\n'
+            self._pages.add(last)
+        return self._pages.close()
 
 
 class PageWriter:
     """A PDF written one image a page, as the pages arrive: each page as wide as its image.
 
-    Saved every :data:`PAGES_PER_SAVE` pages, so the document is never held whole; written as ``<name>.part`` and
+    Each page goes to the file as it is added, so the document is never held whole; written as ``<name>.part`` and
     moved into place when closed. What :class:`PdfWriter` is for a strip cut into pages, this is for pages taken one
     by one (a viewer paged through).
     """
@@ -223,9 +224,8 @@ class PageWriter:
     def __init__(self, path: Path, dpi: float = SCREEN_DPI) -> None:
         """Write to ``path``, ``dpi`` pixels to the inch; refused at once when the name is no file Windows takes."""
         check_name(path)
-        self.path, self.dpi, self.pages = path, dpi, 0
-        self._doc: pymupdf.Document | None = None
-        self._saved = False
+        self.path, self.dpi = path, dpi
+        self._pages = _Pages(path, dpi)
         _part(path).unlink(missing_ok=True)
 
     def __enter__(self) -> Self:
@@ -238,69 +238,32 @@ class PageWriter:
         """Close it, keeping the pages added whatever stopped the run."""
         self.close()
 
+    @property
+    def pages(self) -> int:
+        """How many pages were added."""
+        return self._pages.count
+
     def add(self, image: np.ndarray) -> None:
         """Add ``image`` (``(h, w, 3+)`` uint8) as the next page."""
         check_page(image.shape[1], image.shape[0], self.dpi)
-        if self._doc is None:
-            self._doc = pymupdf.open(_part(self.path)) if self._saved else pymupdf.open()
-        pix = _pixmap(image)
-        rect = pymupdf.Rect(0, 0, pix.width * 72 / self.dpi, pix.height * 72 / self.dpi)
-        self._doc.new_page(width=rect.width, height=rect.height).insert_image(rect, pixmap=pix)
-        self.pages += 1
-        if self.pages % PAGES_PER_SAVE == 0:
-            self._save()
-
-    def _save(self) -> None:
-        if self._doc is None:
-            return
-        if self._saved:
-            self._doc.save(_part(self.path), incremental=True, deflate=True, encryption=pymupdf.PDF_ENCRYPT_KEEP)
-        else:
-            self._doc.save(_part(self.path), deflate=True)
-        self._doc.close()
-        self._doc, self._saved = None, True
+        self._pages.add(image)
 
     def close(self) -> Path | None:
-        """Save and move the PDF into place; the path, or None when no page was added (nothing is written)."""
-        self._save()
-        if not self._saved:
-            return None
-        self._saved = False
-        _slim(_part(self.path))
-        _part(self.path).replace(self.path)
-        return self.path
-
-
-def _slim(path: Path) -> None:
-    """Rewrite a finished PDF with every stream deflated: an incremental save leaves each later page's image raw.
-
-    The document is not held whole to write it small: it is saved page by page (:data:`PAGES_PER_SAVE`) and the
-    incremental saves that follow the first leave the images they add uncompressed, which for page images is most of
-    the file (a 40-page capture written 252 MB, rewritten 7 MB, pixels equal).
-    """
-    import pymupdf  # noqa: PLC0415 -- the writers' one dependency
-
-    slim = path.with_name(path.name + '.slim')
-    with pymupdf.open(path) as doc:
-        doc.save(slim, garbage=4, deflate=True)
-    slim.replace(path)
-
-
-def _chunk(out: BinaryIO, kind: bytes, data: bytes) -> None:
-    out.write(struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data)))
+        """Move the PDF into place; the path, or None when no page was added (nothing is written)."""
+        return self._pages.close()
 
 
 class PngWriter:
-    """A PNG at ``path`` of the rows written to it, ``width`` pixels wide, compressed as they come."""
+    """A PNG (`document_lab.png`) at ``path`` of the rows written, ``width`` pixels wide, deflated as they come."""
 
     def __init__(self, path: Path, width: int) -> None:
         """Open ``<path>.part`` and write the header; its height is filled in on closing."""
         self.path, self.width, self.height = path, width, 0
         self._out = _part(path).open('wb')
-        self._out.write(_PNG)
+        self._out.write(png.SIGNATURE)
         self._header = self._out.tell()
-        _chunk(self._out, b'IHDR', struct.pack('>IIBBBBB', width, 0, 8, 2, 0, 0, 0))
-        self._zip = zlib.compressobj(6)
+        self._out.write(png.header(width, 0, 3))
+        self._zip = zlib.compressobj(png.LEVEL)
 
     def __enter__(self) -> Self:
         """The writer, closed on leaving."""
@@ -316,20 +279,17 @@ class PngWriter:
         """Add ``rows`` (``(n, width, 3)`` uint8) below what was written."""
         if not len(rows):
             return
-        filtered = np.zeros((len(rows), 1 + self.width * 3), dtype=np.uint8)  # filter byte 0: the row as it is
-        filtered[:, 1:] = np.ascontiguousarray(rows[..., :3], dtype=np.uint8).reshape(len(rows), -1)
         self.height += len(rows)
-        if data := self._zip.compress(filtered.tobytes()):
-            _chunk(self._out, b'IDAT', data)
+        if data := self._zip.compress(png.scanlines(rows[..., :3])):
+            self._out.write(png.chunk(b'IDAT', data))
 
     def close(self) -> Path | None:
         """Finish the PNG, fill in its height and move it into place; the path, or None if nothing was written."""
         if self._out.closed:
             return self.path if self.path.exists() else None
-        _chunk(self._out, b'IDAT', self._zip.flush())
-        _chunk(self._out, b'IEND', b'')
+        self._out.write(png.chunk(b'IDAT', self._zip.flush()) + png.chunk(b'IEND', b''))
         self._out.seek(self._header)
-        _chunk(self._out, b'IHDR', struct.pack('>IIBBBBB', self.width, self.height, 8, 2, 0, 0, 0))
+        self._out.write(png.header(self.width, self.height, 3))
         self._out.close()
         if not self.height:
             _part(self.path).unlink()

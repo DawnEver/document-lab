@@ -1,6 +1,7 @@
 """Which windows macOS's window list offers as programs' windows, and which one a wheel lands on, read from a census a
 runner reported."""
 
+import numpy as np
 import pytest
 
 from document_lab.capture import quartz
@@ -45,3 +46,27 @@ def test_a_wheel_the_window_server_routes_elsewhere_is_refused_naming_where(monk
     monkeypatch.setattr(quartz, '_nobody', lambda *_: 'what each says is there')
     with pytest.raises(OSError, match=f'^{named}.* covers the middle of'):
         quartz._require_on_top(_VIEWER, 380, 382)
+
+
+def _bottom_alpha(cut: list[int], rows: int = 64, width: int = 360) -> np.ndarray:
+    """The alpha of a window's bottom ``rows``: from the bottom up, ``cut[i]`` pixels of each corner short of opaque."""
+    alpha = np.full((rows, width), 255, dtype=np.uint8)
+    for up, n in enumerate(cut):
+        alpha[rows - 1 - up, :n] = alpha[rows - 1 - up, width - n :] = 0
+    return alpha
+
+
+# macos-latest, 2026-11-27 (macOS 26): pixels short of opaque per row from the bottom up, both corners together.
+_CORNERS = [48, 22, 18, 14, 12, 10, 8, 6, 6, 4, 4, *[2] * 13]
+
+
+def test_a_window_loses_the_rows_its_rounded_corners_cut():
+    assert quartz._corner_rows(_bottom_alpha([n // 2 for n in _CORNERS])) == 24
+
+
+def test_a_window_with_square_corners_loses_the_ring_alone():
+    assert quartz._corner_rows(_bottom_alpha([])) == quartz._RING
+
+
+def test_a_window_short_of_opaque_all_the_way_up_loses_every_row_read():
+    assert quartz._corner_rows(_bottom_alpha([1] * 64)) == 64

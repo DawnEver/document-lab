@@ -63,7 +63,7 @@ type Box4 = (f64, f64, f64, f64);
 type LayerRow = (bool, Option<String>);
 /// A span: text, font name (no subset tag), size, bold, box, render mode, the number it shares with the spans its
 /// words run on into with no space between (None: none), whether it is written vertically, the unit vector its
-/// baseline runs along (page space, y down), and its layer.
+/// baseline runs along (page space, y down), its layer, and its fill color (None: not filled).
 type SpanRow = (
     String,
     String,
@@ -75,6 +75,7 @@ type SpanRow = (
     bool,
     (f64, f64),
     LayerRow,
+    Option<Vec<f64>>,
 );
 /// What a page paints as paths, as columns -- `document_lab.pdf` takes each buffer whole with `numpy.frombuffer`,
 /// no Python object per point. Buffers are native-endian; an entry per subpath (`pdf::paths::Polylines`) unless
@@ -235,6 +236,7 @@ impl Reader {
                     s.vertical,
                     s.direction,
                     layer(&s.layer),
+                    s.fill.as_ref().map(pdf::color::Color::rgb_or_components),
                 )
             })
             .collect();
@@ -395,9 +397,10 @@ impl Writer {
             .map_err(|e| refused(&e))
     }
 
-    /// Add page `number` (1-based) of `reader` as the next page, with `words` -- `(text, (x0, y0, x1, y1), angle)`,
-    /// each box in page space as the word stands turned back level, `angle` the degrees its baseline is turned,
-    /// clockwise as seen -- laid over it as an invisible text layer.
+    /// Add page `number` (1-based) of `reader` as the next page, with `words` -- `(text, (x0, y0, x1, y1), angle,
+    /// vertical)`, each box in page space as the word stands turned back level, `angle` the degrees its baseline is
+    /// turned, clockwise as seen, `vertical` whether it is written down its box -- laid over it as an invisible text
+    /// layer.
     #[expect(
         clippy::needless_pass_by_value,
         reason = "pyo3 hands a list over owned"
@@ -406,21 +409,24 @@ impl Writer {
         &mut self,
         reader: &Reader,
         number: usize,
-        words: Vec<(String, Box4, f64)>,
+        words: Vec<(String, Box4, f64, bool)>,
     ) -> PyResult<()> {
         let page = reader.at(number)?;
         let words: Vec<pdf::writer::Word> = words
             .iter()
-            .map(|(text, (x0, y0, x1, y1), angle)| pdf::writer::Word {
-                text,
-                bbox: Rect {
-                    x0: *x0,
-                    y0: *y0,
-                    x1: *x1,
-                    y1: *y1,
+            .map(
+                |(text, (x0, y0, x1, y1), angle, vertical)| pdf::writer::Word {
+                    text,
+                    bbox: Rect {
+                        x0: *x0,
+                        y0: *y0,
+                        x1: *x1,
+                        y1: *y1,
+                    },
+                    angle: *angle,
+                    vertical: *vertical,
                 },
-                angle: *angle,
-            })
+            )
             .collect();
         self.open()?
             .copy_page_with_text(&reader.file, page, &words)

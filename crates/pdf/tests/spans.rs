@@ -158,3 +158,31 @@ fn spans_continuing_one_word_share_a_number() {
         pair("up", "down", false)
     );
 }
+
+#[test]
+fn a_fill_change_starts_a_span_and_each_carries_its_fill() {
+    let found = page_spans("BT /F1 10 Tf 10 50 Td 1 0 0 rg (red) Tj 0 g (black) Tj ET");
+    let fills: Vec<_> = found
+        .iter()
+        .map(|s| (s.text.as_str(), s.fill.as_ref().and_then(|c| c.rgb)))
+        .collect();
+    assert_eq!(
+        fills,
+        [
+            ("red", Some([1.0, 0.0, 0.0])),
+            ("black", Some([0.0, 0.0, 0.0]))
+        ]
+    );
+}
+
+#[test]
+fn text_its_rendering_mode_does_not_fill_has_no_fill() {
+    let found = page_spans("BT /F1 10 Tf 10 50 Td 3 Tr (hidden) Tj 1 Tr 0 -12 Td (outlined) Tj ET");
+    assert_eq!(
+        found
+            .iter()
+            .map(|s| (s.text.as_str(), s.fill.is_none()))
+            .collect::<Vec<_>>(),
+        [("hidden", true), ("outlined", true)]
+    );
+}

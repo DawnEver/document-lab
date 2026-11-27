@@ -165,7 +165,7 @@ def test_a_scanned_table_reads_from_its_rules_in_pixels_and_its_text_layer(tmp_p
     with pymupdf.open() as doc:
         drawn = doc.new_page(width=612, height=792)
         draw_ruled_table(drawn)
-        words = [(w[4], tuple(w[:4]), 0.0) for w in drawn.get_text('words')]  # where the scan shows them
+        words = [(w[4], tuple(w[:4]), 0.0, False) for w in drawn.get_text('words')]  # where the scan shows them
     scan = scan_pdf(tmp_path / 'scan.pdf', scan_image(draw_ruled_table, dpi=150))
     reader = _pdf.open(scan.read_bytes(), b'')
     writer = _pdf.create(tmp_path / 'ocr.pdf')

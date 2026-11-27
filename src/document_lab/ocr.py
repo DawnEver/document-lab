@@ -1,8 +1,9 @@
 """A text layer over a PDF of page images, by Tesseract: its words readable, its pixels exactly as they were.
 
-Each page that is one image and has no text is recognized by the ``tesseract`` executable, run on the image at the
-resolution it carries and as the page shows it -- though its samples be placed turned or mirrored by quarter turns (a
-scan on a ``/Rotate`` page); a placement at another angle is refused. Lossless samples are handed over as a PGM/PPM,
+Each page that is one image and has no text is recognized by the ``tesseract`` executable in the languages asked
+for (its ``-l``: ``eng``, ``chi_sim+eng``, ``jpn_vert``), run on the image at the resolution it carries and as the
+page shows it -- though its samples be placed turned or mirrored by quarter turns (a scan on a ``/Rotate`` page); a
+placement at another angle is refused. Lossless samples are handed over as a PGM/PPM,
 turned and, under a ``/Decode`` of ``[1 0]``, inverted exactly; any other ``/Decode`` is refused. CCITT fax data goes,
 as stored, inside a TIFF (:func:`_fax_tiff`) whose tags say its coding, its black and how it is shown; JPEG and JPEG
 2000 go as their encoded data when shown as stored, and are decoded (`document_lab.pdf.read_raster`) only to be
@@ -13,15 +14,17 @@ table printed sideways -- and a turn it is sure enough of (:data:`ORIENTATION_CO
 placed, line by line the surer kept, so an upright running head over a sideways table reads too; one it is unsure of
 is reported and the page read as placed, never guessed. A page skewed more than :data:`DESKEW_ABOVE` degrees
 (`document_lab.ink.skew`) is handed over turned back by its skew, resampled for Tesseract's eyes only: the PDF's
-pixels stay as they were. The words Tesseract reports (TSV, each with its pixel box on the image it read) are mapped
-back through every turn and laid invisible over where they are seen, along the baseline they are seen on, by
-`document_lab._pdf`'s writer (`Writer.copy_page_with_text`); every page is otherwise copied as it is, so a layer is
-never laid twice. How each page was read is returned (:class:`Layered`).
+pixels stay as they were. The words Tesseract reports (its PAGE XML at word level, each with its pixel box on the
+image it read and the direction it reads in) are mapped back through every turn and laid invisible over where they
+are seen, along the baseline they are seen on, by `document_lab._pdf`'s writer (`Writer.copy_page_with_text`) -- a
+word read top to bottom (CJK set in columns, which the ``_vert`` languages read) written vertically, so a reader reads
+it as vertical writing; every page is otherwise copied as it is, so a layer is never laid twice. How each page was
+read is returned (:class:`Layered`).
 
 Tesseract is the user's to install, never bundled: :func:`check` finds it -- on PATH, else in the
 :class:`TesseractPlaces` an entry reads from the environment (beside ``TESSDATA_PREFIX``, where its Windows
-installer puts it) -- and refuses a missing one or a missing language, saying where it looked and how to install
-it, before any work is spent.
+installer puts it) -- and refuses, before any work is spent, a missing one, one older than 5.3 (the first to write
+PAGE XML), and a language it has no data for, saying what it has, where it looked and how to install it.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ import shutil
 import struct
 import subprocess
 import tempfile
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +65,8 @@ ORIENTATION_CONFIDENCE: Final = 4.2
 DESKEW_ABOVE: Final = 1.0
 _BAND: Final = 256  # rows deskewed at a time
 _TOO_FEW: Final = 'Too few characters'  # Tesseract OSD's failure on a page with too little text to judge by
+#: The first Tesseract to write PAGE XML, whose words say the direction they read in.
+_PAGE_XML_SINCE: Final = (5, 3)
 
 _INSTALL: Final = (
     'install it -- Windows: the UB Mannheim installer (https://github.com/UB-Mannheim/tesseract/wiki), then add its '
@@ -70,7 +76,10 @@ _INSTALL: Final = (
 #: Codecs Tesseract reads from a file of their own, by the suffix that names the file's format.
 _CODEC_FILES: Final = {'DCTDecode': '.jpg', 'JPXDecode': '.jp2'}
 _J2K_CODESTREAM: Final = b'\xff\x4f\xff\x51'  # a JPEG 2000 codestream without the JP2 box around it
-_WORD_LEVEL: Final = '5'  # a TSV row's level for one word
+#: A PAGE XML word's reading direction (Tesseract writes these three), as whether it is written vertically.
+_VERTICAL: Final = {'left-to-right': False, 'right-to-left': False, 'top-to-bottom': True}
+#: Tesseract's options for PAGE XML of each word in a box, and its config for PAGE XML.
+_PAGE_XML: Final = ('-c', 'page_xml_level=1', '-c', 'page_xml_polygon=0')
 _CURVE_SAMPLES: Final = 1  # a page's paths are not looked at
 #: An image's placement (the reader's: turned, rows reversed, columns reversed) when it shows its samples as stored.
 _UPRIGHT: Final = (False, False, False)
@@ -134,15 +143,28 @@ def _executable(places: TesseractPlaces) -> Path:
 
 
 def check(languages: str, places: TesseractPlaces) -> Path:
-    """The ``tesseract`` executable, found on PATH or in ``places``, with every ``+``-joined language in ``languages``.
+    """The ``tesseract`` executable, found on PATH or in ``places``, able to read in ``languages``.
 
-    Refused, naming what is missing, where it looked and how to install it, when either is missing.
+    It is 5.3 or later and has data for every ``+``-joined language in ``languages``. Refused, naming what is
+    missing, where it looked and how to install it, when any is missing: for a language, the languages it has and
+    the folder their data is in, where a language's ``<lang>.traineddata`` goes.
     """
     executable = _executable(places)
+    said = _run([str(executable), '--version'])
+    version = re.match(r'\s*tesseract v?(\d+)\.(\d+)', said)
+    if version is None or (int(version[1]), int(version[2])) < _PAGE_XML_SINCE:
+        first = said.strip().splitlines()[0] if said.strip() else 'silent'
+        msg = f'{executable} says {first!r}: OCR needs Tesseract 5.3 or later, which writes PAGE XML; {_INSTALL}'
+        raise OSError(msg)
     header, *listed = _run([str(executable), '--list-langs']).splitlines()
-    available = {name.strip() for name in listed}
+    available = sorted(name.strip() for name in listed if name.strip())
     if missing := [lang for lang in languages.split('+') if lang not in available]:
-        msg = f'{executable} has no language data for {missing} ({header.strip()}); {_INSTALL}'
+        folder = re.search(r'"(.+)"', header)
+        where = folder[1] if folder else header.strip()
+        msg = (
+            f'{executable} has no language data for {missing}: it has {available}, in {where}; a language is its '
+            f'<lang>.traineddata in that folder (https://github.com/tesseract-ocr/tessdata_best), or {_INSTALL}'
+        )
         raise OSError(msg)
     return executable
 
@@ -354,15 +376,15 @@ def _frame(box: Box, size: tuple[int, int], skew: float, turn: int) -> np.ndarra
     return onto @ back @ np.array([*unturn, [0, 0, 1]], dtype=np.float64)
 
 
-type _Line = tuple[int, int, int, int]  # a word's line: its reading's index, then Tesseract's block, paragraph, line
+type _Line = tuple[int, int]  # a word's line: its reading's index, then the line's place in Tesseract's PAGE XML
 
 
 @dataclass(frozen=True)
 class _Word:
     """A recognized word, in page space.
 
-    Its ``text``, its ``box`` turned back level, its baseline's ``angle`` (degrees clockwise as seen), its ``line``
-    and Tesseract's ``confidence`` in it.
+    Its ``text``, its ``box`` turned back level, its baseline's ``angle`` (degrees clockwise as seen), its ``line``,
+    Tesseract's ``confidence`` in it (0 to 1), and whether it is written ``vertical`` (it reads top to bottom).
     """
 
     text: str
@@ -370,6 +392,7 @@ class _Word:
     angle: float
     line: _Line
     confidence: float
+    vertical: bool
 
     def covers(self) -> Box:
         """The box it covers on the page, turned as it is."""
@@ -380,21 +403,43 @@ class _Word:
         return cx - across, cy - down, cx + across, cy + down
 
 
-def _words(tsv: str, frame: np.ndarray, reading: int) -> list[_Word]:
-    """Each word of Tesseract's ``tsv``, mapped by ``frame`` (:func:`_frame`) into page space."""
+def _local(element: ET.Element) -> str:
+    """``element``'s name without its namespace."""
+    return element.tag.rpartition('}')[2]
+
+
+def _words(page: str, frame: np.ndarray, reading: int, name: str) -> list[_Word]:
+    """Each word of Tesseract's PAGE XML ``page`` (word level, boxes), mapped by ``frame`` (:func:`_frame`).
+
+    Into page space, with its line, Tesseract's confidence in it and whether it reads top to bottom. A word read in
+    a direction Tesseract does not write is refused by name.
+    """
     linear = frame[:2, :2]
     along, across = linear @ (1.0, 0.0), linear @ (0.0, 1.0)
     angle = round(math.degrees(math.atan2(along[1], along[0])), 6)
     out = []
-    for row in tsv.splitlines()[1:]:
-        level, _page, block, paragraph, line, _word, left, top, wide, high, confidence, text = row.split('\t')
-        left, top, wide, high = int(left), int(top), int(wide), int(high)
-        if level == _WORD_LEVEL and text.strip() and wide > 0 and high > 0:
+    # Tesseract's own output, of the image we handed it: no entity or reference beyond the document in it
+    lines = [e for e in ET.fromstring(page).iter() if _local(e) == 'TextLine']  # noqa: S314
+    for place, line in enumerate(lines):
+        for word in (e for e in line if _local(e) == 'Word'):
+            children = {_local(c): c for c in word}
+            equiv = {_local(c): c for c in children['TextEquiv']} if 'TextEquiv' in children else {}
+            text = ''.join(equiv['Unicode'].itertext()).strip() if 'Unicode' in equiv else ''
+            coords = children['Coords'].get('points', '') if 'Coords' in children else ''
+            points = [tuple(map(int, p.split(','))) for p in coords.split()]
+            xs, ys = [x for x, _ in points], [y for _, y in points]
+            if not text or not points or max(xs) <= min(xs) or max(ys) <= min(ys):
+                continue
+            direction = word.get('readingDirection')
+            if direction not in _VERTICAL:
+                msg = f'Tesseract read {text!r} on {name} {direction or "in no direction"}: a word is laid as read so'
+                raise ValueError(msg)
+            left, top, wide, high = min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)
             cx, cy, _ = frame @ (left + wide / 2, top + high / 2, 1.0)
             half_w, half_h = wide * math.hypot(*along) / 2, high * math.hypot(*across) / 2
             box = (cx - half_w, cy - half_h, cx + half_w, cy + half_h)
-            key = (reading, int(block), int(paragraph), int(line))
-            out.append(_Word(text.strip(), box, angle, key, float(confidence)))
+            confidence = float(children['TextEquiv'].get('conf', '0'))
+            out.append(_Word(text, box, angle, (reading, place), confidence, _VERTICAL[direction]))
     return out
 
 
@@ -540,9 +585,9 @@ def _recognize(
         for reading, quarter in enumerate([0, turn] if turn else [0]):
             path, size = handed(quarter)
             dpi = str(round(size[0] * 72 / (box[2] - box[0])))
-            tsv = _run([tesseract[0], str(path), *tesseract[1:], '--dpi', dpi, 'tsv'])
+            page = _run([tesseract[0], str(path), *tesseract[1:], '--dpi', dpi, 'page'])
             frame = _frame(box, size, skew if deskew and skew is not None else 0.0, quarter)
-            readings.append(_words(tsv, frame, reading))
+            readings.append(_words(page, frame, reading, name))
     unsure = asked.orientation_confidence is not None and (osd is None or (osd[0] != 0 and not sure))
     words = _surer(readings) if len(readings) > 1 else readings[0]
     return words, Reading(number, osd, turn, unsure, skew, deskew)
@@ -557,7 +602,9 @@ def text_layer(
     orientation_confidence: float | None = ORIENTATION_CONFIDENCE,
     deskew_above: float | None = DESKEW_ABOVE,
 ) -> Layered:
-    """``pdf`` with a text layer in ``languages`` over every page that is one image and has no text, to ``out``.
+    """``pdf`` with a text layer in Tesseract's ``languages`` over every page of one image and no text, to ``out``.
+
+    ``languages`` are Tesseract's, ``+``-joined (``chi_sim+eng``; ``jpn_vert`` for text set in columns).
 
     A page OSD says to turn with ``orientation_confidence`` or more is read turned as well as placed (None: OSD is
     not asked, and Tesseract's ``osd`` data not needed); a page skewed more than ``deskew_above`` degrees is read
@@ -574,7 +621,7 @@ def text_layer(
         if (image := _image(reader, number)) is None:
             continue
         needed = languages if orientation_confidence is None else f'{languages}+osd'
-        tesseract = tesseract or [str(check(needed, places)), 'stdout', '-l', languages]
+        tesseract = tesseract or [str(check(needed, places)), 'stdout', '-l', languages, *_PAGE_XML]
         layers[number], reading = _recognize(pdf, reader, number, image, tesseract=tesseract, asked=asked)
         readings.append(reading)
     part = out.with_name(out.name + '.part')
@@ -582,7 +629,8 @@ def text_layer(
     try:
         for number, _, _ in reader.pages:
             if number in layers:
-                writer.copy_page_with_text(reader, number, [(w.text, w.box, w.angle) for w in layers[number]])
+                words = [(w.text, w.box, w.angle, w.vertical) for w in layers[number]]
+                writer.copy_page_with_text(reader, number, words)
             else:
                 writer.copy_page(reader, number)
         writer.close()

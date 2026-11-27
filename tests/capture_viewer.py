@@ -1,10 +1,11 @@
 """A real scrollable window for the OS parts (``windows``, ``macos``, ``linux``): a known tall image in a Tk canvas.
 
-``python capture_viewer.py <title> <seed>`` says its own pid on stdout first (the window's owner), then shows
-:func:`picture` ``(seed)`` one pixel a pixel (on Windows the process is made per-monitor DPI aware, so Windows does not
-rescale it). Each wheel event scrolls :data:`NOTCH` pixels a notch -- Windows' and Tk 9's ``<MouseWheel>`` count 120 a
-notch, Tk 8.6 on macOS one event a notch, X11's are ``<Button-4>``/``<Button-5>`` -- and the Down arrow :data:`ARROW`
-pixels, both stopping at the end, as a document viewer does.
+``python capture_viewer.py <title> <seed>`` says its own pid on stdout first (the window's owner), then -- once the
+window is up -- where on the screen its view starts (``x y``); it shows :func:`picture` ``(seed)`` one pixel a pixel
+(on Windows the process is made per-monitor DPI aware, so Windows does not rescale it). Each wheel event scrolls
+:data:`NOTCH` pixels a notch -- Windows' and Tk 9's ``<MouseWheel>`` count 120 a notch, Tk 8.6 on macOS one event a
+notch, X11's are ``<Button-4>``/``<Button-5>`` -- and the Down arrow :data:`ARROW` pixels, both stopping at the end, as
+a document viewer does.
 """
 
 import ctypes
@@ -67,10 +68,13 @@ def main(title: str, seed: int) -> None:
 
 
 def _redrawn(root: object, canvas: object) -> None:
-    """Draw the view again once the window is up: Tk 9 on macOS may leave a window blank until it is next drawn."""
+    """Draw the view again once the window is up -- Tk 9 on macOS may leave a window blank until it is next drawn --
+    and say on stdout where on the screen the view starts."""
     root.focus_force()
     canvas.yview_scroll(1, 'units')
     canvas.yview_scroll(-1, 'units')
+    sys.stdout.write(f'{canvas.winfo_rootx()} {canvas.winfo_rooty()}\n')
+    sys.stdout.flush()
 
 
 if __name__ == '__main__':

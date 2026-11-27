@@ -304,16 +304,17 @@ def write_pages(
     renderer: Renderer = 'pymupdf',
     outline: bool = True,
     formulas: formula.Formulas | None = None,
+    formula_model: formula.Model = 'texteller',
 ) -> Paged:
     """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive.
 
     Each page's picture is drawn by ``renderer`` (`document_lab.pdf.read_raster`). ``outline``: the PDF's stated
     outline names the clause headings when it matches the pages; False infers them all the same
-    (`document_lab.markdown.headings`). ``formulas``: ``latex`` writes each equation's LaTeX after its link
-    (`document_lab.formula`); refused by :class:`document_lab.formula.FormulaUnavailable` before anything is written
-    when its model cannot run.
+    (`document_lab.markdown.headings`). ``formulas``: ``latex`` writes each equation's LaTeX after its link, read by
+    ``formula_model`` (`document_lab.formula`); refused by :class:`document_lab.formula.FormulaUnavailable` before
+    anything is written when that model cannot run.
     """
-    transcribe = None if formulas is None else formula.transcriber(formulas)
+    transcribe = None if formulas is None else formula.transcriber(formulas, model=formula_model)
     read = read_pdf(pdf)
     face = layout.body_face(read)
     body = face[1]

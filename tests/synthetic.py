@@ -593,6 +593,38 @@ def icc_profile(*, primaries: Sequence[tuple[float, float]], white: tuple[float,
     return header + len(tags).to_bytes(4, 'big') + table + data
 
 
+def jpx(samples: np.ndarray, *, codestream: bool = False, profile: bytes | None = None) -> bytes:
+    """``samples`` -- rows x columns (gray, or 16-bit gray as ``uint16``), or rows x columns x 2, 3 or 4 (gray and
+    alpha, RGB, RGB and alpha) -- coded JPEG 2000 losslessly (the reversible 5/3 wavelet) by OpenJPEG, through
+    Pillow's plugin: a JP2 file (its color space enumerated, gray or sRGB), or the bare ``codestream``, or -- with
+    ``profile`` -- that codestream in a JP2 whose ``colr`` box embeds the ICC profile (T.800 I.5.3.3, method 2).
+    """
+    from io import BytesIO  # noqa: PLC0415 -- only the JPEG 2000 cases need it
+
+    from PIL import Image  # noqa: PLC0415 -- Pillow is the dev extra's, the truth of these cases alone
+
+    image = Image.fromarray(samples)  # its mode by its shape and type: L, LA, RGB, RGBA or I;16
+    out = BytesIO()
+    image.save(out, 'JPEG2000', irreversible=False, no_jp2=codestream or profile is not None)
+    coded = out.getvalue()
+    if profile is None:
+        return coded
+
+    def box(kind: bytes, body: bytes) -> bytes:
+        return (8 + len(body)).to_bytes(4, 'big') + kind + body
+
+    rows, columns = samples.shape[:2]
+    components = 1 if samples.ndim == 2 else samples.shape[2]
+    header = rows.to_bytes(4, 'big') + columns.to_bytes(4, 'big') + components.to_bytes(2, 'big') + bytes([7, 7, 0, 0])
+    colr = bytes([2, 0, 0]) + profile
+    return (
+        box(b'jP  ', b'\r\n\x87\n')
+        + box(b'ftyp', b'jp2 ' + bytes(4) + b'jp2 ')
+        + box(b'jp2h', box(b'ihdr', header) + box(b'colr', colr))
+        + box(b'jp2c', coded)
+    )
+
+
 def fax_g4(white: np.ndarray) -> bytes:
     """``white`` -- rows of 1 white, 0 black, as CCITT fax decodes by default -- coded Group 4 by MuPDF."""
     rows, columns = white.shape
@@ -600,6 +632,22 @@ def fax_g4(white: np.ndarray) -> bytes:
     stride = len(packed) // rows
     coded = pymupdf.mupdf.fz_compress_ccitt_fax_g4(pymupdf.mupdf.python_buffer_data(packed), columns, rows, stride)
     return bytes(coded.fz_buffer_extract())
+
+
+def jbig2_mmr(white: np.ndarray) -> bytes:
+    """``white`` -- rows of 1 white, 0 black, as a ``JBIG2Decode`` image's samples read -- as an embedded JBIG2 stream
+    (ITU-T T.88 Annex D.3): a page information segment and an immediate lossless generic region, MMR-coded (6.2.6:
+    its data is T.6, the coding of :func:`fax_g4`, by MuPDF; a T.6 white run is a JBIG2 0, the filter's 1)."""
+    rows, columns = white.shape
+
+    def segment(number: int, kind: int, data: bytes) -> bytes:
+        # 7.2: number, flags (type; a one-byte page association), no referred-to segment, page 1, data length.
+        return number.to_bytes(4, 'big') + bytes([kind, 0, 1]) + len(data).to_bytes(4, 'big') + data
+
+    size = columns.to_bytes(4, 'big') + rows.to_bytes(4, 'big')
+    page = size + bytes(8) + bytes([1]) + bytes(2)  # 7.4.8: no resolution, lossless, white, OR, not striped
+    region = size + bytes(8) + bytes([0]) + bytes([1])  # 7.4.1 at (0, 0), OR; 7.4.6.2: MMR
+    return segment(0, 48, page) + segment(1, 38, region + fax_g4(white))
 
 
 TABLE_ROWS = (('Parameter', 'Value', 'Unit'), ('alpha', '1.25', 'mm'), ('beta', '-3', 'kg'), ('gamma', '4.5e2', 's'))

@@ -560,6 +560,7 @@ impl Reader {
             Some(codec) => codec.fax().map_err(|e| refused(&e))?,
             None => None,
         };
+        let masked = samples.masked();
         let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
         Ok((
             samples.width,
@@ -573,7 +574,7 @@ impl Reader {
             samples.data,
             samples.codec.map(|c| text(&c.name)),
             samples.decode,
-            samples.masked,
+            masked,
             fax.map(|f| (f.k, f.columns, f.end_of_line, f.byte_align, f.black_is_1)),
         ))
     }

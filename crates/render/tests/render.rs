@@ -531,16 +531,18 @@ fn a_fax_image_decodes_its_runs() {
 }
 
 #[test]
-fn an_image_in_a_codec_not_decoded_is_counted_by_its_name() {
+fn an_image_whose_codec_data_does_not_decode_is_counted_by_its_codec_and_why() {
     let image = common::stream(
         "/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /JPXDecode",
         "x",
     );
     let r = placed(&image, 10, 10, "");
     assert_eq!(at(&r, 15, 85), WHITE);
-    assert_eq!(
-        r.undrawn.get("JPXDecode image (not decoded in stage 1)"),
-        Some(&1)
+    let why: Vec<_> = r.undrawn.keys().collect();
+    assert_eq!(why.len(), 1, "{why:?}");
+    assert!(
+        why[0].starts_with("JPXDecode image that does not decode: "),
+        "{why:?}"
     );
 }
 

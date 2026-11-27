@@ -14,9 +14,9 @@
 //! What is not drawn yet is never silently missing. What in the region the renderer cannot draw as the file states it
 //! is counted by kind in [`Raster::undrawn`] -- a shading or a pattern (stage 3), a soft mask (drawn without it), a
 //! glyph whose shape cannot be read (a font that embeds no program and has no substitute, by name), a text clip
-//! holding such a glyph (by its box), an image in a codec not decoded here (JPX, JBIG2) or that does not decode --
-//! for the caller to refuse or accept. Hidden optional content and what the colorant `None` paints mark
-//! nothing and are not drawn.
+//! holding such a glyph (by its box), an image whose data does not decode, or decodes only past what a strict decoder
+//! refuses ([`codec`]) -- for the caller to refuse or accept. Hidden optional content and what the colorant `None`
+//! paints mark nothing and are not drawn.
 //!
 //! Layers: [`codec`] (image codecs to samples) -> [`image`] (an image's samples to pixels) and [`clip`] (clipping
 //! paths to masks) -> this module (the page painted).

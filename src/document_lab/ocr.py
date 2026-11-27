@@ -544,7 +544,7 @@ def _recognize(
     (`document_lab.pdf.read_raster`) only to be measured, or when in a codec to be turned or deskewed.
     """
     name = f'page {number} of {pdf.name}'
-    box, _width, _height, obj, matrix, placement, _ = image
+    box, _width, _height, obj, matrix, placement, *_ = image
     if placement is None:
         msg = f'{name} is placed at an angle no quarter turn makes ({matrix}): Tesseract reads it upright only'
         raise ValueError(msg)

@@ -8,7 +8,8 @@
 //! resolved by reference), [`page`] (the page tree), [`content`] (a content stream's operations), [`font`] and [`cmap`] (with [`shape`]: a glyph's outline, from its font program or a substitute), [`function`] (PDF functions), [`icc`] (ICC profiles), [`color`] and
 //! [`geometry`], [`image`] (an image's samples), [`optional`] (which optional content shows), and [`interpret`] (what a
 //! page draws, as events in page space),
-//! read as [`spans`] (runs of text) and [`paths`] (subpaths, curves flattened).
+//! read as [`spans`] (runs of text) and [`paths`] (subpaths, curves flattened). [`structure`] reads a tagged PDF's
+//! structure tree: its elements in order, and the marked content each covers.
 //!
 //! What the document states beside its pages, each read from a [`File`] and its pages: [`outline`] (bookmarks),
 //! [`links`] (each page's), both leading to a [`destination`]; page [`labels`]; [`metadata`] (`/Info` and XMP, read
@@ -49,6 +50,7 @@ pub mod parser;
 pub mod paths;
 pub mod shape;
 pub mod spans;
+pub mod structure;
 mod symbol_tables;
 pub mod trees;
 pub mod writer;

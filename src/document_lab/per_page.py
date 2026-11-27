@@ -26,6 +26,10 @@ A document's running heads and feet (`document_lab.layout.running`: a title, a p
 at a page's edge) are no body text: each page's are listed in its front matter (``header:``, ``footer:``) and left
 out of its markdown.
 
+A tagged PDF's tags give its reading order, headings, paragraphs, tables and figures (`document_lab.tags`; the
+``tagged`` uses, all on by default -- none infers them all); where its tags and the inference disagree is reported
+(`document_lab.agreement`, :attr:`Paged.disagreements`).
+
 The PDF itself goes with them, so the layout stands alone. ``out`` is a directory, or -- ending ``.zip`` -- one
 archive holding the same files (written beside as ``<out>.part`` and moved into place when whole): a document is
 one file to keep, send or index.
@@ -42,7 +46,8 @@ from typing import TYPE_CHECKING, Final
 
 import numpy as np
 
-from document_lab import formula, layout, png
+from document_lab import formula, layout, png, tags
+from document_lab.agreement import compare
 from document_lab.ink import Drawing, drawings, rulings
 from document_lab.ir import BBox
 from document_lab.markdown import Headings, headings, page_markdowns
@@ -52,7 +57,7 @@ from document_lab.regions import Region, Unnumbered, regions
 from document_lab.tables import tables
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Collection, Iterator
     from pathlib import Path
 
     from document_lab.ir import Document, Page, Table
@@ -89,6 +94,9 @@ class Paged:
     textless: tuple[int, ...]
     unread: tuple[int, ...]
     structure: Headings
+    #: Where a tagged PDF's tags and layout's inference disagree, in words (`document_lab.agreement`); empty for an
+    #: untagged PDF.
+    disagreements: tuple[str, ...] = ()
 
 
 def _scanned(page: Page) -> bool:
@@ -221,7 +229,7 @@ def _link(name: str, page: Page, region: Region, latex: dict[int, str]) -> str:
     """
     more = ' (continues on the next page)' if region.bbox.y1 >= page.height - _FOOT else ''
     beside = f'\n\n{latex[id(region)]}' if id(region) in latex else ''
-    return f'![{region.label}]({_file(name, region)}){more}{beside}'
+    return f'![{region.alt or region.label}]({_file(name, region)}){more}{beside}'
 
 
 def _latex(
@@ -303,6 +311,7 @@ def write_pages(
     *,
     renderer: Renderer = 'pymupdf',
     outline: bool = True,
+    tagged: Collection[str] = tags.DEFAULT_USES,
     formulas: formula.Formulas | None = None,
     formula_model: formula.Model = 'texteller',
     unnumbered: Unnumbered = 'strict',
@@ -312,14 +321,16 @@ def write_pages(
     """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive.
 
     Each page's picture is drawn by ``renderer`` (`document_lab.pdf.read_raster`). ``outline``: the PDF's stated
-    outline names the clause headings when it matches the pages; False infers them all the same
-    (`document_lab.markdown.headings`). ``formulas``: ``latex`` writes each equation's LaTeX after its link, read by
-    ``formula_model`` (`document_lab.formula`); refused by :class:`document_lab.formula.FormulaUnavailable` before
-    anything is written when that model cannot run. ``unnumbered``: how displays without a number are found
-    (`document_lab.regions.Unnumbered`). Every step reads the page as its default view shows it
-    (`document_lab.ir.Page.shown`): its pictures, ruled tables, regions, running heads, headings and markdown;
-    ``include_hidden``: what hidden layers draw is read too, ``include_in_background_color``: the text filled in
-    the color under it.
+    outline names the clause headings when it matches the pages; False keeps to its tags and the rules
+    (`document_lab.markdown.headings`). ``tagged``: what a tagged PDF's tags give (`document_lab.tags.USES`; by default
+    ``DEFAULT_USES``, all but figures); none infers it all from layout. ``formulas``: ``latex`` writes each equation's
+    LaTeX after its link, read by ``formula_model`` (`document_lab.formula`); refused by
+    :class:`document_lab.formula.FormulaUnavailable` before anything is written when that model cannot run.
+    ``unnumbered``: how displays without a number are found (`document_lab.regions.Unnumbered`). Every
+    step reads the page as its default view shows it (`document_lab.ir.Page.shown`): its pictures, ruled tables,
+    regions, tags, running heads, headings and markdown, and how the tags agree with layout
+    (`document_lab.agreement`); ``include_hidden``: what hidden layers draw is read too,
+    ``include_in_background_color``: the text filled in the color under it.
     """
     transcribe = None if formulas is None else formula.transcriber(formulas, model=formula_model)
     read = read_pdf(pdf).shown(include_hidden=include_hidden, include_in_background_color=include_in_background_color)
@@ -333,31 +344,18 @@ def write_pages(
         drawn.append(_drawings(pixels, scale, page, body))
         ruled.append(_tables(page, pixels, scale))
     drawn = _without_furniture(drawn, body)
+    shown = {'include_hidden': include_hidden, 'include_in_background_color': include_in_background_color}
+    compared = compare(read, drawn, **shown)
     found = [
-        regions(
-            page,
-            face,
-            drawings,
-            unnumbered=unnumbered,
-            include_hidden=include_hidden,
-            include_in_background_color=include_in_background_color,
-        )
+        regions(page, face, drawings, structure=read.structure, tagged=tagged, unnumbered=unnumbered, **shown)
         for page, drawings in zip(read.pages, drawn, strict=True)
     ]
     furniture = layout.running(read)
     text = layout.without_running(read, furniture)
     latex = {} if transcribe is None else _latex(pdf, read, found, transcribe, renderer)
     placed = [_placed(*part, latex) for part in zip(names, text.pages, found, ruled, strict=True)]
-    structure = headings(
-        text, outline=outline, include_hidden=include_hidden, include_in_background_color=include_in_background_color
-    )
-    texts = page_markdowns(
-        text,
-        placed,
-        sections=structure,
-        include_hidden=include_hidden,
-        include_in_background_color=include_in_background_color,
-    )
+    structure = headings(text, outline=outline, tagged=tagged, **shown)
+    texts = page_markdowns(text, placed, sections=structure, tagged=tagged, **shown)
     index = [f'# {pdf.stem}', '']
     textless, unread = [], []
     with _files(out) as put:
@@ -383,4 +381,5 @@ def write_pages(
             notes = [part for part in (_clauses(md), ', '.join(r.label for r in held)) if part]
             index.append(f'- [page {number}]({name}.md)' + (f' -- {" | ".join(notes)}' if notes else ''))
         put('INDEX.md', ('\n'.join(index) + '\n').encode())
-    return Paged(out, len(read.pages), tuple(textless), tuple(unread), structure)
+    disagreements = compared.disagreements if compared is not None else ()
+    return Paged(out, len(read.pages), tuple(textless), tuple(unread), structure, disagreements)

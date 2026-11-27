@@ -48,6 +48,24 @@ _UNNUMBERED = {
 }
 
 
+_DEFAULT = 'order,headings,paragraphs,tables'
+_TAGS_HELP = (
+    f"what a tagged PDF's tags give in place of inference, comma-separated (default {_DEFAULT}; also figures; "
+    "'none' infers all)"
+)
+
+
+def _uses(text: str) -> frozenset[str]:
+    """``--tags``: the uses named, ``none`` for none; an unknown one is refused by name."""
+    from document_lab.tags import checked  # noqa: PLC0415 -- the parser loads no reader
+
+    names = () if text == 'none' else [t.strip() for t in text.split(',') if t.strip()]
+    try:
+        return checked(names)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog='document-lab', description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
@@ -81,6 +99,7 @@ def _parser() -> argparse.ArgumentParser:
     pages.add_argument('pdf', type=Path)
     pages.add_argument('out', type=Path, help='the directory to write the pages into, or a .zip archive')
     pages.add_argument('--renderer', **_RENDERER)
+    pages.add_argument('--tags', type=_uses, default=_DEFAULT, help=_TAGS_HELP)
     pages.add_argument('--no-outline', action='store_true', help=_NO_OUTLINE)
     _formulas_option(pages)
     pages.add_argument('--unnumbered-equations', **_UNNUMBERED)
@@ -95,6 +114,7 @@ def _parser() -> argparse.ArgumentParser:
         help="the converter (default: ir; marker needs the gpu extra and surya's model server, and refuses without)",
     )
     paper.add_argument('--renderer', **_RENDERER)
+    paper.add_argument('--tags', type=_uses, default=_DEFAULT, help=_TAGS_HELP)
     paper.add_argument('--no-outline', action='store_true', help=_NO_OUTLINE)
     _formulas_option(paper)
     paper.add_argument('--unnumbered-equations', **_UNNUMBERED)
@@ -158,6 +178,7 @@ def _pages(args: argparse.Namespace) -> int:
             renderer=args.renderer,
             outline=not args.no_outline,
             unnumbered=args.unnumbered_equations,
+            tagged=args.tags,
             include_hidden=args.include_hidden,
             include_in_background_color=args.include_in_background_color,
             **_formulas(args),
@@ -166,6 +187,7 @@ def _pages(args: argparse.Namespace) -> int:
         return _refused(refused)
     emit(f'{done.out}: {done.pages} page(s)')
     _structure(done.structure)
+    _disagreements(done.disagreements)
     if len(done.textless) == done.pages:
         emit('no page has text: a capture needs `document-lab ocr` first')
         return 1
@@ -189,6 +211,7 @@ def _paper(args: argparse.Namespace) -> int:
             renderer=args.renderer,
             outline=not args.no_outline,
             unnumbered=args.unnumbered_equations,
+            tagged=args.tags,
             include_hidden=args.include_hidden,
             include_in_background_color=args.include_in_background_color,
             **_formulas(args),
@@ -201,7 +224,16 @@ def _paper(args: argparse.Namespace) -> int:
     )
     if done.structure is not None:
         _structure(done.structure)
+    _disagreements(done.disagreements)
     return 0
+
+
+def _disagreements(notes: tuple[str, ...]) -> None:
+    """Where a tagged PDF's tags and the inference disagree, each in a line (``--tags`` chooses which is used)."""
+    if notes:
+        emit(f'the tags and the inference disagree ({len(notes)}; --tags chooses which is used):')
+        for note in notes:
+            emit(f'  {note}')
 
 
 #: Disagreements between a stated outline and the inferred headings named one by one before the rest are counted.
@@ -210,14 +242,15 @@ _SHOWN_DISAGREEMENTS = 5
 
 def _structure(found: Headings) -> None:
     """Say where the section headings came from and where the PDF's outline and the inferred headings disagree."""
+    judged = 'from the PDF tags' if found.source == 'tags' else 'inferred'
     if found.source == 'outline':
         emit(f'sections: from the PDF outline ({found.stated} items)')
     elif found.unlocated:
-        emit(f'sections: inferred -- the PDF outline ({found.stated} items) is not found on its pages')
+        emit(f'sections: {judged} -- the PDF outline ({found.stated} items) is not found on its pages')
     elif found.stated:
-        emit(f'sections: inferred -- the PDF outline ({found.stated} items) names none of the headings the rules find')
+        emit(f'sections: {judged} -- the PDF outline ({found.stated} items) names none of the headings found')
     else:
-        emit('sections: inferred (the PDF states no outline, or it was not asked for)')
+        emit(f'sections: {judged} (the PDF states no outline, or it was not asked for)')
     lines = found.disagreements
     for line in lines[:_SHOWN_DISAGREEMENTS]:
         emit(f'  {line}')

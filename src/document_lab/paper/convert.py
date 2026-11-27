@@ -16,11 +16,15 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal
+from typing import TYPE_CHECKING, Final, Literal
+
+if TYPE_CHECKING:
+    from collections.abc import Collection
 
 from document_lab import layout
 from document_lab.markdown import Headings, headings, to_markdown
 from document_lab.pdf import read_pdf
+from document_lab.tags import DEFAULT_USES
 
 __all__ = [
     'MarkerUnavailable',
@@ -135,17 +139,19 @@ def convert(
     *,
     tool: Tool | None = None,
     outline: bool = True,
+    tagged: Collection[str] = DEFAULT_USES,
     include_hidden: bool = False,
     include_in_background_color: bool = False,
 ) -> tuple[str, ToolChoice, Headings | None]:
     """The markdown of ``pdf``, its :func:`choose_tool` choice of ``tool``, and how its sections were headed.
 
     On the IR path the PDF's stated outline names the sections when it matches the pages and ``outline`` asks for it,
-    else the rules infer them (`document_lab.markdown.headings`, returned for the caller to report); marker heads
-    its own (None). marker's images land in ``out_dir/img/flat``; the IR path writes none (figures are cropped later).
-    The IR path reads the PDF as its default view shows it (`document_lab.ir.Page.shown`), its running heads too;
-    ``include_hidden``: what hidden layers draw is read too, ``include_in_background_color``: the text filled in
-    the color under it.
+    else its tags and the rules head them (`document_lab.markdown.headings`, returned for the caller to report);
+    marker heads its own (None). ``tagged``: on the IR path, what a tagged PDF's tags give its markdown
+    (`document_lab.markdown`; none infers it all). marker's images land in ``out_dir/img/flat``; the IR path writes
+    none (figures are cropped later). The IR path reads the PDF as its default view shows it
+    (`document_lab.ir.Page.shown`), its running heads and its tags too; ``include_hidden``: what hidden layers draw
+    is read too, ``include_in_background_color``: the text filled in the color under it.
 
     Raises:
         MarkerUnavailable: ``tool='marker'`` and something marker needs is missing.
@@ -160,11 +166,16 @@ def convert(
         read_pdf(pdf).shown(include_hidden=include_hidden, include_in_background_color=include_in_background_color)
     )
     sections = headings(
-        doc, outline=outline, include_hidden=include_hidden, include_in_background_color=include_in_background_color
+        doc,
+        outline=outline,
+        tagged=tagged,
+        include_hidden=include_hidden,
+        include_in_background_color=include_in_background_color,
     )
     return (
         to_markdown(
             doc,
+            tagged=tagged,
             sections=sections,
             include_hidden=include_hidden,
             include_in_background_color=include_in_background_color,

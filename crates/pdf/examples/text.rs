@@ -15,7 +15,12 @@ fn main() {
                 let line: String = text
                     .glyphs
                     .iter()
-                    .map(|g| g.text.clone().unwrap_or_else(|| "\u{FFFD}".to_string()))
+                    .map(|g| {
+                        g.actual_text
+                            .clone()
+                            .or_else(|| g.text.clone())
+                            .unwrap_or_else(|| "\u{FFFD}".to_string())
+                    })
                     .collect();
                 println!("{line}");
             }

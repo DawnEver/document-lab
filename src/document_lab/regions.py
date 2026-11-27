@@ -805,14 +805,15 @@ class _Around:
     def inline(self, line: layout.Line) -> bool:
         """Is the formula on ``line`` set in a paragraph, a caption or a table, no display?
 
-        It opens a caption (``Fig. 3.``, ``FIGURE 21.``, a subfigure's ``(b)``); or it touches a line of prose of its
+        It opens a caption (``Fig. 3.``, ``FIGURE 21.``, a subfigure's ``(b)``) or is a numbered heading (``3.2. Case
+        2: W < Wm``); or it touches a line of prose of its
         column, or stands level with one beside it (a sub- or superscript, a sum's limits the reader set apart from
         its line: ``R>=0``); or it is the tail of a paragraph, a list's item or a caption: within :data:`TAIL_GAP` body
         sizes below a line of prose or a caption's, flush with the column, starting where that line starts or
         centered under it (``eta2 = 99.15 %.``, ``complex with p = 1;``); or :data:`ROW_CELLS` lines more stand level
         with it in its column, a table's row (``M = 10 [Nm]``).
         """
-        if _CAPTION_OPENS.match(line.text):
+        if _CAPTION_OPENS.match(line.text) or _HEADING.match(line.text):
             return True
         box = _spans_box(line)
         left, _ = self.edge(line)

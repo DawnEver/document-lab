@@ -337,6 +337,71 @@ def test_a_missing_file_raises(tmp_path):
         read_pdf(tmp_path / 'absent.pdf')
 
 
+def _raw_page(tmp_path, resources: str, content: bytes, objects: dict[str, str]):
+    """A one-page PDF (200 x 100) drawing ``content`` with ``resources``, its ``objects`` named in them by key."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=200, height=100)
+    for key, source in objects.items():
+        xref = doc.get_new_xref()
+        doc.update_object(xref, source)
+        resources = resources.replace(key, f'{xref} 0 R')
+    doc.xref_set_key(page.xref, 'Resources', resources)
+    stream = doc.get_new_xref()
+    doc.update_object(stream, '<< >>')
+    doc.update_stream(stream, content)
+    doc.xref_set_key(page.xref, 'Contents', f'{stream} 0 R')
+    doc.save(tmp_path / 'raw.pdf')
+    return read_pdf(tmp_path / 'raw.pdf').page(1)
+
+
+_AXIAL = (
+    '<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 1 0] '
+    '/Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >>'
+)
+
+
+def test_a_shading_is_the_closed_rectangle_of_its_clip_filled_with_a_shading(tmp_path):
+    page = _raw_page(tmp_path, '<< /Shading << /S SHADING >> >>', b'q 10 10 50 50 re W n /S sh Q', {'SHADING': _AXIAL})
+    (path,) = page.paths
+    assert path.points.tolist() == [[10, 40], [60, 40], [60, 90], [10, 90]]
+    assert (path.closed, path.stroke, path.fill, path.pattern) == (True, None, (), 'shading')
+    assert tuple(path.provenance.bbox) == (10, 40, 60, 90)
+
+
+def test_a_fill_with_a_pattern_names_it(tmp_path):
+    page = _raw_page(
+        tmp_path,
+        '<< /Pattern << /G PATTERN >> >>',
+        b'0 0 1 rg 0 0 5 5 re f /Pattern cs /G scn 10 10 30 30 re f',
+        {'PATTERN': f'<< /PatternType 2 /Shading {_AXIAL} >>'},
+    )
+    assert [(p.fill, p.pattern) for p in page.paths] == [((0, 0, 1), None), ((), 'shading')]
+
+
+def test_text_of_a_layer_turned_off_is_read_flagged_hidden(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page()
+    off = doc.add_ocg('Off', on=False)
+    page.insert_text((72, 72), 'shown', fontname='helv', fontsize=10)
+    page.insert_text((72, 100), 'layered', fontname='helv', fontsize=10, oc=off)
+    doc.save(tmp_path / 'oc.pdf')
+    spans = {s.text: s.hidden for s in read_pdf(tmp_path / 'oc.pdf').spans()}
+    assert spans == {'shown': False, 'layered': True}
+
+
+def test_annotations_are_read_only_when_asked_and_cite_their_subtype(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), 'body', fontname='helv', fontsize=10)
+    page.add_freetext_annot(pymupdf.Rect(72, 200, 272, 230), 'note', fontsize=10)
+    doc.save(tmp_path / 'a.pdf')
+    assert [s.text for s in read_pdf(tmp_path / 'a.pdf').spans()] == ['body']
+    spans = {s.text: s.annotation for s in read_pdf(tmp_path / 'a.pdf', annotations=True).spans()}
+    assert spans == {'body': None, 'note': 'FreeText'}
+    (note,) = [s for s in read_pdf(tmp_path / 'a.pdf', annotations=True).spans() if s.text == 'note']
+    assert 72 <= note.provenance.bbox.x0 < note.provenance.bbox.x1 <= 272  # inside the annotation's rectangle
+
+
 def test_a_page_is_read_when_first_asked_for_and_kept(tmp_path, monkeypatch):
     import document_lab.pdf as pdf_module  # noqa: PLC0415 -- the reading counted where it happens
 

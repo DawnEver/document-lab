@@ -1,5 +1,7 @@
 """Per-section files, image routing, clutter cleanup, paper.md and INDEX.md for one paper."""
 
+from __future__ import annotations
+
 import re
 import shutil
 from pathlib import Path

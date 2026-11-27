@@ -20,6 +20,7 @@ import pymupdf
 import pytest
 
 from document_lab import _pdf
+from document_lab.ir import BBox, Document
 from document_lab.pdf import read_pdf
 from tests.corpus.goldens import GOLDENS
 from tests.corpus.reading import Page, problems, summarize
@@ -64,14 +65,12 @@ def test_a_wrong_golden_is_reported(pdf: Path, wrong: str, request: pytest.Fixtu
 
 
 @cache
-def _rows(pdf: Path) -> dict[int, tuple]:
-    """What the reader states on each page, as the extension's rows (render modes and image objects included)."""
-    reader = _pdf.open(pdf.read_bytes(), b'')
-    return {number: reader.page(number, 8) for number, _w, _h in reader.pages}
+def _read(pdf: Path) -> Document:
+    return read_pdf(pdf)
 
 
 def _text(pdf: Path, page: int) -> str:
-    return ' '.join(' '.join(span.text for span in read_pdf(pdf).pages[page - 1].spans).split())
+    return ' '.join(' '.join(span.text for span in _read(pdf).page(page).spans).split())
 
 
 def phrases_stated(pdf: Path, page: int, phrases: tuple[str, ...]) -> list[str]:
@@ -85,32 +84,38 @@ def phrases_left_out(pdf: Path, page: int, phrases: tuple[str, ...]) -> list[str
 
 
 def font_text(pdf: Path, font: str, text: str) -> list[str]:
-    found = ''.join(row[0] for rows in _rows(pdf).values() for row in rows[0] if row[1] == font)
+    found = ''.join(span.text for span in _read(pdf).spans() if span.font == font)
     return [] if found == text else [f'the {font} spans state {found!r}, not {text!r}']
 
 
 def page_size(pdf: Path, page: int, size: tuple[float, float]) -> list[str]:
-    found = next((round(w, 2), round(h, 2)) for n, w, h in _pdf.open(pdf.read_bytes(), b'').pages if n == page)
+    stated = _read(pdf).page(page)
+    found = (round(stated.width, 2), round(stated.height, 2))
     return [] if found == size else [f'page {page} is {found} pt, not {size}']
 
 
 def ocr_layer(pdf: Path, modes: frozenset[int]) -> list[str]:
     """Every page one scan under text in render modes ``modes`` (3: invisible)."""
     out = []
-    for number, (spans, _paths, images, _warnings) in _rows(pdf).items():
-        found = {row[6] for row in spans}
+    for page in _read(pdf).pages:
+        found = {span.render_mode for span in page.spans}
         if found != modes:
-            out.append(f'page {number} renders its text in modes {sorted(found)}, not {sorted(modes)}')
-        if not images:
-            out.append(f'page {number} places no image')
+            out.append(f'page {page.number} renders its text in modes {sorted(found)}, not {sorted(modes)}')
+        if not page.figures:
+            out.append(f'page {page.number} places no image')
     return out
 
 
 def jpx_images(pdf: Path, page: int, objects: frozenset[int]) -> list[str]:
     """The image XObjects ``page`` places that the reader hands over still JPX-encoded (D3: not decoded)."""
     reader = _pdf.open(pdf.read_bytes(), b'')
-    images = _rows(pdf)[page][2]
-    found = {obj for _box, _w, _h, obj in images if obj is not None and reader.image(obj)[6] == 'JPXDecode'}
+
+    def codec(image: int) -> str | None:
+        _width, _height, _space, _components, _bits, _data, still_in, _decode, _masked = reader.image(image)
+        return still_in
+
+    placed = {figure.image for figure in _read(pdf).page(page).figures if figure.image is not None}
+    found = {image for image in placed if codec(image) == 'JPXDecode'}
     return [] if found == objects else [f'page {page} places JPX images {sorted(found)}, not {sorted(objects)}']
 
 
@@ -119,19 +124,21 @@ VERTICAL_MIN_WIDTH = 0.5
 
 
 def vertical_run(pdf: Path, page: int, area: tuple[float, float, float, float], text: str) -> list[str]:
-    """The Identity-V glyphs centered in ``area`` (x0, y0, x1, y1), read top to bottom, state ``text``."""
-    x0, y0, x1, y1 = area
-    glyphs = sorted(
-        (row[5][1], row[0], row[5][2] - row[5][0], row[2])
-        for row in _rows(pdf)[page][0]
-        if row[1].endswith('-Identity-V')
-        and x0 <= (row[5][0] + row[5][2]) / 2 <= x1
-        and y0 <= (row[5][1] + row[5][3]) / 2 <= y1
+    """The spans of Identity-V fonts centered in ``area`` (x0, y0, x1, y1) are stated vertical and, read top to
+    bottom (a space between spans), state ``text``.
+    """
+    column = BBox(*area)
+    spans = sorted(
+        (span.provenance.bbox.y0, span.text, span.provenance.bbox.width, span.size, span.vertical)
+        for span in _read(pdf).page(page).spans
+        if span.font.endswith('-Identity-V') and column.contains(*span.center)
     )
-    found = ''.join(t for _y, t, _w, _s in glyphs)
+    found = ' '.join(t for _y, t, _w, _s, _v in spans)
     out = [] if found == text else [f'page {page} states {found!r} down the column, not {text!r}']
-    narrow = [t for _y, t, width, size in glyphs if width < VERTICAL_MIN_WIDTH * size]
-    return out + ([f'page {page}: vertical glyphs {narrow!r} under half an em wide'] if narrow else [])
+    flat = [t for _y, t, _w, _s, vertical in spans if not vertical]
+    out += [f'page {page}: Identity-V spans {flat!r} not stated vertical'] if flat else []
+    narrow = [t for _y, t, width, size, _v in spans if width < VERTICAL_MIN_WIDTH * size]
+    return out + ([f'page {page}: vertical spans {narrow!r} under half an em wide'] if narrow else [])
 
 
 @dataclasses.dataclass(frozen=True)
@@ -180,15 +187,12 @@ FEATURES = {
     'vertical-cjk-reads-top-to-bottom': Feature(
         'cjk-zh-vertical-arxiv-2301.01621v3',
         vertical_run,
-        # Page 3's contents: the page numbers of its first eleven entries, each set in an Identity-V font, down
-        # the right-hand column as the page renders them (x 499-513 pt, y 182-408 pt).
-        (3, (495.0, 170.0, 520.0, 410.0), '12233566889'),
-        (3, (495.0, 170.0, 520.0, 410.0), '98866533221'),
-        known=(
-            'the reader writes Identity-V text horizontally (crates/pdf/src/font.rs: `vertical` is read as '
-            "horizontal): it states '12626' down that column, the run's other glyphs off it to the left, every "
-            'box 0 pt wide'
-        ),
+        # Page 3's contents: the page numbers of its fifteen entries, set in an Identity-V font down the right-hand
+        # column (x 499-506 pt of ink, y 174-488 pt), as the page renders them: 1, 2, 2, 3, 3, 5, 6, 6, 8, 8, 9,
+        # then the units of 12, 14, 16, 17 (their tens are glyphs set beside them, x 494-499 pt, which the font's
+        # ToUnicode names U+006C 'l').
+        (3, (499.0, 170.0, 520.0, 500.0), '1 2 2 3 3 5 6 6 8 8 9 2 4 6 7'),
+        (3, (499.0, 170.0, 520.0, 500.0), '7 6 4 2 9 8 8 6 6 5 3 3 2 2 1'),
     ),
     'japanese-in-an-embedded-cid-font': Feature(
         'cjk-ja-euc-h-arxiv-2608.20674v1',

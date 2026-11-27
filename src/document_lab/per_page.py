@@ -3,8 +3,9 @@
 A paper reads as sections (`document_lab.paper`); a standard is cited by clause on its page, its tables and figures
 in place, so each page is kept whole. ``page-NNN.md`` is the page's text in markdown (`document_lab.markdown`, read
 from the PDF's text layer -- a page of a capture needs `document_lab.ocr` first) under a link to ``page-NNN.png``,
-the page as it is seen: a page that is one image gives that image's own pixels, any other page is rendered at
-:data:`RENDER_DPI`.
+the page as it is seen (`document_lab.pdf.read_raster`): a page one image covers is read at that image's own
+resolution -- its own samples where the reader holds them as the page shows them -- and any other page is rendered
+at :data:`RENDER_DPI`. Every PNG is written by `document_lab.png`.
 
 Each figure, table and equation the page's text and drawn ink locate (`document_lab.regions`, told the picture's
 drawings by `document_lab.ink`, less those half the pages repeat: a logo, a running frame) is cut out of that
@@ -28,13 +29,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 import numpy as np
-import pymupdf
 
-from document_lab import layout
+from document_lab import layout, png
 from document_lab.ink import Drawing, drawings
 from document_lab.ir import BBox
 from document_lab.markdown import page_markdowns
-from document_lab.pdf import read_pdf
+from document_lab.pdf import read_pdf, read_raster
 from document_lab.regions import Region, regions
 
 if TYPE_CHECKING:
@@ -46,11 +46,12 @@ if TYPE_CHECKING:
 __all__ = ['RENDER_DPI', 'Paged', 'write_pages']
 
 RENDER_DPI: Final = 150  # a page that is not one image is rendered at this resolution
-_FOOT: Final = 1.0
+_FOOT: Final = 1.0  # points from the page's foot within which a region runs on to the next page
+_COVER: Final = 1.0  # points an image may fall short of each page edge and still cover the page
 #: Ink within this many body sizes of other ink is one drawing (`document_lab.ink`); lines of text sit further apart.
 DRAWING_REACH: Final = 0.5
 #: A drawing at the same place on at least this share of the pages is the pages' furniture (a header's logo).
-FURNITURE_SHARE: Final = 0.5  # points from the page's foot within which a region runs on to the next page
+FURNITURE_SHARE: Final = 0.5
 
 
 @dataclass(frozen=True)
@@ -62,23 +63,29 @@ class Paged:
     textless: tuple[int, ...]
 
 
-def _picture(pdf: pymupdf.Document, page: Page) -> tuple[pymupdf.Pixmap, float]:
-    """The page as seen, and its pixels per point: the one image it places, its own pixels; else rendered."""
-    placed = [f.image for f in page.figures]
-    if len(placed) == 1 and placed[0] is not None:
-        pix = pymupdf.Pixmap(pdf, placed[0])
-        pix = pymupdf.Pixmap(pix, 0) if pix.alpha else pix
-    else:
-        pix = pdf[page.number - 1].get_pixmap(dpi=RENDER_DPI)
-    return pix, pix.width / page.width
+def _picture(pdf: Path, page: Page) -> tuple[np.ndarray, float]:
+    """The page as seen, RGB rows, and its pixels per point: a page one image covers at that image's resolution."""
+    whole = BBox(0, 0, page.width, page.height)
+    covered = len(page.figures) == 1 and _covers(page.figures[0].provenance.bbox, whole)
+    pixels = read_raster(pdf, page.number, whole, dpi=None if covered else RENDER_DPI).pixels
+    return pixels, pixels.shape[1] / page.width
 
 
-def _drawings(pix: pymupdf.Pixmap, scale: float, page: Page, body: float) -> list[Drawing]:
+def _covers(box: BBox | None, page: BBox) -> bool:
+    """Whether ``box`` holds the ``page`` within :data:`_COVER` of each edge."""
+    return box is not None and (
+        box.x0 <= page.x0 + _COVER
+        and box.y0 <= page.y0 + _COVER
+        and box.x1 >= page.x1 - _COVER
+        and box.y1 >= page.y1 - _COVER
+    )
+
+
+def _drawings(pixels: np.ndarray, scale: float, page: Page, body: float) -> list[Drawing]:
     """The drawn ink of the page's picture (`document_lab.ink`), its text left out: what regions tell drawings by.
 
     Ink within :data:`DRAWING_REACH` ``body`` sizes of other ink is one drawing: a figure's parts sit that close.
     """
-    pixels = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
     text = [BBox(ln.x0, ln.y0, ln.x1, ln.y1) for ln in layout.lines(page, weighted=False)]
     return drawings(pixels, scale, text, DRAWING_REACH * body)
 
@@ -100,14 +107,12 @@ def _without_furniture(drawn: list[list[Drawing]], body: float) -> list[list[Dra
     return [[d for d in page if not recurs(d)] for page in drawn]
 
 
-def _cut(pix: pymupdf.Pixmap, scale: float, region: Region) -> pymupdf.Pixmap:
+def _cut(pixels: np.ndarray, scale: float, region: Region) -> np.ndarray:
     """``region`` of the page's picture, its pixels as they are."""
-    rows = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
     box = region.bbox
-    x0, x1 = max(int(box.x0 * scale), 0), min(int(np.ceil(box.x1 * scale)), pix.width)
-    y0, y1 = max(int(box.y0 * scale), 0), min(int(np.ceil(box.y1 * scale)), pix.height)
-    part = np.ascontiguousarray(rows[y0:y1, x0:x1])
-    return pymupdf.Pixmap(pix.colorspace, x1 - x0, y1 - y0, part.tobytes(), 0)
+    x0, x1 = max(int(box.x0 * scale), 0), min(int(np.ceil(box.x1 * scale)), pixels.shape[1])
+    y0, y1 = max(int(box.y0 * scale), 0), min(int(np.ceil(box.y1 * scale)), pixels.shape[0])
+    return pixels[y0:y1, x0:x1]
 
 
 def _file(name: str, region: Region) -> str:
@@ -164,20 +169,18 @@ def write_pages(pdf: Path, out: Path) -> Paged:
     width = max(3, len(str(len(texts))))
     index = [f'# {pdf.stem}', '']
     textless = []
-    with pymupdf.open(pdf) as doc:
-        drawn = [_drawings(*_picture(doc, page), page, body) for page in read.pages]
-    drawn = _without_furniture(drawn, body)
-    with pymupdf.open(pdf) as doc, _files(out) as put:
+    drawn = _without_furniture([_drawings(*_picture(pdf, page), page, body) for page in read.pages], body)
+    with _files(out) as put:
         if out / pdf.name != pdf:  # the layout stands alone; a PDF already where it goes is not copied onto itself
             put(pdf.name, pdf.read_bytes())
         for number, (text, page) in enumerate(zip(texts, read.pages, strict=True), start=1):
             name = f'page-{number:0{width}d}'
-            pix, scale = _picture(doc, page)
-            put(f'{name}.png', pix.tobytes('png'))
+            pixels, scale = _picture(pdf, page)
+            put(f'{name}.png', png.encode(pixels))
             links = []
             for region in (found := regions(page, body, drawn[number - 1])):
                 file = _file(name, region)
-                put(file, _cut(pix, scale, region).tobytes('png'))
+                put(file, png.encode(_cut(pixels, scale, region)))
                 more = ' (continues on the next page)' if region.bbox.y1 >= page.height - _FOOT else ''
                 links.append((region.label, f'![{region.label}]({file}){more}'))
             put(f'{name}.md', f'[{pdf.name}, page {number}]({name}.png)\n\n{_linked(text, links)}'.encode())

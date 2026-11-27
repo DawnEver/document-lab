@@ -54,9 +54,9 @@ create_exception!(
 
 /// A box as `(x0, y0, x1, y1)`.
 type Box4 = (f64, f64, f64, f64);
-/// A span: text, font name (no subset tag), size, bold, box, render mode, and the number it shares with the spans
-/// its words run on into with no space between (None: none).
-type SpanRow = (String, String, f64, bool, Box4, i64, Option<usize>);
+/// A span: text, font name (no subset tag), size, bold, box, render mode, the number it shares with the spans its
+/// words run on into with no space between (None: none), and whether it is written vertically.
+type SpanRow = (String, String, f64, bool, Box4, i64, Option<usize>, bool);
 /// What a page paints as paths, as columns -- `document_lab.pdf` takes each buffer whole with `numpy.frombuffer`,
 /// no Python object per point. Buffers are native-endian; an entry per subpath (`pdf::paths::Polylines`) unless
 /// said:
@@ -76,12 +76,14 @@ type PathColumns<'py> = (
 );
 /// How a painted path is painted: stroke color, line width, dashes, dash phase, fill color, even-odd.
 type StyleRow = (Option<Vec<f64>>, f64, Vec<f64>, f64, Option<Vec<f64>>, bool);
-/// An image: box, sample width and height, object number (None inline).
-type ImageRow = (Box4, i64, i64, Option<u32>);
+/// An image: box, sample width and height, object number (None inline), and the matrix `(a, b, c, d, e, f)` from
+/// its unit square to page space.
+type ImageRow = (Box4, i64, i64, Option<u32>, [f64; 6]);
 /// What a page draws: spans, paths (as columns), images, warnings.
 type PageRows<'py> = (Vec<SpanRow>, PathColumns<'py>, Vec<ImageRow>, Vec<String>);
 /// An image's samples: width, height, color space family (None: a stencil mask), components, bits per component,
-/// the data after every lossless filter, and the image codec it is still in (None: raw samples).
+/// the data after every lossless filter, the image codec it is still in (None: raw samples), its `/Decode` array
+/// (None: not stated) and whether it states a mask.
 type SamplesRow = (
     i64,
     i64,
@@ -90,6 +92,8 @@ type SamplesRow = (
     i64,
     Vec<u8>,
     Option<String>,
+    Option<Vec<f64>>,
+    bool,
 );
 
 /// A PDF opened.
@@ -160,6 +164,7 @@ impl Reader {
                     box4(s.bbox),
                     s.render_mode,
                     s.unspaced,
+                    s.vertical,
                 )
             })
             .collect();
@@ -175,7 +180,13 @@ impl Reader {
                     styles.push(style(&path));
                 }
                 Event::Image(image) => {
-                    images.push((box4(image.bbox), image.width, image.height, image.object));
+                    images.push((
+                        box4(image.bbox),
+                        image.width,
+                        image.height,
+                        image.object,
+                        image.matrix.0,
+                    ));
                 }
                 Event::Text(_) => {}
             }
@@ -199,6 +210,8 @@ impl Reader {
             samples.bits,
             samples.data,
             samples.codec.map(|c| text(&c.name)),
+            samples.decode,
+            samples.masked,
         ))
     }
 }

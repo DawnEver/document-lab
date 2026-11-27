@@ -11,16 +11,32 @@ stating no heading at all leave every line's heading to the rules below, tags st
 heading those rules find heads no tagged block. A line the tags do not cover -- an artifact, a document tagged in
 part -- is read as an untagged one is:
 
-- Headings: the largest text on page 1 is the title (``#``); a line that is a Roman-numbered upper-case heading
-  (``II. METHOD``), a standalone ``REFERENCES``/``ACKNOWLEDGMENT``/``APPENDIX``/``CONCLUSION``, or an all-bold
-  line numbered ``2`` / ``2.1`` is a section (``##``, ``###`` per depth). A document with no bold text at all (OCR'd:
-  it carries no weight) cannot be judged by weight: there a short numbered line that is no sentence, nor all
-  capitals, heads its clause, and any heading must read as words (`document_lab.layout.wordy`) -- a figure's
-  labels, OCR'd, do not. A line without a letter (a page number), a run of four dots (a contents leader, however
-  garbled) or a contents entry (a leader then a page number) never heads, nor does any line of a table-of-contents
-  page (:data:`TOC_LINES` such entries): it names the sections, it does not open them.
+- Headings: a line that is a Roman-numbered upper-case heading (``II. METHOD``) or a standalone back-matter word in
+  capitals or title case (``REFERENCES``, ``Acknowledgments``, ``Appendix``, ``Conclusion``) is a section (``##``),
+  or a chapter (``#``) when set at least :data:`TITLE_SCALE` times the body as a thesis sets its chapters; else a
+  line at least :data:`TITLE_SCALE` times the body size is a title (``#``: a paper bound in after the first opens
+  with one); else an all-bold line numbered ``2`` / ``2.1`` is a section (``##``, ``###`` per depth), and so is a
+  numbered line set wholly in a face other than the body's (`document_lab.layout.body_face`: an italic, another font,
+  another size) whose parent number already heads, read in order across pages -- ``2.1`` after a heading ``2``: a
+  subsection set in italic heads, a data sheet's row in another face (``09 August 2018``, ``13.56 MHz``) is
+  top-level or continues nothing; else page 1's
+  largest text is its title when at least :data:`PAGE_TITLE_SCALE` times the body and set in at most
+  :data:`PAGE_TITLE_LINES` lines (a repository's cover sheet set at one size throughout has none); else an all-bold
+  line lettered as an appendix's ``A.1`` is a section, and one lettered ``A`` alone when set at least
+  :data:`LETTER_SCALE` times the body (in the body size a bold letter is a table's label), its title read as words
+  (not a letter-spaced ``C O N D I T I O N S``). A web address is never a title. No heading is set smaller than
+  :data:`HEADING_FLOOR` times the body (a footnote's number is), but for a capital Roman-numbered or back-matter
+  heading, which small capitals set below it (a bold title-case ``References`` as small is a table's label). A
+  document with no bold text at all (OCR'd: it carries no weight) cannot be judged by weight: there a short numbered
+  line that is no sentence heads its clause, and any heading must read as words (`document_lab.layout.wordy`) -- a
+  figure's labels, OCR'd, do not. A line without a letter (a page number), a run of four dots (a contents leader,
+  however garbled) or a contents entry (a leader then a page number) never heads, nor does any line of a
+  table-of-contents page (:data:`TOC_LINES` such entries): it names the sections, it does not open them.
 - Paragraphs: lines of one column closer than :data:`PARAGRAPH_GAP` line heights join with a space (a hyphen at a
   line end joins the word); a larger gap, a heading or a column change starts a new paragraph.
+- Placed blocks: a caller that knows a page's regions (`document_lab.per_page`) hands boxes with their own markdown
+  (:data:`Placed`: a table read from its cells, a figure's link); the lines inside a box leave the paragraphs, and the
+  block stands where the box does in reading order. :func:`table` writes rows as a markdown table.
 
 :func:`headings` lists the headings either way, for `document_lab.agreement` to set side by side.
 """
@@ -31,16 +47,20 @@ import re
 from typing import TYPE_CHECKING, Final
 
 from document_lab import layout, tags
+from document_lab.ir import BBox, Provenance, TextSpan
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Collection, Sequence
 
     from document_lab.ir import Document, Element, Page
 
+
+#: A box of a page and the markdown that stands for the lines inside it.
+type Placed = tuple[BBox, str]
+_HOLDER: Final = '\N{OBJECT REPLACEMENT CHARACTER}'  # the text of the line that holds a placed block's place
 #: A block of markdown, and the tagged element it is set from (None: inferred).
 type _Block = tuple[str, Element | None]
-
-__all__ = ['headings', 'page_markdowns', 'to_markdown']
+__all__ = ['Placed', 'back_matter', 'headings', 'page_markdowns', 'table', 'to_markdown']
 
 #: A gap between lines larger than this many line heights starts a paragraph.
 PARAGRAPH_GAP: Final = 0.6
@@ -50,14 +70,28 @@ REJOIN_REACH: Final = 3
 OVERLAP: Final = 0.3
 #: A title is at least this many times the body size.
 TITLE_SCALE: Final = 1.6
+#: Page 1's largest text is its title when at least this many times the body size (a title set smaller).
+PAGE_TITLE_SCALE: Final = 1.2
+#: ... and set in at most this many lines: a title is a short block, a cover sheet set at one size throughout is none.
+PAGE_TITLE_LINES: Final = 4
+#: A heading is set at least this many times the body size: a footnote, set smaller, heads nothing -- but a capital
+#: Roman-numbered or back-matter heading may be set in small capitals below it.
+HEADING_FLOOR: Final = 0.9
+#: An appendix lettered alone (``A``) is set at least this many times the body: a table's bold label is not.
+LETTER_SCALE: Final = 1.1
 #: Prefix that keeps body text starting with "#" from reading as a markdown heading.
 ESCAPE: Final = chr(92)
 #: Unweighted: a numbered line of at most this many words, not ending a sentence, heads its clause.
 HEADING_WORDS: Final = 8
 _ROMAN: Final = re.compile(r'^(?:X{0,3})(?:IX|IV|V?I{0,3})\.\s+[A-Z][A-Z0-9 ,:;&/()\-]{3,}$')
+#: Back matter, matched in capitals; a line heads by it in capitals or in title case.
 _STANDALONE: Final = re.compile(r'^(?:ACKNOWLEDG(?:E)?MENTS?|REFERENCES|APPENDIX|CONCLUSIONS?)$')
 #: A clause number: one or two digits, then ``.N`` parts -- a year (``2011 Evaluation ...``, a table row) is none.
 _NUMBERED: Final = re.compile(r'^(\d{1,2}(?:\.\d+)*)\.?\s+[A-Z]')
+#: An appendix's number: a letter, then ``.N`` parts; weighted documents only (``A`` starts sentences too).
+_LETTERED: Final = re.compile(r'^([A-Z](?:\.\d+)*)\.?\s+[A-Z]')
+#: A web address: never a title, however large.
+_URL: Final = re.compile(r'://|\bwww\.', re.IGNORECASE)
 #: A table-of-contents entry: words, a leader (dots, ellipses, middle dots, rules), a page number at the end.
 _TOC_ENTRY: Final = re.compile(r'^(?=.*[A-Za-z]).*?(?:(?:\.\s?){4,}|\u2026{2,}|\u00b7{3,}|_{4,})\s*[\dixvIXV]{1,5}$')
 #: Lines of a page that are contents entries for the page to be a table of contents.
@@ -75,16 +109,21 @@ def to_markdown(doc: Document, *, include_hidden: bool = False, tagged: Collecti
 
 
 def page_markdowns(
-    doc: Document, *, include_hidden: bool = False, tagged: Collection[str] = tags.DEFAULT_USES
+    doc: Document,
+    placed: Sequence[Sequence[Placed]] = (),
+    *,
+    include_hidden: bool = False,
+    tagged: Collection[str] = tags.DEFAULT_USES,
 ) -> list[str]:
     """Each page's own markdown, in order (empty for a page without text).
 
     Body size and title are judged over the whole document; nothing is joined across a page break: a page stands alone.
-    ``include_hidden``, ``tagged``: as for :func:`to_markdown`.
+    ``placed``: each page's placed blocks (none for a page past its end). ``include_hidden``, ``tagged``: as for
+    :func:`to_markdown`.
     """
     return [
         '\n\n'.join(_rejoin(page)) + '\n' if page else ''
-        for page in _blocks(doc, include_hidden=include_hidden, tagged=tagged)
+        for page in _blocks(doc, placed, include_hidden=include_hidden, tagged=tagged)
     ]
 
 
@@ -100,18 +139,63 @@ def headings(
     ]
 
 
-def _blocks(doc: Document, *, include_hidden: bool, tagged: Collection[str]) -> list[list[_Block]]:
+def table(rows: Sequence[Sequence[str]], boxes: Sequence[Sequence[BBox | None]] | None = None) -> str:
+    """``rows`` as a markdown table, the first its header; a ``|`` in a cell escaped, a short row padded.
+
+    ``boxes``: each slot's cell box (`document_lab.ir.Table.cell_bboxes`), when known: a cell merged over several
+    slots repeats its box, and is written once, in its first slot -- the leftmost of its top row -- its other slots
+    left empty, as a reader sees a merged cell.
+    """
+    width = max(len(row) for row in rows)
+
+    def merged(r: int, c: int) -> bool:
+        box = None if boxes is None else boxes[r][c]
+        return box is not None and ((c > 0 and boxes[r][c - 1] == box) or (r > 0 and boxes[r - 1][c] == box))  # type: ignore[index]
+
+    cells = [
+        ['' if merged(r, c) else ' '.join(text.split()).replace('|', ESCAPE + '|') for c, text in enumerate(row)]
+        + [''] * (width - len(row))
+        for r, row in enumerate(rows)
+    ]
+    lines = [f'| {" | ".join(row)} |' for row in cells]
+    return '\n'.join([lines[0], '|' + ' --- |' * width, *lines[1:]])
+
+
+def _blocks(
+    doc: Document, placed: Sequence[Sequence[Placed]] = (), *, include_hidden: bool, tagged: Collection[str]
+) -> list[list[_Block]]:
     uses = tags.checked(tagged) & {'order', 'headings', 'paragraphs'}
     reading = tags.reading(doc) if uses else None
     doc = doc.shown(include_hidden=include_hidden)
     weighted = any(span.bold for span in doc.spans())
     body = layout.body_size(doc)
-    title_size = max((s.size for s in doc.pages[0].spans), default=0.0) if doc.pages else 0.0
+    face = layout.body_face(doc)
+    headed: set[str] = set()  # the clause numbers headed so far, page after page
+    first = layout.lines(doc.pages[0], weighted=weighted) if doc.pages else []
+    largest = max((ln.size for ln in first), default=0.0)
+    at_largest = sum(ln.size >= largest for ln in first)
+    title = largest if largest >= PAGE_TITLE_SCALE * body and at_largest <= PAGE_TITLE_LINES else None
     last = [0]  # the level of the last heading written, page after page
     return [
-        _page_blocks(page, body, title_size, weighted=weighted, reading=reading, uses=uses, last=last)
-        for page in doc.pages
+        _page_blocks(
+            page,
+            body,
+            title if i == 0 else None,
+            placed[i] if i < len(placed) else (),
+            weighted=weighted,
+            face=face,
+            headed=headed,
+            reading=reading,
+            uses=uses,
+            last=last,
+        )
+        for i, page in enumerate(doc.pages)
     ]
+
+
+def back_matter(text: str) -> bool:
+    """Is ``text`` a back-matter heading in capitals or title case (``REFERENCES``, ``Acknowledgments``, ...)?"""
+    return bool(_STANDALONE.match(text.upper())) and text in {text.upper(), text.capitalize()}
 
 
 def _rejoin(blocks: list[_Block]) -> list[str]:
@@ -120,7 +204,7 @@ def _rejoin(blocks: list[_Block]) -> list[str]:
     A block set from a tagged element continues the nearest earlier block of that same element, within
     :data:`REJOIN_REACH` blocks (a paragraph the tags state over a page break). Any other block starting lower-case
     continues the nearest earlier paragraph (within :data:`REJOIN_REACH` blocks, skipping page furniture between
-    them) that ends unterminated; a heading stops the search.
+    them) that ends unterminated; a heading or a placed block (a region's link leads it) stops the search.
     """
     out: list[str] = []
     owners: list[Element | None] = []
@@ -131,7 +215,7 @@ def _rejoin(blocks: list[_Block]) -> list[str]:
             target = next((i for i in reach if owners[i] is owner), None)
         elif block[:1].islower():
             for i in reach:
-                if out[i].startswith('#'):
+                if out[i].startswith(('#', '![')):
                     break
                 if not out[i].rstrip().endswith(('.', ':', '?', '!')):
                     target = i
@@ -145,21 +229,69 @@ def _rejoin(blocks: list[_Block]) -> list[str]:
     return out
 
 
-def _heading(line: layout.Line, body: float, title_size: float | None, *, weighted: bool) -> str | None:
+def _heading(
+    line: layout.Line,
+    body: float,
+    title: float | None,
+    *,
+    weighted: bool,
+    face: tuple[str, float],
+    headed: set[str],
+) -> str | None:
+    """The line as a heading (``#`` a title, ``##`` a section, deeper per clause depth), else None.
+
+    ``title``: the size page 1 sets its title in, on page 1 (None elsewhere, or when page 1 sets none apart).
+    ``face``: the body's font and size; ``headed``: the clause numbers headed before this line.
+    """
     text = line.text
     if not any(c.isalpha() for c in text) or _TOC_ENTRY.match(text) or '....' in text:
         return None
-    if not weighted and not layout.wordy(text):
-        return None  # OCR noise: a figure's labels, a garbled leader
-    if title_size is not None and line.size >= TITLE_SCALE * body:
+    capital = bool(_ROMAN.match(text)) or (back_matter(text) and text.isupper())
+    if (line.size < HEADING_FLOOR * body and not capital) or (not weighted and not layout.wordy(text)):
+        return None  # a footnote; OCR noise: a figure's labels, a garbled leader
+    titled = line.size >= TITLE_SCALE * body and not _URL.search(text)
+    if _ROMAN.match(text) or back_matter(text):
+        return f'{"#" if titled else "##"} {text}'  # the level of the headings of its size: a chapter's, a section's
+    if titled:
         return f'# {text}'
-    if _ROMAN.match(text) or _STANDALONE.match(text):
-        return f'## {text}'
+    # A clause number states a section more surely than page 1's size states a title; an initial letter less surely.
+    unsentenced = len(text.split()) <= HEADING_WORDS and not text.endswith(('.', ',', ';', ':'))
+    clause = len(text) <= 80 and (line.bold if weighted else unsentenced)
     numbered = _NUMBERED.match(text)
-    clause = len(text.split()) <= HEADING_WORDS and not text.endswith(('.', ',', ';', ':')) and not text.isupper()
-    if numbered and len(text) <= 80 and (line.bold if weighted else clause):
+    if numbered and (clause or (weighted and len(text) <= 80 and _continues(numbered.group(1), line, face, headed))):
         return f'{"#" * (numbered.group(1).count(".") + 2)} {text}'
+    if title is not None and line.size >= title and not _URL.search(text):
+        return f'# {text}'
+    lettered = _LETTERED.match(text) if weighted else None
+    # Its title reads as words: a letter-spaced word (``C O N``) is no title.
+    letter = lettered.group(1) if lettered and layout.wordy(text[lettered.end(1) :]) else None
+    if letter and clause and ('.' in letter or line.size >= LETTER_SCALE * body):
+        return f'{"#" * (letter.count(".") + 2)} {text}'
     return None
+
+
+def _with_placed(page: Page, lines: list[layout.Line], placed: Sequence[Placed]) -> dict[int, str]:
+    """``lines`` less those inside a placed box, a line holding each block's place added; the blocks by holder id."""
+    held: dict[int, str] = {}
+
+    def inside(line: layout.Line) -> bool:
+        cx, cy = (line.x0 + line.x1) / 2, (line.y0 + line.y1) / 2
+        return any(box.x0 <= cx <= box.x1 and box.y0 <= cy <= box.y1 for box, _ in placed)
+
+    lines[:] = [ln for ln in lines if not inside(ln)]
+    for box, text in placed:
+        here = Provenance('', '', page=page.number, bbox=box)
+        holder = layout.Line([TextSpan(_HOLDER, 0.0, '', here)], layout.column(box.x0, box.x1, page.width / 2))
+        lines.append(holder)
+        held[id(holder)] = text
+    return held
+
+
+def _continues(number: str, line: layout.Line, face: tuple[str, float], headed: set[str]) -> bool:
+    """Is the numbered line set wholly in a face other than the body's ``face``, its parent number ``headed``?"""
+    parent, dot, _ = number.rpartition('.')
+    other = all((s.font, round(s.size, 1)) != face for s in line.spans if s.text.strip())
+    return bool(dot) and parent in headed and other
 
 
 def _joined(text: str, line: str) -> str:
@@ -171,19 +303,27 @@ def _page_blocks(
     page: Page,
     body: float,
     title_size: float | None,
+    placed: Sequence[Placed] = (),
     *,
     weighted: bool,
+    face: tuple[str, float],
+    headed: set[str],
     reading: tags.Reading | None,
     uses: frozenset[str],
     last: list[int],
 ) -> list[_Block]:
+    """The page's blocks, each with the tagged element it is set from (None: inferred, or a placed block).
+
+    ``headed`` gains the clause number of each numbered heading it states, ``last`` the level of each heading written.
+    """
     blocks: list[str] = []
     owners: list[Element | None] = []  # the tagged element each block is set from
     paragraph: list[str] = []
     title: list[str] = []
+    beside: list[str] = []  # placed blocks met while a title wraps on: they follow it, not cut it
     began: dict[str, Element | None] = {'paragraph': None, 'title': None}  # the element each began in
     previous: layout.Line | None = None
-    held = None  # the tagged block the previous line is set in
+    current = None  # the tagged block the previous line is set in
 
     def put(text: str, owner: Element | None) -> None:
         blocks.append(text)
@@ -200,21 +340,34 @@ def _page_blocks(
         if title:
             end_paragraph()
             put('# ' + ' '.join(title), began['title'])
+            for text in beside:
+                put(text, None)
             title.clear()
+            beside.clear()
 
     found = layout.lines(page, weighted=weighted)
+    held = _with_placed(page, found, placed)
     lines = reading.ordered(found) if reading is not None and 'order' in uses else layout.ordered(found)
     contents = sum(bool(_TOC_ENTRY.match(line.text)) for line in lines) >= TOC_LINES
     stated_heads = reading is not None and 'headings' in uses and reading.heads
     paragraphs = reading is not None and 'paragraphs' in uses
     for line in lines:
+        if id(line) in held:
+            if title:
+                beside.append(held[id(line)])
+            else:
+                end_paragraph()
+                put(held[id(line)], None)
+                previous = None
+            current = None
+            continue
         covered = reading is not None and reading.block_of(line) is not None
         block = reading.block_of(line) if paragraphs else None
         before = reading.block_of(previous) if paragraphs and previous is not None else None
-        inferred = None if contents else _heading(line, body, title_size, weighted=weighted)
+        inferred = None if contents else _heading(line, body, title_size, weighted=weighted, face=face, headed=headed)
         # A line goes on its tagged block -- unless the tags state no heading and this line heads by the rules.
         goes_on = stated_heads or inferred is None
-        if goes_on and block is not None and block is held and (title or paragraph or blocks):
+        if goes_on and block is not None and block is current and (title or paragraph or blocks):
             if title:
                 title.append(line.text)
             elif paragraph:
@@ -223,7 +376,7 @@ def _page_blocks(
                 blocks[-1] = _joined(blocks[-1], line.text)  # a tagged heading's further line
             previous = line
             continue
-        held = block
+        current = block
         level = reading.level(line) if covered and stated_heads else None
         if level:
             # The tags state the line heads. Where the rules make it a heading too, theirs is its level (a tag's
@@ -235,18 +388,20 @@ def _page_blocks(
             heading = None if titled else inferred  # the tags state no title: the title is inferred
         else:
             heading = inferred
+        if heading and (number := _NUMBERED.match(line.text)):
+            headed.add(number.group(1))
         if heading and not level:
-            held = None  # a heading inferred heads no tagged block: the block's next line starts afresh
+            current = None  # a heading inferred heads no tagged block: the block's next line starts afresh
         if heading and heading.startswith('# '):
             if not title:
-                began['title'] = held
+                began['title'] = current
             title.append(line.text)  # a title wraps over several lines
             previous = line
             continue
         end_title()
         if heading:
             end_paragraph()
-            put(heading, held)
+            put(heading, current)
             previous = line
             continue
         if not (covered and stated_heads) and _continues_heading(blocks, previous, line):

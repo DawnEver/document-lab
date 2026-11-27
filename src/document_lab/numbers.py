@@ -4,7 +4,8 @@ Recognized: a sign (hyphen or the typographic minus), thousands commas in groups
 groups, a decimal point, ``e`` exponents, ``x 10^n`` multipliers (``x``, ``*`` or the multiplication sign)
 and a bare ``10ⁿ`` power. A decimal COMMA is not read as one: ``1,5`` is ambiguous with a thousands
 separator, so its first number is ``1``. A number qualified ``min.`` or ``max.`` (``12.5 min.``, ``max. 3``) is a
-BOUND, read by :func:`bound`. Variation selectors (U+FE00-U+FE0F, U+E0100-U+E01EF), which the reader keeps
+BOUND, read by :func:`bound`. Every space but the thin one is a plain space, a word joiner none
+(:func:`document_lab.ir.spaced`). Variation selectors (U+FE00-U+FE0F, U+E0100-U+E01EF), which the reader keeps
 where a font states them, are not part of a number's spelling and are dropped.
 """
 
@@ -12,6 +13,8 @@ from __future__ import annotations
 
 import re
 from typing import Final, Literal
+
+from document_lab.ir import spaced
 
 __all__ = ['bound', 'first_number', 'parse_number']
 
@@ -28,7 +31,12 @@ _POWER: Final = re.compile(r'^10\^?([+-]?\d+)$')
 
 
 def _normal(text: str) -> str:
-    return text.replace(_MINUS, '-').replace(_THIN, '').translate(_SUPERSCRIPT).translate(_VARIATION_SELECTORS).strip()
+    return (
+        spaced(text.replace(_MINUS, '-').replace(_THIN, ''))
+        .translate(_SUPERSCRIPT)
+        .translate(_VARIATION_SELECTORS)
+        .strip()
+    )
 
 
 def _value(match: re.Match[str]) -> float:

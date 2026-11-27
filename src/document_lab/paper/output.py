@@ -263,9 +263,13 @@ def build_index(
 
 
 def _abstract(sections: list[tuple[str, str]], md_text: str) -> tuple[str, bool]:
-    """paper.md's abstract, and whether it is only the head of a heading-less preamble (no abstract stated)."""
+    """paper.md's abstract, and whether it is only the head of a heading-less preamble (no abstract stated).
+
+    An abstract is stated under an ``Abstract`` heading or line of its own (to the next heading), or run in after
+    ``Abstract--``.
+    """
     abstract_m = re.search(
-        r'(?:^#{1,3}\s*abstract\s*\n)(.*?)(?=^#{1,3}\s|\Z)',
+        r'(?:^(?:#{1,3}\s*)?abstract\s*\n)(.*?)(?=^#{1,3}\s|\Z)',
         md_text,
         re.IGNORECASE | re.MULTILINE | re.DOTALL,
     )

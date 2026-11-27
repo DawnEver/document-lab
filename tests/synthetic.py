@@ -853,20 +853,10 @@ def tagged_pdf(
     """
     doc = pymupdf.open()
     xrefs = {name: doc.get_new_xref() for name in tree}
-    fonts = []
-    for base in ('Helvetica', 'Helvetica-Bold'):
-        fonts.append(doc.get_new_xref())
-        doc.update_object(fonts[-1], f'<< /Type /Font /Subtype /Type1 /BaseFont /{base} /Encoding /WinAnsiEncoding >>')
     refs = {name: f'{xref} 0 R' for name, xref in xrefs.items()}
-    for i, content in enumerate(contents):
-        page = doc.new_page(width=size[0], height=size[1])
-        stream = doc.get_new_xref()
-        doc.update_object(stream, '<< >>')
-        doc.update_stream(stream, content.encode('latin-1'))
-        doc.xref_set_key(page.xref, 'Contents', f'{stream} 0 R')
-        doc.xref_set_key(page.xref, 'Resources', f'<< /Font << /F1 {fonts[0]} 0 R /F2 {fonts[1]} 0 R >> >>')
-        doc.xref_set_key(page.xref, 'StructParents', str(i))
-        refs[f'page{i + 1}'] = f'{page.xref} 0 R'
+    for i, page in enumerate(_content_pages(doc, contents, size)):
+        doc.xref_set_key(page, 'StructParents', str(i))
+        refs[f'page{i + 1}'] = f'{page} 0 R'
     for name, source in tree.items():
         doc.update_object(xrefs[name], source.format(**refs))
     doc.xref_set_key(doc.pdf_catalog(), 'StructTreeRoot', refs['root'])
@@ -874,6 +864,35 @@ def tagged_pdf(
     doc.save(path)
     doc.close()
     return path
+
+
+def content_pdf(path: Path, contents: Sequence[str], *, size: tuple[float, float] = PAGE) -> Path:
+    """A PDF whose pages draw exactly ``contents``, one content stream a page (``size`` points), Helvetica as ``/F1``
+    and Helvetica-Bold as ``/F2`` in its resources: for what no PyMuPDF drawing call states (caps, joins, miter
+    limits, dashes, text rendering modes)."""
+    doc = pymupdf.open()
+    _content_pages(doc, contents, size)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def _content_pages(doc: pymupdf.Document, contents: Sequence[str], size: tuple[float, float]) -> list[int]:
+    """Pages added to ``doc`` drawing ``contents``, one a page, with :func:`content_pdf`'s fonts: their xrefs."""
+    fonts = []
+    for base in ('Helvetica', 'Helvetica-Bold'):
+        fonts.append(doc.get_new_xref())
+        doc.update_object(fonts[-1], f'<< /Type /Font /Subtype /Type1 /BaseFont /{base} /Encoding /WinAnsiEncoding >>')
+    pages = []
+    for content in contents:
+        page = doc.new_page(width=size[0], height=size[1])
+        stream = doc.get_new_xref()
+        doc.update_object(stream, '<< >>')
+        doc.update_stream(stream, content.encode('latin-1'))
+        doc.xref_set_key(page.xref, 'Contents', f'{stream} 0 R')
+        doc.xref_set_key(page.xref, 'Resources', f'<< /Font << /F1 {fonts[0]} 0 R /F2 {fonts[1]} 0 R >> >>')
+        pages.append(page.xref)
+    return pages
 
 
 def in_background_color(page: Page) -> Page:

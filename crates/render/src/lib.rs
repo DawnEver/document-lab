@@ -270,6 +270,13 @@ impl Canvas<'_> {
         self.grid.rect(bbox).meets(self.grid.bounds())
     }
 
+    /// How far past its path (page space) `stroke` may paint pixels: as far as its caps and joins reach
+    /// ([`Stroke::reach`]), and a pixel more -- a line under a tenth of a pixel is drawn one pixel wide, and
+    /// anti-aliasing shades a pixel the paint only nears.
+    fn reach(&self, stroke: &Stroke) -> f64 {
+        stroke.reach() + 1.0 / self.grid.scale
+    }
+
     /// The compositing a mark is drawn with, its soft mask (not drawn) counted.
     fn composited(&mut self, compositing: Compositing) -> BlendMode {
         if compositing.soft_mask {
@@ -285,17 +292,8 @@ impl Canvas<'_> {
         let Some(bounds) = bounds(&path.segments) else {
             return;
         };
-        let reach = path
-            .stroke
-            .as_ref()
-            .map_or(0.0, |s| s.width * s.miter_limit.max(1.0) + s.width);
-        let reach_box = Rect {
-            x0: bounds.x0 - reach,
-            y0: bounds.y0 - reach,
-            x1: bounds.x1 + reach,
-            y1: bounds.y1 + reach,
-        };
-        if !self.meets(reach_box) {
+        let reach = path.stroke.as_ref().map_or(0.0, |s| self.reach(s));
+        if !self.meets(bounds.grown(reach)) {
             return;
         }
         let mask = match self
@@ -523,17 +521,11 @@ impl Canvas<'_> {
             return;
         };
         let reach = if strokes {
-            text.stroke.width * text.stroke.miter_limit.max(1.0) + text.stroke.width
+            self.reach(&text.stroke)
         } else {
             0.0
         };
-        let reach_box = Rect {
-            x0: around.x0 - reach,
-            y0: around.y0 - reach,
-            x1: around.x1 + reach,
-            y1: around.y1 + reach,
-        };
-        if !self.meets(reach_box) {
+        if !self.meets(around.grown(reach)) {
             return;
         }
         let mask = match self

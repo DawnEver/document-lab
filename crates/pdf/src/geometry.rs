@@ -1,6 +1,8 @@
 //! Points and affine matrices (ISO 32000-2 section 8.3): `[a b c d e f]` maps `(x, y)` to
 //! `(a x + c y + e, b x + d y + f)`.
 
+use std::cmp::Ordering;
+
 /// A point.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Point {
@@ -48,6 +50,16 @@ impl Matrix {
     pub fn scale(self) -> f64 {
         let [a, b, c, d, ..] = self.0;
         (a * d - b * c).abs().sqrt()
+    }
+
+    /// The most this matrix stretches a length, whatever its direction: its largest singular value (`scale` when it
+    /// scales evenly).
+    #[must_use]
+    pub fn stretch(self) -> f64 {
+        let [a, b, c, d, ..] = self.0;
+        let sum = a * a + b * b + c * c + d * d;
+        let det = a * d - b * c;
+        f64::midpoint(sum, (sum * sum - 4.0 * det * det).max(0.0).sqrt()).sqrt()
     }
 
     /// The matrix in a PDF array of six numbers, if `values` is one.
@@ -137,6 +149,88 @@ impl Rect {
     pub fn meets(self, other: Self) -> bool {
         self.x0 <= other.x1 && other.x0 <= self.x1 && self.y0 <= other.y1 && other.y0 <= self.y1
     }
+
+    /// Whether the boxes share some area (touching edges do not).
+    #[must_use]
+    pub fn overlaps(self, other: Self) -> bool {
+        self.x0 < other.x1 && other.x0 < self.x1 && self.y0 < other.y1 && other.y0 < self.y1
+    }
+
+    /// The box grown by `by` on every side.
+    #[must_use]
+    pub fn grown(self, by: f64) -> Self {
+        Self {
+            x0: self.x0 - by,
+            y0: self.y0 - by,
+            x1: self.x1 + by,
+            y1: self.y1 + by,
+        }
+    }
+
+    /// Its corners, clockwise in page space from the top left.
+    #[must_use]
+    pub fn corners(self) -> [Point; 4] {
+        [
+            Point {
+                x: self.x0,
+                y: self.y0,
+            },
+            Point {
+                x: self.x1,
+                y: self.y0,
+            },
+            Point {
+                x: self.x1,
+                y: self.y1,
+            },
+            Point {
+                x: self.x0,
+                y: self.y1,
+            },
+        ]
+    }
+}
+
+/// The side of the line from `a` to `b` that `c` lies on -- the sign of their cross product -- when the floating
+/// point product settles it: within Shewchuk's first error bound of zero (Adaptive Precision Floating-Point
+/// Arithmetic and Fast Robust Geometric Predicates, 1997: `ccwerrboundA`) rounding could flip it, and None says so.
+#[must_use]
+pub fn orientation(a: Point, b: Point, c: Point) -> Option<Ordering> {
+    const HALF_ULP: f64 = f64::EPSILON / 2.0;
+    const BOUND: f64 = (3.0 + 16.0 * HALF_ULP) * HALF_ULP;
+    let left = (b.x - a.x) * (c.y - a.y);
+    let right = (b.y - a.y) * (c.x - a.x);
+    let det = left - right;
+    let bound = BOUND * (left.abs() + right.abs());
+    (det.abs() > bound || bound <= 0.0)
+        .then(|| det.partial_cmp(&0.0))
+        .flatten()
+}
+
+/// Whether the segment from `p` to `q` reaches inside `bbox` (along an edge of it does not): unless an axis or the
+/// segment's normal parts them -- every corner of the box on one side of its line, or on it. A corner no exact sign
+/// places counts as on both sides.
+#[must_use]
+pub fn crosses(p: Point, q: Point, bbox: Rect) -> bool {
+    if !Rect::spanning(p, q).overlaps(bbox) {
+        return false;
+    }
+    let corners = bbox.corners().map(|c| orientation(p, q, c));
+    let none_on = |side: Ordering| corners.iter().all(|c| c.is_some_and(|c| c != side));
+    !(none_on(Ordering::Less) || none_on(Ordering::Greater))
+}
+
+/// Whether the segment from `p` to `q` meets `bbox`, its edges counted (touching does): unless an axis or the
+/// segment's normal parts them -- every corner of the box strictly on one side of its line. A corner no exact sign
+/// places counts as on the line.
+#[must_use]
+pub fn touches(p: Point, q: Point, bbox: Rect) -> bool {
+    if !Rect::spanning(p, q).meets(bbox) {
+        return false;
+    }
+    let corners = bbox.corners().map(|c| orientation(p, q, c));
+    let all = |side: Ordering| corners.iter().all(|c| *c == Some(side));
+    !(all(Ordering::Less) || all(Ordering::Greater))
 }
 
 #[cfg(test)]
@@ -156,6 +250,44 @@ mod tests {
             Point { x: 22.0, y: 2.0 }
         );
         assert!((Matrix([3.0, 0.0, 0.0, 3.0, 5.0, 5.0]).scale() - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn stretch_is_the_most_a_length_grows() {
+        // Even: the scale, turned or not.
+        let (c, s) = (0.6, 0.8);
+        assert!(
+            (Matrix([3.0 * c, 3.0 * s, -3.0 * s, 3.0 * c, 1.0, 2.0]).stretch() - 3.0).abs() < 1e-12
+        );
+        // Uneven: the longer axis, though the area scale is 1.
+        let squash = Matrix([10.0, 0.0, 0.0, 0.1, 0.0, 0.0]);
+        assert!((squash.stretch() - 10.0).abs() < 1e-12 && (squash.scale() - 1.0).abs() < 1e-12);
+        // A shear x' = x + y stretches the diagonal by the golden ratio.
+        let golden = f64::midpoint(1.0, 5.0f64.sqrt());
+        assert!((Matrix([1.0, 0.0, 1.0, 1.0, 0.0, 0.0]).stretch() - golden).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_segment_touching_a_box_meets_it_and_reaches_inside_only_through_it() {
+        let rect = Rect {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 10.0,
+            y1: 10.0,
+        };
+        let pt = |x, y| Point { x, y };
+        // Along an edge: touches, does not cross; the boxes meet, they do not overlap.
+        assert!(touches(pt(-5.0, 0.0), pt(15.0, 0.0), rect));
+        assert!(!crosses(pt(-5.0, 0.0), pt(15.0, 0.0), rect));
+        let edge = Rect::spanning(pt(-5.0, 0.0), pt(15.0, 0.0));
+        assert!(edge.meets(rect) && !edge.overlaps(rect));
+        // Through it: both. Past its corner: neither.
+        assert!(
+            touches(pt(-5.0, 5.0), pt(15.0, 5.0), rect)
+                && crosses(pt(-5.0, 5.0), pt(15.0, 5.0), rect)
+        );
+        assert!(!touches(pt(-5.0, 4.0), pt(4.0, -5.0), rect));
+        assert!(!crosses(pt(-5.0, 4.0), pt(4.0, -5.0), rect));
     }
 }
 

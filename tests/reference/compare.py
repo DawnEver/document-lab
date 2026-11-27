@@ -39,6 +39,10 @@ An image of ours PyMuPDF does not place there is ``invented``; PyMuPDF's placeme
 Rendered ink cannot judge a clipped one: a Form showing part of an embedded page hides images that another Form,
 showing another part of the same page, draws in the very place.
 
+The outline is compared item by item -- depth, title (whitespace collapsed) and the page it leads to -- and each page's
+label as a string (no label: empty, as PyMuPDF gives it). PyMuPDF leaves a label prefix stated as a UTF-16 text string
+in its hex form (``<FEFF004B>1`` for ``K1``, a text string by ISO 32000-2 7.9.2.2): that form is decoded on its side.
+
 PyMuPDF reads the page unrotated; its coordinates are turned to the page as displayed, as ours are. The page is read
 one at a time and PyMuPDF's drawings are taken one by one (its ``callback``), so memory holds one document of ours
 and one page of PyMuPDF's.
@@ -46,6 +50,7 @@ and one page of PyMuPDF's.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from collections import Counter, defaultdict
 from contextlib import contextmanager
@@ -61,11 +66,16 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
     from pathlib import Path
 
-    from document_lab.ir import BBox, TextSpan, VectorPath
+    from document_lab.ir import BBox, OutlineItem, TextSpan, VectorPath
+
+#: An outline item as both readers state it: depth (1 top level), title, the 1-based page it leads to (-1: none).
+Entry = tuple[int, str, int]
 
 UNKNOWN = '\N{REPLACEMENT CHARACTER}'
 #: Points two placements of an image may differ by and be one.
 PLACED = 0.5
+#: A UTF-16 text string PyMuPDF leaves in its hex form inside a page label.
+_HEX_TEXT = re.compile(r'<(FEFF(?:[0-9A-Fa-f]{4})*)>')
 #: Points a PyMuPDF character's origin may lie outside one of our spans' boxes and be located in it.
 LOCATED = 1.0
 #: Points a drawing's box may differ from one of our paths' and be its box.
@@ -135,6 +145,11 @@ class Compared:
     locked: bool
     pages: tuple[Page, ...]
     reference_pages: int
+    outline: tuple[Entry, ...] = ()
+    reference_outline: tuple[Entry, ...] = ()
+    #: Each page's label, ours and PyMuPDF's.
+    labels: tuple[str, ...] = ()
+    reference_labels: tuple[str, ...] = ()
 
     @property
     def agreement(self) -> float:
@@ -547,6 +562,17 @@ def _images(ours: list, theirs: pymupdf.Page, to: _Mapping) -> dict[str, int]:
     return {'images': len(ours), 'invented': invented, 'clipped': len(unmatched)}
 
 
+def _entries(items: tuple[OutlineItem, ...], depth: int = 1) -> Iterator[Entry]:
+    for item in items:
+        page = item.destination.page if item.destination is not None else -1
+        yield depth, ' '.join((item.title or '').split()), page
+        yield from _entries(item.children, depth + 1)
+
+
+def _text(hex_string: re.Match) -> str:
+    return bytes.fromhex(hex_string[1]).decode('utf-16')
+
+
 @contextmanager
 def _color_management(*, on: bool) -> Iterator[None]:
     """PyMuPDF's color management ``on`` or off, then back to MuPDF's default (on, when built with ICC)."""
@@ -606,4 +632,16 @@ def compare(path: Path, reference_path: Path | None = None, plant: Plant | None 
                     unreported=unreported,
                 )
             )
-        return Compared(path, locked=False, pages=tuple(pages), reference_pages=reference.page_count)
+        labels = doc.page_labels or ('',) * len(doc.pages)
+        return Compared(
+            path,
+            locked=False,
+            pages=tuple(pages),
+            reference_pages=reference.page_count,
+            outline=tuple(_entries(doc.outline)),
+            reference_outline=tuple(
+                (level, ' '.join(title.split()), page) for level, title, page in reference.get_toc()
+            ),
+            labels=tuple(label or '' for label in labels),
+            reference_labels=tuple(_HEX_TEXT.sub(_text, page.get_label()) for page in reference),
+        )

@@ -2,24 +2,31 @@
 //!
 //! `open(source, password)` reads a PDF -- a file by its path, read here, or one already in memory as bytes -- and
 //! gives its `sha256`; its `page(number, annotations=, curve_samples=, flatness=)` returns what the page draws as
-//! tuples and columns, which `document_lab.pdf` turns into the IR, its `render(...)` a region drawn by the own
-//! renderer (`render`), its `image(object)` an image's samples and its `rgb(object)` their sRGB where they show as
-//! they stand. `create(path, level)` writes a PDF of image pages, or of pages copied from a `Reader`
-//! (`document_lab.capture`), perhaps with a text layer laid over them (`document_lab.ocr`).
+//! tuples and columns, which `document_lab.pdf` turns into the IR, its `links(number)` the page's links, its
+//! `document()` what the document states beside its pages (outline, labels, metadata, form fields, embedded files),
+//! its `render(...)` a region drawn by the own renderer (`render`), its `image(object)` an image's samples, its
+//! `rgb(object)` their sRGB where they show as they stand and its `attachment(object)` an embedded file's bytes.
+//! Pages are numbered from 1 in every row. `create(path, level)` writes a PDF of image pages, or of pages copied from
+//! a `Reader` (`document_lab.capture`), perhaps with a text layer laid over them (`document_lab.ocr`).
 //!
 //! A refusal raises by its kind: [`Refused`] and its kinds when the reader refuses the input, `ValueError` for a
 //! request it cannot honor, `OSError` when writing fails.
 
+use std::cell::OnceCell;
 use std::fmt::Write;
 use std::fs;
 use std::io::{self, BufWriter};
 use std::path::PathBuf;
 
 use pdf::color::Pattern;
+use pdf::destination::{Action, Destination, Targets};
 use pdf::error::Kind;
+use pdf::forms::{Field, Value};
 use pdf::geometry::{Point, Rect};
 use pdf::image::Placement;
 use pdf::interpret::{Event, Layer, PathEvent, Segment};
+use pdf::metadata::{Metadata, Newer};
+use pdf::outline::Item;
 use pdf::paths::{Flattening, Polylines};
 use pdf::writer::Image;
 use pyo3::create_exception;
@@ -145,6 +152,93 @@ type SamplesRow = (
 /// A `CCITTFaxDecode` image's coding: K, columns, end-of-line codes, rows byte-aligned, 1 bits black.
 type FaxRow = (i64, i64, bool, bool, bool);
 
+/// A destination: page number, fit, x, y, zoom, the box a `FitR` fits (page space).
+type DestinationRow = (
+    usize,
+    String,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<Box4>,
+);
+/// An action: kind, destination, URI, file, name.
+type ActionRow = (
+    String,
+    Option<DestinationRow>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+/// An outline item, the items flattened in document order: depth (0 top level), title, destination, action.
+type ItemRow = (
+    usize,
+    Option<String>,
+    Option<DestinationRow>,
+    Option<ActionRow>,
+);
+/// A link: box (page space), destination, action.
+type LinkRow = (Box4, Option<DestinationRow>, Option<ActionRow>);
+/// The XMP packet: title, creators, description, created, modified, metadata date, creator tool, producer,
+/// keywords, the packet's text.
+type XmpRow = (
+    Option<String>,
+    Vec<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+);
+/// The metadata: the `/Info` entries, the XMP packet, which is newer (`info`, `xmp`, `same`).
+type MetadataRow = (
+    Option<Vec<(String, String)>>,
+    Option<XmpRow>,
+    Option<&'static str>,
+);
+/// A widget: page number, box (page space), appearance state, export value.
+type WidgetRow = (Option<usize>, Option<Box4>, Option<String>, Option<String>);
+/// A form field: name, type, flags, value, default, options (export, shown), widgets.
+type FieldRow = (
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<ValueRow>,
+    Option<ValueRow>,
+    Vec<(String, String)>,
+    Vec<WidgetRow>,
+);
+/// An embedded file: tree key, file name, description, MIME type, size, created, modified, page number, object.
+type AttachmentRow = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    Option<usize>,
+    u32,
+);
+/// What the document states beside its pages: outline, page labels (None: none stated), metadata, fields,
+/// embedded files, warnings.
+type DocumentRows = (
+    Vec<ItemRow>,
+    Option<Vec<Option<String>>>,
+    MetadataRow,
+    Vec<FieldRow>,
+    Vec<AttachmentRow>,
+    Vec<String>,
+);
+
+/// A form field's value: one string (a text string or a name, as stated), or several.
+#[derive(IntoPyObject)]
+enum ValueRow {
+    One(String),
+    Several(Vec<String>),
+}
 /// A region drawn: width, height, channels (3 RGB, 4 RGBA), the pixels rows top-down, and each kind of mark not
 /// drawn as the file states it with how many.
 type RasterRow = (u32, u32, u8, Vec<u8>, Vec<(String, usize)>);
@@ -154,6 +248,8 @@ type RasterRow = (u32, u32, u8, Vec<u8>, Vec<(String, usize)>);
 struct Reader {
     file: pdf::File,
     pages: Vec<pdf::Page>,
+    /// What resolving destinations needs, and what reading it warned of: read when first needed.
+    targets: OnceCell<(Targets, Vec<String>)>,
 }
 
 /// Open the PDF `source` with `password` (empty: none): the file at a path (`str` or `os.PathLike`), read whole
@@ -168,7 +264,11 @@ fn open(source: &Bound<'_, PyAny>, password: &[u8]) -> PyResult<Reader> {
     };
     let file = pdf::File::open(data, password).map_err(|e| refused(&e))?;
     let pages = file.pages().map_err(|e| refused(&e))?;
-    Ok(Reader { file, pages })
+    Ok(Reader {
+        file,
+        pages,
+        targets: OnceCell::new(),
+    })
 }
 
 #[pymethods]
@@ -288,6 +388,66 @@ impl Reader {
         }
         let paths = columns(py, &lines, &groups, styles);
         Ok((spans, paths, images, warnings))
+    }
+
+    /// The links on page `number` (1-based), read whether or not annotations are drawn: (links, warnings).
+    fn links(&self, number: usize) -> PyResult<(Vec<LinkRow>, Vec<String>)> {
+        let page = self.at(number)?;
+        let mut notes = Vec::new();
+        let links = self
+            .file
+            .links(page, self.targets(), &mut notes)
+            .into_iter()
+            .map(|l| {
+                (
+                    box4(l.rect),
+                    l.destination.as_ref().map(destination),
+                    l.action.as_ref().map(action),
+                )
+            })
+            .collect();
+        Ok((links, notes))
+    }
+
+    /// What the document states beside its pages: (outline, page labels, metadata, fields, embedded files,
+    /// warnings).
+    fn document(&self) -> DocumentRows {
+        let (targets, notes) = self.targets.get_or_init(|| self.read_targets());
+        let mut notes = notes.clone();
+        let mut outline = Vec::new();
+        flatten(&self.file.outline(targets, &mut notes), 0, &mut outline);
+        let labels = self.file.page_labels(self.pages.len(), &mut notes);
+        let metadata = metadata(self.file.metadata(&mut notes));
+        let fields = self
+            .file
+            .fields(&self.pages, &mut notes)
+            .into_iter()
+            .map(field)
+            .collect();
+        let attachments = self
+            .file
+            .attachments(&self.pages, &mut notes)
+            .into_iter()
+            .map(|a| {
+                (
+                    a.key,
+                    a.name,
+                    a.description,
+                    a.mime,
+                    a.size,
+                    a.created,
+                    a.modified,
+                    a.page.map(|p| p + 1),
+                    a.object,
+                )
+            })
+            .collect();
+        (outline, labels, metadata, fields, attachments, notes)
+    }
+
+    /// The bytes of the embedded file stream `object`, every filter undone.
+    fn attachment(&self, object: u32) -> PyResult<Vec<u8>> {
+        self.file.embedded(object).map_err(|e| refused(&e))
     }
 
     /// The `region` (page space; None: the whole page) of page `number` drawn by the own renderer (`render`) at
@@ -498,6 +658,16 @@ impl Writer {
 }
 
 impl Reader {
+    fn targets(&self) -> &Targets {
+        &self.targets.get_or_init(|| self.read_targets()).0
+    }
+
+    fn read_targets(&self) -> (Targets, Vec<String>) {
+        let mut notes = Vec::new();
+        let targets = Targets::new(&self.file, &self.pages, &mut notes);
+        (targets, notes)
+    }
+
     /// Page `number`, 1-based.
     fn at(&self, number: usize) -> PyResult<&pdf::Page> {
         number
@@ -509,6 +679,84 @@ impl Reader {
 
 fn box4(r: Rect) -> Box4 {
     (r.x0, r.y0, r.x1, r.y1)
+}
+
+/// A destination as its row, its page numbered from 1.
+fn destination(d: &Destination) -> DestinationRow {
+    (
+        d.page + 1,
+        d.fit.clone(),
+        d.x,
+        d.y,
+        d.zoom,
+        d.rect.map(box4),
+    )
+}
+
+/// An action as its row.
+fn action(a: &Action) -> ActionRow {
+    (
+        a.kind.clone(),
+        a.destination.as_ref().map(destination),
+        a.uri.clone(),
+        a.file.clone(),
+        a.name.clone(),
+    )
+}
+
+/// `items` at `depth` and every item below them, in document order, into `out`.
+fn flatten(items: &[Item], depth: usize, out: &mut Vec<ItemRow>) {
+    for item in items {
+        out.push((
+            depth,
+            item.title.clone(),
+            item.destination.as_ref().map(destination),
+            item.action.as_ref().map(action),
+        ));
+        flatten(&item.children, depth + 1, out);
+    }
+}
+
+fn metadata(m: Metadata) -> MetadataRow {
+    let xmp = m.xmp.map(|x| {
+        (
+            x.title,
+            x.creators,
+            x.description,
+            x.created,
+            x.modified,
+            x.metadata_date,
+            x.creator_tool,
+            x.producer,
+            x.keywords,
+            x.packet,
+        )
+    });
+    let newer = m.newer.map(|n| match n {
+        Newer::Info => "info",
+        Newer::Xmp => "xmp",
+        Newer::Same => "same",
+    });
+    (m.info, xmp, newer)
+}
+
+fn field(f: Field) -> FieldRow {
+    let value = |v: Value| match v {
+        Value::Text(s) | Value::Name(s) => ValueRow::One(s),
+        Value::List(l) => ValueRow::Several(l),
+    };
+    (
+        f.name,
+        f.kind,
+        f.flags,
+        f.value.map(value),
+        f.default.map(value),
+        f.options,
+        f.widgets
+            .into_iter()
+            .map(|w| (w.page.map(|p| p + 1), w.rect.map(box4), w.state, w.export))
+            .collect(),
+    )
 }
 
 /// A layer as its row.

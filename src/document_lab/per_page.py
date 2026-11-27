@@ -44,7 +44,7 @@ import numpy as np
 from document_lab import layout, png
 from document_lab.ink import Drawing, drawings, rulings
 from document_lab.ir import BBox
-from document_lab.markdown import page_markdowns
+from document_lab.markdown import Headings, headings, page_markdowns
 from document_lab.markdown import table as markdown_table
 from document_lab.pdf import Renderer, read_pdf, read_raster
 from document_lab.regions import Region, regions
@@ -79,13 +79,15 @@ class Paged:
     """What :func:`write_pages` wrote: ``pages`` pages to ``out``.
 
     ``textless``: the 1-based numbers of the pages without text; ``unread``: those of them one image covers (a scan
-    or capture without a text layer: `document-lab ocr` lays one).
+    or capture without a text layer: `document-lab ocr` lays one). ``structure``: how the clause headings were found
+    -- by the PDF's outline or inferred, and where the two disagree (`document_lab.markdown.Headings`).
     """
 
     out: Path
     pages: int
     textless: tuple[int, ...]
     unread: tuple[int, ...]
+    structure: Headings
 
 
 def _scanned(page: Page) -> bool:
@@ -266,10 +268,12 @@ def _placed(name: str, page: Page, found: list[Region], ruled: tuple[Table, ...]
     return out
 
 
-def write_pages(pdf: Path, out: Path, *, renderer: Renderer = 'pymupdf') -> Paged:
+def write_pages(pdf: Path, out: Path, *, renderer: Renderer = 'pymupdf', outline: bool = True) -> Paged:
     """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive.
 
-    Each page's picture is drawn by ``renderer`` (`document_lab.pdf.read_raster`).
+    Each page's picture is drawn by ``renderer`` (`document_lab.pdf.read_raster`). ``outline``: the PDF's stated
+    outline names the clause headings when it matches the pages; False infers them all the same
+    (`document_lab.markdown.headings`).
     """
     read = read_pdf(pdf)
     face = layout.body_face(read)
@@ -286,7 +290,8 @@ def write_pages(pdf: Path, out: Path, *, renderer: Renderer = 'pymupdf') -> Page
     furniture = layout.running(read)
     text = layout.without_running(read, furniture)
     placed = [_placed(*part) for part in zip(names, text.pages, found, ruled, strict=True)]
-    texts = page_markdowns(text, placed)
+    structure = headings(text, outline=outline)
+    texts = page_markdowns(text, placed, sections=structure)
     index = [f'# {pdf.stem}', '']
     textless, unread = [], []
     with _files(out) as put:
@@ -312,4 +317,4 @@ def write_pages(pdf: Path, out: Path, *, renderer: Renderer = 'pymupdf') -> Page
             notes = [part for part in (_clauses(md), ', '.join(r.label for r in held)) if part]
             index.append(f'- [page {number}]({name}.md)' + (f' -- {" | ".join(notes)}' if notes else ''))
         put('INDEX.md', ('\n'.join(index) + '\n').encode())
-    return Paged(out, len(read.pages), tuple(textless), tuple(unread))
+    return Paged(out, len(read.pages), tuple(textless), tuple(unread), structure)

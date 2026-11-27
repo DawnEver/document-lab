@@ -7,6 +7,7 @@ use std::rc::Rc;
 use crate::crypt::Decryptor;
 use crate::error::{Error, Kind, Result};
 use crate::filter::{self, Decoded};
+use crate::font::Font;
 use crate::object::{Dict, Object, Stream};
 use crate::parser::{Parser, find};
 use crate::xref::{self, Entry, Xref};
@@ -29,6 +30,8 @@ pub struct File {
     repairs: RefCell<Vec<String>>,
     /// The decryption of an encrypted file, and its encryption dictionary's object number (never decrypted).
     decryptor: Option<(Decryptor, Option<u32>)>,
+    /// Fonts read, by their dictionary's object number: read once for every page showing them.
+    pub(crate) fonts: RefCell<HashMap<u32, Rc<Font>>>,
 }
 
 impl File {
@@ -65,6 +68,7 @@ impl File {
             streams: RefCell::new(HashMap::new()),
             repairs: RefCell::new(repair.into_iter().collect()),
             decryptor: None,
+            fonts: RefCell::new(HashMap::new()),
         };
         if let Some(encrypt) = file.xref.trailer.get(b"Encrypt").cloned() {
             let dict = match file.resolve(&encrypt)? {

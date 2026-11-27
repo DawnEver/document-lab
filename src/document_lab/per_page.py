@@ -40,7 +40,7 @@ import json
 import re
 import zipfile
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 import numpy as np
@@ -49,7 +49,7 @@ from document_lab import layout, png, tags
 from document_lab.agreement import compare
 from document_lab.ink import Drawing, drawings, rulings
 from document_lab.ir import BBox
-from document_lab.markdown import page_markdowns
+from document_lab.markdown import Headings, headings, page_markdowns
 from document_lab.markdown import table as markdown_table
 from document_lab.pdf import read_pdf, read_raster
 from document_lab.regions import Region, regions
@@ -59,7 +59,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterator
     from pathlib import Path
 
-    from document_lab.ir import Document, Page, Table
+    from document_lab.ir import Page, Table
     from document_lab.markdown import Placed
 
 __all__ = ['RENDER_DPI', 'Paged', 'write_pages']
@@ -84,13 +84,15 @@ class Paged:
     """What :func:`write_pages` wrote: ``pages`` pages to ``out``.
 
     ``textless``: the 1-based numbers of the pages without text; ``unread``: those of them one image covers (a scan
-    or capture without a text layer: `document-lab ocr` lays one).
+    or capture without a text layer: `document-lab ocr` lays one). ``structure``: how the clause headings were found
+    -- by the PDF's outline or inferred, and where the two disagree (`document_lab.markdown.Headings`).
     """
 
     out: Path
     pages: int
     textless: tuple[int, ...]
     unread: tuple[int, ...]
+    structure: Headings
     #: Where a tagged PDF's tags and layout's inference disagree, in words (`document_lab.agreement`); empty for an
     #: untagged PDF.
     disagreements: tuple[str, ...] = ()
@@ -203,15 +205,6 @@ def _clauses(markdown: str) -> str:
     return '; '.join(line.lstrip('#').strip() for line in markdown.splitlines() if line.startswith('##'))
 
 
-def _body(doc: Document, furniture: list[layout.Running]) -> Document:
-    """``doc`` without its pages' running heads and feet: the text its markdown is written from."""
-    pages = []
-    for page, run in zip(doc.pages, furniture, strict=True):
-        out = {id(span) for line in (*run.head, *run.foot) for span in line.spans}
-        pages.append(replace(page, spans=tuple(s for s in page.spans if id(s) not in out)))
-    return replace(doc, pages=tuple(pages))
-
-
 def _front_matter(run: layout.Running) -> str:
     """The page's running head and foot as YAML front matter (``header:``, ``footer:``); none without them."""
     named = (('header', run.head), ('footer', run.foot))
@@ -280,11 +273,12 @@ def _placed(name: str, page: Page, found: list[Region], ruled: tuple[Table, ...]
     return out
 
 
-def write_pages(pdf: Path, out: Path, *, tagged: Collection[str] = tags.DEFAULT_USES) -> Paged:
+def write_pages(pdf: Path, out: Path, *, outline: bool = True, tagged: Collection[str] = tags.DEFAULT_USES) -> Paged:
     """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive.
 
-    ``tagged``: what a tagged PDF's tags give (`document_lab.tags.USES`; by default ``DEFAULT_USES``, all but
-    figures); none infers it all from layout.
+    ``outline``: the PDF's stated outline names the clause headings when it matches the pages; False keeps to its tags
+    and the rules (`document_lab.markdown.headings`). ``tagged``: what a tagged PDF's tags give
+    (`document_lab.tags.USES`; by default ``DEFAULT_USES``, all but figures); none infers it all from layout.
     """
     read = read_pdf(pdf)
     body = layout.body_size(read)
@@ -302,9 +296,10 @@ def write_pages(pdf: Path, out: Path, *, tagged: Collection[str] = tags.DEFAULT_
         for page, drawings in zip(read.pages, drawn, strict=True)
     ]
     furniture = layout.running(read)
-    text = _body(read, furniture)
+    text = layout.without_running(read, furniture)
     placed = [_placed(*part) for part in zip(names, text.pages, found, ruled, strict=True)]
-    texts = page_markdowns(text, placed, tagged=tagged)
+    structure = headings(text, outline=outline, tagged=tagged)
+    texts = page_markdowns(text, placed, tagged=tagged, sections=structure)
     index = [f'# {pdf.stem}', '']
     textless, unread = [], []
     with _files(out) as put:
@@ -331,4 +326,4 @@ def write_pages(pdf: Path, out: Path, *, tagged: Collection[str] = tags.DEFAULT_
             index.append(f'- [page {number}]({name}.md)' + (f' -- {" | ".join(notes)}' if notes else ''))
         put('INDEX.md', ('\n'.join(index) + '\n').encode())
     disagreements = compared.disagreements if compared is not None else ()
-    return Paged(out, len(read.pages), tuple(textless), tuple(unread), disagreements)
+    return Paged(out, len(read.pages), tuple(textless), tuple(unread), structure, disagreements)

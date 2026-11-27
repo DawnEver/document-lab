@@ -68,8 +68,8 @@ def _heading_text(line: str) -> str:
 
 
 def _headings(doc: Document, notes: list[str]) -> Tally:
-    tagged = {(p, _heading_text(h)): h for p, h in headings(doc)}
-    inferred = {(p, _heading_text(h)): h for p, h in headings(doc, tagged=())}
+    tagged = {(p, _heading_text(h)): h for p, h in headings(doc, outline=False).written}
+    inferred = {(p, _heading_text(h)): h for p, h in headings(doc, outline=False, tagged=()).written}
     for keys, other, what in ((tagged, inferred, 'tagged, not inferred'), (inferred, tagged, 'inferred, not tagged')):
         missing = [k for k in keys if k not in other]
         notes += [f'heading {what}: page {p} {keys[p, t]!r}' for p, t in missing[:EXAMPLES]]

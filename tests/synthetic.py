@@ -598,6 +598,24 @@ def mixed_pdf(path: Path) -> Path:
     return path
 
 
+#: A run of text on a synthetic page: its baseline's left end (x, y), its text, its PyMuPDF font name and its size.
+type Run = tuple[float, float, str, str, float]
+
+
+def text_pdf(path: Path, pages: Sequence[Sequence[Run]], bars: Sequence[Sequence[pymupdf.Rect]] = ()) -> Path:
+    """Letter pages of runs of text, each where it is placed, and filled bars (a fraction's): every box is known."""
+    doc = pymupdf.open()
+    for number, runs in enumerate(pages):
+        page = doc.new_page(width=612, height=792)
+        for x, y, text, font, size in runs:
+            page.insert_text((x, y), text, fontname=font, fontsize=size)
+        for bar in bars[number] if number < len(bars) else ():
+            page.draw_rect(bar, color=None, fill=(0, 0, 0))
+    doc.save(path)
+    doc.close()
+    return path
+
+
 #: Lines top to bottom, each ``(before, drawn, actual, after)``: ``drawn`` is shown, marked with ``/ActualText``
 #: ``actual``. A drawn space stated a zero-width space, a no-break space, a word joiner; the control: ``XY`` stated
 #: the letters ``fi`` of its ligature, a replacement that is no space.
@@ -670,6 +688,81 @@ def tagged_pdf(
         doc.update_object(xrefs[name], source.format(**refs))
     doc.xref_set_key(doc.pdf_catalog(), 'StructTreeRoot', refs['root'])
     doc.xref_set_key(doc.pdf_catalog(), 'MarkInfo', '<< /Marked true >>')
+    doc.save(path)
+    doc.close()
+    return path
+
+
+#: The XMP packet :func:`document_data_pdf` embeds: modified a day after the ``/Info`` dates.
+XMP_PACKET = """<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+<rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:xmp="http://ns.adobe.com/xap/1.0/">
+<dc:title><rdf:Alt><rdf:li xml:lang="x-default">Synthetic (XMP)</rdf:li></rdf:Alt></dc:title>
+<dc:creator><rdf:Seq><rdf:li>Ada</rdf:li><rdf:li>Grace</rdf:li></rdf:Seq></dc:creator>
+<xmp:ModifyDate>2024-01-03T03:04:05Z</xmp:ModifyDate>
+</rdf:Description></rdf:RDF></x:xmpmeta>
+<?xpacket end="w"?>"""
+
+
+def document_data_pdf(path: Path) -> Path:
+    """Three pages (the third turned a quarter) stating what a document states beside its pages.
+
+    Its outline: Introduction (page 1), Method (page 2) with Setup under it, Results (page 3), each leading to its
+    heading as displayed; labels ``i``, ``A-1``, ``A-2``; ``/Info`` and an XMP packet a day newer; on page 1 a URI
+    link and a link to Setup, and a text field ``name`` = ``Ada``; on page 2 a checked box ``agree`` and an attached
+    ``note.txt``; on page 3 a URI link; the document embeds ``data.csv``.
+    """
+    doc = pymupdf.open()
+    for number, heading in enumerate(('1 Introduction', '2 Method', '3 Results'), start=1):
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 100), heading, fontname='helv', fontsize=14)
+        if number == 2:  # the page with a subsection
+            page.insert_text((72, 400), '2.1 Setup', fontname='helv', fontsize=12)
+    doc[2].set_rotation(90)
+
+    def to(page: int, y: float) -> dict:
+        return {'kind': pymupdf.LINK_GOTO, 'page': page, 'to': pymupdf.Point(72, y)}
+
+    doc.set_toc(
+        [
+            [1, 'Introduction', 1, to(0, 100)],
+            [1, 'Method', 2, to(1, 100)],
+            [2, 'Setup', 2, to(1, 400)],
+            [1, 'Results', 3, to(2, 100)],
+        ]
+    )
+    doc.set_page_labels(
+        [
+            {'startpage': 0, 'prefix': '', 'style': 'r', 'firstpagenum': 1},
+            {'startpage': 1, 'prefix': 'A-', 'style': 'D', 'firstpagenum': 1},
+        ]
+    )
+    doc.set_metadata(
+        {
+            'title': 'Synthetic',
+            'author': 'Ada',
+            'creationDate': "D:20240102030405+00'00'",
+            'modDate': "D:20240102030405+00'00'",
+        }
+    )
+    doc.set_xml_metadata(XMP_PACKET)
+    doc[0].insert_link(
+        {'kind': pymupdf.LINK_URI, 'from': pymupdf.Rect(72, 700, 200, 720), 'uri': 'https://example.org/'}
+    )
+    doc[0].insert_link({**to(1, 400), 'from': pymupdf.Rect(72, 650, 200, 670)})
+    doc[2].insert_link(
+        {'kind': pymupdf.LINK_URI, 'from': pymupdf.Rect(72, 100, 200, 120), 'uri': 'https://example.org/3'}
+    )
+    text = pymupdf.Widget()
+    text.field_type, text.field_name, text.field_value = pymupdf.PDF_WIDGET_TYPE_TEXT, 'name', 'Ada'
+    text.rect = pymupdf.Rect(72, 200, 272, 220)
+    doc[0].add_widget(text)
+    box = pymupdf.Widget()
+    box.field_type, box.field_name, box.field_value = pymupdf.PDF_WIDGET_TYPE_CHECKBOX, 'agree', True
+    box.rect = pymupdf.Rect(72, 300, 90, 318)
+    doc[1].add_widget(box)
+    doc.embfile_add('data.csv', b'a,b\n1,2\n', filename='data.csv', desc='numbers')
+    doc[1].add_file_annot(pymupdf.Point(300, 300), b'hi', 'note.txt')
     doc.save(path)
     doc.close()
     return path

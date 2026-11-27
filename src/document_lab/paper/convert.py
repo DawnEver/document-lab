@@ -1,4 +1,8 @@
-"""A paper PDF to markdown: marker-pdf on a GPU (the ``gpu`` extra), else document_lab's own IR on CPU."""
+"""A paper PDF to markdown: marker-pdf on a GPU (the ``gpu`` extra), else document_lab's own IR on CPU.
+
+The IR path writes the paper without its running heads and feet (`document_lab.layout.without_running`): a journal's
+name and a page number repeated at every page's edge are no part of its text.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +15,8 @@ from typing import TYPE_CHECKING, Final, Literal
 if TYPE_CHECKING:
     from collections.abc import Collection
 
-from document_lab.markdown import to_markdown
+from document_lab import layout
+from document_lab.markdown import Headings, headings, to_markdown
 from document_lab.pdf import read_pdf
 from document_lab.tags import DEFAULT_USES
 
@@ -69,17 +74,29 @@ def choose_tool() -> Tool:
 
 
 def convert(
-    pdf: Path, out_dir: Path, *, tool: Tool | None = None, tagged: Collection[str] = DEFAULT_USES
-) -> tuple[str, Tool]:
-    """The markdown of ``pdf`` and the tool used (``tool``, else :func:`choose_tool`).
+    pdf: Path,
+    out_dir: Path,
+    *,
+    tool: Tool | None = None,
+    outline: bool = True,
+    tagged: Collection[str] = DEFAULT_USES,
+) -> tuple[str, Tool, Headings | None]:
+    """The markdown of ``pdf``, the tool used (``tool``, else :func:`choose_tool`), and how its sections were headed.
 
-    marker's images land in ``out_dir/img/flat``; the IR path writes none (figures are cropped later). ``tagged``: on
-    the IR path, what a tagged PDF's tags give its markdown (`document_lab.markdown`; none infers it all).
+    On the IR path the PDF's stated outline names the sections when it matches the pages and ``outline`` asks for it,
+    else its tags and the rules head them (`document_lab.markdown.headings`, returned for the caller to report);
+    marker heads its own (None). ``tagged``: on the IR path, what a tagged PDF's tags give its markdown
+    (`document_lab.markdown`; none infers it all). marker's images land in ``out_dir/img/flat``; the IR path writes
+    none (figures are cropped later).
     """
     used = tool or choose_tool()
     flat = out_dir / 'img' / 'flat'
     flat.mkdir(parents=True, exist_ok=True)
-    return (_run_marker(pdf, out_dir) if used == 'marker' else to_markdown(read_pdf(pdf), tagged=tagged)), used
+    if used == 'marker':
+        return _run_marker(pdf, out_dir), used, None
+    doc = layout.without_running(read_pdf(pdf))
+    sections = headings(doc, outline=outline, tagged=tagged)
+    return to_markdown(doc, tagged=tagged, sections=sections), used, sections
 
 
 def _run_marker(pdf: Path, out_dir: Path) -> str:

@@ -10,9 +10,14 @@
 //! page draws, as events in page space),
 //! read as [`spans`] (runs of text) and [`paths`] (subpaths, curves flattened). [`structure`] reads a tagged PDF's
 //! structure tree: its elements in order, and the marked content each covers.
+//!
+//! What the document states beside its pages, each read from a [`File`] and its pages: [`outline`] (bookmarks),
+//! [`links`] (each page's), both leading to a [`destination`]; page [`labels`]; [`metadata`] (`/Info` and XMP, read
+//! by [`xml`]); [`forms`] (field values); [`attachments`] (embedded files). Name and number trees are [`trees`].
 //! [`writer`] writes a PDF of image pages, or of pages copied from a [`File`].
 
 mod accents;
+pub mod attachments;
 mod base14;
 mod cid2unicode;
 pub mod cmap;
@@ -21,24 +26,33 @@ pub mod color;
 mod compositions;
 pub mod content;
 pub mod crypt;
+pub mod destination;
 pub mod error;
 pub mod file;
 pub mod filter;
 pub mod font;
 mod fontfile;
+pub mod forms;
 pub mod function;
 pub mod geometry;
 pub mod image;
 mod inflate;
 pub mod interpret;
+pub mod labels;
+pub mod links;
+pub mod metadata;
 pub mod object;
 pub mod optional;
+pub mod outline;
 pub mod page;
 pub mod parser;
 pub mod paths;
 pub mod spans;
 pub mod structure;
+mod symbol_tables;
+pub mod trees;
 pub mod writer;
+pub mod xml;
 pub mod xref;
 
 pub use error::{Error, Result};

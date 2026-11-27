@@ -1,8 +1,10 @@
 """A PDF read into the IR by document-lab's own reader (``document_lab._pdf``, Rust).
 
-What a page draws comes back as text spans, vector paths and image figures, each with its box in page space. Pixels
-are the reader's only as an image's own samples (no codec is decoded): :func:`read_raster` takes a region that is
-one image whole from them, and renders any other with PyMuPDF (D4 of task document-lab-pdf-reader).
+What a page draws comes back as text spans, vector paths and image figures, each with its box in page space, and its
+links beside them; what the document states beside its pages -- outline, page labels, metadata, form fields, embedded
+files -- on the :class:`Document`. Pixels are the reader's only as an image's own samples (no codec is decoded):
+:func:`read_raster` takes a region that is one image whole from them, and renders any other with PyMuPDF (D4 of task
+document-lab-pdf-reader); an embedded file's bytes are :func:`read_attachment`'s.
 
 A tagged file's structure tree comes back as :attr:`~document_lab.ir.Document.structure`, each element holding the
 very values it covers: the spans, paths and figures drawn under its marked content, the annotations and images it
@@ -16,7 +18,6 @@ opens no access), :class:`Unsupported`, :class:`Malformed` -- each a ``ValueErro
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 import math
 from collections import defaultdict
 from collections.abc import Callable, Sequence
@@ -30,20 +31,30 @@ import pymupdf
 from document_lab import _pdf
 from document_lab._pdf import Locked, Malformed, NotPdf, Refused, Unsupported
 from document_lab.ir import (
+    Action,
+    Attachment,
     Attribute,
     BBox,
+    Destination,
     Document,
     Element,
+    Field,
     Figure,
+    Info,
+    Link,
     Mark,
     MarkedContent,
+    Metadata,
     ObjectReference,
+    OutlineItem,
     Page,
     Provenance,
     Raster,
     Structure,
     TextSpan,
     VectorPath,
+    Widget,
+    Xmp,
     file_uri,
 )
 
@@ -54,6 +65,7 @@ __all__ = [
     'NotPdf',
     'Refused',
     'Unsupported',
+    'read_attachment',
     'read_pdf',
     'read_raster',
 ]
@@ -93,8 +105,9 @@ def read_pdf(
 ) -> Document:
     """The PDF at ``path``, opened with ``password`` when it is encrypted; each page read when first asked for.
 
-    The file is read whole here, hashed, and kept in memory for the document's life: no file handle stays open,
-    and the pages read later are those of the bytes hashed, whatever becomes of the file.
+    The reader reads the file whole, hashes it, and keeps it in its memory for the document's life (Python holds no
+    copy): no file handle stays open, and the pages read later are those of the bytes hashed, whatever becomes of
+    the file.
 
     Each curve of a vector path is flattened into a polyline: into as few segments as keep it within ``flatness``
     points of the curve, or into ``curve_samples`` segments each, whatever its size; neither given, into
@@ -103,6 +116,8 @@ def read_pdf(
     ``annotations``: each page's annotations' appearances read too, after its content, each value citing its
     annotation's subtype -- off by default, as a page's text is its content's (PyMuPDF's too). Optional content the
     file's default view hides is read either way, each value flagged ``hidden`` for the caller to keep or drop.
+    Links, the outline and the rest of what the document states beside its pages are read either way: they are
+    data, not ink.
 
     Raises:
         ValueError: both ``flatness`` and ``curve_samples`` are given, or one is not above 0.
@@ -124,17 +139,30 @@ def read_pdf(
         msg = f'a curve is flattened within a flatness above 0, or into curve_samples of 1 or more: {flattening}'
         raise ValueError(msg)
     path = Path(path)
-    data = path.read_bytes()
-    sha = hashlib.sha256(data).hexdigest()
-    uri = file_uri(path.resolve())
-    reader = _pdf.open(data, password.encode())
+    reader = _pdf.open(path, password.encode())
+    sha, uri = reader.sha256, file_uri(path.resolve())
     reading = {**flattening, 'annotations': annotations}
+    outline, labels, metadata, fields, attachments, warnings = reader.document()
+    here = Provenance(sha, uri)
     pages: Sequence[Page] = _Pages(reader, sha, uri, reading)
     tree = reader.structure()
-    if tree is None:
-        return Document(sha256=sha, uri=uri, pages=pages, repairs=_Repairs(reader))
-    pages = _actual_texts(tree, tuple(pages))  # a tagged file's structure holds every page's values: read them now
-    return Document(sha256=sha, uri=uri, pages=pages, repairs=_Repairs(reader), structure=_structure(tree, pages))
+    structure = None
+    if tree is not None:
+        pages = _actual_texts(tree, tuple(pages))  # a tagged file's structure holds every page's values: read them now
+        structure = _structure(tree, pages)
+    return Document(
+        sha256=sha,
+        uri=uri,
+        pages=pages,
+        repairs=_Repairs(reader),
+        structure=structure,
+        outline=_outline(outline),
+        page_labels=() if labels is None else tuple(labels),
+        metadata=_metadata(*metadata),
+        fields=tuple(_field(row, here) for row in fields),
+        attachments=tuple(_attachment(row, here) for row in attachments),
+        warnings=tuple(warnings),
+    )
 
 
 type _Drawn = TextSpan | VectorPath | Figure
@@ -316,6 +344,7 @@ def _page(
     """Page ``number`` read as ``reading`` says: its curves' flattening, and whether its annotations are drawn."""
     spans, paths, images, warnings = reader.page(number, **reading)
     cite = partial(Provenance, here.sha256, here.uri, number)  # a box on this page: a Provenance made directly
+    links, link_warnings = reader.links(number)
     return Page(
         number=number,
         width=size[0],
@@ -335,13 +364,97 @@ def _page(
             )
             for box, w, h, image, _, _, (hidden, annotation), marked in images
         ),
-        warnings=tuple(warnings),
+        links=tuple(
+            Link(here.at(bbox=BBox(*box)), _destination(destination), _action(action))
+            for box, destination, action in links
+        ),
+        warnings=(*warnings, *link_warnings),
     )
 
 
 def _mark(row: tuple[int | None, int | None, bool]) -> Mark | None:
     mcid, stream, _ = row
     return None if mcid is None else Mark(mcid, stream)
+
+
+def _destination(row: tuple | None) -> Destination | None:
+    if row is None:
+        return None
+    page, fit, x, y, zoom, box = row
+    return Destination(page, fit, x, y, zoom, None if box is None else BBox(*box))
+
+
+def _action(row: tuple | None) -> Action | None:
+    if row is None:
+        return None
+    kind, destination, uri, file, name = row
+    return Action(kind, _destination(destination), uri, file, name)
+
+
+def _outline(rows: list[tuple]) -> tuple[OutlineItem, ...]:
+    """The outline tree from its items flattened in document order, each with its depth."""
+
+    def level(at: int, depth: int) -> tuple[tuple[OutlineItem, ...], int]:
+        items = []
+        while at < len(rows) and rows[at][0] == depth:
+            _, title, destination, action = rows[at]
+            children, at = level(at + 1, depth + 1)
+            items.append(OutlineItem(title, _destination(destination), _action(action), children))
+        return tuple(items), at
+
+    return level(0, 0)[0]
+
+
+#: The ``/Info`` keys :class:`Info` names, by its field.
+_INFO_KEYS: Final = {
+    'Title': 'title',
+    'Author': 'author',
+    'Subject': 'subject',
+    'Keywords': 'keywords',
+    'Creator': 'creator',
+    'Producer': 'producer',
+    'CreationDate': 'created',
+    'ModDate': 'modified',
+}
+
+
+def _metadata(info: list[tuple[str, str]] | None, xmp: tuple | None, newer: str | None) -> Metadata:
+    named = None
+    if info is not None:
+        known = {_INFO_KEYS[k]: v for k, v in info if k in _INFO_KEYS}
+        named = Info(**known, other=tuple((k, v) for k, v in info if k not in _INFO_KEYS))
+    packet = None
+    if xmp is not None:
+        title, creators, description, created, modified, metadata_date, tool, producer, keywords, text = xmp
+        packet = Xmp(
+            text, title, tuple(creators), description, created, modified, metadata_date, tool, producer, keywords
+        )
+    return Metadata(named, packet, newer)
+
+
+def _value(value: str | list[str] | None) -> str | tuple[str, ...] | None:
+    return tuple(value) if isinstance(value, list) else value
+
+
+def _field(row: tuple, here: Provenance) -> Field:
+    name, kind, flags, value, default, options, widgets = row
+    return Field(
+        name,
+        kind,
+        flags,
+        _value(value),
+        _value(default),
+        tuple(options),
+        tuple(
+            Widget(dataclasses.replace(here, page=page, bbox=None if box is None else BBox(*box)), state, export)
+            for page, box, state, export in widgets
+        ),
+    )
+
+
+def _attachment(row: tuple, here: Provenance) -> Attachment:
+    key, name, description, mime, size, created, modified, page, obj = row
+    return Attachment(dataclasses.replace(here, page=page), obj, key, name, description, mime, size, created, modified)
 
 
 def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
@@ -421,6 +534,21 @@ def _paths(columns: tuple, cite: Callable[..., Provenance]) -> tuple[VectorPath,
     return tuple(out)
 
 
+def read_attachment(path: Path | str, attachment: Attachment, *, password: str = '') -> bytes:
+    """The bytes of ``attachment``, embedded in the PDF at ``path`` (opened with ``password``), every filter undone.
+
+    Raises:
+        ValueError: ``path`` is not the file ``attachment`` was read from (its content hash differs).
+
+    """
+    reader = _pdf.open(Path(path), password.encode())
+    if reader.sha256 != attachment.provenance.sha256:
+        msg = f'{path}: not the file the attachment was read from (sha256 {reader.sha256}, the attachment cites '
+        msg += f'{attachment.provenance.sha256})'
+        raise ValueError(msg)
+    return bytes(reader.attachment(attachment.object))
+
+
 def read_raster(path: Path | str, page: int, bbox: BBox, *, dpi: float | None = None, password: str = '') -> Raster:
     """The region ``bbox`` of 1-based ``page`` as pixels, everything drawn there composited.
 
@@ -431,7 +559,7 @@ def read_raster(path: Path | str, page: int, bbox: BBox, *, dpi: float | None = 
     them as the page shows them (:func:`_samples`); any other region is rendered by PyMuPDF.
     """
     path = Path(path)
-    data = path.read_bytes()
+    data = path.read_bytes()  # rendered and cited alike: the pixels are those of the bytes hashed
     reader = _pdf.open(data, password.encode())
     spans, paths, images, _ = reader.page(page, annotations=True, curve_samples=1)
     spans, images = _shown(spans, _SPAN_LAYER), _shown(images, _IMAGE_LAYER)
@@ -441,7 +569,7 @@ def read_raster(path: Path | str, page: int, bbox: BBox, *, dpi: float | None = 
     pixels = _samples(reader, under, bbox, dpi) if _alone(spans, paths, bbox) else None
     if pixels is None:
         pixels = _rendered(data, page, bbox, dpi, password)
-    here = Provenance(hashlib.sha256(data).hexdigest(), file_uri(path.resolve()), page=page, bbox=bbox)
+    here = Provenance(reader.sha256, file_uri(path.resolve()), page=page, bbox=bbox)
     return Raster(pixels, here)
 
 

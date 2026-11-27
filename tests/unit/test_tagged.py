@@ -55,10 +55,26 @@ def test_a_line_heads_as_its_tag_says_and_no_other_does(tmp_path):
         'p2': '<< /S /P /K 4 >>',
     }
     doc = _doc(tmp_path, content, tree)
-    assert [h for _, h in headings(doc)] == ['# A plain title', '## Background', '### Detail']
+    assert [h for _, h in headings(doc).written] == ['# A plain title', '## Background', '### Detail']
     # Inferred alone, the bold numbered line heads and the plain heading does not.
-    assert '## 2 Methods' in [h for _, h in headings(doc, tagged=())]
-    assert '## Background' not in [h for _, h in headings(doc, tagged=())]
+    assert '## 2 Methods' in [h for _, h in headings(doc, tagged=()).written]
+    assert '## Background' not in [h for _, h in headings(doc, tagged=()).written]
+    assert (headings(doc).source, headings(doc, tagged=()).source) == ('tags', 'inferred')
+
+
+def test_sections_judged_with_other_tag_uses_are_refused_by_the_markdown(tmp_path):
+    content = ' '.join([marked('H1', 0, shown(20, 60, 'Background')), marked('P', 1, shown(20, 150, WORDS))])
+    tree = {
+        'root': '<< /K {doc} >>',
+        'doc': '<< /S /Document /Pg {page1} /K [{h} {p}] >>',
+        'h': '<< /S /H1 /K 0 >>',
+        'p': '<< /S /P /K 1 >>',
+    }
+    doc = _doc(tmp_path, content, tree)
+    inferred = headings(doc, tagged=())
+    assert page_markdowns(doc, tagged=(), sections=inferred) == page_markdowns(doc, tagged=())  # planted: the same
+    with pytest.raises(ValueError, match=r"judged with tagged=\[\].*asked with tagged=\['headings'"):
+        page_markdowns(doc, sections=inferred)
 
 
 def test_an_h_heads_one_level_below_the_sections_it_is_in(tmp_path):
@@ -70,7 +86,7 @@ def test_an_h_heads_one_level_below_the_sections_it_is_in(tmp_path):
         's2': '<< /S /Sect /K {h1} >>',
         'h1': '<< /S /H /K 1 >>',
     }
-    assert [h for _, h in headings(_doc(tmp_path, content, tree))] == ['## Heading 0', '### Heading 1']
+    assert [h for _, h in headings(_doc(tmp_path, content, tree)).written] == ['## Heading 0', '### Heading 1']
 
 
 def test_the_lines_of_one_tagged_block_are_one_paragraph_and_of_two_are_two(tmp_path):
@@ -273,7 +289,7 @@ def test_tags_stating_headings_but_no_title_leave_the_title_to_inference(tmp_pat
         'h': '<< /S /H1 /Pg {page1} /K 1 >>',
         'p': '<< /S /P /Pg {page1} /K 2 >>',
     }
-    assert [h for _, h in headings(_doc(tmp_path, content, tree))] == ['# A Large Title', '## Stated heading']
+    assert [h for _, h in headings(_doc(tmp_path, content, tree)).written] == ['# A Large Title', '## Stated heading']
 
 
 def test_regions_take_from_the_tags_only_the_kinds_asked_and_stated(tmp_path):
@@ -295,7 +311,7 @@ def test_a_tagged_heading_the_rules_find_too_takes_their_level_and_no_level_is_s
         for i, (name, role) in enumerate(zip('abc', ('H1', 'H5', 'H4'), strict=True))
     }
     # REFERENCES heads by the rules too: a section, not the H5 a word processor's style made it.
-    assert [h for _, h in headings(_doc(tmp_path, content, tree))] == [
+    assert [h for _, h in headings(_doc(tmp_path, content, tree)).written] == [
         '## Background',
         '## REFERENCES',
         '### Deep heading',

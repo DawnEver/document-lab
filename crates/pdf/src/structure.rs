@@ -239,7 +239,7 @@ impl<'a> Reader<'a> {
             pages,
             page_numbers: pages
                 .iter()
-                .filter_map(|p| Some((p.object?, p.number)))
+                .filter_map(|p| Some((p.reference?.num, p.number)))
                 .collect(),
             role_map: Dict::new(),
             class_map: Dict::new(),

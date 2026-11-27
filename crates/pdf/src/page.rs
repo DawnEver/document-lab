@@ -6,8 +6,8 @@ use std::collections::HashSet;
 
 use crate::error::{Error, Result};
 use crate::file::File;
-use crate::geometry::{Matrix, Rect};
-use crate::object::{Dict, Object};
+use crate::geometry::{Matrix, Point, Rect};
+use crate::object::{Dict, ObjRef, Object};
 
 /// How deep the page tree may nest before it is refused as a loop or a hostile file.
 const MAX_DEPTH: usize = 64;
@@ -17,8 +17,8 @@ const MAX_DEPTH: usize = 64;
 pub struct Page {
     /// 1-based, in document order.
     pub number: usize,
-    /// The page dictionary's object number; None for a page written directly in its parent's `/Kids`.
-    pub object: Option<u32>,
+    /// The page dictionary's object, by which destinations name the page; None for a page written inline.
+    pub reference: Option<ObjRef>,
     /// The page dictionary.
     pub dict: Dict,
     /// Its resources (inherited when the page names none).
@@ -41,6 +41,16 @@ impl Page {
         } else {
             (w, h)
         }
+    }
+
+    /// The rectangle `r` of user space as displayed: in page space.
+    #[must_use]
+    pub fn displayed(&self, r: Rect) -> Rect {
+        let m = self.to_page_space();
+        Rect::spanning(
+            m.apply(Point { x: r.x0, y: r.y0 }),
+            m.apply(Point { x: r.x1, y: r.y1 }),
+        )
     }
 
     /// The matrix from user space to page space (y down, origin top-left as displayed).
@@ -83,14 +93,22 @@ impl File {
         };
         let mut pages = Vec::new();
         let mut seen = HashSet::new();
-        self.walk(&root, None, &Inherited::default(), &mut pages, &mut seen, 0)?;
+        let reference = self.catalog()?.get(b"Pages").and_then(Object::as_reference);
+        self.walk(
+            &root,
+            reference,
+            &Inherited::default(),
+            &mut pages,
+            &mut seen,
+            0,
+        )?;
         Ok(pages)
     }
 
     fn walk(
         &self,
         node: &Dict,
-        object: Option<u32>,
+        reference: Option<ObjRef>,
         above: &Inherited,
         pages: &mut Vec<Page>,
         seen: &mut HashSet<u32>,
@@ -116,7 +134,7 @@ impl File {
             Some(Object::Array(kids)) => kids,
             _ if node.get(b"Type").and_then(Object::as_name) == Some(b"Pages") => Vec::new(),
             _ => {
-                self.leaf(node, object, &here, pages);
+                self.leaf(node, reference, &here, pages);
                 return Ok(());
             }
         };
@@ -131,8 +149,7 @@ impl File {
             }
             match self.resolve(kid)? {
                 Object::Dict(d) => {
-                    let object = kid.as_reference().map(|r| r.num);
-                    self.walk(&d, object, &here, pages, seen, depth + 1)?;
+                    self.walk(&d, kid.as_reference(), &here, pages, seen, depth + 1)?;
                 }
                 Object::Null => {}
                 other => {
@@ -146,7 +163,13 @@ impl File {
         Ok(())
     }
 
-    fn leaf(&self, dict: &Dict, object: Option<u32>, inherited: &Inherited, pages: &mut Vec<Page>) {
+    fn leaf(
+        &self,
+        dict: &Dict,
+        reference: Option<ObjRef>,
+        inherited: &Inherited,
+        pages: &mut Vec<Page>,
+    ) {
         let number = pages.len() + 1;
         // A page without a media box is read as US Letter, as every viewer does (7.7.3.3 makes it required).
         let media_box = inherited.media_box.unwrap_or_else(|| {
@@ -172,7 +195,7 @@ impl File {
         let turns = inherited.rotate.unwrap_or(0).rem_euclid(360) / 90;
         pages.push(Page {
             number,
-            object,
+            reference,
             dict: dict.clone(),
             resources: inherited.resources.clone().unwrap_or_default(),
             media_box,

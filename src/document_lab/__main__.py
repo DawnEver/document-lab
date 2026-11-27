@@ -11,12 +11,18 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from lab_commons.log import emit
 
 from document_lab.capture import cli as capture_cli
 
+if TYPE_CHECKING:
+    from document_lab.markdown import Headings
+
 __all__ = ['main']
+
+_NO_OUTLINE = "infer the section headings even where the PDF's outline names them on its pages"
 
 
 _DEFAULT = 'order,headings,paragraphs,tables'
@@ -46,7 +52,11 @@ def _parser() -> argparse.ArgumentParser:
     ocr = sub.add_parser('ocr', help='a text layer over a PDF of page images (Tesseract); the pixels kept exactly')
     ocr.add_argument('pdf', type=Path)
     ocr.add_argument('-o', '--out', type=Path, help='the PDF to write (default: the PDF itself, replaced when whole)')
-    ocr.add_argument('--lang', default='eng', help="Tesseract's languages, '+'-joined (default eng; e.g. chi_sim+eng)")
+    ocr.add_argument(
+        '--lang',
+        default='eng',
+        help="Tesseract's languages, '+'-joined (default eng; e.g. chi_sim+eng; jpn_vert, chi_sim_vert for columns)",
+    )
     ocr.add_argument(
         '--orientation-confidence',
         type=_off_or_float,
@@ -66,11 +76,13 @@ def _parser() -> argparse.ArgumentParser:
     pages.add_argument('pdf', type=Path)
     pages.add_argument('out', type=Path, help='the directory to write the pages into, or a .zip archive')
     pages.add_argument('--tags', type=_uses, default=_DEFAULT, help=_TAGS_HELP)
+    pages.add_argument('--no-outline', action='store_true', help=_NO_OUTLINE)
     paper = sub.add_parser('paper', help='a paper PDF to per-section markdown and cropped figures')
     paper.add_argument('pdf', type=Path)
     paper.add_argument('out', type=Path, help='the directory to write the paper layout into')
     paper.add_argument('--tool', choices=('marker', 'ir'), help='force a converter (default: best available)')
     paper.add_argument('--tags', type=_uses, default=_DEFAULT, help=_TAGS_HELP)
+    paper.add_argument('--no-outline', action='store_true', help=_NO_OUTLINE)
     return parser
 
 
@@ -94,8 +106,9 @@ def _ocr(args: argparse.Namespace) -> int:
 def _pages(args: argparse.Namespace) -> int:
     from document_lab.per_page import write_pages  # noqa: PLC0415
 
-    done = write_pages(args.pdf, args.out, tagged=args.tags)
+    done = write_pages(args.pdf, args.out, outline=not args.no_outline, tagged=args.tags)
     emit(f'{done.out}: {done.pages} page(s)')
+    _structure(done.structure)
     _disagreements(done.disagreements)
     if len(done.textless) == done.pages:
         emit('no page has text: a capture needs `document-lab ocr` first')
@@ -110,11 +123,13 @@ def _pages(args: argparse.Namespace) -> int:
 def _paper(args: argparse.Namespace) -> int:
     from document_lab.paper.ingest import ingest  # noqa: PLC0415
 
-    done = ingest(args.pdf, args.out, tool=args.tool, tagged=args.tags)
+    done = ingest(args.pdf, args.out, tool=args.tool, outline=not args.no_outline, tagged=args.tags)
     emit(
         f'{args.out}: {done.sections} sections, {done.figures} figures, {done.tables} tables '
         f'({done.tool}); {len(done.appended)} appended paper(s)'
     )
+    if done.structure is not None:
+        _structure(done.structure)
     _disagreements(done.disagreements)
     return 0
 
@@ -125,6 +140,28 @@ def _disagreements(notes: tuple[str, ...]) -> None:
         emit(f'the tags and the inference disagree ({len(notes)}; --tags chooses which is used):')
         for note in notes:
             emit(f'  {note}')
+
+
+#: Disagreements between a stated outline and the inferred headings named one by one before the rest are counted.
+_SHOWN_DISAGREEMENTS = 5
+
+
+def _structure(found: Headings) -> None:
+    """Say where the section headings came from and where the PDF's outline and the inferred headings disagree."""
+    judged = 'from the PDF tags' if found.source == 'tags' else 'inferred'
+    if found.source == 'outline':
+        emit(f'sections: from the PDF outline ({found.stated} items)')
+    elif found.unlocated:
+        emit(f'sections: {judged} -- the PDF outline ({found.stated} items) is not found on its pages')
+    elif found.stated:
+        emit(f'sections: {judged} -- the PDF outline ({found.stated} items) names none of the headings found')
+    else:
+        emit(f'sections: {judged} (the PDF states no outline, or it was not asked for)')
+    lines = found.disagreements
+    for line in lines[:_SHOWN_DISAGREEMENTS]:
+        emit(f'  {line}')
+    if len(lines) > _SHOWN_DISAGREEMENTS:
+        emit(f'  ... and {len(lines) - _SHOWN_DISAGREEMENTS} more')
 
 
 _RUN = {

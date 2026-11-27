@@ -3,14 +3,15 @@
 Documents (PDF first, HTML tables second) to typed data that carries its provenance. The pipeline, one stage a
 module: `capture` makes a PDF of page images from the screen (the long screenshot); `ocr` lays a Tesseract text layer
 over it; `pdf` reads any PDF into the IR; `layout` makes a page's lines and reading order, on which `markdown`
-writes it as markdown and `regions` finds its figures, tables and equations from its text alone; `per_page`
+writes it as markdown and `regions` finds its figures, tables and equations from its text alone; `tables` reads a
+page's ruled tables cell by cell from its rules and text; `per_page`
 (`document-lab pages`) and `paper` lay a document out -- page by page (standards, manuals) or by section (papers). Generic and domain-free: no
 consumer's vocabulary here -- schemas live in consumers. Modules and usage: `README.md`.
 
 ## Rules here
 
 - Dependency arrow: `paper`, `ai` -> `extract`; `paper` -> `markdown`, `regions`, `pdf`; `per_page` -> `markdown`, `regions`,
-  `ink`, `pdf`; `markdown`, `regions` -> `layout` -> `ir`; `ink` -> `ir` (`regions` takes its drawings as boxes, never pixels);
+  `ink`, `pdf`; `markdown`, `regions`, `tables` -> `layout` -> `ir`; `ink` -> `ir` (`regions` takes its drawings as boxes, never pixels);
   `extract` -> `plot`, `pdf`, `html` -> `numbers`, `ir`; `plot` -> `glyphs` -> `strokefont`; `strokes` -> `plot`, `ir`; `ocr` imports
   nothing of ours; `capture` is apart (`cli` -> `session` -> `stitch`; `cli` -> `desktop`, `export`, `ocr`, `files` ->
   `desktop`, `export`; `join` -> `export`, `stitch`), imported only by `__main__`. PDF bytes are `_pdf`'s (the Rust

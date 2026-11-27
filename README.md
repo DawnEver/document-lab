@@ -68,7 +68,7 @@ document-lab capture out.pdf --open                # open the PDF once written
 Requires a tkinter that starts: Python 3.13.0 in a venv cannot (cpython #125235, `Can't find a usable init.tcl`);
 use Python >= 3.13.1, or copy the base install's `tcl` folder into `.venv\tcl`. And a desktop
 (`capture.screen.System`, one module per OS): Windows (`capture.win32`, ctypes); macOS (`capture.quartz`, ctypes over
-Quartz -- coordinates are points, a grab one pixel a point; the app running Python needs Screen Recording, and
+Quartz -- coordinates are points, a grab one pixel a point, color-matched to sRGB; the app running Python needs Screen Recording, and
 Accessibility to scroll for you, both in System Settings > Privacy & Security); Linux under X11 (`capture.x11`,
 python-xlib from the `capture` extra; an EWMH window manager; a covered window is refused, X11 keeping no picture of
 it). A Wayland session lets no program read other windows: log in to its X11 session. The capture checks all this

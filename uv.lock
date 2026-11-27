@@ -18,8 +18,8 @@ overrides = [
 
 [[package]]
 name = "ai-lab"
-version = "0.0.1.dev452+geaf8b9578"
-source = { git = "https://github.com/DawnEver/ai-lab.git#eaf8b9578926f875d29190ab6275f46056bf6152" }
+version = "0.0.1.dev454+g56822b23b"
+source = { git = "https://github.com/DawnEver/ai-lab.git#56822b23bd11869fd73037222f730c3ed65de34b" }
 dependencies = [
     { name = "lab-commons", extra = ["paths"] },
 ]
@@ -591,8 +591,8 @@ nvtx = [
 
 [[package]]
 name = "dev-lab"
-version = "0.0.1.dev5213+g18488f12c"
-source = { git = "https://github.com/DawnEver/dev-lab.git#18488f12c5846770515627962bb8e43a12962d83" }
+version = "0.0.1.dev5215+g96b7cc6fd"
+source = { git = "https://github.com/DawnEver/dev-lab.git#96b7cc6fdab9acf4ba17a3788533c9051133b0fc" }
 dependencies = [
     { name = "cryptography" },
     { name = "lab-commons", extra = ["io", "paths", "structured", "units"] },

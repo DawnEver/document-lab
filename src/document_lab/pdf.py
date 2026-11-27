@@ -150,7 +150,7 @@ def _alone(spans: list, paths: list, bbox: BBox) -> bool:
         reach = width / 2
         if _meets((min(xs) - reach, min(ys) - reach, max(xs) + reach, max(ys) + reach), bbox):
             return False
-    return not any(mode != INVISIBLE_TEXT and _meets(box, bbox) for _, _, _, _, box, mode, _ in spans)
+    return not any(mode != INVISIBLE_TEXT and _meets(box, bbox) for _, _, _, _, box, mode, *_ in spans)
 
 
 def _samples(reader: _pdf.Reader, under: list, bbox: BBox, dpi: float) -> np.ndarray | None:

@@ -49,7 +49,7 @@
         },
         {
           "name": "Sync the environment",
-          "run": "uv sync --frozen --extra dev"
+          "run": "uv sync --frozen --python 3.14 --managed-python --extra dev"
         },
         {
           "id": "ready",

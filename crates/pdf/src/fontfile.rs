@@ -148,6 +148,41 @@ pub fn sfnt_weight(data: &[u8]) -> Option<f64> {
     }
 }
 
+/// The PostScript name a TrueType/OpenType program states of itself: its `name` table's name ID 6, a Windows
+/// Unicode record's (UTF-16BE) or else a Macintosh Roman one's (ASCII, the only characters a PostScript name has).
+#[must_use]
+pub fn sfnt_postscript_name(data: &[u8]) -> Option<String> {
+    let &(offset, len) = tables(data)?.get(b"name")?;
+    let table = data.get(offset..offset.checked_add(len)?)?;
+    let strings = usize::from(u16_at(table, 4)?);
+    let mut found = None;
+    for i in 0..usize::from(u16_at(table, 2)?) {
+        let record = 6 + i * 12;
+        let field = |k: usize| u16_at(table, record + 2 * k);
+        if field(3)? != 6 {
+            continue;
+        }
+        let start = strings + usize::from(field(5)?);
+        let bytes = table.get(start..start + usize::from(field(4)?))?;
+        match (field(0)?, field(1)?) {
+            (3, 0 | 1) => {
+                let units: Vec<u16> = bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|p| u16::from_be_bytes(*p))
+                    .collect();
+                return String::from_utf16(&units).ok();
+            }
+            (1, 0) if bytes.is_ascii() => {
+                found = Some(String::from_utf8_lossy(bytes).into_owned());
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
 /// The weight class a Type 1 program states of itself: its `/Weight` string (`(Bold)`, `(Medium)`, ...) in its
 /// clear-text part, read as a font name's style words are.
 #[must_use]

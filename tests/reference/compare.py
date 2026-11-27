@@ -3,7 +3,10 @@
 Text is compared as each page's characters, whitespace dropped and order ignored (reading order is layout's, not the
 reader's): the share of the characters we state that PyMuPDF states too. A glyph no font source names reads as
 U+FFFD here (never a guess) while PyMuPDF prints something for it -- its glyph id, a byte -- so those characters are
-counted apart (``unknown``), out of the agreement.
+counted apart (``unknown``), out of the agreement. A symbol font's code PyMuPDF prints as the private-use code point
+its ``ToUnicode`` or ``cmap`` states (U+F0xx) reads here as the symbol shown (`pdf::font`), so each private-use
+character of PyMuPDF's we do not print pairs with one of ours it does not match, and both are counted apart
+(``private``), out of the agreement.
 
 Images are compared by where they are placed. PyMuPDF lists every placement, seen or not; the reader leaves out what
 its clip hides, and its clip is a box holding the true one (`pdf::interpret`), so it leaves out only what cannot show.
@@ -14,6 +17,7 @@ showing another part of the same page, draws in the very place.
 
 from __future__ import annotations
 
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -40,15 +44,20 @@ class Page:
     stated: int  # characters we state, U+FFFD not counted
     reference: int  # characters PyMuPDF states
     unknown: int  # U+FFFD we state
+    private: int  # PyMuPDF's private-use characters we state as another character
     images: int  # ours
     invented: int  # ours PyMuPDF does not place
     clipped: int  # PyMuPDF's placements we do not report
 
     @property
+    def whole(self) -> int:
+        """The larger side's characters, the unknown taken from PyMuPDF's and the private from both."""
+        return max(self.stated - self.private, self.reference - self.unknown - self.private)
+
+    @property
     def agreement(self) -> float:
-        """Matched over the larger side, the unknown taken from PyMuPDF's: 1 when neither states a character."""
-        whole = max(self.stated, self.reference - self.unknown)
-        return 1.0 if whole <= 0 else self.matched / whole
+        """Matched over :attr:`whole`: 1 when neither states a character."""
+        return 1.0 if self.whole <= 0 else self.matched / self.whole
 
 
 @dataclass(frozen=True)
@@ -63,7 +72,7 @@ class Compared:
     @property
     def agreement(self) -> float:
         """The document's characters matched over all its pages' (as :attr:`Page.agreement`, summed first)."""
-        whole = sum(max(p.stated, p.reference - p.unknown) for p in self.pages)
+        whole = sum(p.whole for p in self.pages)
         return 1.0 if whole <= 0 else sum(p.matched for p in self.pages) / whole
 
     @property
@@ -75,6 +84,11 @@ class Compared:
 
 def _characters(text: str) -> Counter[str]:
     return Counter(''.join(text.split()))
+
+
+def _private(c: str) -> bool:
+    """Whether ``c`` is in the Basic Multilingual Plane's private-use area."""
+    return unicodedata.category(c) == 'Co'
 
 
 def _same(a: tuple[float, ...], b: tuple[float, ...]) -> bool:
@@ -113,14 +127,18 @@ def compare(path: Path, reference_path: Path | None = None) -> Compared:
             mine = _characters(''.join(s.text for s in ours.spans))
             unknown = mine.pop(UNKNOWN, 0)
             other = _characters(theirs.get_text('text'))
+            matched = sum((mine & other).values())
+            stated = sum(mine.values())
+            private = sum(n for c, n in (other - mine).items() if _private(c))
             pages.append(
                 Page(
                     number=ours.number,
                     size_off=max(abs(ours.width - theirs.rect.width), abs(ours.height - theirs.rect.height)),
-                    matched=sum((mine & other).values()),
-                    stated=sum(mine.values()),
+                    matched=matched,
+                    stated=stated,
                     reference=sum(other.values()),
                     unknown=unknown,
+                    private=min(private, stated - matched),
                     **_images([f.provenance.bbox for f in ours.figures], theirs),
                 )
             )

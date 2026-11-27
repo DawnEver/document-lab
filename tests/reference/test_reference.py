@@ -59,11 +59,7 @@ def problems(found: Compared) -> list[str]:
     out += [f'page {p.number} is {p.size_off:.3f} pt off in size' for p in found.pages if p.size_off > SIZE_TOLERANCE]
     out += [f'page {p.number} places {p.invented} image(s) PyMuPDF does not' for p in found.pages if p.invented]
     if found.agreement < DOCUMENT_AGREEMENT:
-        pages = [
-            f'{p.number} ({p.agreement:.2f})'
-            for p in found.pages
-            if max(p.stated, p.reference - p.unknown) - p.matched > PAGE_SLACK
-        ]
+        pages = [f'{p.number} ({p.agreement:.2f})' for p in found.pages if p.whole - p.matched > PAGE_SLACK]
         out.append(f'text agrees {found.agreement:.4f} < {DOCUMENT_AGREEMENT}; pages {", ".join(pages[:10])}')
     return out
 

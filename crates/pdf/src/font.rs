@@ -10,6 +10,7 @@ use crate::file::File;
 use crate::fontfile::{self, GlyphText};
 use crate::geometry::Matrix;
 use crate::object::{Dict, Object, Stream};
+use crate::symbol_tables::{CORPORATE_USE, WEBDINGS, WINGDINGS, WINGDINGS_2, WINGDINGS_3};
 
 /// What identifies a font to a reader: its name, the descriptor's facts and what its program says of itself.
 #[derive(Debug, Clone, PartialEq)]
@@ -270,6 +271,8 @@ pub struct Font {
     program: Option<GlyphText>,
     /// A `CIDFontType2`'s CID-to-glyph map (None: the identity).
     cid_to_gid: Option<Vec<u16>>,
+    /// The symbol font it is, by its name or its program's: its private-use text is read as the symbol shown.
+    symbols: Option<Symbols>,
     /// From glyph space to text space (`[0.001 0 0 0.001 0 0]` but for Type 3 fonts).
     pub matrix: Matrix,
     /// The ascent in glyph space.
@@ -335,6 +338,10 @@ impl Font {
                             let program = self.program.as_ref()?;
                             program.text(program.glyph_of_code(code)?)
                         });
+                    let text = match self.symbols {
+                        Some(symbols) => symbols.text(text, Some(b)),
+                        None => text,
+                    };
                     let stated = usize::try_from(i64::from(b) - first)
                         .ok()
                         .and_then(|i| widths.get(i))
@@ -380,6 +387,10 @@ impl Font {
                         })
                         .or_else(|| collection.and_then(|c| c.text(cid)))
                         .or_else(|| legacy_text(*code_text, code, len));
+                    let text = match self.symbols {
+                        Some(symbols) => symbols.text(text, None),
+                        None => text,
+                    };
                     Code {
                         code,
                         bytes: len,
@@ -461,6 +472,95 @@ fn base14(name: &str) -> Option<&'static Metrics> {
     FONTS.iter().find(|m| m.name == canonical)
 }
 
+/// A symbol font: one whose codes show symbols by an encoding of its own, fixed by the font, which its text often
+/// states only as private-use code points -- U+F000 plus the code, the (3,0) Microsoft Symbol `cmap`'s convention a
+/// symbolic TrueType font follows (ISO 32000-2 9.6.5.4), written into `ToUnicode` `CMap`s as found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Symbols {
+    /// Symbol: Annex D.5's encoding.
+    Symbol,
+    /// ITC Zapf Dingbats: Annex D.6's encoding.
+    ZapfDingbats,
+    /// Microsoft's Wingdings, its codes' characters as Unicode 7.0 encoded them (ISO/IEC JTC1/SC2/WG2 N4384), as
+    /// for the three below.
+    Wingdings,
+    /// Microsoft's Wingdings 2.
+    Wingdings2,
+    /// Microsoft's Wingdings 3.
+    Wingdings3,
+    /// Microsoft's Webdings.
+    Webdings,
+}
+
+impl Symbols {
+    /// The symbol font a `/BaseFont` names: by its family, the name less a subset tag, a style after `,` or `-`
+    /// (`Symbol,Bold`, `Wingdings-Regular`) and spaces (`Wingdings 2`).
+    fn named(name: &str) -> Option<Self> {
+        let family: String = without_subset(name)
+            .split([',', '-'])
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| *c != ' ')
+            .collect();
+        Some(match family.as_str() {
+            "Symbol" | "SymbolMT" | "SymbolStd" => Self::Symbol,
+            "ZapfDingbats" | "ZapfDingbatsITC" | "ZapfDingbatsStd" => Self::ZapfDingbats,
+            "Wingdings" => Self::Wingdings,
+            "Wingdings2" => Self::Wingdings2,
+            "Wingdings3" => Self::Wingdings3,
+            "Webdings" => Self::Webdings,
+            _ => return None,
+        })
+    }
+
+    /// The character code `code` shows: Symbol's and Zapf Dingbats' by their glyph names' text, the Microsoft fonts'
+    /// by their tables.
+    fn character(self, code: u8) -> Option<char> {
+        let table: &[(u8, char)] = match self {
+            Self::Symbol => return pdf_encoding::SYMBOL.get(code).map(glyph_of_table),
+            Self::ZapfDingbats => return pdf_encoding::ZDINGBAT.get(code).map(glyph_of_table),
+            Self::Wingdings => &WINGDINGS,
+            Self::Wingdings2 => &WINGDINGS_2,
+            Self::Wingdings3 => &WINGDINGS_3,
+            Self::Webdings => &WEBDINGS,
+        };
+        table
+            .binary_search_by_key(&code, |&(c, _)| c)
+            .ok()
+            .map(|i| table[i].1)
+    }
+
+    /// The text of a code given `stated`, what the font says of it (`ToUnicode`, encoding, program), and the code
+    /// itself for a simple font: a stated real character as stated; a stated private-use U+F000 + c as the
+    /// character c shows (left as stated where the font shows none: the Windows logo); in Symbol and Zapf Dingbats a
+    /// stated code point of Adobe's corporate use as the character Unicode has since given its glyph; nothing
+    /// stated, a simple font's code as the character it shows (the font's (3,0) `cmap` selects its glyph by it).
+    fn text(self, stated: Option<String>, code: Option<u8>) -> Option<String> {
+        let Some(stated) = stated else {
+            return code.and_then(|c| self.character(c)).map(String::from);
+        };
+        let mut chars = stated.chars();
+        let (Some(c), None) = (chars.next(), chars.next()) else {
+            return Some(stated);
+        };
+        let shown = match u8::try_from(u32::from(c).wrapping_sub(0xF000)) {
+            Ok(code) => self.character(code),
+            Err(_) if matches!(self, Self::Symbol | Self::ZapfDingbats) => corporate_use(c),
+            Err(_) => None,
+        };
+        Some(shown.map_or(stated, String::from))
+    }
+}
+
+/// The character Unicode has given the glyph Adobe's corporate-use code point `c` stands for, when it has given one.
+fn corporate_use(c: char) -> Option<char> {
+    CORPORATE_USE
+        .binary_search_by_key(&c, |&(u, _)| u)
+        .ok()
+        .map(|i| CORPORATE_USE[i].1)
+}
+
 impl File {
     /// The font `dict` describes.
     ///
@@ -493,12 +593,20 @@ impl File {
         };
         let descriptor = self.descriptor(cid_font.as_ref().unwrap_or(dict))?;
         let program = self.program(descriptor.as_ref())?;
+        // The symbol font it is: by its name, else -- a producer's generic name, `CIDFont+F7` -- by its program's own.
+        let symbols = Symbols::named(&base_name).or_else(|| {
+            program
+                .as_ref()
+                .and_then(Program::postscript_name)
+                .and_then(|name| Symbols::named(&name))
+        });
         let kind = match &cid_font {
             Some(cid_font) => self.composite(dict, cid_font)?,
             None => self.simple(
                 dict,
                 &subtype,
                 &base_name,
+                symbols,
                 descriptor.as_ref(),
                 program.as_ref(),
             )?,
@@ -553,6 +661,7 @@ impl File {
                 _ => None,
             },
             cid_to_gid,
+            symbols,
             matrix,
             ascent,
             descent,
@@ -625,6 +734,7 @@ impl File {
         dict: &Dict,
         subtype: &str,
         name: &str,
+        symbols: Option<Symbols>,
         descriptor: Option<&Dict>,
         program: Option<&Program>,
     ) -> Result<Kind> {
@@ -649,7 +759,7 @@ impl File {
             .and_then(Object::as_number)
             .unwrap_or(0.0);
         let standard = base14(name);
-        let encoding = self.simple_encoding(dict, subtype, standard, descriptor, program)?;
+        let encoding = self.simple_encoding(dict, subtype, symbols, descriptor, program)?;
         Ok(Kind::Simple {
             first,
             widths,
@@ -665,7 +775,7 @@ impl File {
         &self,
         dict: &Dict,
         subtype: &str,
-        standard: Option<&'static Metrics>,
+        symbols: Option<Symbols>,
         descriptor: Option<&Dict>,
         program: Option<&Program>,
     ) -> Result<Vec<Option<String>>> {
@@ -673,13 +783,6 @@ impl File {
             .and_then(|d| d.get(b"Flags"))
             .and_then(Object::as_integer)
             .is_some_and(|f| f & 4 != 0);
-        // The base encoding: the one named, else the font's own -- Symbol's and ZapfDingbats' built in, Standard
-        // for any other Type 1, and for a symbolic TrueType none at all (its codes are its glyphs).
-        let builtin: &pdf_encoding::ForwardMap = match standard.map(|m| m.name) {
-            Some("Symbol") => &pdf_encoding::SYMBOL,
-            Some("ZapfDingbats") => &pdf_encoding::ZDINGBAT,
-            _ => &pdf_encoding::STANDARD,
-        };
         let (base_name, differences) = match self.get(dict, b"Encoding")? {
             Some(Object::Name(n)) => (Some(n), None),
             Some(Object::Dict(e)) => (
@@ -692,21 +795,27 @@ impl File {
             ),
             _ => (None, None),
         };
-        let base: Option<&pdf_encoding::ForwardMap> = match base_name.as_deref() {
-            Some(b"WinAnsiEncoding") => Some(&pdf_encoding::WINANSI),
-            Some(b"MacRomanEncoding") => Some(&pdf_encoding::MACROMAN),
-            Some(b"MacExpertEncoding") => Some(&pdf_encoding::MACEXPERT),
-            Some(b"StandardEncoding") => Some(&pdf_encoding::STANDARD),
-            _ if subtype == "TrueType" && symbolic => None,
-            _ if subtype == "TrueType" => Some(&pdf_encoding::WINANSI),
-            _ => Some(builtin),
+        // The base encoding: the one named, else the font's own -- a symbol font's built in, Standard for any other
+        // Type 1, and for a symbolic TrueType none at all (its codes are its glyphs).
+        let table = |map: &pdf_encoding::ForwardMap| -> Vec<Option<String>> {
+            (0..=255u8)
+                .map(|b| map.get(b).map(|t| glyph_of_table(t).to_string()))
+                .collect()
         };
-        let mut encoding: Vec<Option<String>> = (0..=255u8)
-            .map(|b| {
-                base.and_then(|m| m.get(b))
-                    .map(|t| glyph_of_table(t).to_string())
-            })
-            .collect();
+        let mut encoding = match base_name.as_deref() {
+            Some(b"WinAnsiEncoding") => table(&pdf_encoding::WINANSI),
+            Some(b"MacRomanEncoding") => table(&pdf_encoding::MACROMAN),
+            Some(b"MacExpertEncoding") => table(&pdf_encoding::MACEXPERT),
+            Some(b"StandardEncoding") => table(&pdf_encoding::STANDARD),
+            _ if subtype == "TrueType" && symbolic => vec![None; 256],
+            _ if subtype == "TrueType" => table(&pdf_encoding::WINANSI),
+            _ => match symbols {
+                Some(symbols) => (0..=255u8)
+                    .map(|b| symbols.character(b).map(String::from))
+                    .collect(),
+                None => table(&pdf_encoding::STANDARD),
+            },
+        };
         // An embedded Type 1 program with no base encoding named: the program's own encoding is the base.
         if base_name.is_none()
             && matches!(subtype, "Type1" | "MMType1")
@@ -877,6 +986,14 @@ enum Program {
 }
 
 impl Program {
+    /// The PostScript name the program states of itself (a TrueType/OpenType program's; a Type 1's is not read).
+    fn postscript_name(&self) -> Option<String> {
+        match self {
+            Self::Type1(_) => None,
+            Self::Sfnt(data) => fontfile::sfnt_postscript_name(data),
+        }
+    }
+
     /// The weight class the program states of itself.
     fn weight(&self) -> Option<f64> {
         match self {
@@ -888,19 +1005,26 @@ impl Program {
 
 /// The text of a base-encoding table entry as its glyph's name says. The tables give Latin-1's characters where
 /// ISO 32000 Annex D names the glyphs `space` (code 32, and `WinAnsiEncoding` octal 240) and `hyphen` (its octal 255):
-/// U+00A0 and U+00AD; the Adobe Glyph List's `space` and `hyphen` are U+0020 and U+002D.
+/// U+00A0 and U+00AD; the Adobe Glyph List's `space` and `hyphen` are U+0020 and U+002D. Symbol's and Zapf Dingbats'
+/// tables give Adobe's corporate-use code points for the glyphs Unicode had not encoded then: those it has since
+/// encoded are their characters.
 fn glyph_of_table(text: char) -> char {
     match text {
         '\u{A0}' => ' ',
         '\u{AD}' => '-',
-        other => other,
+        other => corporate_use(other).unwrap_or(other),
     }
 }
 
-/// The text a glyph name stands for: the Adobe Glyph List's, or a `uniXXXX` / `uXXXX[XX]` name's.
+/// The text a glyph name stands for: the Adobe Glyph List's (a corporate-use code point it gives for a glyph Unicode
+/// has since encoded, as `parenlefttp`'s, read as that character), or a `uniXXXX` / `uXXXX[XX]` name's.
 pub(crate) fn glyph_text(name: &str) -> Option<String> {
     if let Some(t) = pdf_encoding::glyphname_to_unicode(name) {
-        return Some(t.to_string());
+        let mut chars = t.chars();
+        return Some(match (chars.next().and_then(corporate_use), chars.next()) {
+            (Some(c), None) => c.to_string(),
+            _ => t.to_string(),
+        });
     }
     let base = name.split('.').next().unwrap_or(name);
     if let Some(hex) = base

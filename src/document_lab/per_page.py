@@ -314,6 +314,7 @@ def write_pages(
     tagged: Collection[str] = tags.DEFAULT_USES,
     formulas: formula.Formulas | None = None,
     formula_model: formula.Model = 'texteller',
+    include_hidden: bool = False,
     include_in_background_color: bool = False,
 ) -> Paged:
     """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive.
@@ -323,12 +324,13 @@ def write_pages(
     (`document_lab.markdown.headings`). ``tagged``: what a tagged PDF's tags give (`document_lab.tags.USES`; by default
     ``DEFAULT_USES``, all but figures); none infers it all from layout. ``formulas``: ``latex`` writes each equation's
     LaTeX after its link, read by ``formula_model`` (`document_lab.formula`); refused by
-    :class:`document_lab.formula.FormulaUnavailable` before anything is written when that model cannot run.
-    ``include_in_background_color``: the text filled in the color under it is read too, by the regions, the headings
-    and the markdown (see `document_lab.ir`).
+    :class:`document_lab.formula.FormulaUnavailable` before anything is written when that model cannot run. Every
+    step reads the page as its default view shows it (`document_lab.ir.Page.shown`): its pictures, ruled tables,
+    regions, tags, running heads, headings and markdown; ``include_hidden``: what hidden layers draw is read too,
+    ``include_in_background_color``: the text filled in the color under it.
     """
     transcribe = None if formulas is None else formula.transcriber(formulas, model=formula_model)
-    read = read_pdf(pdf)
+    read = read_pdf(pdf).shown(include_hidden=include_hidden, include_in_background_color=include_in_background_color)
     face = layout.body_face(read)
     body = face[1]
     width = max(3, len(str(len(read.pages))))
@@ -339,25 +341,18 @@ def write_pages(
         drawn.append(_drawings(pixels, scale, page, body))
         ruled.append(_tables(page, pixels, scale))
     drawn = _without_furniture(drawn, body)
+    shown = {'include_hidden': include_hidden, 'include_in_background_color': include_in_background_color}
     compared = compare(read, drawn)
     found = [
-        regions(
-            page,
-            face,
-            drawings,
-            include_in_background_color=include_in_background_color,
-            structure=read.structure,
-            tagged=tagged,
-        )
+        regions(page, face, drawings, structure=read.structure, tagged=tagged, **shown)
         for page, drawings in zip(read.pages, drawn, strict=True)
     ]
     furniture = layout.running(read)
     text = layout.without_running(read, furniture)
     latex = {} if transcribe is None else _latex(pdf, read, found, transcribe, renderer)
     placed = [_placed(*part, latex) for part in zip(names, text.pages, found, ruled, strict=True)]
-    shown = {'include_in_background_color': include_in_background_color, 'tagged': tagged}
-    structure = headings(text, outline=outline, **shown)
-    texts = page_markdowns(text, placed, sections=structure, **shown)
+    structure = headings(text, outline=outline, tagged=tagged, **shown)
+    texts = page_markdowns(text, placed, sections=structure, tagged=tagged, **shown)
     index = [f'# {pdf.stem}', '']
     textless, unread = [], []
     with _files(out) as put:

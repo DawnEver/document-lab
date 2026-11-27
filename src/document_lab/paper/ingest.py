@@ -104,6 +104,7 @@ def ingest(
     tagged: Collection[str] = DEFAULT_USES,
     formulas: Formulas | None = None,
     formula_model: Model = 'texteller',
+    include_hidden: bool = False,
     include_in_background_color: bool = False,
 ) -> Ingested:
     """Convert ``pdf`` (with ``tool``, else the IR path) and write its paper layout into ``out_dir``.
@@ -113,8 +114,10 @@ def ingest(
     the rules. ``tagged``: what a tagged PDF's tags give its markdown, and so its sections
     (`document_lab.paper.convert.convert`). ``formulas``: ``latex`` writes each equation crop's LaTeX under its image,
     read by ``formula_model`` (`document_lab.formula`); refused by :class:`document_lab.formula.FormulaUnavailable`
-    before anything is written when that model cannot run. ``include_in_background_color``: the text filled in the
-    color under it is read too, by the markdown and the regions a picture page's text locates (see `document_lab.ir`).
+    before anything is written when that model cannot run. Every step reading text reads the paper as its default
+    view shows it (`document_lab.ir.Page.shown`): its markdown, running heads and tags, its captions and
+    equations; ``include_hidden``: what hidden layers draw is read too, ``include_in_background_color``: the text
+    filled in the color under it.
     """
     transcribe = None if formulas is None else formula.transcriber(formulas, model=formula_model)
     pdf = pdf.resolve()
@@ -125,6 +128,7 @@ def ingest(
         tool=tool,
         outline=outline,
         tagged=tagged,
+        include_hidden=include_hidden,
         include_in_background_color=include_in_background_color,
     )
     compared = compare(read_pdf(pdf)) if choice.tool == 'ir' else None
@@ -148,6 +152,7 @@ def ingest(
         pdf_path=pdf,
         renderer=renderer,
         transcribe=transcribe,
+        include_hidden=include_hidden,
         include_in_background_color=include_in_background_color,
     )
 
@@ -168,6 +173,7 @@ def ingest(
             title_override=title,
             pdf_path=pdf,
             renderer=renderer,
+            include_hidden=include_hidden,
             include_in_background_color=include_in_background_color,
             transcribe=transcribe,
         )

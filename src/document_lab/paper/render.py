@@ -56,18 +56,25 @@ def _covered(box: BBox, page: Page) -> float:
 class _Located:
     """The regions a picture page's text locates (`document_lab.regions`), per page of a document read once.
 
-    ``include_in_background_color``: the text filled in the color under it locates them too (see `document_lab.ir`).
+    ``read`` is the document as its default view shows it; ``include_hidden``, ``include_in_background_color``:
+    what it reads beside (see `document_lab.ir`), told to `document_lab.regions` alike.
     """
 
-    def __init__(self, read: Document, include_in_background_color: bool) -> None:
+    def __init__(self, read: Document, *, include_hidden: bool, include_in_background_color: bool) -> None:
         self.read = read
         self.face = layout.body_face(read)
+        self.include_hidden = include_hidden
         self.include_in_background_color = include_in_background_color
 
     def crop(self, page_num: int, label: str) -> BBox | None:
         """The region labeled ``label`` (``Figure 2``, ``Table 1``, ``(3)``) on the page, or None."""
         page = self.read.pages[page_num]
-        found = regions(page, self.face, include_in_background_color=self.include_in_background_color)
+        found = regions(
+            page,
+            self.face,
+            include_hidden=self.include_hidden,
+            include_in_background_color=self.include_in_background_color,
+        )
         found = [r for r in found if r.label == label]
         return found[0].bbox if len(found) == 1 else None
 
@@ -338,25 +345,28 @@ def render_figure_pages(
     body_sections: list[tuple[str, str]],
     *,
     renderer: Renderer = 'pymupdf',
+    include_hidden: bool = False,
     include_in_background_color: bool = False,
 ) -> tuple[dict[str, str], dict[int, int]]:
     """Render cropped figure images and insert them inline at caption positions.
 
-    ``renderer`` draws them (`document_lab.pdf.read_raster`). ``include_in_background_color``: the text filled in
-    the color under it locates the figures of a picture page too (see `document_lab.ir`).
+    ``renderer`` draws them (`document_lab.pdf.read_raster`).
 
     A label on a page that is one picture (:func:`is_full_page_image`: a screen capture, a scan) has no drawn
     content to crop by: it is cut out where the page's text locates it (`document_lab.regions`: an OCR layer's
     caption and the prose around it), and else links the whole page, rendered once a run as ``page-NN.png`` however many
     such labels the page holds.
 
-    Captions are found, and figures cropped, on the paper without its running heads and feet
+    Captions are found, and figures cropped, on the paper as its default view shows it (`document_lab.ir.Page.shown`;
+    ``include_hidden``, ``include_in_background_color``: what it reads beside) without its running heads and feet
     (`document_lab.layout.without_running`).
 
     Returns (figure_images, page_section_map) where figure_images maps normalized
     figure label → relative image path (for INDEX.md).
     """
-    read = read_pdf(pdf_path)
+    read = read_pdf(pdf_path).shown(
+        include_hidden=include_hidden, include_in_background_color=include_in_background_color
+    )
     paper = layout.without_running(read)
     figure_page_map = build_figure_page_map(paper)
     page_section_map = build_page_section_map(figure_page_map, body_sections, paper)
@@ -382,7 +392,7 @@ def render_figure_pages(
             unique_entries.append((label, normalized, page_num, owning))
 
     located = (
-        _Located(read, include_in_background_color)
+        _Located(read, include_hidden=include_hidden, include_in_background_color=include_in_background_color)
         if any(is_full_page_image(read.pages[e[2]]) for e in unique_entries)
         else None
     )
@@ -422,23 +432,27 @@ def render_equation_images(
     *,
     renderer: Renderer = 'pymupdf',
     transcribe: Transcribe | None = None,
+    include_hidden: bool = False,
     include_in_background_color: bool = False,
 ) -> dict[str, str]:
     """Render equation images (by ``renderer``) and insert them at equation number positions.
 
     The equations are read off the paper without its running heads and feet (`document_lab.layout.without_running`).
     ``transcribe`` (`document_lab.formula.transcriber`): each rendered crop's LaTeX follows its image as a display
-    block. ``include_in_background_color``: the text filled in the color under it locates the equations of a picture
-    page too (see `document_lab.ir`). Returns updated figure_images dict with equation entries added.
+    block. The equations are located on the paper as its default view shows it (`document_lab.ir.Page.shown`;
+    ``include_hidden``, ``include_in_background_color``: what it reads beside). Returns updated figure_images dict
+    with equation entries added.
     """
-    read = read_pdf(pdf_path)
+    read = read_pdf(pdf_path).shown(
+        include_hidden=include_hidden, include_in_background_color=include_in_background_color
+    )
     paper, face = layout.without_running(read), layout.body_face(read)
     eq_page_map = build_equation_page_map(paper)
     if not eq_page_map:
         return figure_images
 
     located = (
-        _Located(read, include_in_background_color)
+        _Located(read, include_hidden=include_hidden, include_in_background_color=include_in_background_color)
         if any(is_full_page_image(read.pages[p]) for p in eq_page_map.values())
         else None
     )

@@ -140,6 +140,7 @@ def convert(
     tool: Tool | None = None,
     outline: bool = True,
     tagged: Collection[str] = DEFAULT_USES,
+    include_hidden: bool = False,
     include_in_background_color: bool = False,
 ) -> tuple[str, ToolChoice, Headings | None]:
     """The markdown of ``pdf``, its :func:`choose_tool` choice of ``tool``, and how its sections were headed.
@@ -148,8 +149,9 @@ def convert(
     else its tags and the rules head them (`document_lab.markdown.headings`, returned for the caller to report);
     marker heads its own (None). ``tagged``: on the IR path, what a tagged PDF's tags give its markdown
     (`document_lab.markdown`; none infers it all). marker's images land in ``out_dir/img/flat``; the IR path writes
-    none (figures are cropped later). ``include_in_background_color``: the IR path writes the text filled in the color
-    under it too (see `document_lab.ir`).
+    none (figures are cropped later). The IR path reads the PDF as its default view shows it
+    (`document_lab.ir.Page.shown`), its running heads and its tags too; ``include_hidden``: what hidden layers draw
+    is read too, ``include_in_background_color``: the text filled in the color under it.
 
     Raises:
         MarkerUnavailable: ``tool='marker'`` and something marker needs is missing.
@@ -160,10 +162,24 @@ def convert(
     flat.mkdir(parents=True, exist_ok=True)
     if choice.tool == 'marker':
         return _run_marker(pdf, out_dir), choice, None
-    doc = layout.without_running(read_pdf(pdf))
-    sections = headings(doc, outline=outline, tagged=tagged, include_in_background_color=include_in_background_color)
+    doc = layout.without_running(
+        read_pdf(pdf).shown(include_hidden=include_hidden, include_in_background_color=include_in_background_color)
+    )
+    sections = headings(
+        doc,
+        outline=outline,
+        tagged=tagged,
+        include_hidden=include_hidden,
+        include_in_background_color=include_in_background_color,
+    )
     return (
-        to_markdown(doc, tagged=tagged, sections=sections, include_in_background_color=include_in_background_color),
+        to_markdown(
+            doc,
+            tagged=tagged,
+            sections=sections,
+            include_hidden=include_hidden,
+            include_in_background_color=include_in_background_color,
+        ),
         choice,
         sections,
     )

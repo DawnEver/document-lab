@@ -325,3 +325,20 @@ def test_a_unit_row_of_lone_signs_the_document_sets_is_a_row_of_its_table(tmp_pa
         ('22', '300', '0.4', 'B220'),
         ('51', '300', '0.4', 'B510'),
     )
+
+
+def test_rows_ruled_apart_with_text_are_a_table_a_striped_icon_without_text_is_not(tmp_path):
+    """ACT1210's names and values: long value lines cross the rules; a manual's striped fan icon has stripes alone."""
+
+    def draw(page):
+        _text(page, 100, PROSE)
+        for y in (160, 180, 200):
+            _text(page, y, 'Rated voltage', x=50)
+            _text(page, y, 'Measured with a meter of the class stated at the rated frequency, 20 C.', x=160)
+        _text(page, 400, PROSE)
+
+    page, body = _page(tmp_path, draw)
+    ruled = _drawn((48, 148, 470, 206), rules=(4, 1), loose=1)
+    icon = _drawn((200, 260, 260, 320), rules=(5, 0), loose=8)
+    found = regions(page, body, [ruled, icon])
+    assert [(r.kind, r.label) for r in found] == [('table', 'Untitled table 1'), ('figure', 'Untitled figure 1')]

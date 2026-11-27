@@ -80,8 +80,9 @@ DRAWN_MIN: Final = 1.5
 DRAWN_STROKE: Final = 1.5
 #: A table's columns stand at least this many body sizes apart: wider than a word space, as no cell's words are.
 COLUMN_GAP: Final = 0.5
-#: A drawing of at least this many rules across it, only words off them, is a table even where lines long enough to
-#: be prose cross it (a data sheet's two columns of names and values, its rows ruled apart).
+#: A drawing of at least this many rules across it, only words off them and TABLE_ROWS lines of text in it, is a table
+#: even where lines long enough to be prose cross it (a data sheet's names and values, its rows ruled apart; a
+#: striped icon holds no text).
 RULED_ROWS: Final = 3
 #: A drawing in a text line's band at most this many times the line's height frames its words (a link, a header).
 FRAME_LINES: Final = 3.0
@@ -292,7 +293,11 @@ def _drawn(page: _Page, drawings: Sequence[Drawing], held: list[Region]) -> list
         box = drawing.box
         cx, cy = (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2
         words_only = drawing.loose <= page.body  # off its rules, only words
-        rowed = drawing.rules[0] >= RULED_ROWS and words_only  # rows ruled apart: a table, its lines however long
+        # rows ruled apart, text between the rules (an icon's stripes hold none): a table, its lines however long
+        held_lines = sum(
+            box.x0 <= ln.x0 and ln.x1 <= box.x1 and box.y0 <= ln.y0 and ln.y1 <= box.y1 for ln in page.lines
+        )
+        rowed = drawing.rules[0] >= RULED_ROWS and words_only and held_lines >= TABLE_ROWS
         if (
             box.x0 < page.left - page.body
             or box.x1 > page.right + page.body

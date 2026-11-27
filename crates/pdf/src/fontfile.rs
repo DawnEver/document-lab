@@ -3,7 +3,8 @@
 //! A TrueType/OpenType program (`/FontFile2`, or `/FontFile3` of subtype `OpenType`) gives its `cmap` table
 //! reversed (glyph to Unicode) and its `post` table's glyph names -- what a font says about its glyphs is the last
 //! word a reader has when the PDF gives no `ToUnicode` `CMap` -- and its `OS/2` weight class; a Type 1 program
-//! (`/FontFile`) its built-in encoding and its `/Weight`.
+//! (`/FontFile`) its built-in encoding and its `/Weight`; a bare CFF program (`/FontFile3` of subtype `Type1C` or
+//! `CIDFontType0C`) the weight its Top DICT and names state.
 
 use std::collections::HashMap;
 
@@ -196,6 +197,164 @@ pub fn type1_weight(program: &[u8]) -> Option<f64> {
     let close = open + rest[open..].iter().position(|&b| b == b')')?;
     let weight = String::from_utf8_lossy(&rest[open + 1..close]);
     crate::font::style_weight(crate::font::words(&weight))
+}
+
+/// The CFF standard strings a weight is spelled with: SIDs 383-390 (the CFF specification, Adobe Technical Note
+/// 5176, Appendix A). The standard strings before them are glyph names and versions, which state no weight.
+const CFF_WEIGHT_STRINGS: [&str; 8] = [
+    "Black", "Bold", "Book", "Light", "Medium", "Regular", "Roman", "Semibold",
+];
+/// The first SID of the String INDEX: the standard strings are 0-390.
+const CFF_STANDARD_STRINGS: usize = 391;
+/// The most operands a DICT operator takes (Adobe Technical Note 5176, Appendix B: the stack limit).
+const CFF_MAX_OPERANDS: usize = 48;
+
+/// The weight class (100-900) a bare CFF program (Adobe Technical Note 5176) states of itself: its first font's
+/// Top DICT `Weight` string (operator 4), read as a Type 1 `/Weight` is; else the style part of its `FullName`
+/// (operator 2), then of its name in the Name INDEX, read as a font name's is. `Ok(None)` when none states one.
+///
+/// Only the header and the Name, Top DICT and String INDEXes are read, each bounded by the data.
+///
+/// # Errors
+///
+/// Names what is malformed: a header or INDEX cut short or out of order, a DICT operand or operator that is not
+/// one, a string number past the String INDEX.
+pub fn cff_weight(data: &[u8]) -> Result<Option<f64>, String> {
+    if data.first() != Some(&1) {
+        return Err("not a CFF program of major version 1".to_string());
+    }
+    let header = *data.get(2).ok_or("its header is cut short")?;
+    let (names, at) =
+        cff_index(data, usize::from(header)).map_err(|e| format!("its Name INDEX {e}"))?;
+    let (dicts, at) = cff_index(data, at).map_err(|e| format!("its Top DICT INDEX {e}"))?;
+    let (strings, _) = cff_index(data, at).map_err(|e| format!("its String INDEX {e}"))?;
+    let top = cff_dict(dicts.first().ok_or("its Top DICT INDEX is empty")?)
+        .map_err(|e| format!("its Top DICT {e}"))?;
+    let string = |operator: u16| -> Result<Option<String>, String> {
+        let Some(operands) = top
+            .iter()
+            .find_map(|(op, operands)| (*op == operator).then_some(operands))
+        else {
+            return Ok(None);
+        };
+        let sid = match operands.last() {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // whole, in range
+            Some(&v) if v >= 0.0 && v.fract() == 0.0 && v < 65536.0 => v as usize,
+            _ => return Err(format!("its Top DICT operator {operator} names no string")),
+        };
+        Ok(if sid < CFF_STANDARD_STRINGS {
+            sid.checked_sub(CFF_STANDARD_STRINGS - CFF_WEIGHT_STRINGS.len())
+                .map(|i| CFF_WEIGHT_STRINGS[i].to_string())
+        } else {
+            let text = strings
+                .get(sid - CFF_STANDARD_STRINGS)
+                .ok_or_else(|| format!("its string {sid} is past its String INDEX"))?;
+            Some(String::from_utf8_lossy(text).into_owned())
+        })
+    };
+    let weight = string(4)?;
+    let full_name = string(2)?;
+    Ok(weight
+        .and_then(|w| crate::font::style_weight(crate::font::words(&w)))
+        .or_else(|| crate::font::name_style_weight(full_name.as_deref()?))
+        .or_else(|| crate::font::name_style_weight(&String::from_utf8_lossy(names.first()?))))
+}
+
+/// The items of the CFF INDEX at `at`, and where it ends.
+fn cff_index(data: &[u8], at: usize) -> Result<(Vec<&[u8]>, usize), String> {
+    const CUT: &str = "is cut short";
+    let count = usize::from(u16_at(data, at).ok_or(CUT)?);
+    if count == 0 {
+        return Ok((Vec::new(), at + 2));
+    }
+    let size = usize::from(*data.get(at + 2).ok_or(CUT)?);
+    if !(1..=4).contains(&size) {
+        return Err(format!("has offsets {size} bytes long"));
+    }
+    let offsets_at = at + 3;
+    let offset = |i: usize| -> Result<usize, String> {
+        let bytes = data
+            .get(offsets_at + i * size..offsets_at + (i + 1) * size)
+            .ok_or(CUT)?;
+        Ok(bytes.iter().fold(0, |v, &b| v << 8 | usize::from(b)))
+    };
+    let base = offsets_at + (count + 1) * size - 1; // an offset counts from the byte before the data
+    let mut start = offset(0)?;
+    if start != 1 {
+        return Err("does not start its data at offset 1".to_string());
+    }
+    let mut items = Vec::with_capacity(count);
+    for i in 1..=count {
+        let end = offset(i)?;
+        if end < start {
+            return Err("has offsets out of order".to_string());
+        }
+        items.push(
+            data.get(base.saturating_add(start)..base.saturating_add(end))
+                .ok_or(CUT)?,
+        );
+        start = end;
+    }
+    Ok((items, base.saturating_add(start)))
+}
+
+/// A CFF DICT's entries: each operator (an escaped one `12 b1` as `1200 + b1`) with its operands; a real operand
+/// is read as NaN, its value being no string number.
+fn cff_dict(data: &[u8]) -> Result<Vec<(u16, Vec<f64>)>, String> {
+    let mut entries = Vec::new();
+    let mut operands = Vec::new();
+    let mut i = 0;
+    while let Some(&b0) = data.get(i) {
+        let byte = |k: usize| {
+            data.get(i + k)
+                .copied()
+                .ok_or_else(|| "is cut short in an operand".to_string())
+        };
+        let (value, length) = match b0 {
+            0..=21 => {
+                let (operator, length) = if b0 == 12 {
+                    (1200 + u16::from(byte(1)?), 2)
+                } else {
+                    (u16::from(b0), 1)
+                };
+                entries.push((operator, std::mem::take(&mut operands)));
+                i += length;
+                continue;
+            }
+            28 => (f64::from(i16::from_be_bytes([byte(1)?, byte(2)?])), 3),
+            29 => (
+                f64::from(i32::from_be_bytes([byte(1)?, byte(2)?, byte(3)?, byte(4)?])),
+                5,
+            ),
+            30 => {
+                let end = data[i + 1..]
+                    .iter()
+                    .position(|&b| b >> 4 == 0xF || b & 0xF == 0xF)
+                    .ok_or("is cut short in a real")?;
+                (f64::NAN, end + 2)
+            }
+            32..=246 => (f64::from(b0) - 139.0, 1),
+            247..=250 => (
+                (f64::from(b0) - 247.0) * 256.0 + f64::from(byte(1)?) + 108.0,
+                2,
+            ),
+            251..=254 => (
+                -(f64::from(b0) - 251.0) * 256.0 - f64::from(byte(1)?) - 108.0,
+                2,
+            ),
+            _ => return Err(format!("holds the reserved byte {b0}")),
+        };
+        if operands.len() == CFF_MAX_OPERANDS {
+            return Err(format!("has more than {CFF_MAX_OPERANDS} operands"));
+        }
+        operands.push(value);
+        i += length;
+    }
+    if operands.is_empty() {
+        Ok(entries)
+    } else {
+        Err("ends in operands with no operator".to_string())
+    }
 }
 
 fn u16_at(data: &[u8], at: usize) -> Option<u16> {
@@ -706,5 +865,100 @@ mod tests {
             type1_weight(b"/FontName /CMR12 def eexec /Weight (Bold)"),
             None
         );
+    }
+    /// An INDEX of `items`, offsets one byte long.
+    fn index(items: &[&[u8]]) -> Vec<u8> {
+        let mut out = u16::try_from(items.len()).unwrap().to_be_bytes().to_vec();
+        if items.is_empty() {
+            return out;
+        }
+        out.push(1);
+        let mut offset = 1;
+        out.push(1);
+        for item in items {
+            offset += item.len();
+            out.push(u8::try_from(offset).unwrap());
+        }
+        for item in items {
+            out.extend(*item);
+        }
+        out
+    }
+
+    /// A CFF program of one font named `name`, its Top DICT `top`, its String INDEX `strings`.
+    fn cff(name: &[u8], top: &[u8], strings: &[&[u8]]) -> Vec<u8> {
+        [
+            &[1, 0, 4, 1][..],
+            &index(&[name]),
+            &index(&[top]),
+            &index(strings),
+        ]
+        .concat()
+    }
+
+    /// A DICT integer operand (the three-byte form).
+    fn int(v: i16) -> Vec<u8> {
+        [&[28][..], &v.to_be_bytes()].concat()
+    }
+
+    #[test]
+    fn a_cff_program_states_its_weight_by_its_weight_string_else_its_names_style_part() {
+        let weight = |sid: i16| [int(sid), vec![4]].concat();
+        let full_name = |sid: i16| [int(sid), vec![2]].concat();
+        // A string of the String INDEX (SID 391 on), and a standard string (390: `Semibold`).
+        assert_eq!(
+            cff_weight(&cff(b"F", &weight(391), &[b"Bold"])),
+            Ok(Some(700.0))
+        );
+        assert_eq!(cff_weight(&cff(b"F", &weight(390), &[])), Ok(Some(600.0)));
+        // The weight string first; then the full name's style part, then the font name's.
+        assert_eq!(
+            cff_weight(&cff(
+                b"F-Bold",
+                &[weight(392), full_name(391)].concat(),
+                &[b"Nimbus Sans Bold", b"Regular"]
+            )),
+            Ok(Some(400.0))
+        );
+        assert_eq!(
+            cff_weight(&cff(b"F", &full_name(391), &[b"Nimbus Sans Bold"])),
+            Ok(Some(700.0))
+        );
+        assert_eq!(
+            cff_weight(&cff(b"ABCDEF+NimbusSans-Bold", &[], &[])),
+            Ok(Some(700.0))
+        );
+        assert_eq!(cff_weight(&cff(b"CMBX10", &[], &[])), Ok(None));
+        // Reals, two-byte operators and long integers are read past; UnderlineThickness (12 4) is not the weight.
+        let top = [
+            &[30, 0x1a, 0x2f][..],       // 1.2
+            &[29, 0, 0, 1, 0x87, 12, 7], // 391, FontMatrix (one operand, enough to skip)
+            &int(384),
+            &[12, 4],      // UnderlineThickness 384
+            &[248, 27, 4], // Weight 391
+        ]
+        .concat();
+        assert_eq!(cff_weight(&cff(b"F", &top, &[b"Black"])), Ok(Some(900.0)));
+    }
+
+    #[test]
+    fn a_malformed_cff_program_is_refused_never_a_panic() {
+        let good = cff(b"F", &[int(391), vec![4]].concat(), &[b"Bold"]);
+        for end in 0..good.len() {
+            assert!(cff_weight(&good[..end]).is_err(), "cut at {end}");
+        }
+        let mut version = good.clone();
+        version[0] = 2;
+        assert!(cff_weight(&version).is_err());
+        let mut wide = good.clone();
+        wide[6] = 5; // the Name INDEX's offsets five bytes long
+        assert!(cff_weight(&wide).is_err());
+        let mut backwards = good.clone();
+        backwards[8] = 0; // the Name INDEX's last offset before its first
+        assert!(cff_weight(&backwards).is_err());
+        let unknown = cff(b"F", &[int(500), vec![4]].concat(), &[b"Bold"]);
+        assert!(cff_weight(&unknown).is_err());
+        assert!(cff_weight(&cff(b"F", &[255], &[])).is_err());
+        assert!(cff_weight(&cff(b"F", &[30, 0x1a], &[])).is_err()); // a real never ended
     }
 }

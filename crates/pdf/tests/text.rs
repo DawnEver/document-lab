@@ -680,3 +680,57 @@ fn a_symbol_font_under_a_generic_name_is_known_by_its_programs_own_name() {
         "\u{F057}\u{F0B3}"
     );
 }
+
+#[test]
+fn variation_selectors_a_to_unicode_states_are_kept() {
+    let font = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 6 0 R >>";
+    let cmap = common::stream(
+        "",
+        "1 begincodespacerange <00> <FF> endcodespacerange 2 beginbfchar <31> <0031FE0E> <32> <8FBADB40DD00> endbfchar",
+    );
+    let (events, _) = texts("BT /F1 10 Tf 0 50 Td (12) Tj ET", font, &[&cmap]);
+    assert_eq!(text(&events[0]), "1\u{FE0E}\u{8FBA}\u{E0100}"); // as stated, not stripped: numbers strips them
+}
+
+/// A Type 1 font named `/ABCDEF+F1` (no weight word) embedding the bare CFF program whose bytes are `hex`.
+fn cff_font(hex: &str) -> [String; 3] {
+    [
+        "<< /Type /Font /Subtype /Type1 /BaseFont /ABCDEF+F1 /FontDescriptor 6 0 R >>".to_string(),
+        "<< /Type /FontDescriptor /FontName /ABCDEF+F1 /Flags 32 /FontFile3 7 0 R >>".to_string(),
+        common::stream(
+            "/Subtype /Type1C /Filter /ASCIIHexDecode",
+            &format!("{hex}>"),
+        ),
+    ]
+}
+
+#[test]
+fn a_cff_program_s_weight_string_makes_its_font_bold() {
+    // Header; Name INDEX (`F1`); Top DICT INDEX (Weight: standard string 384, `Bold`); an empty String INDEX.
+    let [font, descriptor, program] =
+        cff_font("01000401 0001 01 01 03 4631 0001 01 01 05 1C018004 0000");
+    let (events, warnings) = texts(
+        "BT /F1 10 Tf 0 50 Td (A) Tj ET",
+        &font,
+        &[&descriptor, &program],
+    );
+    assert_eq!(events[0].font.program_weight, Some(700.0), "{warnings:?}");
+    assert!(events[0].font.bold());
+}
+
+#[test]
+fn a_malformed_cff_program_is_a_warning_and_its_text_still_reads() {
+    let [font, descriptor, program] = cff_font("02000401 0001 01 01 03 4631");
+    let (events, warnings) = texts(
+        "BT /F1 10 Tf 0 50 Td (A) Tj ET",
+        &font,
+        &[&descriptor, &program],
+    );
+    assert_eq!(text(&events[0]), "A");
+    assert!(!events[0].font.bold());
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].contains("/F1 (ABCDEF+F1)") && warnings[0].contains("CFF"),
+        "{warnings:?}"
+    );
+}

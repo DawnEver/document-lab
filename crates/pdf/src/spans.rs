@@ -42,10 +42,8 @@ use std::rc::Rc;
 use crate::accents;
 use crate::color::Color;
 use crate::font::FontInfo;
-use crate::geometry::{Point, Rect};
-use crate::interpret::{
-    Blend, Clip, Compositing, Event, Layer, Marked, Outline, Segment, TextEvent,
-};
+use crate::geometry::{Point, Rect, Segment};
+use crate::interpret::{Blend, Clip, Compositing, Event, Layer, Marked, Outline, TextEvent};
 
 /// A gap wider than this many font sizes between two glyphs is a space.
 pub const SPACE: f64 = 0.15;
@@ -192,7 +190,7 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
             span: Span {
                 text: piece.to_string(),
                 drawn: None,
-                font: Rc::clone(&text.font),
+                font: Rc::clone(&text.font.info),
                 size: text.size,
                 bbox: glyph.bbox,
                 render_mode: text.render_mode,
@@ -368,14 +366,14 @@ fn in_background_color(open: &Open, below: &[Event], marks: &[Option<Rect>]) -> 
 }
 
 /// Whether every glyph of `text` with ink in `bbox` paints only `fill`, opaque: glyphs cover no box for sure (their
-/// outlines are not read), but one in another color shows what is drawn over it (a black `!` on a white triangle).
+/// outlines are not read here), but one in another color shows what is drawn over it (a black `!` on a white triangle).
 fn text_in(text: &TextEvent, fill: &Color, bbox: Rect) -> bool {
     let paints =
         |color: &Color, alpha: f64| opaque(text.compositing, alpha) && same_color(color, fill);
     let fills = !matches!(text.render_mode, 0 | 2 | 4 | 6)
         || paints(&text.fill, text.compositing.fill_alpha);
     let strokes = !matches!(text.render_mode, 1 | 2 | 5 | 6)
-        || paints(&text.stroke, text.compositing.stroke_alpha);
+        || paints(&text.stroke.color, text.compositing.stroke_alpha);
     (fills && strokes)
         || !text
             .glyphs
@@ -533,11 +531,11 @@ fn orientation(a: Point, b: Point, c: Point) -> Option<Ordering> {
 }
 
 /// Whether `clip`, and every clip it narrows, [covers](covers) `bbox` whole: a clip of glyphs covers nothing, their
-/// outlines not read.
+/// outlines not read here.
 fn clip_covers(clip: &Clip, bbox: Rect) -> bool {
     let here = match &clip.outline {
         Outline::Path { segments, even_odd } => covers(segments, *even_odd, bbox),
-        Outline::Glyphs(_) => false,
+        Outline::Glyphs { .. } => false,
     };
     here && clip.within.as_deref().is_none_or(|c| clip_covers(c, bbox))
 }
@@ -635,7 +633,7 @@ fn sits_on(accent: &Placed, letter: &Placed) -> bool {
 /// else whether a space lies before it. It joins `open` when its fill is `open`'s too.
 fn join(open: &Open, text: &TextEvent, origin: Point, direction: (f64, f64)) -> Option<bool> {
     let size = open.span.size.max(f64::MIN_POSITIVE);
-    if open.span.font != text.font
+    if open.span.font != text.font.info
         || (open.span.size - text.size).abs() > 0.01 * size
         || open.span.render_mode != text.render_mode
         || open.span.layer != text.layer

@@ -3,8 +3,9 @@
 mod common;
 
 use pdf::color::Pattern;
+use pdf::geometry::Segment;
 use pdf::geometry::{Point, Rect};
-use pdf::interpret::{ImageEvent, PathEvent, Segment};
+use pdf::interpret::{ImageEvent, PathEvent};
 use pdf::{Event, File};
 
 fn events(page_extra: &str, content: &str, extra: &[&str]) -> (pdf::Content, pdf::Page) {
@@ -408,15 +409,46 @@ fn a_form_bbox_is_a_clipping_path_through_its_matrix() {
 }
 
 #[test]
-fn a_text_object_clips_to_its_clipping_glyphs_boxes() {
-    use pdf::interpret::Outline;
+fn an_empty_string_in_a_clipping_mode_adds_nothing_to_the_clip() {
     let (content, _) = events(
+        "/Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>",
+        "BT /F1 10 Tf 7 Tr () Tj ET 0 0 50 50 re f",
+        &[],
+    );
+    assert_eq!(paths(&content)[0].clip, None);
+}
+
+#[test]
+fn a_text_object_clips_to_its_clipping_glyphs_outlines() {
+    use pdf::interpret::Outline;
+    let (content, page) = events(
         "/Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>",
         "BT /F1 10 Tf 7 Tr 10 10 Td (A) Tj ET 0 0 50 50 re f",
         &[],
     );
     let clip = paths(&content)[0].clip.as_ref().expect("the glyphs' clip");
-    assert!(matches!(&clip.outline, Outline::Glyphs(boxes) if boxes.len() == 1));
+    let Outline::Glyphs { segments, unshaped } = &clip.outline else {
+        panic!("{clip:?}");
+    };
+    assert_eq!(unshaped.as_slice(), []);
+    // The A of Helvetica's substitute, 10 points tall at most and 6.67 wide, on the baseline 10 points up.
+    let points: Vec<_> = segments
+        .iter()
+        .filter_map(|s| match s {
+            Segment::MoveTo(q) | Segment::LineTo(q) | Segment::CurveTo(_, _, q) => Some(*q),
+            Segment::Close => None,
+        })
+        .collect();
+    let around = pdf::geometry::Rect::around(&points).expect("an outline");
+    let baseline = page.size().1 - 10.0;
+    assert!(
+        around.x0 >= 9.9 && around.x1 <= 16.8 && around.width() > 6.0,
+        "{around:?}"
+    );
+    assert!(
+        (around.y1 - baseline).abs() < 0.1 && around.height() > 6.5,
+        "{around:?}"
+    );
 }
 
 #[test]

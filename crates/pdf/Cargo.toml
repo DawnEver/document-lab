@@ -2,8 +2,8 @@
 name = "pdf"
 version.workspace = true
 edition.workspace = true
-# The workspace's MIT, and BSD-3-Clause for Adobe's tables: CID-to-Unicode (`src/cid2unicode`) and the predefined
-# CMaps (`src/cmaps`).
+# The workspace's MIT, and BSD-3-Clause for Adobe's tables -- CID-to-Unicode (`src/cid2unicode`) and the predefined
+# CMaps (`src/cmaps`) -- and for PDFium's Foxit fonts, the standard 14 fonts' substitutes (`src/fonts`, its LICENSE.txt).
 license = "MIT AND BSD-3-Clause"
 
 # document-lab's own PDF reader and image-page writer: syntax, filters, encryption, fonts, the content-stream
@@ -16,6 +16,7 @@ md-5 = "0.11.0"
 miniz_oxide = "0.9.1"
 moxcms = "0.9.2"
 pdf_encoding = "0.4.0"
+skrifa = { version = "0.50.0", default-features = false, features = ["std", "type1"] }
 sha2 = "0.11.2"
 
 [lints]

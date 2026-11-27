@@ -19,8 +19,11 @@
 //! its box is kept: never one lost, at worst one kept that a viewer hides. A shading's event is the box it may
 //! paint: the clip's, within the shading's own `/BBox`, not the narrower area a non-extended gradient covers.
 //! Each event also carries the clip itself, for whoever draws it: the chain of clipping paths in force ([`Clip`]) --
-//! each `W`/`W*` path, each Form's `/BBox`, each text object's clipping glyphs (by their boxes) -- and how it is
-//! composited ([`Compositing`]: the constant alphas, blend mode and whether a soft mask is in force).
+//! each `W`/`W*` path, each Form's `/BBox`, each text object's clipping glyphs (by their outlines) -- and how it is
+//! composited ([`Compositing`]: the constant alphas, blend mode and whether a soft mask is in force). A text event
+//! carries its font, each glyph's text rendering matrix and the stroke it is painted with: what drawing its glyphs'
+//! shapes needs ([`crate::shape`]). [`File::drawing`] interprets a page for a renderer: as [`File::interpret`]
+//! does, and each Type 3 glyph's procedure run in place after its text event, its marks events of their own.
 //!
 //! Marked content (14.6) is tracked as a stack apart from the graphics state: `q`/`Q` neither saves nor ends it,
 //! and a Form's sequences end with the Form (one left open is closed there, with a warning). What optional
@@ -58,12 +61,13 @@ use crate::color::{Color, Pattern, Space};
 use crate::content::{Operation, operations};
 use crate::error::{Error, Result};
 use crate::file::File;
-use crate::font::{Font, FontInfo};
-use crate::geometry::{Matrix, Point, Rect};
+use crate::font::Font;
+use crate::geometry::{Matrix, Point, Rect, Segment};
 use crate::icc::Intent;
 use crate::object::{Dict, Object, Stream, text_string};
 use crate::optional::OptionalContent;
 use crate::page::Page;
+use crate::shape::Shape;
 
 /// How deep Form `XObject`s may nest before one is refused as a loop.
 const MAX_FORM_DEPTH: usize = 32;
@@ -71,19 +75,6 @@ const MAX_FORM_DEPTH: usize = 32;
 /// Half an em in text space units of one font size (500 units of a composite font's 1000-unit glyph space): half a
 /// vertical column's width across.
 const HALF_EM: f64 = 0.5;
-
-/// One piece of a path, in page space.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Segment {
-    /// Start a subpath.
-    MoveTo(Point),
-    /// A straight line.
-    LineTo(Point),
-    /// A cubic Bezier curve: two control points, then its end.
-    CurveTo(Point, Point, Point),
-    /// Close the subpath back to its start.
-    Close,
-}
 
 /// How a path is stroked.
 #[derive(Debug, Clone, PartialEq)]
@@ -126,9 +117,15 @@ pub enum Outline {
         /// Even-odd (`W*`) rather than nonzero winding (`W`).
         even_odd: bool,
     },
-    /// The glyphs shown in a clipping text mode (4-7) in one text object, by their boxes: their outlines are not
-    /// read here.
-    Glyphs(Vec<Rect>),
+    /// The glyphs shown in a clipping text mode (4-7) in one text object: the outlines of those whose shape is
+    /// read, in page space and filled by the nonzero rule, and the boxes of those whose shape is not (a Type 3
+    /// glyph, a font with no program to draw it from), which stand in for them.
+    Glyphs {
+        /// The outlines, page space.
+        segments: Vec<Segment>,
+        /// The boxes of the glyphs with no outline, page space.
+        unshaped: Vec<Rect>,
+    },
 }
 
 /// How a mark is composited onto what lies below it (11.3.5, 11.6.4): the graphics state's constant alphas, blend
@@ -334,13 +331,17 @@ pub struct Glyph {
     /// Its box in page space: across its advance from the font's descent to its ascent, or when its font writes
     /// vertically, down its advance and an em across, centered on its origin.
     pub bbox: Rect,
+    /// From its text space (an em is 1, y up: where its [`Shape`] lies) to page space: the text rendering matrix
+    /// (9.4.4) -- font size, horizontal scaling, rise, text matrix, CTM -- its outline moved off the vertical origin by
+    /// its position vector when its font writes vertically.
+    pub matrix: Matrix,
 }
 
 /// The glyphs one string shows, in one font, size and state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextEvent {
     /// The font.
-    pub font: Rc<FontInfo>,
+    pub font: Rc<Font>,
     /// The font size in page space (the text matrix and the CTM applied).
     pub size: f64,
     /// The text rendering mode (`Tr`): 0 fill, 1 stroke, 3 invisible (an OCR text layer), 4-6 painted and added
@@ -348,8 +349,8 @@ pub struct TextEvent {
     pub render_mode: i64,
     /// The fill color.
     pub fill: Color,
-    /// The stroke color.
-    pub stroke: Color,
+    /// The stroke its glyphs are stroked with (render modes 1, 2, 5, 6): color, line width, dashes, caps, joins.
+    pub stroke: Stroke,
     /// Whether the font writes vertically: its glyphs step down a column, each from its vertical origin.
     pub vertical: bool,
     /// The glyphs, in showing order.
@@ -502,8 +503,16 @@ struct Interpreter<'a> {
     /// The text matrix and the text line matrix (9.4.2), between `BT` and `ET`.
     text_matrix: Matrix,
     line_matrix: Matrix,
-    /// The boxes of the glyphs shown in a clipping mode in this text object: the clip at `ET`.
-    text_clip: Vec<Rect>,
+    /// The glyphs shown in a clipping mode in this text object: the clip at `ET` (outlines, boxes of those without),
+    /// and the box it lies in.
+    text_clip: Option<(Vec<Segment>, Vec<Rect>, Rect)>,
+    /// Whether each Type 3 glyph's procedure is run where the glyph is shown ([`File::drawing`]), and where: its
+    /// text rendering matrix as the renderer places it.
+    procedures: Option<&'a dyn Fn(Matrix) -> Matrix>,
+    /// A Type 3 glyph's procedure is running.
+    in_procedure: bool,
+    /// ... after its `d1`: its color operators are ignored (9.6.4).
+    uncolored: bool,
     /// The default view of the file's optional content.
     optional: OptionalContent,
     /// The open marked-content sequences, outermost first.
@@ -532,6 +541,33 @@ impl File {
     /// Refuses page contents that are not streams; an operation that cannot be read, or an annotation, is a warning
     /// instead.
     pub fn interpret(&self, page: &Page, annotations: bool) -> Result<Content> {
+        self.interpreted(page, annotations, None)
+    }
+
+    /// What `page` draws, as a renderer needs it: [`File::interpret`]'s events, and after each text event in a Type
+    /// 3 font that paints (modes other than 3 and 7), each of its glyphs' procedures run in place -- under its text
+    /// rendering matrix as `place` places it (a renderer's own rounding of a glyph's origin) and the font's matrix,
+    /// with the font's resources (else those in force) -- its marks events of their own (a procedure after `d1`
+    /// paints in the fill color in force: its color operators are ignored).
+    ///
+    /// # Errors
+    ///
+    /// As [`File::interpret`].
+    pub fn drawing(
+        &self,
+        page: &Page,
+        annotations: bool,
+        place: &dyn Fn(Matrix) -> Matrix,
+    ) -> Result<Content> {
+        self.interpreted(page, annotations, Some(place))
+    }
+
+    fn interpreted(
+        &self,
+        page: &Page,
+        annotations: bool,
+        procedures: Option<&dyn Fn(Matrix) -> Matrix>,
+    ) -> Result<Content> {
         let mut data = Vec::new();
         match self.get(&page.dict, b"Contents")? {
             None => {}
@@ -570,7 +606,10 @@ impl File {
             clipping: None,
             text_matrix: Matrix::IDENTITY,
             line_matrix: Matrix::IDENTITY,
-            text_clip: Vec::new(),
+            text_clip: None,
+            procedures,
+            in_procedure: false,
+            uncolored: false,
             optional: self.optional_content()?,
             marked: Vec::new(),
             stream: None,
@@ -659,7 +698,7 @@ impl Interpreter<'_> {
             || self.path_operation(operator, operands)?
             || self.paint_operation(operator)
             || self.color_operation(operator, operands, resources)?
-            || self.text_operation(operator, operands, resources)?
+            || self.text_operation(operator, operands, resources, depth)?
         {
             return Ok(());
         }
@@ -689,6 +728,7 @@ impl Interpreter<'_> {
             b"W" => self.clipping = Some(false),
             b"W*" => self.clipping = Some(true),
             b"sh" => self.shading(operands, resources)?,
+            b"d1" if self.in_procedure => self.uncolored = true,
             b"BMC" => self.marked.push(Sequence {
                 artifact: operands.first().and_then(Object::as_name) == Some(b"Artifact"),
                 ..Sequence::default()
@@ -1012,18 +1052,18 @@ impl Interpreter<'_> {
         operator: &[u8],
         operands: &[Object],
         resources: &Dict,
+        depth: usize,
     ) -> Result<bool> {
         let text = &mut self.state.text;
         match operator {
             b"BT" => {
                 (self.text_matrix, self.line_matrix) = (Matrix::IDENTITY, Matrix::IDENTITY);
-                self.text_clip.clear();
+                self.text_clip = None;
             }
             b"ET" => {
-                let boxes = std::mem::take(&mut self.text_clip);
-                if let Some(glyphs) = boxes.iter().copied().reduce(Rect::union) {
-                    self.state.clip = self.state.clip.intersect(glyphs);
-                    self.narrow(Outline::Glyphs(boxes));
+                if let Some((segments, unshaped, bounds)) = self.text_clip.take() {
+                    self.state.clip = self.state.clip.intersect(bounds);
+                    self.narrow(Outline::Glyphs { segments, unshaped });
                 }
             }
             b"Tc" => text.char_spacing = last::<1>(operands)?[0],
@@ -1059,18 +1099,18 @@ impl Interpreter<'_> {
                 let leading = text.leading;
                 self.next_line(0.0, -leading);
             }
-            b"Tj" => self.show(string(operands)?),
+            b"Tj" => self.show(string(operands)?, resources, depth),
             b"'" => {
                 let leading = text.leading;
                 self.next_line(0.0, -leading);
-                self.show(string(operands)?);
+                self.show(string(operands)?, resources, depth);
             }
             b"\"" => {
                 let v = last::<2>(&operands[..operands.len().saturating_sub(1)])?;
                 (text.word_spacing, text.char_spacing) = (v[0], v[1]);
                 let leading = text.leading;
                 self.next_line(0.0, -leading);
-                self.show(string(operands)?);
+                self.show(string(operands)?, resources, depth);
             }
             b"TJ" => {
                 let items = operands
@@ -1094,7 +1134,7 @@ impl Interpreter<'_> {
                         }
                     }
                 }
-                self.text_event(glyphs);
+                self.text_event(glyphs, resources, depth);
             }
             _ => return Ok(false),
         }
@@ -1152,9 +1192,9 @@ impl Interpreter<'_> {
         })
     }
 
-    fn show(&mut self, bytes: &[u8]) {
+    fn show(&mut self, bytes: &[u8], resources: &Dict, depth: usize) {
         let glyphs = self.glyphs(bytes);
-        self.text_event(glyphs);
+        self.text_event(glyphs, resources, depth);
     }
 
     /// The glyphs `bytes` shows, the text matrix advanced past each.
@@ -1179,6 +1219,9 @@ impl Interpreter<'_> {
             // Horizontally: the box spans the advance w0 along the baseline, from the font's descent to its ascent
             // across it. Vertically (9.7.4.3, 9.4.4): the origin is the vertical one; the box spans the advance w1y
             // down the column and an em across it, centered on the origin; Tc and Tw step down unscaled by Tz.
+            // The outline's origin: the horizontal one, which a vertical font's position vector sets back from the
+            // vertical origin the glyph is placed by (9.7.4.3).
+            let (vx, vy) = code.position.unwrap_or((0.0, 0.0));
             let (end, corners, step) = match code.vertical_advance {
                 None => {
                     let (ascent, descent) = (
@@ -1213,19 +1256,20 @@ impl Interpreter<'_> {
                 origin: at((0.0, 0.0)),
                 end: at(end),
                 bbox: Rect::around(&corners.map(at)).expect("four corners"),
+                matrix: Matrix([1.0, 0.0, 0.0, 1.0, -vx, -vy]).then(render),
             });
             self.advance(step.0, step.1);
         }
         out
     }
 
-    fn text_event(&mut self, mut glyphs: Vec<Glyph>) {
-        if (4..=7).contains(&self.state.text.render_mode) {
-            self.text_clip.extend(glyphs.iter().map(|g| g.bbox));
-        }
-        let Some(font) = &self.state.text.font else {
+    fn text_event(&mut self, mut glyphs: Vec<Glyph>, resources: &Dict, depth: usize) {
+        let Some(font) = self.state.text.font.clone() else {
             return;
         };
+        if (4..=7).contains(&self.state.text.render_mode) {
+            self.clip_glyphs(&font, &glyphs);
+        }
         let clip = self.state.clip;
         glyphs.retain(|g| g.bbox.meets(clip));
         if glyphs.is_empty() {
@@ -1243,12 +1287,13 @@ impl Interpreter<'_> {
         }
         let text = &self.state.text;
         let m = self.text_matrix.then(self.state.ctm).0;
+        let paints = !matches!(text.render_mode, 3 | 7);
         let event = TextEvent {
-            font: Rc::new(font.info.clone()),
+            font: Rc::clone(&font),
             size: text.size * m[2].hypot(m[3]),
             render_mode: text.render_mode,
             fill: self.state.fill_color.clone(),
-            stroke: self.state.stroke_color.clone(),
+            stroke: self.stroke(),
             vertical: font.vertical(),
             glyphs,
             layer: self.layer(),
@@ -1256,7 +1301,109 @@ impl Interpreter<'_> {
             clip: self.state.clips.clone(),
             compositing: self.state.compositing,
         };
+        let shown: Vec<(u32, Matrix)> = match self.procedures {
+            Some(place) if paints && font.info.subtype == "Type3" => event
+                .glyphs
+                .iter()
+                .map(|g| (g.code, place(g.matrix)))
+                .collect(),
+            _ => Vec::new(),
+        };
         self.out.events.push(Event::Text(event));
+        for (code, matrix) in shown {
+            if let Err(e) = self.procedure(&font, code, matrix, resources, depth) {
+                self.warn(
+                    b"Tj",
+                    &format!("a Type 3 glyph's procedure is not drawn: {e}"),
+                );
+            }
+        }
+    }
+
+    /// The glyphs shown in a clipping mode join the text object's clip: each one's outline, in page space, else its
+    /// box (a Type 3 glyph, a glyph whose shape is missing).
+    fn clip_glyphs(&mut self, font: &Font, glyphs: &[Glyph]) {
+        let Some(first) = glyphs.first() else {
+            return; // an empty string adds nothing to the clip
+        };
+        let (segments, unshaped, bounds) = self
+            .text_clip
+            .get_or_insert_with(|| (Vec::new(), Vec::new(), first.bbox));
+        for glyph in glyphs {
+            *bounds = bounds.union(glyph.bbox);
+            match font.shape(glyph.code) {
+                Shape::Outline(outline) => {
+                    let placed: Vec<Segment> = outline
+                        .iter()
+                        .map(|s| s.mapped(|p| glyph.matrix.apply(p)))
+                        .collect();
+                    if let Some(around) = self::bounds(&placed) {
+                        *bounds = bounds.union(around);
+                    }
+                    segments.extend(placed);
+                }
+                Shape::Procedure | Shape::Missing(_) => unshaped.push(glyph.bbox),
+            }
+        }
+    }
+
+    /// The procedure of the Type 3 glyph `code` of `font` run, as a Form is (8.10), under the glyph's text rendering
+    /// matrix `matrix` and the font's matrix, with the font's resources, else `resources`; the state, the path and
+    /// the text object end with it.
+    fn procedure(
+        &mut self,
+        font: &Font,
+        code: u32,
+        matrix: Matrix,
+        resources: &Dict,
+        depth: usize,
+    ) -> Result<()> {
+        let Some((stream, own)) = font.procedure(self.file, code) else {
+            return Ok(()); // a code naming no procedure draws nothing
+        };
+        if depth >= MAX_FORM_DEPTH {
+            return Err(Error::malformed("Type 3 glyphs and Forms nest too deep"));
+        }
+        let data = self.file.decode(&stream)?.into_bytes()?;
+        let saved = (
+            self.state.clone(),
+            self.stack.len(),
+            std::mem::take(&mut self.path),
+            self.current,
+            self.start,
+            (self.text_matrix, self.line_matrix),
+            self.text_clip.take(),
+            (self.in_procedure, self.uncolored),
+        );
+        self.state.ctm = font.matrix.then(matrix);
+        (self.in_procedure, self.uncolored) = (true, false);
+        let floor = std::mem::replace(&mut self.marked_floor, self.marked.len());
+        self.run(&data, own.as_ref().unwrap_or(resources), depth + 1);
+        self.close_marked("a Type 3 glyph's procedure");
+        self.marked_floor = floor;
+        self.state = saved.0;
+        self.stack.truncate(saved.1);
+        (self.path, self.current, self.start) = (saved.2, saved.3, saved.4);
+        (self.text_matrix, self.line_matrix) = saved.5;
+        self.text_clip = saved.6;
+        (self.in_procedure, self.uncolored) = saved.7;
+        Ok(())
+    }
+
+    /// The stroke the graphics state paints with, in page space.
+    fn stroke(&self) -> Stroke {
+        let state = &self.state;
+        let scale = state.ctm.scale();
+        Stroke {
+            color: state.stroke_color.clone(),
+            width: state.line_width * scale,
+            dashes: state.dashes.iter().map(|d| d * scale).collect(),
+            dash_phase: state.dash_phase * scale,
+            cap: state.cap,
+            join: state.join,
+            miter_limit: state.miter_limit,
+            ctm: state.ctm,
+        }
     }
 
     /// Color spaces and colors; whether `operator` sets one.
@@ -1266,6 +1413,25 @@ impl Interpreter<'_> {
         operands: &[Object],
         resources: &Dict,
     ) -> Result<bool> {
+        if self.uncolored
+            && matches!(
+                operator,
+                b"CS"
+                    | b"cs"
+                    | b"SC"
+                    | b"SCN"
+                    | b"sc"
+                    | b"scn"
+                    | b"G"
+                    | b"g"
+                    | b"RG"
+                    | b"rg"
+                    | b"K"
+                    | b"k"
+            )
+        {
+            return Ok(true); // a Type 3 glyph after `d1` paints in the color in force
+        }
         let (space, color) = match operator {
             b"CS" | b"cs" => {
                 let value = operands.first().unwrap_or(&Object::Null);
@@ -1469,19 +1635,9 @@ impl Interpreter<'_> {
     /// the paints are in the colorant `None`.
     fn push_path(&mut self, stroke: bool, fill: Option<bool>, inkless: bool) {
         let state = &self.state;
-        let scale = state.ctm.scale();
         let event = PathEvent {
             segments: self.path.clone(),
-            stroke: stroke.then(|| Stroke {
-                color: state.stroke_color.clone(),
-                width: state.line_width * scale,
-                dashes: state.dashes.iter().map(|d| d * scale).collect(),
-                dash_phase: state.dash_phase * scale,
-                cap: state.cap,
-                join: state.join,
-                miter_limit: state.miter_limit,
-                ctm: state.ctm,
-            }),
+            stroke: stroke.then(|| self.stroke()),
             fill: fill.map(|even_odd| Fill {
                 color: state.fill_color.clone(),
                 even_odd,

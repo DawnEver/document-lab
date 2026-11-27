@@ -5,15 +5,17 @@
 //! (`crate::image`; measured against `MuPDF`, which does the same); a clip holding the whole canvas is no clip, so
 //! drawing under it needs no mask. A chain is made once: the events drawn under one clip share it, and a chain whose
 //! paths are the same as one made before (a figure clipping each of its curves to the same plot box) is that one's.
-//! A text clip is the union of its glyphs' boxes until stage 2 reads their outlines, counted as such.
+//! A text clip is its glyphs' outlines, filled by the nonzero rule; a glyph with no outline to read (a Type 3 glyph, a
+//! font with no program) stands in by its box, counted as such.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
+use pdf::geometry::Segment;
 use pdf::geometry::{Point, Rect};
-use pdf::interpret::{Clip, Outline, Segment};
+use pdf::interpret::{Clip, Outline};
 use tiny_skia::{FillRule, Mask, PathBuilder, Transform};
 
 use crate::Grid;
@@ -43,7 +45,8 @@ pub struct Clips {
 }
 
 impl Clips {
-    /// What `clip` leaves of the canvas `grid` maps onto. A text clip met is counted in `undrawn`.
+    /// What `clip` leaves of the canvas `grid` maps onto. A text clip holding a glyph by its box is counted in
+    /// `undrawn`.
     pub(crate) fn mask(
         &mut self,
         clip: Option<&Rc<Clip>>,
@@ -53,9 +56,9 @@ impl Clips {
         let Some(clip) = clip else {
             return Left::All;
         };
-        if has_glyphs(clip) {
+        if by_boxes(clip) {
             *undrawn
-                .entry("text clip (its glyphs' boxes until stage 2)".to_string())
+                .entry("text clip glyph with no outline (by its box)".to_string())
                 .or_default() += 1;
         }
         self.left(clip, grid)
@@ -93,23 +96,15 @@ impl Clips {
         let outer = clip.within.as_ref().map_or(0, |o| self.key(o));
         let mut hasher = DefaultHasher::new();
         outer.hash(&mut hasher);
+        std::mem::discriminant(&clip.outline).hash(&mut hasher);
         match &clip.outline {
             Outline::Path { segments, even_odd } => {
                 even_odd.hash(&mut hasher);
-                for s in segments {
-                    let points: &[Point] = match s {
-                        Segment::MoveTo(p) | Segment::LineTo(p) => std::slice::from_ref(p),
-                        Segment::CurveTo(a, b, p) => &[*a, *b, *p],
-                        Segment::Close => &[],
-                    };
-                    std::mem::discriminant(s).hash(&mut hasher);
-                    for p in points {
-                        (p.x.to_bits(), p.y.to_bits()).hash(&mut hasher);
-                    }
-                }
+                hash_segments(segments, &mut hasher);
             }
-            Outline::Glyphs(boxes) => {
-                for b in boxes {
+            Outline::Glyphs { segments, unshaped } => {
+                hash_segments(segments, &mut hasher);
+                for b in unshaped {
                     [b.x0, b.y0, b.x1, b.y1].map(f64::to_bits).hash(&mut hasher);
                 }
             }
@@ -120,9 +115,25 @@ impl Clips {
     }
 }
 
-/// Whether a clip of the chain `clip` ends is a text clip.
-fn has_glyphs(clip: &Clip) -> bool {
-    matches!(clip.outline, Outline::Glyphs(_)) || clip.within.as_deref().is_some_and(has_glyphs)
+/// `segments`' content, hashed.
+fn hash_segments(segments: &[Segment], hasher: &mut DefaultHasher) {
+    for s in segments {
+        let points: &[Point] = match s {
+            Segment::MoveTo(p) | Segment::LineTo(p) => std::slice::from_ref(p),
+            Segment::CurveTo(a, b, p) => &[*a, *b, *p],
+            Segment::Close => &[],
+        };
+        std::mem::discriminant(s).hash(hasher);
+        for p in points {
+            (p.x.to_bits(), p.y.to_bits()).hash(hasher);
+        }
+    }
+}
+
+/// Whether a clip of the chain `clip` ends is a text clip holding a glyph by its box.
+fn by_boxes(clip: &Clip) -> bool {
+    matches!(&clip.outline, Outline::Glyphs { unshaped, .. } if !unshaped.is_empty())
+        || clip.within.as_deref().is_some_and(by_boxes)
 }
 
 /// What `within` leaves, narrowed to `outline`.
@@ -146,9 +157,16 @@ fn narrowed(within: Left, outline: &Outline, grid: &Grid) -> Left {
                 (crate::build(segments, &|p| grid.point(p)), rule)
             }
         }
-        Outline::Glyphs(boxes) => {
-            let boxes: Vec<Rect> = boxes.iter().map(|b| grid.rect(*b)).collect();
-            (rect_path(&boxes), FillRule::Winding)
+        Outline::Glyphs { segments, unshaped } => {
+            let mut builder = PathBuilder::new();
+            if let Some(outlines) = crate::build(segments, &|p| grid.point(p)) {
+                builder.push_path(&outlines);
+            }
+            let boxes: Vec<Rect> = unshaped.iter().map(|b| grid.rect(*b)).collect();
+            if let Some(boxes) = rect_path(&boxes) {
+                builder.push_path(&boxes);
+            }
+            (builder.finish(), FillRule::Winding)
         }
     };
     let Some(path) = path else {

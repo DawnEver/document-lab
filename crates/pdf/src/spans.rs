@@ -16,15 +16,30 @@
 //! An accent drawn as a glyph of its own over (or under) a letter, as TeX without T1 encoding draws `ü` (`u` and
 //! `¨`), is one glyph with it before spans are made: the two composed as [`crate::accents`] says, the letter's
 //! place in the drawing order kept, its box spanning both. One set on no letter stays as it is (a lone `¨`).
+//!
+//! A fill change splits a run (a scan's glyphs each a grey of their own, a colored digit): the piece after it says it
+//! [continues the run](Span::continues_run) of the span before it, so a reader setting spans into lines reads the
+//! run whole without judging again where it goes on.
+//!
+//! Text filled in the color painted under it shows nothing ([`Span::in_background_color`]): a white word on the
+//! white page, a black one on a black box. What is under a span is what was drawn before it, top down: every
+//! mark overlapping its box must be in its fill, down to one covering its box whole -- a path filled in one opaque
+//! color whose region, by its fill rule, holds the box, and so does every clip in force: a rectangle, a polygon, a
+//! rounded box, a clip intersected in (`covers`: it never covers wrongly, a curve covering only where the box
+//! of its control points stays clear of the span's) -- or, when none covers it, the page, white. The colors are
+//! compared exactly, as sRGB. Any other mark overlapping its box (an image, a shading, a pattern, a translucent
+//! paint, a glyph or a path in a color of its own: a black `!` on a white triangle glyph on a black box) shows the
+//! text; a glyph covers no box for sure, its outline not read. What hidden or inkless layers draw is under nothing.
 
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::rc::Rc;
 
 use crate::accents;
 use crate::color::Color;
 use crate::font::FontInfo;
-use crate::geometry::{Point, Rect};
-use crate::interpret::{Event, Layer, TextEvent};
+use crate::geometry::{Point, Rect, Segment};
+use crate::interpret::{Blend, Clip, Compositing, Event, Layer, Outline, TextEvent};
 
 /// A gap wider than this many font sizes between two glyphs is a space.
 pub const SPACE: f64 = 0.15;
@@ -35,6 +50,8 @@ pub const BASELINE: f64 = 0.1;
 /// A glyph raised or lowered by up to this many font sizes (a superscript, a subscript) still continues the word
 /// before it.
 pub const RISE: f64 = 0.5;
+/// The page's own color, under every mark: white, in sRGB.
+pub const PAGE: [f64; 3] = [1.0, 1.0, 1.0];
 
 /// A run of text.
 #[derive(Debug, Clone, PartialEq)]
@@ -63,6 +80,12 @@ pub struct Span {
     pub unspaced: Option<usize>,
     /// The color its glyphs are filled with; None when its rendering mode does not fill (stroke, invisible, clip).
     pub fill: Option<Color>,
+    /// Whether it continues the run of the span before it: its first glyph would have joined that span but for a
+    /// change of fill (see the module).
+    pub continues_run: bool,
+    /// Whether its glyphs are filled (and only filled: render mode 0 or 4) in the color of what is painted under its
+    /// box, so it shows nothing (see the module).
+    pub in_background_color: bool,
 }
 
 /// The fill of glyphs shown in `text`: its fill color when its rendering mode fills (0, 2, 4, 6).
@@ -72,6 +95,11 @@ fn fill_of(text: &TextEvent) -> Option<Color> {
 
 struct Open {
     span: Span,
+    /// The index in the page's events of the text event showing its first glyph: what was drawn before it is under
+    /// it.
+    first: usize,
+    /// How its first glyph is composited.
+    compositing: Compositing,
     /// Where its first glyph starts.
     origin: Point,
     end: Point,
@@ -83,6 +111,8 @@ struct Open {
 /// and its box.
 struct Placed<'a> {
     event: &'a TextEvent,
+    /// The index of `event` in the page's events.
+    index: usize,
     text: Cow<'a, str>,
     origin: Point,
     end: Point,
@@ -94,13 +124,15 @@ struct Placed<'a> {
 pub fn spans(events: &[Event]) -> Vec<Span> {
     let mut glyphs: Vec<Placed> = events
         .iter()
-        .filter_map(|event| match event {
-            Event::Text(text) => Some(text),
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            Event::Text(text) => Some((index, text)),
             _ => None,
         })
-        .flat_map(|event| {
+        .flat_map(|(index, event)| {
             event.glyphs.iter().map(move |glyph| Placed {
                 event,
+                index,
                 text: Cow::Borrowed(glyph.text.as_deref().unwrap_or("\u{FFFD}")),
                 origin: glyph.origin,
                 end: glyph.end,
@@ -128,9 +160,13 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
             open.as_ref().map_or(along, |o| o.span.direction)
         };
         let piece = glyph.text.as_ref();
+        let step = open
+            .as_ref()
+            .and_then(|o| join(o, text, glyph.origin, direction));
         let joined = open
             .as_mut()
-            .and_then(|o| join(o, text, glyph.origin, direction).map(|gap| (o, gap)));
+            .zip(step)
+            .filter(|(o, _)| o.span.fill == fill_of(text));
         if let Some((o, gap)) = joined {
             if gap && !o.span.text.ends_with(' ') && !piece.starts_with(' ') {
                 o.span.text.push(' ');
@@ -152,7 +188,7 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
         open = Some(Open {
             span: Span {
                 text: piece.to_string(),
-                font: Rc::clone(&text.font),
+                font: Rc::clone(&text.font.info),
                 size: text.size,
                 bbox: glyph.bbox,
                 render_mode: text.render_mode,
@@ -161,24 +197,310 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
                 direction,
                 unspaced: None,
                 fill: fill_of(text),
+                continues_run: step.is_some(),
+                in_background_color: false,
             },
+            first: glyph.index,
+            compositing: text.compositing,
             origin: glyph.origin,
             end: glyph.end,
             inked: inks(piece),
         });
     }
     out.extend(open);
+    finished(out, events)
+}
+
+/// The spans `out` opened on the page of `events`, finished: each its [`Span::unspaced`] number, a blank one left
+/// out -- the next continuing the run of the span kept before it only when every span between went on with that
+/// run --, trailing white-space trimmed, and whether it is [in its background's color](in_background_color).
+fn finished(out: Vec<Open>, events: &[Event]) -> Vec<Span> {
     let unspaced = unspaced(&out);
+    let marks: Vec<Option<Rect>> = events.iter().map(mark).collect();
+    let mut runs_on = false;
     out.into_iter()
         .zip(unspaced)
-        .filter(|(o, _)| !o.span.text.trim().is_empty())
-        .map(|(o, unspaced)| {
+        .filter_map(|(o, unspaced)| {
+            if o.span.text.trim().is_empty() {
+                runs_on &= o.span.continues_run;
+                return None;
+            }
+            let continues_run = o.span.continues_run && runs_on;
+            runs_on = true;
+            let in_background_color =
+                in_background_color(&o, &events[..o.first], &marks[..o.first]);
             let mut span = o.span;
             let trimmed = span.text.trim_end().len();
             span.text.truncate(trimmed);
-            Span { unspaced, ..span }
+            Some(Span {
+                unspaced,
+                continues_run,
+                in_background_color,
+                ..span
+            })
         })
         .collect()
+}
+
+/// The box `event` may paint something seen in; None when it paints nothing seen (in a hidden or inkless layer,
+/// invisible text, a path of no points). A stroke reaches half its width past its path.
+fn mark(event: &Event) -> Option<Rect> {
+    match event {
+        Event::Text(text)
+            if !text.layer.hidden && !text.layer.inkless && !matches!(text.render_mode, 3 | 7) =>
+        {
+            text.glyphs
+                .iter()
+                .filter(|g| g.text.as_deref().is_none_or(inks))
+                .map(|g| g.bbox)
+                .reduce(Rect::union)
+        }
+        Event::Path(path) if !path.layer.hidden && !path.layer.inkless => {
+            let bounds = Rect::around(&points(&path.segments))?;
+            let half = path.stroke.as_ref().map_or(0.0, |s| s.width / 2.0);
+            Some(Rect {
+                x0: bounds.x0 - half,
+                y0: bounds.y0 - half,
+                x1: bounds.x1 + half,
+                y1: bounds.y1 + half,
+            })
+        }
+        Event::Image(image) if !image.layer.hidden && !image.layer.inkless => Some(image.bbox),
+        Event::Shading(shading) if !shading.layer.hidden && !shading.layer.inkless => {
+            Some(shading.bbox)
+        }
+        _ => None,
+    }
+}
+
+/// Whether `open`'s glyphs, only filled and composited as they are, are in the color painted under its box by the
+/// events `below` it, whose [`mark`]s are `marks` (see the module).
+fn in_background_color(open: &Open, below: &[Event], marks: &[Option<Rect>]) -> bool {
+    let span = &open.span;
+    let Some(fill) = span
+        .fill
+        .as_ref()
+        .filter(|_| matches!(span.render_mode, 0 | 4))
+    else {
+        return false;
+    };
+    if !opaque(open.compositing, open.compositing.fill_alpha) {
+        return false;
+    }
+    let bbox = span.bbox;
+    let paints = |color: &Color, compositing: Compositing, alpha: f64| {
+        opaque(compositing, alpha) && same_color(color, fill)
+    };
+    for (event, _) in below
+        .iter()
+        .zip(marks)
+        .rev()
+        .filter(|(_, m)| m.is_some_and(|m| overlaps(m, bbox)))
+    {
+        match event {
+            Event::Text(text) => {
+                if !text_in(text, fill, bbox) {
+                    return false;
+                }
+            }
+            Event::Path(path) => {
+                let stroke = path.stroke.as_ref().is_none_or(|s| {
+                    paints(&s.color, path.compositing, path.compositing.stroke_alpha)
+                });
+                let filled = path.fill.as_ref().is_none_or(|f| {
+                    paints(&f.color, path.compositing, path.compositing.fill_alpha)
+                });
+                if !(stroke && filled) {
+                    return false;
+                }
+                if path
+                    .fill
+                    .as_ref()
+                    .is_some_and(|f| covers(&path.segments, f.even_odd, bbox))
+                    && path.clip.as_deref().is_none_or(|c| clip_covers(c, bbox))
+                {
+                    return true;
+                }
+            }
+            Event::Image(_) | Event::Shading(_) => return false,
+        }
+    }
+    fill.pattern.is_none() && fill.rgb == Some(PAGE)
+}
+
+/// Whether every glyph of `text` with ink in `bbox` paints only `fill`, opaque: glyphs cover no box for sure (their
+/// outlines are not read here), but one in another color shows what is drawn over it (a black `!` on a white triangle).
+fn text_in(text: &TextEvent, fill: &Color, bbox: Rect) -> bool {
+    let paints =
+        |color: &Color, alpha: f64| opaque(text.compositing, alpha) && same_color(color, fill);
+    let fills = !matches!(text.render_mode, 0 | 2 | 4 | 6)
+        || paints(&text.fill, text.compositing.fill_alpha);
+    let strokes = !matches!(text.render_mode, 1 | 2 | 5 | 6)
+        || paints(&text.stroke.color, text.compositing.stroke_alpha);
+    (fills && strokes)
+        || !text
+            .glyphs
+            .iter()
+            .any(|g| g.text.as_deref().is_none_or(inks) && overlaps(g.bbox, bbox))
+}
+
+/// Whether two boxes share some area (touching edges do not).
+fn overlaps(a: Rect, b: Rect) -> bool {
+    a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1
+}
+
+/// Whether a mark composited so, at constant alpha `alpha`, paints its own color: alpha 1, `Normal`, no soft mask,
+/// in no transparency group composited otherwise.
+fn opaque(compositing: Compositing, alpha: f64) -> bool {
+    alpha >= 1.0
+        && compositing.blend == Blend::Normal
+        && !compositing.soft_mask
+        && !compositing.grouped
+}
+
+/// Whether two colors are one sRGB color exactly; a pattern, or a color with no sRGB, is no one color.
+fn same_color(a: &Color, b: &Color) -> bool {
+    a.pattern.is_none() && b.pattern.is_none() && a.rgb.is_some() && a.rgb == b.rgb
+}
+
+/// Every point `segments` name, a curve's control points too: their box holds the path.
+fn points(segments: &[Segment]) -> Vec<Point> {
+    segments
+        .iter()
+        .flat_map(|segment| match *segment {
+            Segment::MoveTo(p) | Segment::LineTo(p) => vec![p],
+            Segment::CurveTo(a, b, c) => vec![a, b, c],
+            Segment::Close => vec![],
+        })
+        .collect()
+}
+
+/// Whether the region `segments` fill -- by the even-odd rule or the nonzero winding one (8.5.3.3) -- holds `bbox`
+/// whole, never wrongly. A box no edge reaches inside lies in one piece of the plane the edges cut, filled or not as
+/// its center winds round them: exact there. A region an edge reaches inside the box (a seam where two subpaths
+/// overlap), a side no exact sign settles, or a curve whose control points' box reaches inside the box, covers
+/// nothing.
+fn covers(segments: &[Segment], even_odd: bool, bbox: Rect) -> bool {
+    let Some(edges) = edges(segments, bbox) else {
+        return false;
+    };
+    if edges.iter().any(|&(p, q)| crosses(p, q, bbox)) {
+        return false;
+    }
+    let center = Point {
+        x: f64::midpoint(bbox.x0, bbox.x1),
+        y: f64::midpoint(bbox.y0, bbox.y1),
+    };
+    // The edges crossing the ray from the center along x, each counted by its direction (Sunday's winding number).
+    let mut winding = 0_i64;
+    for &(p, q) in &edges {
+        let up = p.y <= center.y && center.y < q.y;
+        let down = q.y <= center.y && center.y < p.y;
+        if up || down {
+            match orientation(p, q, center) {
+                Some(Ordering::Greater) if up => winding += 1,
+                Some(Ordering::Less) if down => winding -= 1,
+                Some(Ordering::Greater | Ordering::Less) => {}
+                None | Some(Ordering::Equal) => return false,
+            }
+        }
+    }
+    if even_odd {
+        winding % 2 != 0
+    } else {
+        winding != 0
+    }
+}
+
+/// The straight edges bounding the region `segments` fill, every subpath closed back to its start as a fill closes
+/// it; a curve by its chord, when its control points' box -- which holds the curve -- stays clear of `bbox`'s inside,
+/// so the curve and its chord wind alike round any point in the box. None when a curve's box reaches inside it.
+fn edges(segments: &[Segment], bbox: Rect) -> Option<Vec<(Point, Point)>> {
+    let mut out = Vec::new();
+    let (mut start, mut at): (Option<Point>, Option<Point>) = (None, None);
+    for segment in segments {
+        match *segment {
+            Segment::MoveTo(p) => {
+                out.extend(at.zip(start));
+                (start, at) = (Some(p), Some(p));
+            }
+            Segment::LineTo(p) => {
+                out.extend(at.map(|a| (a, p)));
+                start = start.or(Some(p));
+                at = Some(p);
+            }
+            Segment::CurveTo(b, c, d) => {
+                let a = at.unwrap_or(b);
+                if overlaps(Rect::around(&[a, b, c, d])?, bbox) {
+                    return None;
+                }
+                out.push((a, d));
+                start = start.or(Some(a));
+                at = Some(d);
+            }
+            Segment::Close => {
+                out.extend(at.zip(start));
+                at = start;
+            }
+        }
+    }
+    out.extend(at.zip(start));
+    Some(out)
+}
+
+/// Whether the segment from `p` to `q` reaches inside `bbox` (along an edge of it does not): unless an axis or the
+/// segment's normal parts them -- every corner of the box on one side of its line, or on it. A corner no exact sign
+/// places counts as on both sides.
+fn crosses(p: Point, q: Point, bbox: Rect) -> bool {
+    if !overlaps(Rect::spanning(p, q), bbox) {
+        return false;
+    }
+    let corners = [
+        Point {
+            x: bbox.x0,
+            y: bbox.y0,
+        },
+        Point {
+            x: bbox.x1,
+            y: bbox.y0,
+        },
+        Point {
+            x: bbox.x1,
+            y: bbox.y1,
+        },
+        Point {
+            x: bbox.x0,
+            y: bbox.y1,
+        },
+    ]
+    .map(|c| orientation(p, q, c));
+    let none_on = |side: Ordering| corners.iter().all(|c| c.is_some_and(|c| c != side));
+    !(none_on(Ordering::Less) || none_on(Ordering::Greater))
+}
+
+/// The side of the line from `a` to `b` that `c` lies on -- the sign of their cross product -- when the floating
+/// point product settles it: within Shewchuk's first error bound of zero (Adaptive Precision Floating-Point
+/// Arithmetic and Fast Robust Geometric Predicates, 1997: `ccwerrboundA`) rounding could flip it, and None says so.
+fn orientation(a: Point, b: Point, c: Point) -> Option<Ordering> {
+    const HALF_ULP: f64 = f64::EPSILON / 2.0;
+    const BOUND: f64 = (3.0 + 16.0 * HALF_ULP) * HALF_ULP;
+    let left = (b.x - a.x) * (c.y - a.y);
+    let right = (b.y - a.y) * (c.x - a.x);
+    let det = left - right;
+    let bound = BOUND * (left.abs() + right.abs());
+    (det.abs() > bound || bound <= 0.0)
+        .then(|| det.partial_cmp(&0.0))
+        .flatten()
+}
+
+/// Whether `clip`, and every clip it narrows, [covers](covers) `bbox` whole: a clip of glyphs covers nothing, their
+/// outlines not read here.
+fn clip_covers(clip: &Clip, bbox: Rect) -> bool {
+    let here = match &clip.outline {
+        Outline::Path { segments, even_odd } => covers(segments, *even_odd, bbox),
+        Outline::Glyphs { .. } => false,
+    };
+    here && clip.within.as_deref().is_none_or(|c| clip_covers(c, bbox))
 }
 
 /// Each span's [`Span::unspaced`] number: the lowest index among the spans linked to it by continuing one
@@ -267,14 +589,13 @@ fn sits_on(accent: &Placed, letter: &Placed) -> bool {
         && (-BASELINE * size..=RISE * size).contains(&rise)
 }
 
-/// Whether the glyph at `origin` continues `open`: None when it starts another span, else whether a space lies
-/// before it.
+/// Whether the glyph at `origin` continues the run `open` ends, whatever its fill: None when it starts another run,
+/// else whether a space lies before it. It joins `open` when its fill is `open`'s too.
 fn join(open: &Open, text: &TextEvent, origin: Point, direction: (f64, f64)) -> Option<bool> {
     let size = open.span.size.max(f64::MIN_POSITIVE);
-    if open.span.font != text.font
+    if open.span.font != text.font.info
         || (open.span.size - text.size).abs() > 0.01 * size
         || open.span.render_mode != text.render_mode
-        || open.span.fill != fill_of(text)
         || open.span.layer != text.layer
         || open.span.vertical != text.vertical
         || (open.span.direction.0 - direction.0).abs() + (open.span.direction.1 - direction.1).abs()

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from document_lab import layout, png
+from document_lab import formula, layout, png
 from document_lab.ir import BBox
 from document_lab.paper.crop import crop_figure, equation_context
 from document_lab.paper.pagemap import FIG_TABLE_RE, build_figure_page_map, build_page_section_map
@@ -17,6 +17,9 @@ from document_lab.pdf import read_pdf, read_raster
 from document_lab.regions import Region, Unnumbered, equations, regions
 
 if TYPE_CHECKING:
+    import numpy as np
+
+    from document_lab.formula import Transcribe
     from document_lab.ir import Document, Page
     from document_lab.pdf import Renderer
 
@@ -47,15 +50,28 @@ def _covered(box: BBox, page: Page) -> float:
 
 
 class _Located:
-    """The regions a picture page's text locates (`document_lab.regions`), per page of a document read once."""
+    """The regions a picture page's text locates (`document_lab.regions`), per page of a document read once.
 
-    def __init__(self, read: Document) -> None:
+    ``read`` is the document as its default view shows it; ``include_hidden``, ``include_in_background_color``:
+    what it reads beside (see `document_lab.ir`), told to `document_lab.regions` alike.
+    """
+
+    def __init__(self, read: Document, *, include_hidden: bool, include_in_background_color: bool) -> None:
         self.read = read
         self.face = layout.body_face(read)
+        self.include_hidden = include_hidden
+        self.include_in_background_color = include_in_background_color
 
     def crop(self, page_num: int, label: str) -> BBox | None:
         """The region labeled ``label`` (``Figure 2``, ``Table 1``, ``(3)``) on the page, or None."""
-        found = [r for r in regions(self.read.pages[page_num], self.face) if r.label == label]
+        page = self.read.pages[page_num]
+        found = regions(
+            page,
+            self.face,
+            include_hidden=self.include_hidden,
+            include_in_background_color=self.include_in_background_color,
+        )
+        found = [r for r in found if r.label == label]
         return found[0].bbox if len(found) == 1 else None
 
 
@@ -63,15 +79,20 @@ class _Located:
 RENDER_DPI = 144.0
 
 
-def _render(pdf: Path, read: Document, page_num: int, img_path: Path, crop: BBox | None, renderer: Renderer) -> None:
-    """The page, or its ``crop``, rendered by ``renderer`` at :data:`RENDER_DPI` to ``img_path`` (once)."""
-    if img_path.exists():
-        return
+def _render(
+    pdf: Path, read: Document, page_num: int, img_path: Path, crop: BBox | None, renderer: Renderer
+) -> np.ndarray:
+    """The page, or its ``crop``, rendered by ``renderer`` at :data:`RENDER_DPI` to ``img_path``.
+
+    Always rendered and written, a file already there replaced (the render is deterministic, so a rerun writes the
+    same bytes): returns the pixels written -- a PNG is lossless, so they are the file's.
+    """
     page = read.pages[page_num]
     region = crop or BBox(0.0, 0.0, page.width, page.height)
     pixels = read_raster(pdf, page_num + 1, region, dpi=RENDER_DPI, renderer=renderer).pixels
     img_path.parent.mkdir(parents=True, exist_ok=True)
     img_path.write_bytes(png.encode(pixels))
+    return pixels
 
 
 @dataclass(frozen=True)
@@ -116,7 +137,10 @@ def _equations(
     face: tuple[str, float],
     body_sections: list[tuple[str, str]],
     page_section_map: dict[int, int],
+    *,
     unnumbered: Unnumbered,
+    include_hidden: bool,
+    include_in_background_color: bool,
 ) -> list[_Equation]:
     """Every display equation of the paper, numbered or not, in reading order, each with the section that owns it.
 
@@ -128,7 +152,14 @@ def _equations(
     out = []
     for number, page in enumerate(paper.pages):
         if is_full_page_image(read.pages[number]):
-            found = [r for r in regions(read.pages[number], face, unnumbered=unnumbered) if r.kind == 'equation']
+            found = regions(
+                read.pages[number],
+                face,
+                unnumbered=unnumbered,
+                include_hidden=include_hidden,
+                include_in_background_color=include_in_background_color,
+            )
+            found = [r for r in found if r.kind == 'equation']
         else:
             found = equations(page, face, unnumbered=unnumbered)
         for region in found:
@@ -232,13 +263,16 @@ def _after_lead_in(content: str, lead_in: str, start: int) -> int | None:
     return search_from + gap.start() + 1 if gap else search_from + 1
 
 
-def _insert_equations_inline(section_file: Path, found: list[_Equation], placed: set[int], *, cited: bool) -> None:
+def _insert_equations_inline(
+    section_file: Path, found: list[_Equation], placed: set[int], latex: dict[int, str], *, cited: bool
+) -> None:
     """Link each equation of ``found`` not yet ``placed`` where ``section_file`` sets it, in reading order.
 
     Where its number stands as its own mark (:func:`_definition`); else after the paragraph its lead-in sentence ends
     (:func:`_after_lead_in`), with its formula's text and its number -- a display without a number is placed so alone.
     ``cited``: the last resort for a numbered one placed nowhere else, at its first mention ``(N)`` in its own section.
-    An equation placed is added to ``placed``: it is linked once, in one section.
+    An equation placed is added to ``placed``: it is linked once, in one section. Its ``latex`` (by its id), when
+    read, follows its image.
     """
     content = section_file.read_text(encoding='utf-8')
     changed = False
@@ -249,16 +283,16 @@ def _insert_equations_inline(section_file: Path, found: list[_Equation], placed:
         if Path(eq.image).name in content:
             placed.add(id(eq))
             continue
-        link = f'![{eq.alt}](../{eq.image})'
+        link = f'![{eq.alt}](../{eq.image})' + (f'\n\n{latex[id(eq)]}' if id(eq) in latex else '')
         if cited:
             m = re.search(rf'\(\s*{re.escape(eq.number)}\s*\)', content) if eq.number is not None else None
             at, insertion = (m.start(), f'\n\n{link}\n\n') if m else (None, '')
         elif eq.number is not None and (at := _definition(content, eq.number)) is not None:
             insertion = f'\n\n{link}\n\n'
         elif eq.lead_in and (at := _after_lead_in(content, eq.lead_in, start)) is not None:
-            formula = f'\n*{eq.formula}*' if eq.formula else ''
+            text = f'\n*{eq.formula}*' if eq.formula else ''
             number = f'\n({eq.number})' if eq.number is not None else ''
-            insertion = f'\n{link}{formula}{number}\n'
+            insertion = f'\n{link}{text}{number}\n'
         else:
             continue
         if at is None:
@@ -314,6 +348,8 @@ def render_figure_pages(
     body_sections: list[tuple[str, str]],
     *,
     renderer: Renderer = 'pymupdf',
+    include_hidden: bool = False,
+    include_in_background_color: bool = False,
 ) -> tuple[dict[str, str], dict[int, int]]:
     """Render cropped figure images and insert them inline at caption positions.
 
@@ -321,16 +357,19 @@ def render_figure_pages(
 
     A label on a page that is one picture (:func:`is_full_page_image`: a screen capture, a scan) has no drawn
     content to crop by: it is cut out where the page's text locates it (`document_lab.regions`: an OCR layer's
-    caption and the prose around it), and else links the whole page, rendered once as ``page-NN.png`` however many
+    caption and the prose around it), and else links the whole page, rendered once a run as ``page-NN.png`` however many
     such labels the page holds.
 
-    Captions are found, and figures cropped, on the paper without its running heads and feet
+    Captions are found, and figures cropped, on the paper as its default view shows it (`document_lab.ir.Page.shown`;
+    ``include_hidden``, ``include_in_background_color``: what it reads beside) without its running heads and feet
     (`document_lab.layout.without_running`).
 
     Returns (figure_images, page_section_map) where figure_images maps normalized
     figure label → relative image path (for INDEX.md).
     """
-    read = read_pdf(pdf_path)
+    read = read_pdf(pdf_path).shown(
+        include_hidden=include_hidden, include_in_background_color=include_in_background_color
+    )
     paper = layout.without_running(read)
     figure_page_map = build_figure_page_map(paper)
     page_section_map = build_page_section_map(figure_page_map, body_sections, paper)
@@ -355,7 +394,12 @@ def render_figure_pages(
             seen[normalized] = owning
             unique_entries.append((label, normalized, page_num, owning))
 
-    located = _Located(read) if any(is_full_page_image(read.pages[e[2]]) for e in unique_entries) else None
+    located = (
+        _Located(read, include_hidden=include_hidden, include_in_background_color=include_in_background_color)
+        if any(is_full_page_image(read.pages[e[2]]) for e in unique_entries)
+        else None
+    )
+    rendered: set[Path] = set()
     for label, normalized, page_num, owning in unique_entries:
         page = paper.pages[page_num]
         own = f'page-{page_num + 1:02d}-{normalized.lower().replace(" ", "-")}.png'
@@ -366,7 +410,9 @@ def render_figure_pages(
         else:  # nothing locates it: the page itself, once, shared by every such label on it
             crop, img_name = None, f'page-{page_num + 1:02d}.png'
         img_path = out_dir / 'img' / f'sec{owning:02d}' / img_name
-        _render(pdf_path, read, page_num, img_path, crop, renderer)
+        if img_path not in rendered:  # a whole page several labels share is rendered once a run
+            _render(pdf_path, read, page_num, img_path, crop, renderer)
+            rendered.add(img_path)
         figure_images[normalized] = f'img/sec{owning:02d}/{img_name}'
 
     _fix_cross_section_image_refs(out_dir, body_sections, page_section_map)
@@ -388,25 +434,44 @@ def render_equation_images(
     page_section_map: dict[int, int],
     *,
     renderer: Renderer = 'pymupdf',
+    transcribe: Transcribe | None = None,
     unnumbered: Unnumbered = 'strict',
+    include_hidden: bool = False,
+    include_in_background_color: bool = False,
 ) -> dict[str, str]:
     """Render every display equation of the paper, numbered or not (by ``renderer``), and link each in its section.
 
-    ``unnumbered``: how displays without a number are found (`document_lab.regions.Unnumbered`).
+    ``transcribe`` (`document_lab.formula.transcriber`): each rendered crop's LaTeX follows its image as a display
+    block. ``unnumbered``: how displays without a number are found (`document_lab.regions.Unnumbered`).
 
-    The equations are found on the paper without its running heads and feet (`document_lab.layout.without_running`,
-    :func:`_equations`), each cut out with its number when one is printed, and linked once
-    (:func:`_insert_equations_inline`): first where any section sets its number or its lead-in, then a numbered one
-    still unplaced at its first mention in its own section. Returns ``figure_images`` with each equation's image
-    added, under ``Equation 3`` -- one without a number under ``Untitled equation 2, page 3``.
+    The equations are found on the paper as its default view shows it (`document_lab.ir.Page.shown`;
+    ``include_hidden``, ``include_in_background_color``: what it reads beside), without its running heads and feet
+    (`document_lab.layout.without_running`, :func:`_equations`), each cut out with its number when one is printed, and
+    linked once (:func:`_insert_equations_inline`): first where any section sets its number or its lead-in, then a
+    numbered one still unplaced at its first mention in its own section. Returns ``figure_images`` with each
+    equation's image added, under ``Equation 3`` -- one without a number under ``Untitled equation 2, page 3``.
     """
-    read = read_pdf(pdf_path)
+    read = read_pdf(pdf_path).shown(
+        include_hidden=include_hidden, include_in_background_color=include_in_background_color
+    )
     paper, face = layout.without_running(read), layout.body_face(read)
-    found = _equations(read, paper, face, body_sections, page_section_map, unnumbered)
+    found = _equations(
+        read,
+        paper,
+        face,
+        body_sections,
+        page_section_map,
+        unnumbered=unnumbered,
+        include_hidden=include_hidden,
+        include_in_background_color=include_in_background_color,
+    )
+    latex: dict[int, str] = {}
     for eq in found:
-        _render(pdf_path, read, eq.page, out_dir / eq.image, eq.region.bbox, renderer)
+        written = _render(pdf_path, read, eq.page, out_dir / eq.image, eq.region.bbox, renderer)
         key = eq.alt if eq.number is not None else f'{eq.alt}, page {eq.page + 1}'
         figure_images[key] = eq.image
+        if transcribe is not None:
+            latex[id(eq)] = formula.beside(transcribe(written), eq.number)
 
     files = [
         (idx, path)
@@ -415,7 +480,7 @@ def render_equation_images(
     ]
     placed: set[int] = set()
     for _, path in files:
-        _insert_equations_inline(path, found, placed, cited=False)
+        _insert_equations_inline(path, found, placed, latex, cited=False)
     for idx, path in files:
-        _insert_equations_inline(path, [eq for eq in found if eq.owning == idx], placed, cited=True)
+        _insert_equations_inline(path, [eq for eq in found if eq.owning == idx], placed, latex, cited=True)
     return figure_images

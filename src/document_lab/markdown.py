@@ -2,7 +2,17 @@
 
 Lines and their reading order are `document_lab.layout`'s.
 
-- Headings: a line that is a Roman-numbered upper-case heading (``II. METHOD``) or a standalone back-matter word in
+- Headings (:func:`headings`): a document stating an outline (bookmarks) has its sections named by it -- each item is
+  looked for on the page its destination names (or the next, where a section starts at the top of a page), its title
+  matched to a line (or two or three wrapped lines) up to case, punctuation and numbering, the nearest to the place
+  the destination states; a top-level item heads ``##``, a child ``###`` and so on (a lone top-level item holding
+  all others is the title, ``#``; an item without a title names no heading and is reported). The outline is used
+  when every titled item is found on its page and it names at least one of the headings the rules below find (when
+  they find any: an outline of a cover sheet's title and terms of use is no section structure). Then the outline
+  heads sections, beside the rules' title and back matter (an outline often leaves an unnumbered ``References`` or
+  ``Acknowledgments`` out), and the headings the rules would add are reported as ``unstated``; else what does not
+  match is reported and the rules decide. The rules -- the inferred structure, the alternative: a line that is a
+  Roman-numbered upper-case heading (``II. METHOD``) or a standalone back-matter word in
   capitals or title case (``REFERENCES``, ``Acknowledgments``, ``Appendix``, ``Conclusion``) is a section (``##``),
   or a chapter (``#``) when set at least :data:`TITLE_SCALE` times the body as a thesis sets its chapters; else a
   line at least :data:`TITLE_SCALE` times the body size is a title (``#``: a paper bound in after the first opens
@@ -35,21 +45,23 @@ Lines and their reading order are `document_lab.layout`'s.
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Final
+import unicodedata
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Final, Literal
 
 from document_lab import layout
 from document_lab.ir import BBox, Provenance, TextSpan
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
-    from document_lab.ir import Document, Page
+    from document_lab.ir import Document, OutlineItem, Page
 
 
 #: A box of a page and the markdown that stands for the lines inside it.
 type Placed = tuple[BBox, str]
 _HOLDER: Final = '\N{OBJECT REPLACEMENT CHARACTER}'  # the text of the line that holds a placed block's place
-__all__ = ['Placed', 'back_matter', 'page_markdowns', 'table', 'to_markdown']
+__all__ = ['Headings', 'Placed', 'back_matter', 'headings', 'page_markdowns', 'table', 'to_markdown']
 
 #: A gap between lines larger than this many line heights starts a paragraph.
 PARAGRAPH_GAP: Final = 0.6
@@ -85,32 +97,139 @@ _URL: Final = re.compile(r'://|\bwww\.', re.IGNORECASE)
 _TOC_ENTRY: Final = re.compile(r'^(?=.*[A-Za-z]).*?(?:(?:\.\s?){4,}|\u2026{2,}|\u00b7{3,}|_{4,})\s*[\dixvIXV]{1,5}$')
 #: Lines of a page that are contents entries for the page to be a table of contents.
 TOC_LINES: Final = 3
+#: Lines an outline item's title may wrap over.
+TITLE_LINES: Final = 3
+#: A line opening with an outline item's title, then more (a run-in heading), is its heading only this many of its
+#: font sizes from the place the item's destination states.
+RUN_IN_REACH: Final = 3.0
+#: A section number before a title, ignored when titles are matched: ``2``, ``2.1.``, ``IV.``, ``III-A``, ``(a)``.
+_NUMBERING: Final = re.compile(r'^\(?(?:\d+|(?=[ivx])x{0,3}(?:ix|iv|v?i{0,3})|[a-z])(?:[.-](?:\d+|[a-z]))*[.):]?\s+')
 
 
-def to_markdown(doc: Document, *, include_hidden: bool = False) -> str:
+@dataclass(frozen=True, slots=True)
+class Headings:
+    """Which lines head a document's sections, and where that comes from: what :func:`headings` judged."""
+
+    #: ``'outline'``: the document's stated outline, found on its pages; ``'inferred'``: the rules.
+    source: Literal['outline', 'inferred']
+    #: Each page's heading lines, by page: (index of the line in reading order, its markdown heading, the lines its
+    #: text wraps over).
+    marks: tuple[tuple[tuple[int, str, int], ...], ...]
+    #: How many items the document's outline states (0: it states none, or the outline was not asked for).
+    stated: int = 0
+    #: Outline items not found on their page, each as ``'title' (page N)``: why a stated outline was not used.
+    unlocated: tuple[str, ...] = ()
+    #: Headings the rules find that the outline does not name (beside an outline found on its pages).
+    unstated: tuple[str, ...] = ()
+    #: The headings the outline put in the markdown, as written there (without their ``#``).
+    named: tuple[str, ...] = ()
+    #: Outline items stating no title, each as ``page N``: they name no heading.
+    untitled: tuple[str, ...] = ()
+    #: How many of the rules' headings the outline names (beside an outline found on its pages).
+    shared: int = 0
+
+    @property
+    def written(self) -> tuple[tuple[int, str], ...]:
+        """Each heading as the markdown writes it, ``(page, heading line)`` in order.
+
+        A title (``#``) set over consecutive lines is one heading, its lines' text joined, as :func:`page_markdowns`
+        writes it.
+        """
+        out: list[tuple[int, str]] = []
+        for number, marks in enumerate(self.marks, start=1):
+            end = -1  # where the title being written ends, in line indexes
+            for i, heading, span in marks:
+                if heading.startswith('# ') and i == end and out[-1][1].startswith('# '):
+                    out[-1] = (number, f'{out[-1][1]} {heading[2:]}')
+                else:
+                    out.append((number, heading))
+                end = i + span
+        return tuple(out)
+
+    @property
+    def disagreements(self) -> tuple[str, ...]:
+        """Where the stated outline and the inferred structure differ, in words; empty when they agree or no outline."""
+        return (
+            *(f'outline item {u} is not found on its page' for u in self.unlocated),
+            *(f'an outline item ({u}) states no title: it names no heading' for u in self.untitled),
+            *(f'heading {u!r} is found by the rules but named by no outline item' for u in self.unstated),
+        )
+
+
+def headings(
+    doc: Document, *, outline: bool = True, include_hidden: bool = False, include_in_background_color: bool = False
+) -> Headings:
+    """Which lines of ``doc`` head its sections: its stated outline, else the rules (the module says how).
+
+    ``outline``: the outline is used when the document states one that matches its pages (the module says when);
+    False keeps to the rules. ``include_hidden``, ``include_in_background_color``: as for :func:`to_markdown`.
+    """
+    shown = doc.shown(include_hidden=include_hidden, include_in_background_color=include_in_background_color)
+    weighted = any(span.bold for span in shown.spans())
+    pages = [layout.ordered(layout.lines(page, weighted=weighted)) for page in shown.pages]
+    inferred = _inferred(shown, pages, weighted=weighted)
+    items = list(_flatten(doc.outline)) if outline else []
+    if not items:
+        return Headings('inferred', inferred)
+    located, unlocated, untitled = _locate(doc.outline, items, pages)
+    if unlocated:
+        return Headings('inferred', inferred, len(items), tuple(unlocated), untitled=tuple(untitled))
+    covered = {(n, i + k) for (n, i), (_, span) in located.items() for k in range(span)}
+    rules = {(n, i): h for n, page in enumerate(inferred, start=1) for i, h, _ in page if not h.startswith('# ')}
+    shared = len(rules.keys() & covered)
+    unstated = tuple(h.lstrip('#').strip() for key, h in sorted(rules.items()) if key not in covered)
+    if rules and not shared:
+        return Headings('inferred', inferred, len(items), (), unstated, untitled=tuple(untitled))
+    marks = []
+    named = []
+    for number, (lines, page_rules) in enumerate(zip(pages, inferred, strict=True), start=1):
+        page = [
+            (i, h, span)
+            for i, h, span in page_rules
+            if (h.startswith('# ') or back_matter(h.lstrip('#').strip())) and (number, i) not in covered
+        ]
+        for (n, i), (level, span) in located.items():
+            if n == number:
+                text = ' '.join(line.text for line in lines[i : i + span])
+                page.append((i, f'{"#" * level} {text}', span))
+                named.append(text)
+        marks.append(tuple(sorted(page)))  # the rules' title and back matter kept: an outline rarely names them
+    return Headings('outline', tuple(marks), len(items), (), unstated, tuple(named), tuple(untitled), shared)
+
+
+def to_markdown(
+    doc: Document,
+    *,
+    include_hidden: bool = False,
+    include_in_background_color: bool = False,
+    sections: Headings | None = None,
+) -> str:
     """The document as markdown, page after page: a paragraph a page break cut is joined again.
 
-    ``include_hidden``: the text hidden layers draw is written too (see `document_lab.ir`).
+    ``include_hidden``: the text hidden layers draw is written too; ``include_in_background_color``: the text filled
+    in the color under it too (see `document_lab.ir`). ``sections``: which lines head sections, as :func:`headings`
+    judged them (None: judged here, a stated outline first).
     """
-    return (
-        '\n\n'.join(_rejoin([block for page in _blocks(doc.shown(include_hidden=include_hidden)) for block in page]))
-        + '\n'
-    )
+    blocks = _blocks(doc, include_hidden, include_in_background_color, sections)
+    return '\n\n'.join(_rejoin([block for page in blocks for block in page])) + '\n'
 
 
 def page_markdowns(
-    doc: Document, placed: Sequence[Sequence[Placed]] = (), *, include_hidden: bool = False
+    doc: Document,
+    placed: Sequence[Sequence[Placed]] = (),
+    *,
+    include_hidden: bool = False,
+    include_in_background_color: bool = False,
+    sections: Headings | None = None,
 ) -> list[str]:
     """Each page's own markdown, in order (empty for a page without text).
 
     Body size and title are judged over the whole document; nothing is joined across a page break: a page stands alone.
-    ``placed``: each page's placed blocks (none for a page past its end). ``include_hidden``: as for
-    :func:`to_markdown`.
+    ``placed``: each page's placed blocks (none for a page past its end). ``include_hidden``,
+    ``include_in_background_color`` and ``sections``: as for :func:`to_markdown`.
     """
-    return [
-        '\n\n'.join(_rejoin(page)) + '\n' if page else ''
-        for page in _blocks(doc.shown(include_hidden=include_hidden), placed)
-    ]
+    blocks = _blocks(doc, include_hidden, include_in_background_color, sections, placed)
+    return ['\n\n'.join(_rejoin(page)) + '\n' if page else '' for page in blocks]
 
 
 def table(rows: Sequence[Sequence[str]], boxes: Sequence[Sequence[BBox | None]] | None = None) -> str:
@@ -135,27 +254,129 @@ def table(rows: Sequence[Sequence[str]], boxes: Sequence[Sequence[BBox | None]] 
     return '\n'.join([lines[0], '|' + ' --- |' * width, *lines[1:]])
 
 
-def _blocks(doc: Document, placed: Sequence[Sequence[Placed]] = ()) -> list[list[str]]:
-    weighted = any(span.bold for span in doc.spans())
+def _blocks(
+    doc: Document,
+    include_hidden: bool,
+    include_in_background_color: bool,
+    sections: Headings | None,
+    placed: Sequence[Sequence[Placed]] = (),
+) -> list[list[str]]:
+    shown = doc.shown(include_hidden=include_hidden, include_in_background_color=include_in_background_color)
+    sections = sections or headings(
+        doc, include_hidden=include_hidden, include_in_background_color=include_in_background_color
+    )
+    weighted = any(span.bold for span in shown.spans())
+    inferred = sections.source == 'inferred'
+    return [
+        _page_blocks(page, marks, placed[i] if i < len(placed) else (), weighted=weighted, inferred=inferred)
+        for i, (page, marks) in enumerate(zip(shown.pages, sections.marks, strict=True))
+    ]
+
+
+def _inferred(doc: Document, pages: list[list[layout.Line]], *, weighted: bool) -> tuple:
+    """Each page's heading lines by the rules, page after page: (index, markdown heading, 1) each.
+
+    ``pages``: each page's lines in reading order. A contents page has none. A numbered line heads by its face only
+    where its parent number heads before it (`_continues`), so the pages are judged in order.
+    """
     body = layout.body_size(doc)
     face = layout.body_face(doc)
     headed: set[str] = set()  # the clause numbers headed so far, page after page
-    first = layout.lines(doc.pages[0], weighted=weighted) if doc.pages else []
+    first = pages[0] if pages else []
     largest = max((ln.size for ln in first), default=0.0)
     at_largest = sum(ln.size >= largest for ln in first)
     title = largest if largest >= PAGE_TITLE_SCALE * body and at_largest <= PAGE_TITLE_LINES else None
-    return [
-        _page_blocks(
-            page,
-            body,
-            title if i == 0 else None,
-            placed[i] if i < len(placed) else (),
-            weighted=weighted,
-            face=face,
-            headed=headed,
-        )
-        for i, page in enumerate(doc.pages)
-    ]
+    out = []
+    for n, lines in enumerate(pages):
+        marks = []
+        if sum(bool(_TOC_ENTRY.match(line.text)) for line in lines) < TOC_LINES:
+            for i, line in enumerate(lines):
+                heading = _heading(line, body, title if n == 0 else None, weighted=weighted, face=face, headed=headed)
+                if heading and (number := _NUMBERED.match(line.text)):
+                    headed.add(number.group(1))
+                if heading:
+                    marks.append((i, heading, 1))
+        out.append(tuple(marks))
+    return tuple(out)
+
+
+def _flatten(items: tuple[OutlineItem, ...], depth: int = 0) -> Iterator[tuple[int, OutlineItem]]:
+    for item in items:
+        yield depth, item
+        yield from _flatten(item.children, depth + 1)
+
+
+def _normal(text: str) -> str:
+    """``text`` as titles are matched: folded (compatibility, case), its section numbers dropped, letters and digits.
+
+    Numbers are dropped one after another (``4.3. A Comparison`` reads as ``A Comparison`` reads), never to nothing.
+    """
+    folded = unicodedata.normalize('NFKC', text).casefold().strip()
+    while (number := _NUMBERING.match(folded)) and folded[number.end() :].strip():
+        folded = folded[number.end() :]
+    return ''.join(c for c in folded if c.isalnum())
+
+
+def _locate(
+    outline: tuple[OutlineItem, ...], items: list[tuple[int, OutlineItem]], pages: list[list[layout.Line]]
+) -> tuple[dict[tuple[int, int], tuple[int, int]], list[str], list[str]]:
+    """Where each outline item heads, the items not found on their page, and the items without a title.
+
+    Where: ``{(page, line index): (heading level, lines its title wraps over)}``. Unfound: each as
+    ``'title' (page N)``; untitled: each as ``page N``.
+    """
+    shift = 1 if len(outline) == 1 and outline[0].children else 2  # a lone top-level item is the title
+    located: dict[tuple[int, int], tuple[int, int]] = {}
+    unlocated = []
+    untitled = []
+    for depth, item in items:
+        dest = item.destination
+        where = f'page {dest.page}' if dest is not None else 'no destination in this document'
+        title = _normal(item.title or '')
+        if not title:
+            untitled.append(where)
+            continue
+        found = _find(title, dest.page, dest.y, pages, located) if dest is not None else None
+        if found is None:
+            unlocated.append(f'{item.title!r} ({where})')
+            continue
+        number, i, span = found
+        located[number, i] = (depth + shift, span)
+    return located, unlocated, untitled
+
+
+def _find(
+    title: str, page: int, y: float | None, pages: list[list[layout.Line]], taken: dict
+) -> tuple[int, int, int] | None:
+    """The page, first line and line count of the lines reading ``title`` (normalized), not yet ``taken``.
+
+    Looked for on ``page``, else the next; the nearest to ``y`` (on ``page``) when several read it. A line opening
+    with the title (a run-in heading) counts only within :data:`RUN_IN_REACH` font sizes of ``y``.
+    """
+    for number in (page, page + 1):
+        if not 1 <= number <= len(pages):
+            continue
+        lines = pages[number - 1]
+        near = y if number == page else None
+        exact, run_in = [], []
+        for i in range(len(lines)):
+            if (number, i) in taken:
+                continue
+            for span in range(1, TITLE_LINES + 1):
+                text = _normal(' '.join(line.text for line in lines[i : i + span]))
+                if text == title:
+                    exact.append((i, span))
+                    break
+                close = near is not None and abs(lines[i].y0 - near) <= RUN_IN_REACH * lines[i].size
+                if span == 1 and close and text.startswith(title):
+                    run_in.append((i, 1))
+                if not title.startswith(text) or i + span >= len(lines):
+                    break
+        for found in (exact, run_in):
+            if found:
+                i, span = min(found, key=lambda f: 0.0 if near is None else abs(lines[f[0]].y0 - near))
+                return number, i, span
+    return None
 
 
 def back_matter(text: str) -> bool:
@@ -254,16 +475,13 @@ def _continues(number: str, line: layout.Line, face: tuple[str, float], headed: 
 
 
 def _page_blocks(
-    page: Page,
-    body: float,
-    title_size: float | None,
-    placed: Sequence[Placed] = (),
-    *,
-    weighted: bool,
-    face: tuple[str, float],
-    headed: set[str],
+    page: Page, marks: tuple, placed: Sequence[Placed] = (), *, weighted: bool, inferred: bool
 ) -> list[str]:
-    """The page's blocks; ``headed`` gains the clause number of each numbered heading it states."""
+    """The page's blocks: its ``marks`` (index, heading, lines it wraps over) heading, its other lines in paragraphs.
+
+    The marks index the page's lines in reading order; a placed block takes the lines inside its box out of them. An
+    upper-case line under an ``inferred`` heading continues it (the rules judge a heading line by line).
+    """
     blocks: list[str] = []
     paragraph: list[str] = []
     previous: layout.Line | None = None
@@ -282,16 +500,18 @@ def _page_blocks(
         title.clear()
         beside.clear()
 
-    found = layout.lines(page, weighted=weighted)
+    found = layout.ordered(layout.lines(page, weighted=weighted))
+    heads = {id(found[i]): heading for i, heading, _ in marks}
+    wrapped = {id(found[i + k]) for i, _, span in marks for k in range(1, span)}  # a heading's wrapped lines
     held = _with_placed(page, found, placed)
     lines = layout.ordered(found)
-    contents = sum(bool(_TOC_ENTRY.match(line.text)) for line in lines) >= TOC_LINES
     for line in lines:
-        heading = None if contents else _heading(line, body, title_size, weighted=weighted, face=face, headed=headed)
-        if heading and (number := _NUMBERED.match(line.text)):
-            headed.add(number.group(1))
+        if id(line) in wrapped:
+            previous = line
+            continue
+        heading = heads.get(id(line))
         if heading and heading.startswith('# '):
-            title.append(line.text)  # a title wraps over several lines
+            title.append(heading[2:])  # a title wraps over several lines
             previous = line
             continue
         if id(line) in held:
@@ -309,7 +529,7 @@ def _page_blocks(
             blocks.append(heading)
             previous = line
             continue
-        if _continues_heading(blocks, previous, line):
+        if inferred and _continues_heading(blocks, previous, line):
             blocks[-1] = f'{blocks[-1]} {line.text}'
             previous = line
             continue

@@ -593,8 +593,8 @@ nvtx = [
 
 [[package]]
 name = "dev-lab"
-version = "0.0.1.dev5260+g7956b0968"
-source = { git = "https://github.com/DawnEver/dev-lab.git#7956b0968797b563400ef4da9892384100602f97" }
+version = "0.0.1.dev5270+g7649c90fd"
+source = { git = "https://github.com/DawnEver/dev-lab.git#7649c90fdc4400cd64f538ecec083714d51a313b" }
 dependencies = [
     { name = "cryptography" },
     { name = "lab-commons", extra = ["io", "paths", "structured", "units"] },
@@ -660,6 +660,12 @@ dev = [
     { name = "python-xlib", marker = "sys_platform == 'linux'" },
     { name = "ruff" },
 ]
+formula = [
+    { name = "pillow" },
+    { name = "torch", version = "2.15.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'win32'" },
+    { name = "torch", version = "2.15.0+cu132", source = { registry = "https://download.pytorch.org/whl/cu132" }, marker = "sys_platform == 'win32'" },
+    { name = "transformers" },
+]
 gpu = [
     { name = "marker-pdf" },
     { name = "six" },
@@ -678,17 +684,21 @@ requires-dist = [
     { name = "marker-pdf", marker = "extra == 'gpu'", specifier = "<2.2" },
     { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.7" },
     { name = "numpy" },
+    { name = "pillow", marker = "extra == 'formula'" },
     { name = "pymupdf", specifier = "<2" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "python-xlib", marker = "sys_platform == 'linux' and extra == 'capture'" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "six", marker = "extra == 'gpu'" },
+    { name = "torch", marker = "sys_platform == 'win32' and extra == 'formula'", index = "https://download.pytorch.org/whl/cu132" },
     { name = "torch", marker = "sys_platform == 'win32' and extra == 'gpu'", index = "https://download.pytorch.org/whl/cu132" },
+    { name = "torch", marker = "sys_platform != 'win32' and extra == 'formula'" },
     { name = "torch", marker = "sys_platform != 'win32' and extra == 'gpu'" },
     { name = "torchvision", marker = "sys_platform == 'win32' and extra == 'gpu'", index = "https://download.pytorch.org/whl/cu132" },
     { name = "torchvision", marker = "sys_platform != 'win32' and extra == 'gpu'" },
+    { name = "transformers", marker = "extra == 'formula'" },
 ]
-provides-extras = ["ai", "capture", "dev", "gpu"]
+provides-extras = ["ai", "capture", "dev", "formula", "gpu"]
 
 [[package]]
 name = "execnet"
@@ -1121,8 +1131,8 @@ wheels = [
 
 [[package]]
 name = "lab-commons"
-version = "0.3.1.dev1807+gd6ecec1a1"
-source = { git = "https://github.com/DawnEver/lab-commons.git#d6ecec1a1f96e5c09869b9286e4e5a4ce7aae935" }
+version = "0.3.1.dev1812+gfb66302ed"
+source = { git = "https://github.com/DawnEver/lab-commons.git#fb66302ed6d6f23aef8fcaf7b158ff1f12a2cf15" }
 
 [package.optional-dependencies]
 io = [

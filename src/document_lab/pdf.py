@@ -1,10 +1,13 @@
 """A PDF read into the IR by document-lab's own reader (``document_lab._pdf``, Rust).
 
-What a page draws comes back as text spans, vector paths and image figures, each with its box in page space. Pixels
-are the reader's only as an image's own samples (no codec is decoded): :func:`read_raster` takes a region that is
-one image whole from them, and draws any other with a renderer -- PyMuPDF (the reference, the default) or
-document-lab's own (``renderer='own'``: the ``render`` crate, drawing from this reader's interpreter; it draws no
-text until its stage 2, so it refuses a region holding text -- D37 of task document-lab-pdf-reader).
+What a page draws comes back as text spans, vector paths and image figures, each with its box in page space, and its
+links beside them; what the document states beside its pages -- outline, page labels, metadata, form fields, embedded
+files -- on the :class:`Document`. Pixels are the reader's only as an image's own samples (no codec is decoded):
+:func:`read_raster` takes a region that is one image whole from them, and draws any other with a renderer -- PyMuPDF
+(the reference, the default) or document-lab's own (``renderer='own'``: the ``render`` crate, drawing from this
+reader's interpreter, text from its fonts' outlines; it refuses a region holding what it does not draw yet, by
+name -- D37 of task document-lab-pdf-reader; what text a region shows is `document_lab.ir.Page.shown`'s);
+an embedded file's bytes are :func:`read_attachment`'s.
 
 What the reader refuses raises a :class:`Refused` of its kind -- :class:`NotPdf`, :class:`Locked` (the password
 opens no access), :class:`Unsupported`, :class:`Malformed` -- each a ``ValueError``.
@@ -12,6 +15,7 @@ opens no access), :class:`Unsupported`, :class:`Malformed` -- each a ``ValueErro
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from collections.abc import Callable, Sequence
 from functools import partial
@@ -23,7 +27,27 @@ import pymupdf
 
 from document_lab import _pdf
 from document_lab._pdf import Locked, Malformed, NotPdf, Refused, Unsupported
-from document_lab.ir import BBox, Document, Figure, Page, Provenance, Raster, TextSpan, VectorPath, file_uri
+from document_lab.ir import (
+    Action,
+    Attachment,
+    BBox,
+    Destination,
+    Document,
+    Field,
+    Figure,
+    Info,
+    Link,
+    Metadata,
+    OutlineItem,
+    Page,
+    Provenance,
+    Raster,
+    TextSpan,
+    VectorPath,
+    Widget,
+    Xmp,
+    file_uri,
+)
 
 __all__ = [
     'CURVE_SAMPLES',
@@ -33,6 +57,7 @@ __all__ = [
     'Refused',
     'Renderer',
     'Unsupported',
+    'read_attachment',
     'read_pdf',
     'read_raster',
 ]
@@ -49,13 +74,12 @@ CURVE_SAMPLES: Final = 8
 VECTOR_DPI: Final = 300.0
 #: How far (in pixels) a placed image's edges and sides may miss a region's and the region still be the image whole.
 WHOLE_IMAGE_SLACK: Final = 0.25
-#: Where a span row and an image row (``Reader.page``) hold their layer.
-_SPAN_LAYER: Final = 9
+#: Where an image row (``Reader.page``) holds its layer.
 _IMAGE_LAYER: Final = 6
 #: The text rendering mode that neither fills nor strokes (an OCR layer): text that shows nothing.
 INVISIBLE_TEXT: Final = 3
 
-#: What draws a region: PyMuPDF, or document-lab's own renderer (no text until its stage 2).
+#: What draws a region: PyMuPDF, or document-lab's own renderer.
 Renderer = Literal['pymupdf', 'own']
 
 
@@ -80,7 +104,8 @@ def read_pdf(
     ``annotations``: each page's annotations' appearances read too, after its content, each value citing its
     annotation's subtype -- off by default, as a page's text is its content's (PyMuPDF's too). Optional content the
     file's default view hides, and what the colorant ``None`` paints, are read either way, each value flagged
-    ``hidden`` or ``inkless`` for the caller to keep or drop (`document_lab.ir`).
+    ``hidden`` or ``inkless`` for the caller to keep or drop (`document_lab.ir`). Links, the outline and the rest of
+    what the document states beside its pages are read either way: they are data, not ink.
 
     Raises:
         ValueError: both ``flatness`` and ``curve_samples`` are given, or one is not above 0.
@@ -105,7 +130,20 @@ def read_pdf(
     reader = _pdf.open(path, password.encode())
     sha, uri = reader.sha256, file_uri(path.resolve())
     reading = {**flattening, 'annotations': annotations}
-    return Document(sha256=sha, uri=uri, pages=_Pages(reader, sha, uri, reading), repairs=_Repairs(reader))
+    outline, labels, metadata, fields, attachments, warnings = reader.document()
+    here = Provenance(sha, uri)
+    return Document(
+        sha256=sha,
+        uri=uri,
+        pages=_Pages(reader, sha, uri, reading),
+        repairs=_Repairs(reader),
+        outline=_outline(outline),
+        page_labels=() if labels is None else tuple(labels),
+        metadata=_metadata(*metadata),
+        fields=tuple(_field(row, here) for row in fields),
+        attachments=tuple(_attachment(row, here) for row in attachments),
+        warnings=tuple(warnings),
+    )
 
 
 class _Repairs(Sequence[str]):
@@ -174,6 +212,7 @@ def _page(
     """Page ``number`` read as ``reading`` says: its curves' flattening, and whether its annotations are drawn."""
     spans, paths, images, warnings = reader.page(number, **reading)
     cite = partial(Provenance, here.sha256, here.uri, number)  # a box on this page: a Provenance made directly
+    links, link_warnings = reader.links(number)
     return Page(
         number=number,
         width=size[0],
@@ -184,12 +223,98 @@ def _page(
             Figure(cite(bbox=box), w, h, image, hidden=hidden, inkless=inkless, annotation=annotation)
             for box, w, h, image, _, _, (hidden, inkless, annotation) in images
         ),
-        warnings=tuple(warnings),
+        links=tuple(
+            Link(here.at(bbox=BBox(*box)), _destination(destination), _action(action))
+            for box, destination, action in links
+        ),
+        warnings=(*warnings, *link_warnings),
     )
 
 
+def _destination(row: tuple | None) -> Destination | None:
+    if row is None:
+        return None
+    page, fit, x, y, zoom, box = row
+    return Destination(page, fit, x, y, zoom, None if box is None else BBox(*box))
+
+
+def _action(row: tuple | None) -> Action | None:
+    if row is None:
+        return None
+    kind, destination, uri, file, name = row
+    return Action(kind, _destination(destination), uri, file, name)
+
+
+def _outline(rows: list[tuple]) -> tuple[OutlineItem, ...]:
+    """The outline tree from its items flattened in document order, each with its depth."""
+
+    def level(at: int, depth: int) -> tuple[tuple[OutlineItem, ...], int]:
+        items = []
+        while at < len(rows) and rows[at][0] == depth:
+            _, title, destination, action = rows[at]
+            children, at = level(at + 1, depth + 1)
+            items.append(OutlineItem(title, _destination(destination), _action(action), children))
+        return tuple(items), at
+
+    return level(0, 0)[0]
+
+
+#: The ``/Info`` keys :class:`Info` names, by its field.
+_INFO_KEYS: Final = {
+    'Title': 'title',
+    'Author': 'author',
+    'Subject': 'subject',
+    'Keywords': 'keywords',
+    'Creator': 'creator',
+    'Producer': 'producer',
+    'CreationDate': 'created',
+    'ModDate': 'modified',
+}
+
+
+def _metadata(info: list[tuple[str, str]] | None, xmp: tuple | None, newer: str | None) -> Metadata:
+    named = None
+    if info is not None:
+        known = {_INFO_KEYS[k]: v for k, v in info if k in _INFO_KEYS}
+        named = Info(**known, other=tuple((k, v) for k, v in info if k not in _INFO_KEYS))
+    packet = None
+    if xmp is not None:
+        title, creators, description, created, modified, metadata_date, tool, producer, keywords, text = xmp
+        packet = Xmp(
+            text, title, tuple(creators), description, created, modified, metadata_date, tool, producer, keywords
+        )
+    return Metadata(named, packet, newer)
+
+
+def _value(value: str | list[str] | None) -> str | tuple[str, ...] | None:
+    return tuple(value) if isinstance(value, list) else value
+
+
+def _field(row: tuple, here: Provenance) -> Field:
+    name, kind, flags, value, default, options, widgets = row
+    return Field(
+        name,
+        kind,
+        flags,
+        _value(value),
+        _value(default),
+        tuple(options),
+        tuple(
+            Widget(dataclasses.replace(here, page=page, bbox=None if box is None else BBox(*box)), state, export)
+            for page, box, state, export in widgets
+        ),
+    )
+
+
+def _attachment(row: tuple, here: Provenance) -> Attachment:
+    key, name, description, mime, size, created, modified, page, obj = row
+    return Attachment(dataclasses.replace(here, page=page), obj, key, name, description, mime, size, created, modified)
+
+
 def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
-    text, font, size, bold, box, mode, unspaced, vertical, direction, (hidden, _, annotation), fill = row
+    text, font, size, bold, box, mode, unspaced, vertical, direction, layer, paint, continues_run = row
+    hidden, _, annotation = layer
+    fill, in_background_color = paint
     return TextSpan(
         text,
         size,
@@ -203,6 +328,8 @@ def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
         hidden=hidden,
         annotation=annotation,
         fill=None if fill is None else tuple(fill),
+        continues_run=continues_run,
+        in_background_color=in_background_color,
     )
 
 
@@ -261,6 +388,21 @@ def _paths(columns: tuple, cite: Callable[..., Provenance]) -> tuple[VectorPath,
     return tuple(out)
 
 
+def read_attachment(path: Path | str, attachment: Attachment, *, password: str = '') -> bytes:
+    """The bytes of ``attachment``, embedded in the PDF at ``path`` (opened with ``password``), every filter undone.
+
+    Raises:
+        ValueError: ``path`` is not the file ``attachment`` was read from (its content hash differs).
+
+    """
+    reader = _pdf.open(Path(path), password.encode())
+    if reader.sha256 != attachment.provenance.sha256:
+        msg = f'{path}: not the file the attachment was read from (sha256 {reader.sha256}, the attachment cites '
+        msg += f'{attachment.provenance.sha256})'
+        raise ValueError(msg)
+    return bytes(reader.attachment(attachment.object))
+
+
 def read_raster(
     path: Path | str,
     page: int,
@@ -280,7 +422,8 @@ def read_raster(
     drawn by ``renderer``: PyMuPDF, or the own renderer (:func:`_drawn`).
 
     Raises:
-        Unsupported: ``renderer='own'`` and the region holds what it does not draw yet (text, a shading, ...).
+        Unsupported: ``renderer='own'`` and the region holds what it does not draw yet (a shading, a glyph of a font
+            it has no program for, ...).
 
     """
     if renderer not in ('pymupdf', 'own'):
@@ -289,17 +432,20 @@ def read_raster(
     path = Path(path)
     data = path.read_bytes()  # rendered and cited alike: the pixels are those of the bytes hashed
     reader = _pdf.open(data, password.encode())
-    spans, paths, images, _ = reader.page(page, annotations=True, curve_samples=1)
-    spans = [row for row in spans if not row[_SPAN_LAYER][0]]  # text is text whatever its color: hidden only
+    rows, paths, images, _ = reader.page(page, annotations=True, curve_samples=1)
+    here = Provenance(reader.sha256, file_uri(path.resolve()), page=page, bbox=bbox)
+    _, width, height = reader.pages[page - 1]
+    cite = partial(Provenance, here.sha256, here.uri, page)
+    # The text the page shows (`Page.shown`): what draws the region without it draws the same pixels.
+    spans = Page(page, width, height, spans=tuple(_span(row, cite) for row in rows)).shown().spans
     under = [row for row in images if not any(row[_IMAGE_LAYER][:2]) and _meets(row[0], bbox)]
     if dpi is None:
         dpi = max(filter(None, map(_native, under)), default=VECTOR_DPI)
     pixels = _samples(reader, under, bbox, dpi) if _alone(spans, paths, bbox) else None
     if pixels is None and renderer == 'own':
-        pixels = _drawn(reader, page, bbox, dpi, spans)
+        pixels = _drawn(reader, page, bbox, dpi)
     if pixels is None:
         pixels = _rendered(data, page, bbox, dpi, password)
-    here = Provenance(reader.sha256, file_uri(path.resolve()), page=page, bbox=bbox)
     return Raster(pixels, here)
 
 
@@ -314,8 +460,8 @@ def _native(image: tuple) -> float:
     return 72 * max(width / across, height / down) if across and down else 0.0
 
 
-def _alone(spans: list, paths: tuple, bbox: BBox) -> bool:
-    """Whether no path that shows and no visible text (an OCR layer is invisible) is drawn on ``bbox``.
+def _alone(spans: Sequence[TextSpan], paths: tuple, bbox: BBox) -> bool:
+    """Whether no path that shows and none of the visible text of ``spans`` (an OCR layer is not) is drawn on ``bbox``.
 
     ``paths`` are the reader's columns (``PathColumns`` in ``crates/pybind``): each subpath's box, its stroke's
     width and its layer its painted path's. A path a hidden layer draws, or the colorant ``None`` paints, does not
@@ -335,22 +481,18 @@ def _alone(spans: list, paths: tuple, bbox: BBox) -> bool:
     return not _texts(spans, bbox)
 
 
-def _texts(spans: list, bbox: BBox) -> int:
-    """How many of ``spans`` (none hidden) are visible text (an OCR layer is invisible) drawn on ``bbox``."""
-    return sum(mode != INVISIBLE_TEXT and _meets(box, bbox) for _, _, _, _, box, mode, *_ in spans)
+def _texts(spans: Sequence[TextSpan], bbox: BBox) -> int:
+    """How many of ``spans`` (the page's shown ones) are visible text (an OCR layer is not) drawn on ``bbox``."""
+    return sum(
+        s.render_mode != INVISIBLE_TEXT and s.provenance.bbox is not None and _meets(s.provenance.bbox, bbox)
+        for s in spans
+    )
 
 
-def _drawn(reader: _pdf.Reader, page: int, bbox: BBox, dpi: float, spans: list) -> np.ndarray:
+def _drawn(reader: _pdf.Reader, page: int, bbox: BBox, dpi: float) -> np.ndarray:
     """``bbox`` drawn by the own renderer, refusing a region holding what it does not draw yet, by name and count."""
-    texts = _texts(spans, bbox)
-    if texts:
-        msg = (
-            f'page {page}: the own renderer draws no text until its stage 2, and the region holds {texts} span(s) of '
-            "it; render it with renderer='pymupdf'"
-        )
-        raise Unsupported(msg)
     width, height, channels, pixels, undrawn = reader.render(
-        page, tuple(bbox), dpi / 72, text=False, annotations=True, alpha=False
+        page, tuple(bbox), dpi / 72, text=True, annotations=True, alpha=False
     )
     if undrawn:
         named = ', '.join(f'{what} x{count}' for what, count in undrawn)

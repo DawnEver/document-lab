@@ -234,3 +234,223 @@ fn an_accent_beside_or_far_above_a_letter_stays_an_accent() {
         ["\u{B4}", "u"]
     );
 }
+
+/// Each span's text and whether it continues the run of the span before it.
+fn runs(content: &str) -> Vec<(String, bool)> {
+    page_spans(content)
+        .into_iter()
+        .map(|s| (s.text, s.continues_run))
+        .collect()
+}
+
+#[test]
+fn a_piece_a_fill_change_splits_off_continues_the_run_before_it() {
+    let pieces = |a: &str, b: &str, c: &str| {
+        vec![
+            (a.to_string(), false),
+            (b.to_string(), true),
+            (c.to_string(), true),
+        ]
+    };
+    assert_eq!(
+        runs("BT /F1 10 Tf 10 50 Td (one) Tj 1 0 0 rg (two) Tj 0 g (three) Tj ET"),
+        pieces("one", "two", "three")
+    );
+    // A blank piece in a fill of its own is left out; the run goes on through it.
+    assert_eq!(
+        runs("BT /F1 10 Tf 10 50 Td (one) Tj 1 0 0 rg ( ) Tj 0 0 1 rg (two) Tj ET"),
+        [("one".to_string(), false), ("two".to_string(), true)]
+    );
+}
+
+#[test]
+fn a_fill_change_with_another_break_starts_a_run() {
+    // The planted wrong truths: a fill change together with a font change, a new line, a far jump, or a blank
+    // piece set apart before the next.
+    for content in [
+        "BT /F1 10 Tf 10 50 Td (one) Tj /F2 10 Tf 1 0 0 rg (two) Tj ET",
+        "BT /F1 10 Tf 10 50 Td (one) Tj 1 0 0 rg 0 -12 Td (two) Tj ET",
+        "BT /F1 10 Tf 10 50 Td (one) Tj 1 0 0 rg 100 0 Td (two) Tj ET",
+        "BT /F1 10 Tf 10 50 Td (one) Tj 1 0 0 rg 100 0 Td ( ) Tj 0 0 1 rg (two) Tj ET",
+    ] {
+        assert_eq!(
+            runs(content),
+            [("one".to_string(), false), ("two".to_string(), false)],
+            "{content}"
+        );
+    }
+}
+
+/// Each span's text and whether it is filled in the color painted under it.
+fn unseen(content: &str) -> Vec<(String, bool)> {
+    page_spans(content)
+        .into_iter()
+        .map(|s| (s.text, s.in_background_color))
+        .collect()
+}
+
+#[test]
+fn text_filled_in_the_color_under_it_shows_nothing() {
+    let one = |text: &str, unseen: bool| vec![(text.to_string(), unseen)];
+    // White on the white page.
+    assert_eq!(
+        unseen("BT 1 g /F1 10 Tf 10 50 Td (white) Tj ET"),
+        one("white", true)
+    );
+    // White on a black box: the visible control.
+    assert_eq!(
+        unseen("0 g 0 0 200 100 re f BT 1 g /F1 10 Tf 10 50 Td (white) Tj ET"),
+        one("white", false)
+    );
+    // Black on a black box closed twice (`re h`), its color stated in another space: compared as sRGB.
+    assert_eq!(
+        unseen("0 0 0 rg 0 0 200 100 re h f BT 0 g /F1 10 Tf 10 50 Td (black) Tj ET"),
+        one("black", true)
+    );
+    // Black on the white page: text as it is mostly set.
+    assert_eq!(
+        unseen("BT /F1 10 Tf 10 50 Td (black) Tj ET"),
+        one("black", false)
+    );
+}
+
+#[test]
+fn text_shows_where_anything_under_it_is_another_color() {
+    let shown = |resources: &str, content: &str| {
+        let file = File::open(
+            common::one_page(resources, content, &[HELVETICA, BOLD]),
+            b"",
+        )
+        .unwrap();
+        let page = file.pages().unwrap().remove(0);
+        let found = spans(&file.interpret(&page, false).unwrap().events);
+        assert!(
+            !found.is_empty() && found.iter().all(|s| !s.in_background_color),
+            "{content}"
+        );
+    };
+    // Black text half on a black box: the rest is on the white page.
+    shown(
+        FONTS,
+        "0 g 0 0 20 100 re f BT /F1 10 Tf 10 50 Td (black) Tj ET",
+    );
+    // White text on a white box drawn over half a black one.
+    shown(
+        FONTS,
+        "0 g 0 0 20 100 re f 1 g 15 0 185 100 re f BT 1 g /F1 10 Tf 10 50 Td (white) Tj ET",
+    );
+    // Black text on a white glyph on a black box (a caution sign's `!` on its triangle).
+    shown(
+        FONTS,
+        "0 g 0 0 200 100 re f BT 1 g /F1 60 Tf 5 20 Td (M) Tj ET BT 0 g /F1 10 Tf 20 40 Td (!) Tj ET",
+    );
+    // White text stroked too (render mode 2): its outline shows.
+    shown(FONTS, "BT 1 g 2 Tr /F1 10 Tf 10 50 Td (white) Tj ET");
+    // Black text on a black box painted half transparent: grey under it.
+    shown(
+        "/Resources << /Font << /F1 5 0 R /F2 6 0 R >> /ExtGState << /G1 << /ca 0.5 >> >> >>",
+        "q /G1 gs 0 g 0 0 200 100 re f Q BT 0 g /F1 10 Tf 10 50 Td (black) Tj ET",
+    );
+}
+
+/// Black text set where the backdrops below are drawn around it.
+const BLACK: &str = "BT 0 g /F1 10 Tf 50 45 Td (black) Tj ET";
+
+/// Whether [`BLACK`] drawn over `backdrop` (painted in black) shows nothing, the backdrop made from the box the
+/// text is set in, in user space: left, bottom, right, top.
+fn hidden_by(backdrop: impl Fn(f64, f64, f64, f64) -> String) -> bool {
+    let set = page_spans(BLACK).remove(0).bbox;
+    let (x0, b, x1, t) = (set.x0, 100.0 - set.y1, set.x1, 100.0 - set.y0);
+    let content = format!("0 g {} {BLACK}", backdrop(x0, b, x1, t));
+    let found = page_spans(&content);
+    assert_eq!(found.len(), 1, "{content}");
+    found[0].in_background_color
+}
+
+/// A box `margin` around the text's, its corners rounded by `radius`: four curves.
+fn rounded(text: [f64; 4], margin: f64, radius: f64) -> String {
+    let [x0, y0, x1, y1] = text;
+    let (west, east, south, north) = (x0 - margin, x1 + margin, y0 - margin, y1 + margin);
+    let (wr, er, sr, nr) = (west + radius, east - radius, south + radius, north - radius);
+    let arm = radius * 0.552; // a quarter circle's control arm
+    let (wa, ea, sa, na) = (wr - arm, er + arm, sr - arm, nr + arm);
+    format!(
+        "{wr} {south} m {er} {south} l {ea} {south} {east} {sa} {east} {sr} c {east} {nr} l {east} {na} {ea} {north} \
+         {er} {north} c {wr} {north} l {wa} {north} {west} {na} {west} {nr} c {west} {sr} l {west} {sa} {wa} {south} \
+         {wr} {south} c h f"
+    )
+}
+
+/// The page with a notch cut at the text's lower left corner, as one outline: the diagonal through the corner.
+fn notched(x0: f64, b: f64) -> String {
+    let (right, down, left, up) = (x0 + 2.0, b - 1.0, x0 - 1.0, b + 2.0);
+    format!("0 0 m 0 100 l 200 100 l 200 0 l {right} 0 l {right} {down} l {left} {up} l 0 {up} l h")
+}
+
+#[test]
+fn a_filled_region_or_clip_holding_the_text_whole_covers_it() {
+    // A triangle around the box: no rectangle, still the text's whole backdrop.
+    assert!(hidden_by(|_, _, _, _| "0 0 m 400 0 l 0 200 l h f".into()));
+    // A box with rounded corners, its curves clear of the text.
+    assert!(hidden_by(|x0, b, x1, t| rounded([x0, b, x1, t], 5.0, 4.0)));
+    // A frame cut out by the even-odd rule, the text on its band, not in its hole.
+    assert!(hidden_by(|_, _, _, _| {
+        "0 0 200 100 re 150 10 20 20 re f*".into()
+    }));
+    // A box inside another, wound alike: nonzero fills the inner one too.
+    assert!(hidden_by(|x0, b, x1, t| {
+        let (w, h) = (x1 - x0 + 2.0, t - b + 2.0);
+        format!("0 0 200 100 re {} {} {w} {h} re f", x0 - 1.0, b - 1.0)
+    }));
+    // The page filled inside a triangle clipping it, and inside a frame clipped by the even-odd rule.
+    assert!(hidden_by(|_, _, _, _| {
+        "q 0 0 m 400 0 l 0 200 l h W n 0 0 200 100 re f Q".into()
+    }));
+    assert!(hidden_by(|_, _, _, _| {
+        "q 0 0 200 100 re 150 10 20 20 re W* n 0 0 200 100 re f Q".into()
+    }));
+}
+
+#[test]
+fn a_region_or_clip_leaving_any_of_the_text_out_does_not_cover_it() {
+    // The planted wrong truths: each a backdrop of the test above, but for a part of the text's box.
+    // The page with a notch cut at the text's corner.
+    assert!(!hidden_by(|x0, b, _, _| format!("{} f", notched(x0, b))));
+    // The same corner cut out by the even-odd rule: a triangle hole over it.
+    assert!(!hidden_by(|x0, b, _, _| {
+        let (right, down, left, up) = (x0 + 2.0, b - 1.0, x0 - 1.0, b + 2.0);
+        format!("0 0 200 100 re {left} {down} m {right} {down} l {left} {up} l h f*")
+    }));
+    // A triangle whose long side runs through the text's middle.
+    assert!(!hidden_by(|x0, b, x1, t| format!(
+        "0 0 m {} 0 l 0 {} l h f",
+        x0 + x1,
+        b + t
+    )));
+    // A box inside another, by the even-odd rule: a hole the text sits in.
+    assert!(!hidden_by(|x0, b, x1, t| {
+        let (w, h) = (x1 - x0 + 2.0, t - b + 2.0);
+        format!("0 0 200 100 re {} {} {w} {h} re f*", x0 - 1.0, b - 1.0)
+    }));
+    // A curve bowing into the text's corner where its chord passes well clear of it: the curve, not its chord,
+    // bounds the region.
+    assert!(!hidden_by(|x0, b, _, _| {
+        let (start, bow, end) = (b + 5.0, (x0 + 8.0, b + 8.0), x0 + 5.0);
+        format!(
+            "0 {start} m {} {} {} {} {end} 0 c 200 0 l 200 100 l 0 100 l h f",
+            bow.0, bow.1, bow.0, bow.1
+        )
+    }));
+    // Rounded corners reaching into the text: their curves' boxes meet it.
+    assert!(!hidden_by(|x0, b, x1, t| rounded([x0, b, x1, t], 1.0, 4.0)));
+    // The page filled inside a clip notched at the text's corner, and inside one with a hole on the text.
+    assert!(!hidden_by(|x0, b, _, _| format!(
+        "q {} W n 0 0 200 100 re f Q",
+        notched(x0, b)
+    )));
+    assert!(!hidden_by(|x0, b, _, _| format!(
+        "q 0 0 200 100 re {} {} 2 2 re W* n 0 0 200 100 re f Q",
+        x0 + 1.0,
+        b + 1.0
+    )));
+}

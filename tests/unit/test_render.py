@@ -17,7 +17,7 @@ import pymupdf
 import pytest
 
 from document_lab.ir import BBox
-from document_lab.pdf import Unsupported, read_raster
+from document_lab.pdf import Unsupported, read_pdf, read_raster
 from tests.rendering import agrees, disagreement, own, page_pdf, reference
 from tests.synthetic import icc_profile
 
@@ -417,15 +417,50 @@ def test_a_region_drawn_by_the_own_renderer_is_the_reader_s_render_of_it(tmp_pat
     assert agrees(*disagreement(raster.pixels, whole[41:209, 41:250]))
 
 
-def test_the_own_renderer_refuses_a_region_holding_text_by_name(tmp_path):
+def test_the_own_renderer_draws_a_region_holding_text(tmp_path):
     doc = pymupdf.open()
     page = doc.new_page(width=200, height=150)
     page.insert_text((20, 40), 'Hello', fontsize=12)
     path = tmp_path / 't.pdf'
     doc.save(path)
-    with pytest.raises(Unsupported, match='no text until its stage 2'):
-        read_raster(path, 1, BBox(0, 0, 200, 150), dpi=DPI, renderer='own')
+    drawn = read_raster(path, 1, BBox(0, 0, 200, 150), dpi=DPI, renderer='own').pixels
+    whole, undrawn = own(path.read_bytes(), DPI)
+    assert undrawn == {}
+    assert (whole.min(axis=2) < 128).any()
+    assert np.array_equal(drawn, whole)
     assert read_raster(path, 1, BBox(100, 100, 200, 150), dpi=DPI, renderer='own').pixels.min() == 255
+
+
+def test_the_own_renderer_refuses_a_region_holding_a_glyph_it_has_no_program_for_by_name(tmp_path):
+    font = (
+        '<< /Type /Font /Subtype /Type0 /BaseFont /MSMincho /Encoding /Identity-H /DescendantFonts [<< /Type /Font '
+        '/Subtype /CIDFontType2 /BaseFont /MSMincho /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) '
+        '/Supplement 2 >> /FontDescriptor << /Type /FontDescriptor /FontName /MSMincho /Flags 4 >> >>] >>'
+    )
+    path = tmp_path / 'cjk.pdf'
+    path.write_bytes(
+        page_pdf('BT /F1 20 Tf 20 100 Td <00010002> Tj ET', {'F1': (font, None)}, resources='/Font << /F1 {F1} >>')
+    )
+    with pytest.raises(Unsupported, match=r'font MSMincho is not embedded and has no substitute x2'):
+        read_raster(path, 1, BBox(0, 0, 200, 150), dpi=DPI, renderer='own')
+
+
+def test_the_own_renderer_draws_a_region_whose_only_text_shows_nothing(tmp_path):
+    whole = BBox(0, 0, 200, 150)
+    doc = pymupdf.open()
+    page = doc.new_page(width=200, height=150)
+    page.draw_rect(pymupdf.Rect(10, 20, 190, 60), color=None, fill=(0, 0, 0))
+    page.insert_text((20, 45), 'black on black', fontsize=12, color=(0, 0, 0))
+    page.insert_text((20, 100), 'white on white', fontsize=12, color=(1, 1, 1))
+    doc.save(tmp_path / 'unseen.pdf')
+    assert all(s.in_background_color for s in read_pdf(tmp_path / 'unseen.pdf').spans())  # the premise
+    drawn = read_raster(tmp_path / 'unseen.pdf', 1, whole, dpi=DPI, renderer='own').pixels
+    assert agrees(*disagreement(drawn, read_raster(tmp_path / 'unseen.pdf', 1, whole, dpi=DPI).pixels))
+    # The planted control: one span the page shows beside them is drawn, and the region is not the same.
+    page.insert_text((20, 130), 'shown', fontsize=12)
+    doc.save(tmp_path / 'shown.pdf')
+    shown = read_raster(tmp_path / 'shown.pdf', 1, whole, dpi=DPI, renderer='own').pixels
+    assert not agrees(*disagreement(shown[240:, :], drawn[240:, :]))
 
 
 def test_the_own_renderer_refuses_a_region_holding_what_it_does_not_draw_by_name(tmp_path):

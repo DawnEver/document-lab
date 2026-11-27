@@ -10,8 +10,9 @@ consumer's vocabulary here -- schemas live in consumers. Modules and usage: `REA
 
 ## Rules here
 
-- Dependency arrow: `paper`, `ai` -> `extract`; `paper` -> `markdown`, `regions`, `pdf`; `per_page` -> `markdown`, `regions`,
-  `tables`, `ink`, `pdf`, `png`; `regions` -> `tables`; `markdown`, `regions`, `tables` -> `layout` -> `ir`; `ink` -> `ir` (`regions` takes its drawings, `tables` a scan's rulings, as boxes, never pixels);
+- Dependency arrow: `paper`, `ai` -> `extract`; `paper` -> `markdown`, `regions`, `pdf`, `formula`; `per_page` -> `markdown`,
+  `regions`, `tables`, `ink`, `pdf`, `png`, `formula`; `formula` imports nothing of ours (torch and transformers only
+  when asked); `regions` -> `tables`; `markdown`, `regions`, `tables` -> `layout` -> `ir`; `ink` -> `ir` (`regions` takes its drawings, `tables` a scan's rulings, as boxes, never pixels);
   `extract` -> `plot`, `pdf`, `html` -> `numbers` -> `ir`; `plot` -> `glyphs` -> `strokefont`; `strokes` -> `plot`, `ir`; `ocr` -> `ink`, `pdf`
   (a picture measured: its skew; a codec decoded to be turned); `capture` is apart (`cli` -> `session` -> `stitch`; `cli` -> `desktop`, `export`, `ocr`, `files` ->
   `win32`, `export`; `desktop` -> `win32` | `quartz` | `x11` (one per OS, chosen at run time) -> `screen`; `join` ->
@@ -19,7 +20,8 @@ consumer's vocabulary here -- schemas live in consumers. Modules and usage: `REA
   `_pdf`'s (the Rust crates): `pdf` reads through it, `capture` (`export`, `join`, `files`) and `ocr` read and write
   through it; PyMuPDF only renders pixels (`pdf.read_raster`, `paper`, `glyphs`). OCR is `ocr`'s alone: no other
   module runs the `tesseract` executable, which is the user's to install, never bundled. The base imports
-  without `ai_lab` (`tests/unit/test_ai.py` proves it in a subprocess).
+  without `ai_lab` (`tests/unit/test_ai.py` proves it in a subprocess) and without torch or transformers
+  (`tests/unit/test_formula.py`).
 - A test that needs expected values builds a SYNTHETIC PDF (`tests/synthetic.py`); no real PDF is ever committed
   (the repo is public). Three real papers, held locally (`DOCUMENT_LAB_PAPERS=<dir>`, the `papers` part), are checked
   STRUCTURALLY against what each PDF says (`tests/paper/structure.py`), every check paired with a planted wrong truth
@@ -28,10 +30,11 @@ consumer's vocabulary here -- schemas live in consumers. Modules and usage: `REA
   body, `tests/capture_part.py`) are OS parts: CI runs each on its hosted runner (`linux` and `macos` after a setup
   giving the runner's interpreter Tk, `linux`'s also starting Xvfb and openbox: `[tool.dev_lab.parts] hosted`). `gpu` (marker-pdf), `vendor` (`DOCUMENT_LAB_VENDOR_PDF=<pdf>`), `papers`
   (`DOCUMENT_LAB_PAPERS=<dir>`), `reference` (`DOCUMENT_LAB_REFERENCE_PDFS=<pdfs or dirs>`: the reader accepted
-  against PyMuPDF, the previous implementation, within declared tolerances) and `ocr` (Tesseract) are declared
-  resource parts, unproduced on hosted runners: base never selects them, and they FAIL where their resource is
-  missing, never skip. `corpus` (`tests/corpus`) is produced on hosted runners: only CC BY 4.0 or US public-domain
-  PDFs, fetched from their immutable public URLs, pinned by sha256, never committed (`tests/corpus/sources.py`).
+  against PyMuPDF, the previous implementation, within declared tolerances), `ocr` (Tesseract) and `formula` (the
+  `formula` extra and its models' weights) are declared resource parts, unproduced on hosted runners: base never
+  selects them, and they FAIL where their resource is missing, never skip. `corpus` (`tests/corpus`) is produced on
+  hosted runners: only CC BY 4.0 or US public-domain PDFs, fetched from their immutable public URLs, pinned by
+  sha256, never committed (`tests/corpus/sources.py`).
 - A value the document does not state is absent, a raster plot raises, an ambiguous match refuses: never a
   silent default.
 - No pymupdf4llm: markdown is written from the IR (`markdown.py`). `pymupdf<2` because 2.x requires

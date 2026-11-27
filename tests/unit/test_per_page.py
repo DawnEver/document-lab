@@ -6,9 +6,10 @@ import numpy as np
 import pymupdf
 import pytest
 
+from document_lab.__main__ import main
 from document_lab.capture.export import to_pdf
 from document_lab.per_page import RENDER_DPI, UNREAD, write_pages
-from tests.synthetic import draw_booktabs, draw_ruled_table
+from tests.synthetic import draw_booktabs, draw_ruled_table, table_cell_rect
 
 
 def test_each_page_gets_its_markdown_and_image_and_the_index_names_them(tmp_path):
@@ -143,6 +144,24 @@ def test_a_drawing_every_page_repeats_is_furniture_and_one_page_s_table_is_still
     with zipfile.ZipFile(tmp_path / 'out.zip') as archive:
         cut = sorted(n for n in archive.namelist() if '-table-' in n)
     assert cut == ['page-001-table-untitled-1.png']
+
+
+def test_the_index_names_each_page_by_the_clauses_its_outline_states(tmp_path):
+    with pymupdf.open() as doc:
+        for clause in ('Scope', 'Terms and definitions'):
+            page = doc.new_page(width=400, height=300)
+            page.insert_text((40, 60), clause, fontsize=12)  # plain words: the rules cannot tell a clause by them
+            page.insert_text((40, 100), 'The text of the clause, in a sentence of its own.', fontsize=10)
+        doc.set_toc([[1, 'Scope', 1], [1, 'Terms and definitions', 2]])
+        doc.save(tmp_path / 'std.pdf')
+    done = write_pages(tmp_path / 'std.pdf', tmp_path / 'out')
+    assert done.structure.source == 'outline'
+    index = (tmp_path / 'out' / 'INDEX.md').read_text(encoding='utf-8')
+    assert '- [page 1](page-001.md) -- Scope\n' in index
+    assert '- [page 2](page-002.md) -- Terms and definitions\n' in index
+    inferred = write_pages(tmp_path / 'std.pdf', tmp_path / 'inferred', outline=False)
+    assert inferred.structure.source == 'inferred'
+    assert '-- Scope' not in (tmp_path / 'inferred' / 'INDEX.md').read_text(encoding='utf-8')
 
 
 def test_a_ruled_table_is_written_as_a_pipe_table_in_place_of_its_words(tmp_path):
@@ -399,8 +418,6 @@ def test_text_drawn_inside_an_untitled_figure_goes_with_it_not_into_the_body(tmp
 def test_the_unnumbered_equations_option_reaches_the_pages_written(tmp_path):
     """``document-lab pages --unnumbered-equations``: a display without a number is cut out at strict (the default)
     and left in the text at off, numbered ones either way."""
-    from document_lab.__main__ import main  # noqa: PLC0415 -- the command line under test
-
     pdf = tmp_path / 'sheet.pdf'
     doc = pymupdf.open()
     page = doc.new_page(width=595, height=842)
@@ -417,3 +434,92 @@ def test_the_unnumbered_equations_option_reaches_the_pages_written(tmp_path):
         out = tmp_path / level
         assert main(['pages', str(pdf), str(out), '--unnumbered-equations', level]) == 0
         assert sorted(p.stem.removeprefix('page-001-') for p in out.glob('page-001-equation-*.png')) == files
+
+
+@pytest.mark.parametrize('kind', ['hidden', 'in_background_color'])
+def test_text_the_page_does_not_show_is_written_only_when_its_own_flag_asks(tmp_path, kind):
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=400, height=300)
+        page.insert_text((40, 60), 'Words the page shows.', fontsize=10)
+        _unshown(doc, page, (40, 100), 'Words the page does not show.', kind, fontsize=10)
+        doc.save(tmp_path / 'std.pdf')
+    own, other = ('--include-hidden', '--include-in-background-color')[:: 1 if kind == 'hidden' else -1]
+    for flags, read in (([], False), ([other], False), ([own], True)):  # the other flag: the planted control
+        out = tmp_path / '-'.join(['out', *flags])
+        assert main(['pages', str(tmp_path / 'std.pdf'), str(out), *flags]) == 0
+        written = (out / 'page-001.md').read_text(encoding='utf-8')
+        assert 'Words the page shows.' in written
+        assert ('does not show' in written) is read, flags
+
+
+#: The text a page draws but its default view does not show, planted two ways, and the option that reads it.
+UNSHOWN = {'hidden': 'include_hidden', 'in_background_color': 'include_in_background_color'}
+
+
+def _unshown(doc, page, point, text, kind, **style):
+    """``text`` set at ``point`` on ``page`` as the default view does not show it: on a layer turned off, or white."""
+    if kind == 'hidden':
+        page.insert_text(point, text, oc=doc.add_ocg('Off', on=False), **style)
+    else:
+        page.insert_text(point, text, color=(1, 1, 1), **style)
+
+
+@pytest.mark.parametrize('kind', UNSHOWN)
+def test_a_ruled_table_s_cells_read_what_the_page_shows(tmp_path, kind):
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 300), 'The limits are given below.', fontsize=10)
+        draw_ruled_table(page)
+        cell = table_cell_rect(1, 2)
+        _unshown(doc, page, (cell.x0 + 60, cell.y1 - 6), 'unseen', kind, fontname='helv', fontsize=9)
+        doc.save(tmp_path / 'std.pdf')
+    for asked in (False, True):
+        write_pages(tmp_path / 'std.pdf', tmp_path / f'out-{asked}', **{UNSHOWN[kind]: asked})
+        page1 = (tmp_path / f'out-{asked}' / 'page-001.md').read_text(encoding='utf-8')
+        (row,) = [line for line in page1.splitlines() if line.startswith('| alpha')]
+        assert ('unseen' in row) is asked, row
+        assert page1.count('unseen') == asked  # in its cell alone, never the running text
+
+
+@pytest.mark.parametrize('kind', UNSHOWN)
+def test_running_heads_are_what_the_page_shows(tmp_path, kind):
+    with pymupdf.open() as doc:
+        for number in range(1, 4):
+            page = doc.new_page(width=595, height=842)
+            page.insert_text((42, 60), 'Data and Signal Line Chokes', fontsize=11)
+            _unshown(doc, page, (499, 60), 'ACT1210', kind, fontsize=11)
+            page.insert_text((37, 120), f'Clause {number} states the rated current of the part.', fontsize=11)
+        doc.save(tmp_path / 'sheet.pdf')
+    for asked in (False, True):
+        write_pages(tmp_path / 'sheet.pdf', tmp_path / f'out-{asked}', **{UNSHOWN[kind]: asked})
+        md = (tmp_path / f'out-{asked}' / 'page-002.md').read_text(encoding='utf-8')
+        heads = '["Data and Signal Line Chokes", "ACT1210"]' if asked else '["Data and Signal Line Chokes"]'
+        assert md.startswith(f'---\nheader: {heads}\n---\n\n'), md
+
+
+@pytest.mark.parametrize('kind', UNSHOWN)
+def test_an_untitled_figure_takes_the_text_the_page_shows_in_it(tmp_path, kind):
+    prose = 'The rated output is the mechanical power available at the shaft and shall be expressed in watts.'
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=600, height=840)
+        page.insert_text((50, 100), prose, fontsize=10)
+        # Its frame and its axis drawn as lines of their own: a mark under the white letter, by its box, would show it
+        # (the reader judges a stroke by its path's box).
+        for a, b in (
+            ((150, 140), (450, 140)),
+            ((450, 140), (450, 320)),
+            ((450, 320), (150, 320)),
+            ((150, 320), (150, 140)),
+        ):
+            page.draw_line(a, b, width=1)
+        page.draw_line((150, 230), (450, 230), width=2)
+        page.draw_circle((300, 200), 40, color=(0, 0, 0), width=2)
+        page.insert_text((290, 280), 'N', fontsize=10)  # a pole's letter, shown
+        _unshown(doc, page, (380, 300), 'S', kind, fontsize=10)  # another, not
+        page.insert_text((50, 420), prose, fontsize=10)
+        doc.save(tmp_path / 'std.pdf')
+    for asked in (False, True):
+        write_pages(tmp_path / 'std.pdf', tmp_path / f'out-{asked}', **{UNSHOWN[kind]: asked})
+        blocks = (tmp_path / f'out-{asked}' / 'page-001.md').read_text(encoding='utf-8').split('\n\n')
+        figure = blocks.index('![Untitled figure 1](page-001-figure-untitled-1.png)')
+        assert blocks[figure + 1] == ('*Text in the figure:* N S' if asked else '*Text in the figure:* N')

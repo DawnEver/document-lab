@@ -37,7 +37,10 @@ fn main() {
                     let unread = text.glyphs.iter().filter(|g| g.text.is_none()).count();
                     if unread > 0 {
                         *counts
-                            .entry(format!("{} {}", text.font.subtype, text.font.name))
+                            .entry(format!(
+                                "{} {}",
+                                text.font.info.subtype, text.font.info.name
+                            ))
                             .or_default() += unread;
                     }
                 }

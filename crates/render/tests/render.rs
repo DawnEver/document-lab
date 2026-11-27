@@ -43,9 +43,9 @@ const WHITE: [u8; 3] = [255; 3];
 const BLACK: [u8; 3] = [0; 3];
 const RED: [u8; 3] = [255, 0, 0];
 
-#[test]
-fn text_is_refused_by_name_until_stage_2() {
-    let file = File::open(common::one_page("", "", &[]), b"").unwrap();
+/// The page of `content` with `page_extra` and `extra` objects, text drawn, at one pixel a point.
+fn texted(page_extra: &str, content: &str, extra: &[&str]) -> Raster {
+    let file = File::open(common::one_page(page_extra, content, extra), b"").unwrap();
     let page = file.pages().unwrap().remove(0);
     let options = Options {
         region: None,
@@ -54,8 +54,117 @@ fn text_is_refused_by_name_until_stage_2() {
         annotations: false,
         alpha: false,
     };
-    let refused = render(&file, &page, &options).unwrap_err();
-    assert!(refused.to_string().contains("stage 2"), "{refused}");
+    render(&file, &page, &options).unwrap()
+}
+
+/// A Type 3 font (object 5) of two glyphs, each a square across its 1000-unit glyph space: `a` (object 6) after
+/// `d1`, setting red, which it may not; `b` (object 7) after `d0`, which keeps its red.
+fn squares() -> [String; 3] {
+    [
+        "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] /FontMatrix [0.001 0 0 0.001 0 0] \
+         /CharProcs << /a 6 0 R /b 7 0 R >> /Encoding << /Type /Encoding /Differences [97 /a /b] >> \
+         /FirstChar 97 /LastChar 98 /Widths [1000 1000] >>"
+            .to_string(),
+        common::stream("", "1000 0 0 0 1000 1000 d1 1 0 0 rg 0 0 1000 1000 re f"),
+        common::stream("", "1000 0 d0 1 0 0 rg 0 0 1000 1000 re f"),
+    ]
+}
+
+const BLUE: [u8; 3] = [0, 0, 255];
+
+#[test]
+fn a_type3_glyph_is_drawn_by_its_procedure_in_the_text_color_after_d1() {
+    let [font, a, b] = squares();
+    let content = "BT /T3 40 Tf 0 0 1 rg 10 10 Td (a) Tj 60 0 Td (b) Tj 3 Tr 60 0 Td (a) Tj ET";
+    let r = texted(
+        "/Resources << /Font << /T3 5 0 R >> >>",
+        content,
+        &[&font, &a, &b],
+    );
+    // User (10, 10)-(50, 50) is page columns 10..50, rows 50..90.
+    assert_eq!(at(&r, 10, 50), BLUE);
+    assert_eq!(at(&r, 49, 89), BLUE);
+    assert_eq!(at(&r, 9, 70), WHITE);
+    assert_eq!(at(&r, 50, 70), WHITE);
+    assert_eq!(at(&r, 90, 70), RED, "d0: the procedure's own color");
+    assert_eq!(at(&r, 150, 70), WHITE, "render mode 3 paints nothing");
+    assert!(r.undrawn.is_empty(), "{:?}", r.undrawn);
+    let off = drawn(
+        "/Resources << /Font << /T3 5 0 R >> >>",
+        content,
+        &[&font, &a, &b],
+        1.0,
+        None,
+    );
+    assert!(
+        off.data.iter().all(|&v| v == 255),
+        "text off draws no glyph"
+    );
+}
+
+const HELVETICA: &str =
+    "/Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>";
+
+/// The columns of row `y` that are dark.
+fn dark(r: &Raster, y: u32) -> Vec<u32> {
+    (0..r.width).filter(|&x| at(r, x, y)[0] < 128).collect()
+}
+
+#[test]
+fn a_glyph_is_its_outline_filled_stroked_or_clipped_to() {
+    // Helvetica's I (its substitute's), 100 points tall from user y 10: one bar.
+    let filled = texted(HELVETICA, "BT /F1 100 Tf 10 10 Td (I) Tj ET", &[]);
+    let bar = dark(&filled, 50);
+    let (left, right) = (bar[0], *bar.last().unwrap());
+    assert!(
+        right - left >= 6 && u32::try_from(bar.len()) == Ok(right - left + 1),
+        "{bar:?}"
+    );
+    assert!(
+        left > 10 && right < 10 + 28,
+        "{bar:?}: within the I's advance"
+    );
+    assert!(filled.undrawn.is_empty(), "{:?}", filled.undrawn);
+    // Stroked thin, the bar's edges ink and its middle does not.
+    let stroked = texted(
+        HELVETICA,
+        "BT /F1 100 Tf 1 Tr 0.5 w 10 10 Td (I) Tj ET",
+        &[],
+    );
+    let middle = u32::midpoint(left, right);
+    assert_eq!(at(&stroked, middle, 50), WHITE);
+    assert!(at(&stroked, left, 50)[0] < 200 && at(&stroked, right, 50)[0] < 200);
+    // As a clip (mode 7), a fill after it shows inside the bar alone.
+    let clipped = texted(
+        HELVETICA,
+        "BT /F1 100 Tf 7 Tr 10 10 Td (I) Tj ET 1 0 0 rg 0 0 200 100 re f",
+        &[],
+    );
+    assert_eq!(at(&clipped, middle, 50), RED);
+    assert_eq!(at(&clipped, left - 2, 50), WHITE);
+    assert_eq!(at(&clipped, right + 2, 50), WHITE);
+    assert!(clipped.undrawn.is_empty(), "{:?}", clipped.undrawn);
+}
+
+#[test]
+fn a_glyph_whose_font_has_no_program_and_no_substitute_is_counted_by_its_font() {
+    let font = "<< /Type /Font /Subtype /Type0 /BaseFont /MSMincho /Encoding /Identity-H /DescendantFonts [<< \
+                /Type /Font /Subtype /CIDFontType2 /BaseFont /MSMincho /CIDSystemInfo << /Registry (Adobe) \
+                /Ordering (Japan1) /Supplement 2 >> /FontDescriptor << /Type /FontDescriptor /FontName /MSMincho \
+                /Flags 4 >> >>] >>";
+    let r = texted(
+        "/Resources << /Font << /F2 5 0 R >> >>",
+        "BT /F2 20 Tf 10 10 Td <00010002> Tj ET",
+        &[font],
+    );
+    assert!(r.data.iter().all(|&v| v == 255));
+    assert_eq!(
+        r.undrawn
+            .get("font MSMincho is not embedded and has no substitute"),
+        Some(&2),
+        "{:?}",
+        r.undrawn
+    );
 }
 
 #[test]

@@ -34,7 +34,8 @@ def page_pdf(content: str, objects: dict[str, tuple[str, bytes | None]] | None =
 
     ``objects`` are named objects (a dictionary's source and its stream's bytes, None for no stream); a dictionary
     names another as ``{Name}``, and those named ``Im...`` or ``Fm...`` are the page's XObjects. ``resources`` adds
-    entries to the page's resources. A stated ``/Filter`` is kept: the bytes are stored as given.
+    entries to the page's resources, naming objects as ``{Name}`` too (a font: ``/Font << /F1 {F1} >>``). A stated
+    ``/Filter`` is kept: the bytes are stored as given.
     """
     doc = pymupdf.open()
     page = doc.new_page(width=200, height=150)
@@ -53,7 +54,7 @@ def page_pdf(content: str, objects: dict[str, tuple[str, bytes | None]] | None =
     doc.update_stream(content_number, content.encode('latin-1'))
     xobjects = ' '.join(f'/{name} {refs[name]}' for name in objects if name.startswith(('Im', 'Fm')))
     doc.xref_set_key(page.xref, 'Contents', f'{content_number} 0 R')
-    doc.xref_set_key(page.xref, 'Resources', f'<< /XObject << {xobjects} >> {resources} >>')
+    doc.xref_set_key(page.xref, 'Resources', f'<< /XObject << {xobjects} >> {resources.format(**refs)} >>')
     return doc.tobytes()
 
 
@@ -68,10 +69,11 @@ def reference(data: bytes, dpi: float, *, managed: bool = True) -> np.ndarray:
         pymupdf.TOOLS.set_icc(True)
 
 
-def own(data: bytes, dpi: float, page: int = 1) -> tuple[np.ndarray, dict[str, int]]:
-    """Page ``page`` of ``data`` drawn by the own renderer at ``dpi`` (no text), and what it did not draw."""
+def own(data: bytes, dpi: float, page: int = 1, *, text: bool = True) -> tuple[np.ndarray, dict[str, int]]:
+    """Page ``page`` of ``data`` drawn by the own renderer at ``dpi`` (its text too unless not ``text``), and what
+    it did not draw."""
     width, height, channels, pixels, undrawn = _pdf.open(data, b'').render(
-        page, None, dpi / 72, text=False, annotations=True, alpha=False
+        page, None, dpi / 72, text=text, annotations=True, alpha=False
     )
     return np.frombuffer(pixels, dtype=np.uint8).reshape(height, width, channels).copy(), dict(undrawn)
 

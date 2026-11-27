@@ -3,6 +3,7 @@ a drawn page is still cropped per label. Equation images: every display, numbere
 
 import numpy as np
 import pymupdf
+import pytest
 
 from document_lab import layout
 from document_lab.markdown import to_markdown
@@ -107,3 +108,58 @@ def test_every_display_equation_is_written_and_linked_once_numbered_or_not(tmp_p
     md = (out / 'md' / '01-power.md').read_text(encoding='utf-8')
     assert md.count('page-01-equation-untitled-1.png') == md.count('page-01-equation-3.png') == 1
     assert md.index('defined as follows') < md.index('equation-untitled-1') < md.index('equation-3')
+
+
+#: The text a page draws but its default view does not show, planted two ways, and the option that reads it.
+UNSHOWN = {'hidden': 'include_hidden', 'in_background_color': 'include_in_background_color'}
+
+
+def _unshown(doc: pymupdf.Document, page: pymupdf.Page, point: tuple[float, float], text: str, kind: str) -> None:
+    """``text`` set at ``point`` as the default view does not show it: on a layer turned off, or white on white."""
+    if kind == 'hidden':
+        page.insert_text(point, text, fontsize=10, oc=doc.add_ocg('Off', on=False))
+    else:
+        page.insert_text(point, text, fontsize=10, color=(1, 1, 1))
+
+
+@pytest.mark.parametrize('kind', UNSHOWN)
+def test_a_caption_is_located_where_the_page_shows_it(tmp_path, kind):
+    pdf = tmp_path / 'paper.pdf'
+    doc = pymupdf.open()
+    _drawn_page(doc, 'Figure 2. Two')  # the control: a caption the page shows
+    page = doc.new_page()
+    page.draw_rect(pymupdf.Rect(72, 100, 300, 250), color=(0, 0, 0), fill=(0.5, 0.5, 0.5))
+    _unshown(doc, page, (72, 270), 'Figure 3. Three', kind)
+    doc.save(pdf)
+    body = 'Figure 2. Two\n\nFigure 3. Three\n'
+    for asked in (False, True):
+        out = tmp_path / f'out-{asked}'
+        (out / 'md').mkdir(parents=True)
+        (out / 'md' / '01-shapes.md').write_text(body, encoding='utf-8')
+        images, _ = render_figure_pages(pdf, out, [('## Shapes', body)], **{UNSHOWN[kind]: asked})
+        assert images['Figure 2'] == 'img/sec01/page-01-figure-2.png'
+        assert ('Figure 3' in images) is asked
+
+
+@pytest.mark.parametrize('kind', UNSHOWN)
+def test_an_equation_is_located_where_the_page_shows_its_number(tmp_path, kind):
+    pdf = tmp_path / 'paper.pdf'
+    prose = 'The torque follows from the flux linkage and the current of each phase as stated below.'
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), prose, fontsize=10)
+    page.insert_text((200, 140), 'T = p (psi i)', fontsize=10)
+    page.insert_text((500, 140), '(1)', fontsize=10)  # the control: a number the page shows
+    page.insert_text((72, 180), prose, fontsize=10)
+    page.insert_text((200, 220), 'P = T w', fontsize=10)
+    _unshown(doc, page, (500, 220), '(2)', kind)
+    page.insert_text((72, 260), prose, fontsize=10)
+    doc.save(pdf)
+    body = 'Equation (1) and Equation (2).\n'
+    for asked in (False, True):
+        out = tmp_path / f'out-{asked}'
+        (out / 'md').mkdir(parents=True)
+        (out / 'md' / '01-torque.md').write_text(body, encoding='utf-8')
+        images = render_equation_images(pdf, out, [('## Torque', body)], {}, {0: 1}, **{UNSHOWN[kind]: asked})
+        assert images['Equation 1'] == 'img/sec01/page-01-equation-1.png'
+        assert ('Equation 2' in images) is asked

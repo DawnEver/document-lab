@@ -1,5 +1,7 @@
 """Per-section files, image routing, clutter cleanup, paper.md and INDEX.md for one paper."""
 
+from __future__ import annotations
+
 import re
 import shutil
 from pathlib import Path
@@ -10,6 +12,7 @@ from document_lab.paper.text import RN_PATTERN as _RN
 from document_lab.paper.text import extract_title_from_preamble, slug
 
 if TYPE_CHECKING:
+    from document_lab.formula import Transcribe
     from document_lab.pdf import Renderer
     from document_lab.regions import Unnumbered
 
@@ -299,11 +302,17 @@ def write_paper_output(
     title_override: str | None = None,
     pdf_path: Path | None = None,
     renderer: Renderer = 'pymupdf',
+    transcribe: Transcribe | None = None,
     unnumbered: Unnumbered = 'strict',
+    include_hidden: bool = False,
+    include_in_background_color: bool = False,
 ) -> tuple[int, int, int]:
     """Write per-section files, paper.md, images (rendered by ``renderer``), INDEX.md for one paper.
 
+    ``transcribe``: each equation crop's LaTeX follows its image (:func:`render_equation_images`).
     ``unnumbered``: how displays without a number are found (`document_lab.regions.Unnumbered`).
+    ``include_hidden``, ``include_in_background_color``: what the text locating figures and equations reads
+    beside the default view (`document_lab.paper.render`).
 
     Returns (n_sections, n_figures, n_tables).
     """
@@ -329,10 +338,26 @@ def write_paper_output(
     # Render cropped figure/table images and insert inline
     figure_images: dict[str, str] = {}
     if pdf_path and pdf_path.exists():
-        figure_images, page_section_map = render_figure_pages(pdf_path, out_dir, body_sections, renderer=renderer)
+        figure_images, page_section_map = render_figure_pages(
+            pdf_path,
+            out_dir,
+            body_sections,
+            renderer=renderer,
+            include_hidden=include_hidden,
+            include_in_background_color=include_in_background_color,
+        )
 
         figure_images = render_equation_images(
-            pdf_path, out_dir, body_sections, figure_images, page_section_map, renderer=renderer, unnumbered=unnumbered
+            pdf_path,
+            out_dir,
+            body_sections,
+            figure_images,
+            page_section_map,
+            renderer=renderer,
+            transcribe=transcribe,
+            unnumbered=unnumbered,
+            include_hidden=include_hidden,
+            include_in_background_color=include_in_background_color,
         )
 
     # Clean up raw converter clutter (raw images, picture-text blocks)

@@ -464,15 +464,14 @@ def equations(
     drawings: Sequence[Drawing] = (),
     *,
     unnumbered: Unnumbered = 'strict',
-    include_hidden: bool = False,
 ) -> list[Region]:
     """Every display equation of ``page``, numbered or not, top to bottom: its formula and its number, nothing else.
 
-    ``face``: the font and size the document's prose is set in (`document_lab.layout.body_face`); ``page`` is best
-    handed without its running heads and feet (`document_lab.layout.without_running`), which no equation holds.
-    ``drawings``: the page's drawn ink (`document_lab.ink`), when the caller holds its picture: a formula's bars and
-    the glyphs OCR read as nothing. ``unnumbered``: how displays without a number are found (:data:`Unnumbered`);
-    numbered ones always are. ``include_hidden``: what hidden layers draw counts too (see `document_lab.ir`).
+    ``face``: the font and size the document's prose is set in (`document_lab.layout.body_face`); ``page`` is read as
+    handed: best as its default view shows it (`document_lab.ir.Page.shown`) and without its running heads and feet
+    (`document_lab.layout.without_running`), which no equation holds. ``drawings``: the page's drawn ink
+    (`document_lab.ink`), when the caller holds its picture: a formula's bars and the glyphs OCR read as nothing.
+    ``unnumbered``: how displays without a number are found (:data:`Unnumbered`); numbered ones always are.
 
     A numbered equation is labeled by its number as read (``(3)``, ``(16a)``), one without ``Untitled equation N``
     in page order. Each is found by what the page states, never guessed:
@@ -490,7 +489,6 @@ def equations(
       block diagram) and to stand as a display (:func:`_display`).
     - From its number or its line, the equation takes its formula's pieces (:func:`_equation_box`).
     """
-    page = page.shown(include_hidden=include_hidden)
     if not page.spans or face[1] <= 0:
         return []
     return _in_order(_equations(page, face, drawings, unnumbered))
@@ -1060,16 +1058,17 @@ def regions(
     *,
     unnumbered: Unnumbered = 'strict',
     include_hidden: bool = False,
+    include_in_background_color: bool = False,
 ) -> list[Region]:
     """The figures, tables and equations of ``page``, top to bottom.
 
     ``face``: the font and size the document's prose is set in (`document_lab.layout.body_face`), its size the body
     size every measure here is in. ``drawings``: the page's drawn ink (`document_lab.ink`), when the caller holds its
     picture; without them a region is told by its words alone. ``unnumbered``: how displays without a number are found
-    (:data:`Unnumbered`, :func:`equations`). ``include_hidden``: what hidden layers draw counts too (see
-    `document_lab.ir`).
+    (:data:`Unnumbered`, :func:`equations`). ``include_hidden``: what hidden layers draw counts too;
+    ``include_in_background_color``: the text filled in the color under it too (see `document_lab.ir`).
     """
-    page = page.shown(include_hidden=include_hidden)
+    page = page.shown(include_hidden=include_hidden, include_in_background_color=include_in_background_color)
     if not page.spans or face[1] <= 0:
         return []
     judged = _Page(page, face[1])
@@ -1079,9 +1078,8 @@ def regions(
             kind, label = caption
             found.append(_figure(judged, line, label) if kind == 'figure' else _table(judged, line, label))
     captioned = [r.bbox for r in found]
-    for r in _equations(
-        page, face, drawings, unnumbered
-    ):  # one without a number inside a captioned figure is the figure's
+    # one without a number inside a captioned figure is the figure's
+    for r in _equations(page, face, drawings, unnumbered):
         middle = ((r.bbox.x0 + r.bbox.x1) / 2, (r.bbox.y0 + r.bbox.y1) / 2)
         if r.captioned or not any(box.contains(*middle) for box in captioned):
             found.append(r)

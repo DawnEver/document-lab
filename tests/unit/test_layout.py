@@ -2,6 +2,7 @@
 side by side right to left.
 """
 
+import dataclasses
 import math
 
 import pymupdf
@@ -328,3 +329,13 @@ def test_a_run_split_by_its_fill_reads_as_the_run_its_source_set(tmp_path):
 
     assert read(split) == read(whole)
     assert [text for text, _ in read(split)] == [text for _, text in GREY_LINES]  # the control: two lines stay two
+
+
+def test_a_span_that_continues_a_run_is_one_run_with_the_span_before_it():
+    """The reader says which piece split off a run goes on with it (``continues_run``), and layout reads the pieces as
+    that one run, judging nothing again: two pieces half a size apart across are one line. The control: the same
+    pieces, the second starting a run, are two lines."""
+    piece = TextSpan('two', SIZE, 'Helvetica', SRC.at(bbox=BBox(87, 105, 102, 115)), fill=(1.0, 0.0, 0.0))
+    for continues, texts in ((True, ['one two']), (False, ['one', 'two'])):
+        page = _page(_flat('one', 72, 100), dataclasses.replace(piece, continues_run=continues))
+        assert [ln.text for ln in layout.ordered(layout.lines(page, weighted=True))] == texts

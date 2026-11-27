@@ -8,9 +8,12 @@ A value read off a page is drawn by its content, or by an annotation's appearanc
 the reader is asked for annotations). What the page draws but its default view does not show is read too, flagged
 for the caller to keep or drop (:meth:`Page.shown` drops both): ``hidden``, drawn by optional content the default
 view hides (a layer turned off), and ``inkless``, painted in the colorant ``None``, which marks nothing in any view
-(a path, an image or a shading; text is text whatever its color, as an invisible OCR layer's is). Both are False
-by default because what neither flags is seen. A module judging a page's content leaves both out unless its
-``include_hidden`` or ``include_inkless`` says otherwise.
+(a path, an image or a shading; text is text whatever its color, as an invisible OCR layer's is). A span is
+flagged a third way, ``in_background_color``: filled in the color painted under it (white on the white page, black
+on a black box), it shows nothing in the view that draws it -- a fact of its paint and what lies under it, not of
+its layer or its colorant, so neither of the other two. All are False by default because what none flags is seen.
+A module judging a page's content leaves them out unless its ``include_hidden``, ``include_inkless`` or
+``include_in_background_color`` says otherwise.
 
 Beside its pages a document states data no page draws: its outline (bookmarks), its pages' labels, its metadata,
 its form fields' values, the files it embeds, and each page's links -- each as stated, a value it does not state
@@ -232,6 +235,13 @@ class TextSpan:
     mark: Mark | None = None
     #: An ``/Artifact`` holds it: pagination, layout or decoration the document states is not its content.
     artifact: bool = False
+    #: It continues the run of the span before it on its page: its source set them as one run, which it split where
+    #: the fill changes (a scan's glyphs each a grey of their own, a colored digit). False: it starts a run, or its
+    #: source states no runs.
+    continues_run: bool = False
+    #: Filled (and only filled) in the color its source paints under its box -- the page's white, or the paint of what
+    #: was drawn under it -- so it shows nothing (see the module). Its source compares the colors exactly.
+    in_background_color: bool = False
 
     @property
     def center(self) -> tuple[float, float]:
@@ -571,17 +581,23 @@ class Page:
     #: Content the reader skipped and why (an operation it could not read, a link whose target does not resolve).
     warnings: tuple[str, ...] = ()
 
-    def shown(self, *, include_hidden: bool = False, include_inkless: bool = False) -> Page:
+    def shown(
+        self, *, include_hidden: bool = False, include_inkless: bool = False, include_in_background_color: bool = False
+    ) -> Page:
         """The page as its default view shows it.
 
         What hidden layers draw is left out unless ``include_hidden``, what the colorant ``None`` paints unless
-        ``include_inkless``.
+        ``include_inkless``, text filled in the color under it unless ``include_in_background_color``.
         """
-        if include_hidden and include_inkless:
+        if include_hidden and include_inkless and include_in_background_color:
             return self
         return dataclasses.replace(
             self,
-            spans=tuple(s for s in self.spans if include_hidden or not s.hidden),
+            spans=tuple(
+                s
+                for s in self.spans
+                if (include_hidden or not s.hidden) and (include_in_background_color or not s.in_background_color)
+            ),
             paths=tuple(
                 p for p in self.paths if (include_hidden or not p.hidden) and (include_inkless or not p.inkless)
             ),
@@ -771,9 +787,18 @@ class Document:
         for page in self.pages:
             yield from page.spans
 
-    def shown(self, *, include_hidden: bool = False, include_inkless: bool = False) -> Document:
+    def shown(
+        self, *, include_hidden: bool = False, include_inkless: bool = False, include_in_background_color: bool = False
+    ) -> Document:
         """The document as its default view shows it, page by page (:meth:`Page.shown`)."""
-        if include_hidden and include_inkless:
+        if include_hidden and include_inkless and include_in_background_color:
             return self
-        pages = tuple(p.shown(include_hidden=include_hidden, include_inkless=include_inkless) for p in self.pages)
+        pages = tuple(
+            p.shown(
+                include_hidden=include_hidden,
+                include_inkless=include_inkless,
+                include_in_background_color=include_in_background_color,
+            )
+            for p in self.pages
+        )
         return dataclasses.replace(self, pages=pages)

@@ -77,8 +77,10 @@ type LayerRow = (bool, bool, Option<String>);
 type MarkedRow = (Option<i64>, Option<u32>, bool);
 /// A span: text, font name (no subset tag), size, bold, box, render mode, the number it shares with the spans its
 /// words run on into with no space between (None: none), whether it is written vertically, the unit vector its
-/// baseline runs along (page space, y down), its layer, its fill color (None: not filled), and what its marked content
-/// says: the text its glyphs draw when an `/ActualText` replaced it (None: the text is that), and the sequence itself.
+/// baseline runs along (page space, y down), its layer, its fill color (None: not filled) and whether that is the
+/// color painted under it, and -- one tuple, as pyo3 converts twelve elements at most -- whether it continues the
+/// run of the span before it (`pdf::spans::Span`) and what its marked content says: the text its glyphs draw when an
+/// `/ActualText` replaced it (None: the text is that), and the sequence itself.
 type SpanRow = (
     String,
     String,
@@ -90,8 +92,8 @@ type SpanRow = (
     bool,
     (f64, f64),
     LayerRow,
-    Option<Vec<f64>>,
-    (Option<String>, MarkedRow),
+    (Option<Vec<f64>>, bool),
+    (bool, Option<String>, MarkedRow),
 );
 /// What a page paints as paths, as columns -- `document_lab.pdf` takes each buffer whole with `numpy.frombuffer`,
 /// no Python object per point. Buffers are native-endian; an entry per subpath (`pdf::paths::Polylines`) unless
@@ -387,8 +389,11 @@ impl Reader {
                     s.vertical,
                     s.direction,
                     layer(&s.layer),
-                    s.fill.as_ref().map(pdf::color::Color::rgb_or_components),
-                    (s.drawn, marked(s.marked)),
+                    (
+                        s.fill.as_ref().map(pdf::color::Color::rgb_or_components),
+                        s.in_background_color,
+                    ),
+                    (s.continues_run, s.drawn, marked(s.marked)),
                 )
             })
             .collect();

@@ -459,8 +459,10 @@ def _attachment(row: tuple, here: Provenance) -> Attachment:
 
 
 def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
-    text, font, size, bold, box, mode, unspaced, vertical, direction, layer, fill, (drawn, marked) = row
+    text, font, size, bold, box, mode, unspaced, vertical, direction, layer, paint, run_and_mark = row
     hidden, _, annotation = layer
+    fill, in_background_color = paint
+    continues_run, drawn, marked = run_and_mark
     return TextSpan(
         text,
         size,
@@ -477,6 +479,8 @@ def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
         drawn=drawn,
         mark=_mark(marked),
         artifact=marked[2],
+        continues_run=continues_run,
+        in_background_color=in_background_color,
     )
 
 

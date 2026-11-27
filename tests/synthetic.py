@@ -527,6 +527,38 @@ def mixed_pdf(path: Path) -> Path:
     return path
 
 
+#: Lines top to bottom, each ``(before, drawn, actual, after)``: ``drawn`` is shown, marked with ``/ActualText``
+#: ``actual``. A drawn space stated a zero-width space, a no-break space, a word joiner; the control: ``XY`` stated
+#: the letters ``fi`` of its ligature, a replacement that is no space.
+ACTUAL_TEXT_LINES = (
+    ('80', ' ', '\u200b', 'V'),
+    ('80', ' ', '\u00a0', 'V'),
+    ('80', ' ', '\u2060', 'V'),
+    ('Ex', 'XY', 'fi', 'nal'),
+)
+
+
+def actual_text_pdf(path: Path) -> Path:
+    """One page of :data:`ACTUAL_TEXT_LINES`, 30 points apart, set in Helvetica 10."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=200)
+    font = doc.get_new_xref()
+    doc.update_object(font, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>')
+    doc.xref_set_key(page.xref, 'Resources', f'<< /Font << /F1 {font} 0 R >> >>')
+    content = '\n'.join(
+        f'BT /F1 10 Tf 20 {160 - 30 * i} Td ({before}) Tj '
+        f'/Span << /ActualText <FEFF{actual.encode("utf-16-be").hex()}> >> BDC ({drawn}) Tj EMC ({after}) Tj ET'
+        for i, (before, drawn, actual, after) in enumerate(ACTUAL_TEXT_LINES)
+    )
+    stream = doc.get_new_xref()
+    doc.update_object(stream, '<< >>')
+    doc.update_stream(stream, content.encode('ascii'))
+    doc.xref_set_key(page.xref, 'Contents', f'{stream} 0 R')
+    doc.save(path)
+    doc.close()
+    return path
+
+
 def hidden_layer(page: Page) -> Page:
     """``page`` with everything it draws in a hidden layer: what a layer turned off in the default view reads as."""
     return replace(

@@ -5,6 +5,7 @@ import pytest
 
 from document_lab.markdown import page_markdowns, to_markdown
 from document_lab.pdf import read_pdf
+from tests.synthetic import actual_text_pdf
 
 LEFT, RIGHT, WIDTH = 50, 320, 240
 
@@ -159,3 +160,7 @@ def test_text_of_a_layer_turned_off_is_written_only_when_asked(tmp_path):
     assert 'Off too.' not in page_markdowns(read)[0]
     assert 'Off too.' in to_markdown(read, include_hidden=True)
     assert 'Off too.' in page_markdowns(read, include_hidden=True)[0]
+
+
+def test_markdown_writes_a_stated_space_as_a_space_and_a_word_joiner_as_none(tmp_path):
+    assert to_markdown(read_pdf(actual_text_pdf(tmp_path / 'actual.pdf'))) == '80 V\n\n80 V\n\n80V\n\nExfinal\n'

@@ -2,7 +2,7 @@ import dataclasses
 
 import pytest
 
-from document_lab.ir import BBox, Document, Page, Provenance, Table, TextSpan, union
+from document_lab.ir import BBox, Document, Page, Provenance, Table, TextSpan, spaced, union
 
 
 def _prov(page=1, bbox=(0.0, 0.0, 10.0, 10.0)):
@@ -58,6 +58,25 @@ def test_a_document_walks_its_pages_in_order():
     )
     assert [s.text for s in doc.spans()] == ['hi']
     assert doc.page(2).spans == (span,)
+
+
+#: Every space separator (Unicode category Zs) but the plain space itself.
+SEPARATORS = ['\u00a0', '\u1680', *map(chr, range(0x2000, 0x200B)), '\u202f', '\u205f', '\u3000']
+
+
+@pytest.mark.parametrize('space', [*SEPARATORS, '\u200b'])
+def test_every_space_separator_and_the_zero_width_space_is_a_plain_space(space):
+    assert spaced(f'80{space}V') == '80 V'
+
+
+@pytest.mark.parametrize('joiner', ['\u2060', '\ufeff'])
+def test_a_word_joiner_forbids_a_break_and_is_dropped(joiner):
+    assert spaced(f'80{joiner}V') == '80V'
+
+
+def test_spaces_in_a_run_are_one_and_all_else_is_untouched():
+    assert spaced(' 80 \u00a0\u200b V\u2060 ') == ' 80 V '
+    assert spaced('\ufb01nal\ta\nb') == '\ufb01nal\ta\nb'  # a ligature, a tab and a newline are no Zs
 
 
 def test_union_is_the_smallest_box_covering_all():

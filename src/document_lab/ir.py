@@ -9,13 +9,19 @@ the reader is asked for annotations). Optional content the file's default view h
 too and flagged ``hidden`` for the caller to keep or drop (:meth:`Page.shown` drops it); ``hidden`` is False by
 default because content no hidden layer draws is seen. A module judging a page's content leaves hidden content
 out unless its ``include_hidden`` says otherwise.
+
+A span's text is what its document states, a replacement (``/ActualText``) too: a no-break or zero-width space
+stays one. A module that joins, splits or matches text reads it through :func:`spaced`.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import re
+import sys
+import unicodedata
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Final, NamedTuple
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -33,8 +39,28 @@ __all__ = [
     'Table',
     'TextSpan',
     'VectorPath',
+    'spaced',
     'union',
 ]
+
+#: Every space separator (Unicode category Zs: the no-break, en, em, thin, ideographic ... spaces) is a space, and so
+#: is the zero-width space (U+200B), a word break unseen; a word joiner (U+2060, and U+FEFF read as one) forbids a
+#: break and is dropped.
+_SPACES: Final = {
+    **{c: ' ' for c in range(sys.maxunicode + 1) if unicodedata.category(chr(c)) == 'Zs'},
+    0x200B: ' ',
+    0x2060: None,
+    0xFEFF: None,
+}
+_RUN: Final = re.compile(' {2,}')
+
+
+def spaced(text: str) -> str:
+    """``text`` with every space a plain one and a run of them one, word joiners dropped (see :data:`_SPACES`).
+
+    Tabs and line breaks are no space separators: they stay.
+    """
+    return _RUN.sub(' ', text.translate(_SPACES))
 
 
 class BBox(NamedTuple):

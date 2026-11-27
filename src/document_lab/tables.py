@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Final
 
 import numpy as np
 
-from document_lab.ir import BBox, Page, Table, union
+from document_lab.ir import BBox, Page, Table, spaced, union
 from document_lab.layout import lines
 
 if TYPE_CHECKING:
@@ -418,7 +418,7 @@ def _texts(page: Page, slots: _Slots, cell_of: list[list[int]], boxes: list[BBox
     """Each cell's text: its spans as lines, top to bottom; a span reaching over a rule breaks the grid."""
     held: list[list[TextSpan]] = [[] for _ in boxes]
     for span in page.spans:
-        if not span.text.strip():
+        if not spaced(span.text).strip():
             continue
         slot = _slot(slots, *span.center)
         if slot is None:

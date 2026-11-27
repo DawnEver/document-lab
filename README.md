@@ -5,7 +5,7 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 
 | module | does |
 |---|---|
-| `ir` | frozen IR: `Provenance`, `TextSpan`, `VectorPath`, `Table`/`Cell`, `Figure`, `Raster`, `Page`, `Document` |
+| `ir` | frozen IR: `Provenance`, `TextSpan`, `VectorPath`, `Table`/`Cell`, `Figure`, `Raster`, `Page`, `Document`; `spaced` (every stated space a plain one, for text joined, split or matched) |
 | `pdf` | `read_pdf(path, password=, annotations=)`: spans, vector paths and image figures, each with its page and box (a hidden layer's flagged `hidden`; annotations' when asked), read by the package's own reader (`document_lab._pdf`, the Rust crate `crates/pdf`); `read_raster(path, page, bbox)`: a region's pixels at its images' native resolution -- one image whole is its own samples, read by the reader, any other region rendered by PyMuPDF |
 | `html` | `read_html(path)`: every `<table>` as a `Table` (standard-library parser) |
 | `plot` | `plots(page)`: curves digitized from VECTOR plots (axes linear, log10, or piecewise between labeled ticks; labels as text, glyph outlines or stroke-font polylines; fragments joined; legend samples apart); a raster plot raises `RasterPlot`. `raster_plot(raster)`: one plot traced from pixels, each point with its pixel uncertainty; unreadable labels raise `UnreadableTickLabels` unless stated (`x_values=`, `y_values=`) |

@@ -6,6 +6,7 @@ import pymupdf
 import pytest
 
 from document_lab.extract import Field, Schema, from_columns, from_rows
+from document_lab.ir import BBox
 from document_lab.pdf import read_pdf
 from document_lab.tables import NotATable, grids, tables
 from tests.synthetic import (
@@ -269,3 +270,13 @@ def test_a_detected_table_feeds_extract_with_each_values_cell(tmp_path):
 def test_a_page_without_rules_has_no_grid(tmp_path):
     page = _page(tmp_path, lambda p: p.insert_text((72, 72), 'Only prose.', fontsize=9))
     assert grids(page) == ()
+
+
+def test_a_cell_reads_a_stated_space_as_a_space_and_a_zero_width_space_over_a_rule_breaks_no_grid(tmp_path):
+    page = _page(tmp_path, draw_table)
+    stated = tuple(dataclasses.replace(s, text='al\u00a0\u200bpha') if s.text == 'alpha' else s for s in page.spans)
+    rule = table_cell_rect(1, 0).x1
+    across = stated[0].provenance.at(bbox=BBox(rule - 3, 425, rule + 3, 434))
+    gap = dataclasses.replace(stated[0], text='\u200b', provenance=across)
+    (table,) = tables(dataclasses.replace(page, spans=(*stated, gap)))
+    assert table.rows[1] == ('al pha', '1.25', 'mm')

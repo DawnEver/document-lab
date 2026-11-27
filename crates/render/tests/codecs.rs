@@ -75,9 +75,17 @@ fn text(w: u32, h: u32) -> Bits {
 /// parameters `params`) at its own size in the page's bottom-left corner, with `extra` objects 6, 7, ... -- drawn one
 /// pixel a point.
 fn drawn(dict: &str, data: &[u8], params: &str, extra: &[String], bits: &Bits) -> Raster {
-    let image = common::hex_stream(
+    let mut objects = vec![jbig2_image(dict, data, params, bits)];
+    objects.extend(extra.iter().cloned());
+    placed(&objects, bits)
+}
+
+/// An image `XObject` of `bits`'s size, `dict`, its `/Filter` chain ending in `/JBIG2Decode` over hex `data`, its
+/// parameters `params`.
+fn jbig2_image(dict: &str, data: &[u8], params: &str, bits: &Bits) -> String {
+    common::hex_stream(
         &format!(
-            "/Type /XObject /Subtype /Image /Width {} /Height {} {dict} /DecodeParms [null {params}]",
+            "/Type /XObject /Subtype /Image /Width {} /Height {} {dict} /DecodeParms [null {params}]", // spelling-ignore-line: the PDF name
             bits.w, bits.h
         ),
         data,
@@ -86,9 +94,12 @@ fn drawn(dict: &str, data: &[u8], params: &str, extra: &[String], bits: &Bits) -
         "/Filter /ASCIIHexDecode",
         "/Filter [/ASCIIHexDecode /JBIG2Decode]",
         1,
-    );
-    let mut objects = vec![image];
-    objects.extend(extra.iter().cloned());
+    )
+}
+
+/// The page placing image object 5 of `objects` (5, 6, ...) at `bits`'s size in its bottom-left corner, drawn one
+/// pixel a point.
+fn placed(objects: &[String], bits: &Bits) -> Raster {
     let objects = objects.iter().map(String::as_str).collect::<Vec<_>>();
     let content = format!("1 0 0 rg q {} 0 0 {} 0 0 cm /Im1 Do Q", bits.w, bits.h);
     let file = File::open(
@@ -410,5 +421,51 @@ fn a_jbig2_image_missing_its_globals_is_drawn_leniently_and_counted_by_why() {
             "JBIG2Decode image drawn past what does not decode strictly: Segment(InvalidReference)"
         ),
         "{why}"
+    );
+}
+
+/// A black gray image (object 5) masked by `/Mask 6 0 R`: a JBIG2 stream stating no `/ImageMask` (read as a stencil
+/// all the same, as `MuPDF` reads a `/Mask` image), with `extra` objects 7, ...
+fn masked_black(mask: &[u8], params: &str, extra: &[String], bits: &Bits) -> Raster {
+    let black = vec![0u8; (bits.w * bits.h) as usize];
+    let image = common::hex_stream(
+        &format!(
+            "/Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceGray /BitsPerComponent 8 \
+             /Mask 6 0 R",
+            bits.w, bits.h
+        ),
+        &black,
+    );
+    let mut objects = vec![image, jbig2_image("", mask, params, bits)];
+    objects.extend(extra.iter().cloned());
+    placed(&objects, bits)
+}
+
+#[test]
+fn a_jbig2_mask_shows_its_image_where_black_and_one_drawn_leniently_is_counted_by_why() {
+    let bits = text(100, 40);
+    let encoded = symbol_coded(&bits);
+    let globals = encoded.global_data.clone().unwrap();
+    // A /Mask sample of 1 masks its area out: JBIG2 black decodes to 0, so the image shows where the mask is black.
+    let r = masked_black(
+        &encoded.page_data,
+        "<< /JBIG2Globals 7 0 R >>",
+        &[common::hex_stream("", &globals)],
+        &bits,
+    );
+    assert_eq!(wrong(&r, &bits), Some(0));
+    // Planted wrong decode: the mask ignored, the image black throughout.
+    let mut ignored = bits.clone();
+    ignored.black.fill(true);
+    assert!(reported(&r, &ignored));
+    // Its globals missing: a strict decoder refuses it, a lenient one draws it blank -- counted, never silent.
+    let r = masked_black(&encoded.page_data, "null", &[], &bits);
+    let why: Vec<_> = r.undrawn.keys().collect();
+    assert_eq!(why.len(), 1, "{why:?}");
+    assert!(
+        why[0].starts_with(
+            "a mask's JBIG2Decode image drawn past what does not decode strictly: Segment(InvalidReference)"
+        ),
+        "{why:?}"
     );
 }

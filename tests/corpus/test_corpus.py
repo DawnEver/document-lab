@@ -16,6 +16,7 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pymupdf
 import pytest
 
@@ -25,6 +26,7 @@ from document_lab.pdf import read_pdf
 from tests.corpus.goldens import GOLDENS
 from tests.corpus.reading import Page, problems, summarize
 from tests.corpus.sources import SOURCES
+from tests.rendering import own, reference
 
 pytestmark = pytest.mark.corpus
 
@@ -117,6 +119,33 @@ def jpx_images(pdf: Path, page: int, objects: frozenset[int]) -> list[str]:
     placed = {figure.image for figure in _read(pdf).page(page).figures if figure.image is not None}
     found = {image for image in placed if codec(image) == 'JPXDecode'}
     return [] if found == objects else [f'page {page} places JPX images {sorted(found)}, not {sorted(objects)}']
+
+
+#: The most levels a JPX image the own renderer draws may be off PyMuPDF's drawing of it.
+JPX_LEVELS = 2
+
+
+def jpx_drawn(pdf: Path, objects: frozenset[int], turn: int) -> list[str]:
+    """Each image XObject of ``objects``, placed alone on a page of its size one sample a point (no group or soft
+    mask of the source's page in force), is drawn by the own renderer within :data:`JPX_LEVELS` of what PyMuPDF
+    draws (the reference, color management off) turned ``turn`` degrees (not 0: a planted wrong truth)."""
+    out = []
+    for number in sorted(objects):
+        with pymupdf.open(pdf) as doc:
+            width, height = (int(doc.xref_get_key(number, key)[1]) for key in ('Width', 'Height'))
+            page = doc.new_page(0, width=width, height=height)
+            content = doc.get_new_xref()
+            doc.update_object(content, '<< >>')
+            doc.update_stream(content, f'q {width} 0 0 {height} 0 0 cm /Im1 Do Q'.encode())
+            doc.xref_set_key(page.xref, 'Contents', f'{content} 0 R')
+            doc.xref_set_key(page.xref, 'Resources', f'<< /XObject << /Im1 {number} 0 R >> >>')
+            data = doc.tobytes()
+        drawn, undrawn = own(data, 72, text=False)
+        truth = np.rot90(reference(data, 72, managed=False), turn // 90)
+        off = int(np.abs(drawn.astype(int) - truth.astype(int)).max())
+        if undrawn or off > JPX_LEVELS:
+            out.append(f'image {number} drawn {off} levels off the reference, undrawn {undrawn}')
+    return out
 
 
 #: The narrowest a vertical glyph's box may be, in ems: a CJK glyph is about one em wide.
@@ -229,6 +258,12 @@ FEATURES = {
         jpx_images,
         (1, frozenset({288, 295, 299, 303})),  # page 1's image XObjects filtered /JPXDecode
         (1, frozenset({288, 295, 299})),
+    ),
+    'jpx-images-drawn-as-the-reference-draws-them': Feature(
+        'devicen-jpx-usgs-fs20213001',
+        jpx_drawn,
+        (frozenset({288, 295, 299, 303}), 0),  # page 1's JPX images, each with a JPX soft mask
+        (frozenset({288, 295, 299, 303}), 180),
     ),
 }
 

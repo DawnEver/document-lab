@@ -630,6 +630,22 @@ def fax_g4(white: np.ndarray) -> bytes:
     return bytes(coded.fz_buffer_extract())
 
 
+def jbig2_mmr(white: np.ndarray) -> bytes:
+    """``white`` -- rows of 1 white, 0 black, as a ``JBIG2Decode`` image's samples read -- as an embedded JBIG2 stream
+    (ITU-T T.88 Annex D.3): a page information segment and an immediate lossless generic region, MMR-coded (6.2.6:
+    its data is T.6, the coding of :func:`fax_g4`, by MuPDF; a T.6 white run is a JBIG2 0, the filter's 1)."""
+    rows, columns = white.shape
+
+    def segment(number: int, kind: int, data: bytes) -> bytes:
+        # 7.2: number, flags (type; a one-byte page association), no referred-to segment, page 1, data length.
+        return number.to_bytes(4, 'big') + bytes([kind, 0, 1]) + len(data).to_bytes(4, 'big') + data
+
+    size = columns.to_bytes(4, 'big') + rows.to_bytes(4, 'big')
+    page = size + bytes(8) + bytes([1]) + bytes(2)  # 7.4.8: no resolution, lossless, white, OR, not striped
+    region = size + bytes(8) + bytes([0]) + bytes([1])  # 7.4.1 at (0, 0), OR; 7.4.6.2: MMR
+    return segment(0, 48, page) + segment(1, 38, region + fax_g4(white))
+
+
 TABLE_ROWS = (('Parameter', 'Value', 'Unit'), ('alpha', '1.25', 'mm'), ('beta', '-3', 'kg'), ('gamma', '4.5e2', 's'))
 TABLE_ORIGIN = (72.0, 400.0)
 TABLE_CELL = (120.0, 20.0)

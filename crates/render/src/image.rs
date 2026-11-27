@@ -1,5 +1,6 @@
-//! An image placed on a page to pixels (ISO 32000-2 section 8.9): its samples decoded ([`crate::codec`] for a codec
-//! the reader hands over), mapped through `/Decode`, converted to sRGB as the reader converts colors -- `DeviceGray`,
+//! An image placed on a page to pixels (ISO 32000-2 section 8.9): its dictionary as the reader reads it
+//! (`pdf::image::Samples`, for `Reader.image` alike), its samples decoded ([`crate::codec`] for a codec the reader
+//! hands over), mapped through `/Decode`, converted to sRGB as the reader converts colors -- `DeviceGray`,
 //! `DeviceRGB` and `DeviceCMYK` by the standard's formulas, `ICCBased` through its profile (a profile that does not
 //! read: as the device space of its component count), every other space (`Indexed`, `CalGray`/`CalRGB`, `Lab`,
 //! `Separation`, `DeviceN`) through `pdf::color::Space::color` -- and masked: a stencil mask (`/ImageMask`) paints
@@ -19,8 +20,9 @@ use pdf::color::Space;
 use pdf::filter::Codec;
 use pdf::geometry::{Matrix, Point};
 use pdf::icc::Intent;
+use pdf::image::{Role, Samples};
 use pdf::interpret::ImageEvent;
-use pdf::object::{Dict, Object};
+use pdf::object::Object;
 use tiny_skia::{IntSize, Pixmap, PixmapRef};
 
 use crate::codec;
@@ -211,87 +213,50 @@ struct Image {
 }
 
 impl Image {
+    /// The image `event` places, its samples as the reader reads its dictionary (`pdf::image`).
     fn of(file: &File, event: &ImageEvent) -> Result<Self, String> {
-        let failed = |e: pdf::Error| e.to_string();
-        let (dict, decoded, resources) = match (&event.inline, event.object) {
-            (Some(inline), _) => (
-                inline.dict.clone(),
-                pdf::filter::decode(&inline.dict, &inline.data, &|o| file.resolve(o))
-                    .map_err(failed)?,
-                inline.resources.clone(),
-            ),
-            (None, Some(num)) => {
-                let Object::Stream(stream) = file.object(num).map_err(failed)? else {
-                    return Err(format!("image object {num} is no stream"));
-                };
-                let decoded = file.decode(&stream).map_err(failed)?;
-                (stream.dict, decoded, Dict::new())
-            }
+        let samples = match (&event.inline, event.object) {
+            (Some(inline), _) => file.inline_image(inline),
+            (None, Some(num)) => file.image(num),
             (None, None) => return Err("an image with neither data nor object".to_string()),
         };
-        let inline = event.inline.is_some();
-        let get = |long: &[u8], short: &[u8]| -> Result<Option<Object>, String> {
-            let value = dict
-                .get(long)
-                .or_else(|| if inline { dict.get(short) } else { None });
-            value.map(|v| file.resolve(v)).transpose().map_err(failed)
-        };
-        let count = |long: &[u8], short: &[u8]| -> Result<u32, String> {
-            get(long, short)?
-                .and_then(|v| v.as_integer())
-                .and_then(|v| u32::try_from(v).ok())
+        Self::read(file, samples.map_err(|e| e.to_string())?)
+    }
+
+    /// The image `samples` state, its codec's data decoded ([`codec`]).
+    fn read(file: &File, samples: Samples) -> Result<Self, String> {
+        let count = |value: i64, key: &str| {
+            u32::try_from(value)
+                .ok()
                 .filter(|v| *v > 0)
-                .ok_or_else(|| format!("an image states no /{}", String::from_utf8_lossy(long)))
+                .ok_or_else(|| format!("an image states no /{key}"))
         };
-        let (width, height) = (count(b"Width", b"W")?, count(b"Height", b"H")?);
-        let stencil = matches!(get(b"ImageMask", b"IM")?, Some(Object::Bool(true)));
-        let mut space = match get(b"ColorSpace", b"CS")? {
-            _ if stencil => None,
-            Some(value) => Some(file.color_space(&value, &resources).map_err(failed)?),
-            // A JPEG 2000 may leave its space to its data (Table 87).
-            None if decoded
-                .codec
-                .as_ref()
-                .is_some_and(|c| c.name == b"JPXDecode") =>
-            {
-                Some(pdf::image::jpx_space(&decoded.data).map_err(failed)?)
+        let (width, height) = (
+            count(samples.width, "Width")?,
+            count(samples.height, "Height")?,
+        );
+        let stencil = samples.space.is_none();
+        let mut space = samples.space;
+        let (mut bits, mut data, mut partial, mut opacity) = (1, samples.data, None, None);
+        match &samples.codec {
+            None if !stencil => bits = count(samples.bits, "BitsPerComponent")?,
+            None => {}
+            Some(stated) => {
+                // A codec states the depth it decodes to.
+                let found = codec::decode(file, stated, &data, (width, height), space.as_ref())?;
+                if let Some(s) = space {
+                    space = Some(codec_space(stated, &found, s)?);
+                }
+                // `/SMaskInData` (Table 87): 0 ignores the data's opacity, 1 takes it as the soft mask, 2 too with
+                // the colors preblended; an `/SMask` stated takes precedence.
+                if samples.soft_mask.is_none()
+                    && let (Some(alpha), code @ (1 | 2)) = (found.opacity, samples.in_data)
+                {
+                    opacity = Some((alpha, code == 2));
+                }
+                bits = found.bits;
+                (data, partial) = (found.data, found.partial);
             }
-            None => return Err("an image states no /ColorSpace".to_string()),
-        };
-        let decode = get(b"Decode", b"D")?.and_then(|v| {
-            v.as_array()
-                .map(|a| a.iter().filter_map(Object::as_number).collect())
-        });
-        let interpolate = matches!(get(b"Interpolate", b"I")?, Some(Object::Bool(true)));
-        let intent = match get(b"Intent", b"Intent")? {
-            Some(Object::Name(n)) => Intent::named(&n).unwrap_or_default(),
-            _ => Intent::default(),
-        };
-        let (soft_mask, mask) = if inline {
-            (None, get(b"Mask", b"Mask")?)
-        } else {
-            (get(b"SMask", b"SMask")?, get(b"Mask", b"Mask")?)
-        };
-        let (mut bits, mut data, mut partial, mut opacity) = (1, decoded.data, None, None);
-        if decoded.codec.is_none() && !stencil {
-            bits = count(b"BitsPerComponent", b"BPC")?;
-        }
-        if let Some(stated) = &decoded.codec {
-            // A codec states the depth it decodes to.
-            let found = codec::decode(file, stated, &data, (width, height), space.as_ref())?;
-            if let Some(s) = space {
-                space = Some(codec_space(stated, &found, s)?);
-            }
-            // `/SMaskInData` (Table 87): 0 ignores the data's opacity, 1 takes it as the soft mask, 2 too with the
-            // colors preblended; an `/SMask` stated takes precedence.
-            let in_data = get(b"SMaskInData", b"SMaskInData")?.and_then(|v| v.as_integer());
-            if soft_mask.is_none()
-                && let (Some(alpha), Some(code @ (1 | 2))) = (found.opacity, in_data)
-            {
-                opacity = Some((alpha, code == 2));
-            }
-            bits = found.bits;
-            (data, partial) = (found.data, found.partial);
         }
         if !matches!(bits, 1 | 2 | 4 | 8 | 16) {
             return Err(format!("an image of {bits} bits a component"));
@@ -302,13 +267,13 @@ impl Image {
             stencil,
             bits,
             space,
-            decode,
-            interpolate,
-            intent,
+            decode: samples.decode,
+            interpolate: samples.interpolate,
+            intent: samples.intent,
             data,
             partial,
-            soft_mask,
-            mask,
+            soft_mask: samples.soft_mask,
+            mask: samples.mask,
             opacity,
         })
     }
@@ -445,7 +410,8 @@ fn colored(file: &File, image: &Image, notes: &mut Vec<String>) -> Result<Vec<u8
         let Some(Object::Stream(stream)) = value else {
             continue;
         };
-        let (mask, stated_matte) = mask_alpha(file, stream, soft, (image.width, image.height))?;
+        let (mask, stated_matte) =
+            mask_alpha(file, stream, soft, (image.width, image.height), notes)?;
         for (a, m) in alpha.iter_mut().zip(mask) {
             *a = mul(*a, m);
         }
@@ -504,67 +470,39 @@ fn level(v: f64) -> u8 {
 }
 
 /// A soft mask's (`soft`) or a stencil `/Mask`'s alpha, sample by sample, resampled (nearest) to `size`; and a soft
-/// mask's `/Matte`.
+/// mask's `/Matte`. What of the mask's data was not decoded as it stands joins `notes`.
 fn mask_alpha(
     file: &File,
     stream: &pdf::Stream,
     soft: bool,
     (width, height): (u32, u32),
+    notes: &mut Vec<String>,
 ) -> Result<(Vec<u8>, Option<Vec<f64>>), String> {
     let failed = |e: pdf::Error| e.to_string();
-    let dict = &stream.dict;
-    let int = |key: &[u8]| -> Result<u32, String> {
-        file.get(dict, key)
-            .map_err(failed)?
-            .and_then(|v| v.as_integer())
-            .and_then(|v| u32::try_from(v).ok())
-            .filter(|v| *v > 0)
-            .ok_or_else(|| format!("a mask states no /{}", String::from_utf8_lossy(key)))
-    };
-    let (w, h) = (int(b"Width")?, int(b"Height")?);
-    let decoded = file.decode(stream).map_err(failed)?;
-    let (data, bits) = match &decoded.codec {
-        Some(c) => {
-            let found = codec::decode(file, c, &decoded.data, (w, h), Some(&Space::Gray))?;
-            (found.data, found.bits)
-        }
-        None if soft => (decoded.data, int(b"BitsPerComponent")?),
-        None => (decoded.data, 1),
-    };
-    let decode: Option<Vec<f64>> = file.get(dict, b"Decode").map_err(failed)?.and_then(|v| {
-        v.as_array()
-            .map(|a| a.iter().filter_map(Object::as_number).collect())
-    });
-    let mask = Image {
-        width: w,
-        height: h,
-        stencil: !soft,
-        bits,
-        space: Some(Space::Gray),
-        decode: decode.clone(),
-        interpolate: false,
-        intent: Intent::default(),
-        data,
-        partial: None,
-        soft_mask: None,
-        mask: None,
-        opacity: None,
-    };
+    let role = if soft { Role::SoftMask } else { Role::Stencil };
+    let mask = Image::read(file, file.image_stream(stream, role).map_err(failed)?)?;
+    if let Some(why) = &mask.partial {
+        notes.push(format!("a mask's {why}"));
+    }
+    let (w, h, decode) = (mask.width, mask.height, mask.decode.as_deref());
     let samples = mask.samples()?;
     let alpha: Vec<u8> = if soft {
-        levels(&samples, &Space::Gray, bits, decode.as_deref())
+        levels(&samples, &Space::Gray, mask.bits, decode)
     } else {
         // A stencil: a sample of 1 (0 under `/Decode [1 0]`) masks its area out.
-        let masks = u16::from(!decode.as_deref().is_some_and(|d| d.first() > d.get(1)));
+        let masks = u16::from(!decode.is_some_and(|d| d.first() > d.get(1)));
         samples
             .iter()
             .map(|&s| if s == masks { 0 } else { 255 })
             .collect()
     };
-    let matte = file.get(dict, b"Matte").map_err(failed)?.and_then(|v| {
-        v.as_array()
-            .map(|a| a.iter().filter_map(Object::as_number).collect())
-    });
+    let matte = file
+        .get(&stream.dict, b"Matte")
+        .map_err(failed)?
+        .and_then(|v| {
+            v.as_array()
+                .map(|a| a.iter().filter_map(Object::as_number).collect())
+        });
     if (w, h) == (width, height) {
         return Ok((alpha, matte));
     }

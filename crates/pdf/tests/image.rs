@@ -23,7 +23,7 @@ fn samples(extra: &str) -> pdf::image::Samples {
 #[test]
 fn plain_samples_state_no_decode_and_no_mask() {
     let plain = samples("");
-    assert_eq!((plain.decode, plain.masked), (None, false));
+    assert_eq!((plain.masked(), plain.decode), (false, None));
     assert_eq!(plain.data, b"ab");
 }
 
@@ -34,9 +34,12 @@ fn a_decode_array_is_handed_over_as_stated() {
 
 #[test]
 fn a_soft_mask_or_a_mask_says_the_image_is_masked() {
-    assert!(samples("/SMask 6 0 R").masked);
-    assert!(samples("/Mask 6 0 R").masked);
-    assert!(samples("/Mask [0 127]").masked);
+    assert!(samples("/SMask 6 0 R").masked());
+    assert!(samples("/Mask 6 0 R").masked());
+    assert!(samples("/Mask [0 127]").masked());
+    // A JPEG 2000 taking its data's opacity as its soft mask.
+    assert!(samples("/SMaskInData 1").masked());
+    assert!(!samples("/SMaskInData 0").masked());
 }
 
 #[test]

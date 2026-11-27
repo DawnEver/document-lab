@@ -85,24 +85,50 @@ _TOC_ENTRY: Final = re.compile(r'^(?=.*[A-Za-z]).*?(?:(?:\.\s?){4,}|\u2026{2,}|\
 TOC_LINES: Final = 3
 
 
-def to_markdown(doc: Document) -> str:
-    """The document as markdown, page after page: a paragraph a page break cut is joined again."""
-    return '\n\n'.join(_rejoin([block for page in _blocks(doc) for block in page])) + '\n'
+def to_markdown(doc: Document, *, include_hidden: bool = False) -> str:
+    """The document as markdown, page after page: a paragraph a page break cut is joined again.
+
+    ``include_hidden``: the text hidden layers draw is written too (see `document_lab.ir`).
+    """
+    return (
+        '\n\n'.join(_rejoin([block for page in _blocks(doc.shown(include_hidden=include_hidden)) for block in page]))
+        + '\n'
+    )
 
 
-def page_markdowns(doc: Document, placed: Sequence[Sequence[Placed]] = ()) -> list[str]:
+def page_markdowns(
+    doc: Document, placed: Sequence[Sequence[Placed]] = (), *, include_hidden: bool = False
+) -> list[str]:
     """Each page's own markdown, in order (empty for a page without text).
 
     Body size and title are judged over the whole document; nothing is joined across a page break: a page stands alone.
-    ``placed``: each page's placed blocks (none for a page past its end).
+    ``placed``: each page's placed blocks (none for a page past its end). ``include_hidden``: as for
+    :func:`to_markdown`.
     """
-    return ['\n\n'.join(_rejoin(page)) + '\n' if page else '' for page in _blocks(doc, placed)]
+    return [
+        '\n\n'.join(_rejoin(page)) + '\n' if page else ''
+        for page in _blocks(doc.shown(include_hidden=include_hidden), placed)
+    ]
 
 
-def table(rows: Sequence[Sequence[str]]) -> str:
-    """``rows`` as a markdown table, the first its header; a ``|`` in a cell escaped, a short row padded."""
+def table(rows: Sequence[Sequence[str]], boxes: Sequence[Sequence[BBox | None]] | None = None) -> str:
+    """``rows`` as a markdown table, the first its header; a ``|`` in a cell escaped, a short row padded.
+
+    ``boxes``: each slot's cell box (`document_lab.ir.Table.cell_bboxes`), when known: a cell merged over several
+    slots repeats its box, and is written once, in its first slot -- the leftmost of its top row -- its other slots
+    left empty, as a reader sees a merged cell.
+    """
     width = max(len(row) for row in rows)
-    cells = [[c.replace('|', ESCAPE + '|') for c in row] + [''] * (width - len(row)) for row in rows]
+
+    def merged(r: int, c: int) -> bool:
+        box = None if boxes is None else boxes[r][c]
+        return box is not None and ((c > 0 and boxes[r][c - 1] == box) or (r > 0 and boxes[r - 1][c] == box))  # type: ignore[index]
+
+    cells = [
+        ['' if merged(r, c) else ' '.join(text.split()).replace('|', ESCAPE + '|') for c, text in enumerate(row)]
+        + [''] * (width - len(row))
+        for r, row in enumerate(rows)
+    ]
     lines = [f'| {" | ".join(row)} |' for row in cells]
     return '\n'.join([lines[0], '|' + ' --- |' * width, *lines[1:]])
 

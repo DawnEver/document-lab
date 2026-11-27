@@ -6,20 +6,29 @@ import pymupdf
 import pytest
 
 from document_lab.extract import Field, Schema, from_columns, from_rows
+from document_lab.ink import Rulings, rulings
+from document_lab.ir import BBox, Page
 from document_lab.pdf import read_pdf
 from document_lab.tables import NotATable, grids, tables
 from tests.synthetic import (
     MERGED,
     MERGED_ROWS,
     RED,
+    SCAN_PAGE,
     TABLE_ROWS,
     Axis,
     PlotSpec,
+    broken_rules,
+    double_border,
     draw_plot,
     draw_ruled_table,
+    draw_sideways_table,
     draw_table,
     mixed_pdf,
+    scan_image,
     table_cell_rect,
+    table_differences,
+    turned,
 )
 
 
@@ -269,3 +278,160 @@ def test_a_detected_table_feeds_extract_with_each_values_cell(tmp_path):
 def test_a_page_without_rules_has_no_grid(tmp_path):
     page = _page(tmp_path, lambda p: p.insert_text((72, 72), 'Only prose.', fontsize=9))
     assert grids(page) == ()
+
+
+def test_a_cell_reads_a_stated_space_as_a_space_and_a_zero_width_space_over_a_rule_breaks_no_grid(tmp_path):
+    page = _page(tmp_path, draw_table)
+    stated = tuple(dataclasses.replace(s, text='al\u00a0\u200bpha') if s.text == 'alpha' else s for s in page.spans)
+    rule = table_cell_rect(1, 0).x1
+    across = stated[0].provenance.at(bbox=BBox(rule - 3, 425, rule + 3, 434))
+    gap = dataclasses.replace(stated[0], text='\u200b', provenance=across)
+    (table,) = tables(dataclasses.replace(page, spans=(*stated, gap)))
+    assert table.rows[1] == ('al pha', '1.25', 'mm')
+
+
+# A scanned page: its rules come from its picture (`ink.rulings`), its words from OCR. Here the words are the drawn
+# text's own, placed where the scan turns them (each box's center turned, its size kept), so every expected value is
+# known and Tesseract is not needed; the ``ocr`` part runs the same tables through it.
+
+
+def _scanned(tmp_path, *draws, angle=0.0, noise=0.0, dpi=300):
+    """The page of ``draws`` as scanned: its words where the scan shows them, and its picture's rulings."""
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=SCAN_PAGE.width, height=SCAN_PAGE.height)
+        for draw in draws:
+            draw(page)
+        doc.save(tmp_path / 'drawn.pdf')
+    drawn = read_pdf(tmp_path / 'drawn.pdf').page(1)
+
+    def seen(span):
+        box = span.provenance.bbox
+        x, y = turned((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2, angle)
+        moved = BBox(x - box.width / 2, y - box.height / 2, x + box.width / 2, y + box.height / 2)
+        return dataclasses.replace(span, provenance=span.provenance.at(bbox=moved))
+
+    words = Page(1, drawn.width, drawn.height, spans=tuple(seen(s) for s in drawn.spans))
+    pixels = scan_image(*draws, dpi=dpi, angle=angle, noise=noise)
+    return words, rulings(pixels, pixels.shape[1] / SCAN_PAGE.width)
+
+
+@pytest.mark.parametrize(('angle', 'noise'), [(0.0, 0.0), (1.0, 0.0), (-0.7, 1.0), (1.5, 1.0)])
+def test_a_scanned_ruled_table_reads_from_its_pictures_rules_and_its_words(tmp_path, angle, noise):
+    page, found = _scanned(tmp_path, draw_ruled_table, angle=angle, noise=noise)
+    assert found.skew == pytest.approx(angle, abs=0.05)
+    (table,) = tables(page, rulings=found)
+    assert table_differences(table, TABLE_ROWS, angle=angle) == ([], [])
+    assert (table.provenance.page, table.provenance.locator) == (1, 'table[0]')
+
+
+def test_a_scanned_merged_cell_repeats_its_text_and_box_where_the_scan_turns_it(tmp_path):
+    page, found = _scanned(tmp_path, lambda p: draw_ruled_table(p, MERGED_ROWS, merged=MERGED), angle=-1.3, noise=1.0)
+    (table,) = tables(page, rulings=found)
+    assert table_differences(table, MERGED_ROWS, merged=MERGED, angle=-1.3) == ([], [])
+
+
+@pytest.mark.parametrize(
+    ('draws', 'within'),
+    [
+        ((draw_ruled_table, broken_rules), 0.5),
+        ((lambda p: draw_ruled_table(p, width=2.0),), 0.5),
+        ((draw_ruled_table, double_border), 1.3),  # a double rule is one line, at its rules' mean
+    ],
+    ids=['broken rules', 'thick rules', 'a double outline'],
+)
+def test_a_scans_broken_thick_or_double_rules_still_rule_its_table(tmp_path, draws, within):
+    page, found = _scanned(tmp_path, *draws, angle=0.6, noise=0.5, dpi=200)
+    (table,) = tables(page, rulings=found)
+    assert table_differences(table, TABLE_ROWS, angle=0.6, within=within) == ([], [])
+
+
+@pytest.mark.parametrize(
+    ('wrong', 'kind'),
+    [
+        ({'rows': MERGED_ROWS}, 'text'),
+        ({'rows': TABLE_ROWS[:3]}, 'structure'),
+        ({'rows': TABLE_ROWS, 'merged': ((0, 1, 0, 2),)}, 'structure'),
+        ({'rows': TABLE_ROWS, 'angle': -1.0}, 'structure'),
+    ],
+    ids=['other words', 'a row fewer', 'a merged cell that is not there', 'the skew the other way'],
+)
+def test_the_comparison_reports_every_planted_wrong_truth(tmp_path, wrong, kind):
+    page, found = _scanned(tmp_path, draw_ruled_table, angle=1.0)
+    (table,) = tables(page, rulings=found)
+    structure, text = table_differences(table, **{'angle': 1.0, **wrong})
+    assert structure if kind == 'structure' else text
+
+
+def test_a_scan_without_rules_has_no_skew_and_no_table(tmp_path):
+    page, found = _scanned(tmp_path, lambda p: p.insert_text((72, 100), 'Only prose, no rule.', fontsize=11))
+    assert found == Rulings(None, ())
+    assert tables(page, rulings=found) == ()
+
+
+def _text_only(tmp_path, rows=TABLE_ROWS):
+    """Page 1 of a PDF of :func:`draw_ruled_table`'s text without its rules, as read."""
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=612, height=792)
+        for r, row in enumerate(rows):
+            for c, text in enumerate(row):
+                rect = table_cell_rect(r, c)
+                page.insert_text((rect.x0 + 4, rect.y1 - 6), text, fontname='helv', fontsize=9)
+        doc.save(tmp_path / 'text.pdf')
+    return read_pdf(tmp_path / 'text.pdf').page(1)
+
+
+def _picture_grid(rows: int, extra: tuple[BBox, ...] = ()) -> Rulings:
+    """:func:`draw_ruled_table`'s grid of ``rows`` rows by three as picture rules (thin boxes), and ``extra``."""
+    whole = table_cell_rect(0, 0) | table_cell_rect(rows - 1, 2)
+    level = tuple(BBox(whole.x0, y - 0.25, whole.x1, y + 0.25) for y in range(400, 401 + 20 * rows, 20))
+    upright = tuple(BBox(x - 0.25, whole.y0, x + 0.25, whole.y1) for x in (72, 192, 312, 432))
+    return Rulings(0.0, level + upright + extra)
+
+
+def test_a_picture_rule_inside_one_words_box_is_that_words_ink(tmp_path):
+    """The tops of ``mm`` side by side read as a short level rule: within the word's box, it parts no cell."""
+    page = _text_only(tmp_path)
+    word = next(s for s in page.spans if s.text == 'mm').provenance.bbox
+    tops = BBox(word.x0 + 0.5, word.y0 + 1, word.x1 - 0.5, word.y0 + 1.3)
+    (table,) = tables(page, rulings=_picture_grid(4, (tops,)))
+    assert table.rows == TABLE_ROWS
+    (broken,) = grids(page, rulings=Rulings(0.0, (*_picture_grid(4).rules, tops._replace(x0=word.x0 - 5))))
+    assert isinstance(broken, NotATable)  # reaching out of the word, it is a rule: a planted control
+
+
+def test_a_stroke_a_picture_rule_runs_through_is_that_rule_read_as_text_but_a_dash_in_a_cell_is_kept(tmp_path):
+    page = _text_only(tmp_path, [('a', '-', 'b'), ('c', 'd', 'e')])
+    on_rule = page.spans[0].provenance.at(bbox=BBox(191.0, 402.0, 193.0, 412.0))  # across the rule at x 192
+    read_rule = dataclasses.replace(page.spans[0], text='|', provenance=on_rule)
+    (table,) = tables(dataclasses.replace(page, spans=(*page.spans, read_rule)), rulings=_picture_grid(2))
+    assert table.rows == (('a', '-', 'b'), ('c', 'd', 'e'))
+    (kept,) = tables(
+        dataclasses.replace(page, spans=(*page.spans, dataclasses.replace(read_rule, text='x'))),
+        rulings=_picture_grid(2),
+    )
+    assert kept.rows[0][:2] != ('a', '-')  # a letter on a rule is no rule read as text: a planted control
+
+
+def _sideways_differences(table, turn):
+    """How ``table`` differs from :func:`draw_sideways_table`'s drawn ``turn`` degrees: rows, then each cell's box."""
+    out = [] if table.rows == TABLE_ROWS else [f'rows {table.rows}']
+    for r, row in enumerate(TABLE_ROWS):
+        for c in range(len(row)):
+            drawn, box = table_cell_rect(r, c), table.cell_bboxes[r][c]
+            x, y = turned((drawn.x0 + drawn.x1) / 2, (drawn.y0 + drawn.y1) / 2, turn)
+            seen = ((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2, box.width, box.height)
+            if seen != pytest.approx((x, y, drawn.height, drawn.width), abs=0.5):
+                out.append(f'cell ({r}, {c}) at {seen}')
+    return out
+
+
+@pytest.mark.parametrize('turn', [-90, 90], ids=['read bottom to top', 'read top to bottom'])
+def test_a_table_printed_sideways_reads_in_the_frame_its_text_stands_upright_in(tmp_path, turn):
+    def head(page):
+        page.insert_text((72, 60), 'An upright running head', fontsize=10)
+
+    (table,) = tables(_page(tmp_path, head, lambda page: draw_sideways_table(page, turn=turn)))
+    assert _sideways_differences(table, turn) == []
+    assert _sideways_differences(table, -turn)  # a planted wrong truth: turned the other way
+    mirrored = dataclasses.replace(table, rows=tuple(row[::-1] for row in table.rows))
+    assert _sideways_differences(mirrored, turn)  # ... and its cells read in another order

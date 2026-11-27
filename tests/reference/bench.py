@@ -9,8 +9,10 @@ page through ``read_pdf`` (``Document.pages``), PyMuPDF extracts the same per pa
 default -- ``get_texttrace()`` (every glyph with its box, font and color), ``get_cdrawings()``,
 ``get_image_info()``; ``--text`` and ``--drawings`` select its structured calls instead (``rawdict`` builds a dict
 per character, ``get_drawings`` one per path; they cost it about ten times more). Time is wall time from the path to
-the last page (imports excluded); memory is the process's peak working set (resident set) over its working set
-once both readers were imported. A document PyMuPDF asks a password for is skipped.
+the last page (imports excluded), each document read once before either reader is timed, so neither pays for
+fetching it from disk (or a synced folder) where the other finds it cached; memory is the process's peak working set
+(resident set) over its working set once both readers were imported. A document PyMuPDF asks a password for is
+skipped.
 """
 
 from __future__ import annotations
@@ -183,6 +185,7 @@ def main(argv: list[str] | None = None) -> None:
     pdfs = _pdfs(args.paths)
 
     def one(pdf: Path) -> dict:
+        pdf.read_bytes()  # into the OS cache: the reader timed first would pay for fetching it alone
         return {
             'pdf': pdf,
             'ours': _measure('ours', pdf, args.text, args.drawings),

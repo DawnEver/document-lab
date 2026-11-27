@@ -2,13 +2,14 @@
 the prose around it bound a figure or table, an equation number the noise lines beside it."""
 
 import pymupdf
+import pytest
 
 from document_lab import layout
 from document_lab.ink import Drawing
 from document_lab.ir import BBox
 from document_lab.pdf import read_pdf
 from document_lab.regions import regions
-from tests.synthetic import hidden_layer, in_background_color
+from tests.synthetic import LANDSCAPE_CAPTION, TABLE_ROWS, hidden_layer, in_background_color, landscape_pdf
 
 PROSE = 'The rated output is the mechanical power available at the shaft and shall be expressed in watts.'
 
@@ -365,3 +366,30 @@ def test_rows_ruled_apart_with_text_are_a_table_a_striped_icon_without_text_is_n
     icon = _drawn((200, 260, 260, 320), rules=(5, 0), loose=8)
     found = regions(page, face, [ruled, icon])
     assert [(r.kind, r.label) for r in found] == [('table', 'Untitled table 1'), ('figure', 'Untitled figure 1')]
+
+
+def test_a_caption_up_the_side_of_a_landscape_table_cuts_its_region_in_its_own_frame(tmp_path):
+    """A landscape table printed sideways, its caption above it in its frame (left of it on the page, read bottom to
+    top): the caption is matched in its frame and the table runs across the page from it to the note after it; its
+    cells are read in that frame, each box turned back to where the page shows it."""
+    read = read_pdf(landscape_pdf(tmp_path / 'landscape.pdf'))
+    page = read.page(1)
+    (region,) = regions(page, layout.body_face(read))
+    assert (region.kind, region.label) == ('table', 'Table 10')
+    cells = {cell for row in TABLE_ROWS for cell in row}
+
+    def wrongly(box):
+        """The spans ``box`` holds and should not, or should hold and does not: the caption and the cells it holds."""
+        return [s.text for s in page.spans if box.contains(*s.center) != (s.text in cells | {LANDSCAPE_CAPTION[0]})]
+
+    assert wrongly(region.bbox) == []
+    caption = next(s for s in page.spans if s.text == LANDSCAPE_CAPTION[0]).provenance.bbox
+    # The planted wrong truth: the caption read as the page stands, its table running down the page from it.
+    assert wrongly(BBox(0, caption.y0, page.width, page.height))
+    assert region.table.rows == TABLE_ROWS
+    boxes = {s.text: tuple(s.provenance.bbox) for s in page.spans}
+    seen = [v for r, row in enumerate(TABLE_ROWS) for c in range(len(row)) for v in region.table.cell_bboxes[r][c]]
+    assert seen == pytest.approx([v for row in TABLE_ROWS for cell in row for v in boxes[cell]])
+    # The planted wrong truth: a cell's box left in the table's frame stands nowhere near its text on the page.
+    framed = layout.framed(region.table.cell_bboxes[0][0], (0.0, -1.0))
+    assert not framed.contains(*next(s for s in page.spans if s.text == TABLE_ROWS[0][0]).center)

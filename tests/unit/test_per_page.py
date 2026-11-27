@@ -6,10 +6,27 @@ import numpy as np
 import pymupdf
 import pytest
 
+from document_lab import layout
 from document_lab.__main__ import main
 from document_lab.capture.export import to_pdf
+from document_lab.markdown import table as markdown_table
+from document_lab.pdf import read_pdf
 from document_lab.per_page import RENDER_DPI, UNREAD, write_pages
-from tests.synthetic import draw_booktabs, draw_ruled_table, table_cell_rect
+from document_lab.regions import regions
+from document_lab.tables import tables
+from tests.synthetic import (
+    LANDSCAPE_CAPTION,
+    LANDSCAPE_HEAD,
+    LANDSCAPE_NOTE,
+    TABLE_ROWS,
+    draw_booktabs,
+    draw_ruled_table,
+    landscape_pdf,
+    table_cell_rect,
+)
+
+#: A line of prose: it bounds a region.
+PROSE = 'The rated output is the mechanical power available at the shaft and shall be expressed in watts.'
 
 
 def test_each_page_gets_its_markdown_and_image_and_the_index_names_them(tmp_path):
@@ -502,3 +519,85 @@ def test_an_untitled_figure_takes_the_text_the_page_shows_in_it(tmp_path, kind):
         blocks = (tmp_path / f'out-{asked}' / 'page-001.md').read_text(encoding='utf-8').split('\n\n')
         figure = blocks.index('![Untitled figure 1](page-001-figure-untitled-1.png)')
         assert blocks[figure + 1] == ('*Text in the figure:* N S' if asked else '*Text in the figure:* N')
+
+
+def test_a_landscape_table_s_caption_heads_it_and_its_region_is_cut_and_linked(tmp_path):
+    """A landscape table printed sideways under an upright running head: the page reads sideways, so its caption --
+    above the table in their frame -- comes first, then the region's link and the table, then the note after it; the
+    head, turned against the page's text, is neither its body nor its front matter."""
+    pdf = landscape_pdf(tmp_path / 'landscape.pdf')
+    assert main(['pages', str(pdf), str(tmp_path / 'out')]) == 0
+    md = (tmp_path / 'out' / 'page-001.md').read_text(encoding='utf-8')
+    blocks = md.rstrip('\n').split('\n\n')
+    order = [
+        blocks.index(LANDSCAPE_CAPTION[0]),
+        blocks.index('![Table 10](page-001-table-10.png)'),
+        blocks.index(markdown_table(TABLE_ROWS)),
+        blocks.index(LANDSCAPE_NOTE[0]),
+    ]
+    assert order == sorted(order)
+    assert (tmp_path / 'out' / 'page-001-table-10.png').exists()
+    assert not any(head in md for head, _ in LANDSCAPE_HEAD)
+    # The planted wrong truth: read as the page stands, the table -- its top above the caption's -- would come first.
+    page = read_pdf(pdf).page(1)
+    (table,) = tables(page)
+    caption = next(s for s in page.spans if s.text == LANDSCAPE_CAPTION[0]).provenance.bbox
+    assert table.provenance.bbox.y0 < caption.y0
+
+
+def test_a_region_s_text_reading_more_rows_but_fewer_columns_than_its_rules_gives_way_to_them(tmp_path):
+    """A captioned ruled table whose first column's words run up to its rule (the next column's 4 points on) and
+    whose first cell wraps: its text reads four rows in two columns, its rules three rows in three. Text that runs
+    columns its rules part into one reads less, however many rows it makes: the ruled table is written."""
+    rows = (('Grade', 'Flux mT', 'Hc kA/m'), ('AlNiCo 9/5', '550', '44'), ('AlNiCo 12/6', '630', '52'))
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 380), 'Table 1 - Magnetic properties of the cast grades', fontname='helv', fontsize=9)
+        draw_ruled_table(page, [('', '', '')] * len(rows))
+        for r, row in enumerate(rows):
+            for c, text in enumerate(row):
+                rect, font = table_cell_rect(r, c), 'hebo' if c == 0 else 'helv'
+                lines = [text, 'cast'] if (r, c) == (1, 0) else [text]
+                for i, line in enumerate(lines):
+                    x = (
+                        rect.x1 - 2 - pymupdf.get_text_length(line, fontname=font, fontsize=9)
+                        if c == 0
+                        else rect.x0 + 2
+                    )
+                    y = rect.y1 - 6 if len(lines) == 1 else rect.y0 + 9 + 9 * i
+                    page.insert_text((x, y), line, fontname=font, fontsize=9)
+        page.insert_text((72, 520), PROSE, fontname='helv', fontsize=9)
+        doc.save(tmp_path / 'std.pdf')
+    read = read_pdf(tmp_path / 'std.pdf')
+    (region,) = regions(read.page(1), layout.body_face(read))
+    (ruled,) = tables(read.page(1))
+    # The planted wrong truth: the region's text reads more rows than the rules, in fewer columns.
+    assert len(region.table.rows) > len(ruled.rows)
+    assert max(map(len, region.table.rows)) < len(ruled.rows[0])
+    assert main(['pages', str(tmp_path / 'std.pdf'), str(tmp_path / 'out')]) == 0
+    page1 = (tmp_path / 'out' / 'page-001.md').read_text(encoding='utf-8')
+    assert markdown_table(ruled.rows) in page1
+    assert sum(line.startswith('| ---') for line in page1.splitlines()) == 1  # one table written
+
+
+def test_untitled_rows_inside_a_ruled_table_no_caption_holds_are_its_own_and_written_once(tmp_path):
+    """A ruled table with no caption -- a continued table -- whose rows a full-width note parts: its rows above and
+    below the note are each told as an untitled table by their cells, inside the ruled one. They are its own rows:
+    the ruled table is written once, with all of them, and no region of them alone is cut."""
+    note = 'Typical values of further properties are given for information only'
+    rows = (*TABLE_ROWS[:2], (note, '', ''), *TABLE_ROWS[2:])
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 300), PROSE, fontname='helv', fontsize=9)
+        draw_ruled_table(page, rows, merged=((2, 0, 2, 2),))
+        doc.save(tmp_path / 'std.pdf')
+    read = read_pdf(tmp_path / 'std.pdf')
+    (ruled,) = tables(read.page(1))
+    # The planted wrong truth: told by their rows, the bands above and below the note are tables of their own.
+    told = [r for r in regions(read.page(1), layout.body_face(read)) if r.table is not None]
+    assert [r.table.rows for r in told] == [rows[:2], rows[3:]]
+    assert main(['pages', str(tmp_path / 'std.pdf'), str(tmp_path / 'out')]) == 0
+    page1 = (tmp_path / 'out' / 'page-001.md').read_text(encoding='utf-8')
+    assert sum(line.startswith('| ---') for line in page1.splitlines()) == 1  # one table written
+    assert markdown_table(ruled.rows, ruled.cell_bboxes) in page1
+    assert page1.count('alpha') == 1

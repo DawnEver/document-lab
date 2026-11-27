@@ -7,6 +7,12 @@ Prose is a line that reads as words (`document_lab.layout.wordy`), set near the 
 width or :data:`PROSE_WORDS` words long. A mention in prose (``Table 7, item 1d``) or a contents entry (a leader) is
 no caption. A figure or table spans the text width; its label is the caption's, as read.
 
+Each caption is read in its own frame (`document_lab.layout.framed`): among the lines that read its way -- upright text
+and vertical writing the page's own, text turned a quarter its quarter's -- above, below and across are its lines'.
+So a caption up the side of a landscape table runs its table across the page from it, its text width the table's
+lines' along them, and its cells are read with them turned level (`document_lab.tables.aligned`), each box turned back
+to where the page shows it. A table without a caption is told by its rows in each frame alike.
+
 An equation number ending a line right of :data:`NUMBER_RIGHT` of its column -- alone, or after a formula (``(3)``,
 ``(A.1)``) -- is an equation, cut out by :func:`equation`: its formula's lines from the number to the prose around it,
 in the number's column on a page set in two columns there (a left column's number stands short of the page's middle),
@@ -171,19 +177,63 @@ def overlap(a: BBox, b: BBox) -> float:
     return max(w, 0.0) * max(h, 0.0) / smaller if smaller > 0 else 0.0
 
 
-class _Page:
-    """A page's lines with what regions are judged by: its body size and text extent, and which lines are prose."""
+@dataclass(frozen=True)
+class _Seen:
+    """A line as regions judge it in a frame (:class:`_Page`): its ``box`` there, x along the frame's text, y down."""
 
-    def __init__(self, page: Page, body: float) -> None:
-        self.page, self.body = page, body
-        self.lines = sorted(layout.lines(page, weighted=False), key=lambda ln: ln.y0)
+    line: layout.Line
+    box: BBox
+
+    @property
+    def x0(self) -> float:
+        return self.box.x0
+
+    @property
+    def y0(self) -> float:
+        return self.box.y0
+
+    @property
+    def x1(self) -> float:
+        return self.box.x1
+
+    @property
+    def y1(self) -> float:
+        return self.box.y1
+
+    @property
+    def text(self) -> str:
+        return self.line.text
+
+    @property
+    def size(self) -> float:
+        return self.line.size
+
+    @property
+    def spans(self) -> list[TextSpan]:
+        return self.line.spans
+
+
+def _page_box(line: layout.Line) -> BBox:
+    return BBox(line.x0, line.y0, line.x1, line.y1)
+
+
+class _Page:
+    """A page's ``lines`` as regions judge them in the frame of ``way`` (`document_lab.layout.framed`).
+
+    With what regions are judged by: its body size and text extent, and which lines are prose -- all in that frame.
+    """
+
+    def __init__(self, page: Page, body: float, lines: Sequence[layout.Line], way: layout.Way) -> None:
+        self.page, self.body, self.way = page, body, way
+        self.bounds = layout.framed(BBox(0.0, 0.0, page.width, page.height), way)
+        self.lines = sorted((_Seen(ln, layout.framed(_page_box(ln), way)) for ln in lines), key=lambda ln: ln.y0)
         # The text width: every line set near the body size -- words or not, a table's cells and a page's furniture
         # count -- so one wide column of words is not taken for the whole width.
         text = [ln for ln in self.lines if body / ROW_SIZE <= ln.size <= ROW_SIZE * body]
-        self.left = min((ln.x0 for ln in text), default=0.0)
-        self.right = max((ln.x1 for ln in text), default=page.width)
+        self.left = min((ln.x0 for ln in text), default=self.bounds.x0)
+        self.right = max((ln.x1 for ln in text), default=self.bounds.x1)
 
-    def prose(self, line: layout.Line) -> bool:
+    def prose(self, line: _Seen) -> bool:
         return (
             layout.wordy(line.text)
             and line.size <= PROSE_SIZE * self.body
@@ -192,42 +242,50 @@ class _Page:
         )
 
     def box(self, top: float, bottom: float) -> BBox:
+        """The box across the text width from ``top`` to ``bottom`` (in the frame), as the page shows it."""
         side = PAD * self.body  # as above and below: a glyph's edge is not cut
-        return BBox(
-            max(self.left - side, 0.0),
-            max(top, 0.0),
-            min(self.right + side, self.page.width),
-            min(bottom, self.page.height),
+        bounds = self.bounds
+        seen = BBox(
+            max(self.left - side, bounds.x0),
+            max(top, bounds.y0),
+            min(self.right + side, bounds.x1),
+            min(bottom, bounds.y1),
         )
+        return layout.unframed(seen, self.way)
 
 
-def _caption(line: layout.Line) -> tuple[str, str] | None:
+def _view_way(line: layout.Line) -> layout.Way:
+    """The frame regions judge ``line`` in: the quarter turn it reads along; upright for vertical writing and askew."""
+    return line.way if not line.vertical and line.way in layout.QUARTERS else layout.UP
+
+
+def _caption(line: _Seen) -> tuple[str, str] | None:
     if '....' in line.text or (found := _CAPTION.match(line.text)) is None:
         return None
     return found.group(1).lower(), f'{found.group(1)} {found.group(2)}'
 
 
-def _figure(page: _Page, caption: layout.Line, label: str) -> Region:
+def _figure(page: _Page, caption: _Seen, label: str) -> Region:
     above = [ln.y1 for ln in page.lines if ln.y1 <= caption.y0 and page.prose(ln)]
-    top = max(above) + PAD * page.body if above else 0.0
+    top = max(above) + PAD * page.body if above else page.bounds.y0
     return Region('figure', label, page.box(top, caption.y1 + PAD * page.body))
 
 
-def _table(page: _Page, caption: layout.Line, label: str) -> Region:
-    def ends(line: layout.Line) -> bool:
+def _table(page: _Page, caption: _Seen, label: str) -> Region:
+    def ends(line: _Seen) -> bool:
         return page.prose(line) or _caption(line) is not None
 
     below = [ln.y0 for ln in page.lines if ln.y0 >= caption.y1 and ends(ln)]
-    bottom = min(below) - PAD * page.body if below else page.page.height
+    bottom = min(below) - PAD * page.body if below else page.bounds.y1
     return Region('table', label, page.box(caption.y0 - PAD * page.body, bottom))
 
 
-def _bands(page: _Page) -> list[list[layout.Line]]:
+def _bands(page: _Page) -> list[list[_Seen]]:
     """The page's lines in bands, top to bottom: lines whose middles lie within half a body size share one."""
     return _bands_of(page, page.lines)
 
 
-def _speck(line: layout.Line) -> bool:
+def _speck(line: _Seen) -> bool:
     """A speck OCR read as a cell.
 
     OCR'd (an invisible text layer), under :data:`CELL_CHARS` letters or digits, and not a dash (an empty entry).
@@ -238,7 +296,7 @@ def _speck(line: layout.Line) -> bool:
     return ocr and sum(c.isalnum() for c in stripped) < CELL_CHARS and stripped not in _DASHES
 
 
-def _row(page: _Page, band: list[layout.Line]) -> bool:
+def _row(page: _Page, band: list[_Seen]) -> bool:
     """Is ``band`` a table's row: cells side by side, none of them prose nor a contents entry?
 
     :data:`ROW_CELLS` of them are set near the body size and none larger (a lone ``-`` may read smaller); one is short,
@@ -256,14 +314,14 @@ def _row(page: _Page, band: list[layout.Line]) -> bool:
     )
 
 
-def _continues(page: _Page, band: list[layout.Line], row: list[layout.Line]) -> bool:
+def _continues(page: _Page, band: list[_Seen], row: list[_Seen]) -> bool:
     """Is ``band`` a further line of the cells of ``row``, the table's last row?
 
     Each of its lines reads as words -- a formula OCR'd does not -- and starts within one of the row's cells (as a
     wrapped title starts under its own); none is prose, a clause heading, a caption or a contents entry.
     """
 
-    def in_cell(line: layout.Line) -> bool:
+    def in_cell(line: _Seen) -> bool:
         return any(cell.x0 - page.body <= line.x0 <= cell.x1 for cell in row)
 
     return all(
@@ -295,7 +353,7 @@ def _untitled_tables(page: _Page, held: list[Region]) -> list[Region]:
             bottom = max(bottom, *(ln.y1 for ln in bands[j]))
             j += 1
         top = min(ln.y0 for ln in first)
-        inside = any(r.bbox.y0 <= top <= r.bbox.y1 for r in held)
+        inside = any(b.y0 <= top <= b.y1 for b in (layout.framed(r.bbox, page.way) for r in held))
         if rows >= TABLE_ROWS and not inside:
             box = page.box(top - PAD * page.body, bottom + PAD * page.body)
             found.append(Region('table', _UNTITLED + 'table', box))
@@ -362,7 +420,7 @@ def _drawn(page: _Page, drawings: Sequence[Drawing], held: list[Region]) -> list
     return found
 
 
-def _math(lines: list[layout.Line]) -> bool:
+def _math(lines: list[_Seen]) -> bool:
     """Does the text of ``lines`` read as math: a relation or operator sign, a Greek letter, or set in a math font?"""
     text = ''.join(ln.text for ln in lines)
     signs = any(c in _MATH_SIGNS or unicodedata.name(c, '').startswith('GREEK') for c in text)
@@ -416,7 +474,7 @@ def _title(page: _Page, box: BBox) -> frozenset[int]:
     return frozenset({max(above)[1]}) if above else frozenset()
 
 
-def _round_words(box: BBox, line: layout.Line) -> bool:
+def _round_words(box: BBox, line: _Seen) -> bool:
     """Is ``box`` a frame round ``line``'s words, as a link's or a header's is?
 
     Sharing half the line's band or more, across the line or beside it, at most :data:`FRAME_LINES` its height, the
@@ -432,9 +490,9 @@ def _round_words(box: BBox, line: layout.Line) -> bool:
     return framed and (layout.wordy(line.text) or fills)
 
 
-def _bands_of(page: _Page, lines: list[layout.Line]) -> list[list[layout.Line]]:
+def _bands_of(page: _Page, lines: list[_Seen]) -> list[list[_Seen]]:
     """``lines`` in bands, as :func:`_bands` makes them of the whole page."""
-    bands: list[list[layout.Line]] = []
+    bands: list[list[_Seen]] = []
     for line in sorted(lines, key=lambda ln: ln.y0):
         middle = (line.y0 + line.y1) / 2
         if bands and abs(middle - sum((ln.y0 + ln.y1) / 2 for ln in bands[-1]) / len(bands[-1])) <= page.body / 2:
@@ -445,13 +503,38 @@ def _bands_of(page: _Page, lines: list[layout.Line]) -> list[list[layout.Line]]:
 
 
 def _cells(page: _Page, region: Region) -> Table | None:
-    """The cells of table ``region`` as its text sets them (`document_lab.tables.aligned`).
+    """The cells of table ``region`` as its text sets them (`document_lab.tables.aligned`), in the frame it was told in.
 
-    Its text is the spans whose middle lies in it, below its caption.
+    Its text is the spans whose middle lies in it, below its caption -- each turned level in that frame, and each box
+    found turned back to where the page shows it.
     """
     caption = next((ln for ln in page.lines if (c := _caption(ln)) and c[1] == region.label), None)
-    box, below = region.bbox, caption.y1 if caption is not None else region.bbox.y0
-    return aligned([s for s in page.page.spans if box.x0 <= s.center[0] <= box.x1 and below < s.center[1] <= box.y1])
+    box = layout.framed(region.bbox, page.way)
+    below = caption.y1 if caption is not None else box.y0
+    spans = (_turned(s, page.way) for s in page.page.spans)
+    found = aligned([s for s in spans if box.x0 <= s.center[0] <= box.x1 and below < s.center[1] <= box.y1])
+    return None if found is None else _turned_back(found, page.way)
+
+
+def _turned(span: TextSpan, way: layout.Way) -> TextSpan:
+    """``span`` as it stands in the frame of ``way``: its box framed, its direction turned with it."""
+    if way == layout.UP:
+        return span
+    (dx, dy), (wx, wy) = span.direction, way
+    here = span.provenance.at(bbox=layout.framed(span.provenance.bbox, way))
+    return replace(span, provenance=here, direction=(dx * wx + dy * wy, dy * wx - dx * wy))
+
+
+def _turned_back(table: Table, way: layout.Way) -> Table:
+    """``table`` read in the frame of ``way``, its boxes (the table's, its cells') as the page shows them."""
+    if way == layout.UP:
+        return table
+
+    def back(box: BBox | None) -> BBox | None:
+        return None if box is None else layout.unframed(box, way)
+
+    cells = None if table.cell_bboxes is None else tuple(tuple(map(back, row)) for row in table.cell_bboxes)
+    return replace(table, cell_bboxes=cells, provenance=table.provenance.at(bbox=back(table.provenance.bbox)))
 
 
 def equation(page: Page, number: str, face: tuple[str, float]) -> BBox | None:
@@ -709,6 +792,30 @@ def _tagged(page: _Page, structure: Structure, inferred: list[Region], uses: fro
     return found
 
 
+def _told(page: Page, face: tuple[str, float], every: list[layout.Line]) -> tuple[list[Region], dict[int, _Page]]:
+    """The regions ``page``'s text tells -- captions, equation numbers, rows of cells -- and each one's frame.
+
+    Each way's lines are read in its own frame (:func:`_view_way`); the frame a caption or a row was read in is kept
+    by the region's id.
+    """
+    ways = [way for way in layout.QUARTERS if any(_view_way(ln) == way for ln in every)]
+    views = [_Page(page, face[1], [ln for ln in every if _view_way(ln) == way], way) for way in ways]
+    found: list[Region] = []
+    judged: dict[int, _Page] = {}
+    for view in views:
+        for line in view.lines:
+            if caption := _caption(line):
+                kind, label = caption
+                found.append(_figure(view, line, label) if kind == 'figure' else _table(view, line, label))
+                judged[id(found[-1])] = view
+    found += _equations(page, face)
+    for view in views:
+        for region in _untitled_tables(view, found):
+            found.append(region)
+            judged[id(region)] = view
+    return found, judged
+
+
 def regions(
     page: Page,
     face: tuple[str, float],
@@ -733,18 +840,13 @@ def regions(
     page = page.shown(include_hidden=include_hidden, include_in_background_color=include_in_background_color)
     if not page.spans or face[1] <= 0:
         return []
-    judged = _Page(page, face[1])
-    found: list[Region] = []
-    for line in judged.lines:
-        if caption := _caption(line):
-            kind, label = caption
-            found.append(_figure(judged, line, label) if kind == 'figure' else _table(judged, line, label))
-    found += _equations(page, face)
-    found += _untitled_tables(judged, found)
-    found += _drawn(judged, drawings, found)
+    every = layout.lines(page, weighted=False)
+    whole = _Page(page, face[1], every, layout.UP)  # drawings are judged against all the page's text as it stands
+    found, judged = _told(page, face, every)
+    found += _drawn(whole, drawings, found)
     if structure is not None and uses & {'tables', 'figures'} and tags.covers(structure, page.number):
-        found = _tagged(judged, structure, found, uses)
-    found = [replace(r, table=_cells(judged, r)) if r.kind == 'table' else r for r in found]
+        found = _tagged(whole, structure, found, uses)
+    found = [replace(r, table=_cells(judged.get(id(r), whole), r)) if r.kind == 'table' else r for r in found]
     # Clamped to the page, a region its text sets across the page's edge can be left without area (a caption the foot
     # cuts, prose right above it: its figure's top falls below the foot); it shows nothing and is none.
     shown = sorted((r for r in found if r.bbox.x1 > r.bbox.x0 and r.bbox.y1 > r.bbox.y0), key=lambda r: r.bbox.y0)

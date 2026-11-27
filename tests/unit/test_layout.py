@@ -12,7 +12,17 @@ from document_lab import layout
 from document_lab.ir import BBox, Page, Provenance, TextSpan
 from document_lab.layout import lines
 from document_lab.pdf import read_pdf
-from tests.synthetic import ACTUAL_TEXT_LINES, actual_text_pdf, layer_pdf
+from tests.synthetic import (
+    ACTUAL_TEXT_LINES,
+    LANDSCAPE_CAPTION,
+    LANDSCAPE_HEAD,
+    LANDSCAPE_NOTE,
+    TABLE_ROWS,
+    actual_text_pdf,
+    landscape_pdf,
+    layer_pdf,
+    turned_text_pdf,
+)
 
 
 def _line_texts(path):
@@ -339,3 +349,97 @@ def test_a_span_that_continues_a_run_is_one_run_with_the_span_before_it():
     for continues, texts in ((True, ['one two']), (False, ['one', 'two'])):
         page = _page(_flat('one', 72, 100), dataclasses.replace(piece, continues_run=continues))
         assert [ln.text for ln in layout.ordered(layout.lines(page, weighted=True))] == texts
+
+
+# The page's way: the way most of its characters read, the frame its furniture, columns and order are judged in.
+
+
+def _furniture(path) -> list[str]:
+    return [s.text for s in layout.furniture(read_pdf(path).page(1))]
+
+
+def test_a_landscape_table_under_an_upright_running_head_reads_sideways_its_head_turned_against_it(tmp_path):
+    """A standard's landscape table printed sideways under a two-span upright running head: most of the page reads
+    bottom to top, so that is its way; the head, upright and wholly outside the sideways text, is its furniture."""
+    page = read_pdf(landscape_pdf(tmp_path / 'landscape.pdf')).page(1)
+    assert layout.reading_way(page.spans) == (0.0, -1.0)
+    head = [text for text, _ in LANDSCAPE_HEAD]
+    assert [s.text for s in layout.furniture(page)] == head
+    found = layout.lines(page, weighted=False)
+    assert {ln.page_way for ln in found} == {(0.0, -1.0)}
+    read = [ln.text for ln in layout.ordered(found)]
+    assert read[0] == LANDSCAPE_CAPTION[0]  # its top is the sideways text's: the caption above the table
+    every = {LANDSCAPE_CAPTION[0], LANDSCAPE_NOTE[0], *(cell for row in TABLE_ROWS for cell in row)}
+    assert {ln.text for ln in found} == every  # the sideways text, every line of it, and nothing else
+    # The planted wrong truth: judged against the box of the page's upright text -- the head's -- every sideways span
+    # stands outside it and would be furniture.
+    upright = [s.provenance.bbox for s in page.spans if layout.upright(s)]
+    below = max(b.y1 for b in upright)
+    assert all(s.provenance.bbox.y0 >= below for s in page.spans if not layout.upright(s))
+
+
+def test_an_upright_page_keeps_its_sideways_margin_notes_as_furniture(tmp_path):
+    """The control: prose upright, a note up the left margin and one down the right -- the page reads upright and the
+    notes are its furniture, as they were."""
+    prose = 'The rated output is the mechanical power available at the shaft, expressed in watts.'
+    runs = [(72, 100 + 14 * i, prose, 0) for i in range(4)] + [
+        (30, 400, 'Draft for comment', 90),
+        (585, 200, 'Not for citation', 270),
+    ]
+    path = turned_text_pdf(tmp_path / 'notes.pdf', runs)
+    assert layout.reading_way(read_pdf(path).page(1).spans) == layout.UP
+    assert _furniture(path) == ['Draft for comment', 'Not for citation']
+    # The planted wrong truth: the page read the notes' way would make its prose the furniture.
+    assert prose not in _furniture(path)
+
+
+def test_an_upright_page_reads_upright_beside_a_stamp_longer_than_most_of_its_lines(tmp_path):
+    """A publisher's stamp down the margin holds more characters than the upright text's half -- with axis labels up a
+    figure inside the text -- yet the upright text is the most any way holds: the page reads upright, and the stamp is
+    furniture. A rule asking more than half the characters would find no way, and keep the stamp as text."""
+    stamp = 'Downloaded from the publisher library on 1 January 2026 by a reader; see the terms of use'
+    runs = [
+        (72, 100, 'Figure 3 shows the current of each phase at full load.', 0),
+        (72, 114, 'The peaks fall where the model places them within 2 %.', 0),
+        (90, 400, 'Current amplitude (A)', 90),
+        (300, 400, 'Current amplitude (A)', 90),
+        (72, 500, 'Table 4 lists them.', 0),
+        (580, 60, stamp, 270),
+    ]
+    path = turned_text_pdf(tmp_path / 'stamped.pdf', runs)
+    page = read_pdf(path).page(1)
+    counts = {}
+    for s in page.spans:
+        counts[s.direction] = counts.get(s.direction, 0) + len(s.text.replace(' ', ''))
+    assert 2 * counts[(1.0, 0.0)] < sum(counts.values()) < 3 * counts[(1.0, 0.0)]  # most, but not more than half
+    assert layout.reading_way(page.spans) == layout.UP
+    assert _furniture(path) == [stamp]
+    assert 'Current amplitude (A)' not in _furniture(path)  # the control: labels inside the text stay
+
+
+def test_a_page_two_ways_read_equally_has_no_way_none_of_its_text_furniture_and_reads_as_it_stands(tmp_path):
+    """No silent default: a page whose characters read upright and sideways in equal numbers has no way
+    (``reading_way`` None), no text of it is furniture, and its lines are read as it stands, upright. The planted
+    control: one more upright character, and the page reads upright with the stamp its furniture."""
+    stamp = (585, 200, 'ABCDEFGHIJ KLMNOPQRST', 270)
+    tie = turned_text_pdf(tmp_path / 'tie.pdf', [(72, 100, 'abcdefghij klmnopqrst', 0), stamp])
+    page = read_pdf(tie).page(1)
+    assert layout.reading_way(page.spans) is None
+    assert layout.furniture(page) == []
+    found = layout.lines(page, weighted=False)
+    assert sorted(ln.text for ln in found) == ['ABCDEFGHIJ KLMNOPQRST', 'abcdefghij klmnopqrst']
+    assert {ln.page_way for ln in found} == {layout.UP}
+    more = turned_text_pdf(tmp_path / 'more.pdf', [(72, 100, 'abcdefghij klmnopqrstu', 0), stamp])
+    assert _furniture(more) == ['ABCDEFGHIJ KLMNOPQRST']
+
+
+def test_a_landscape_table_s_cells_at_the_page_top_on_every_page_are_no_running_head(tmp_path):
+    """A table continued sideways over pages sets its cells at the same place on each, its last column at the page's
+    top: a line turned sideways only ends at the top and runs along no edge, so it is never a running line."""
+    read = read_pdf(landscape_pdf(tmp_path / 'landscape.pdf', pages=3))
+    found = layout.running(read)
+    assert [(run.head, run.foot) for run in found] == [((), ())] * 3
+    # The planted wrong truth: the topmost line of each page is a cell that recurs at its place on every page.
+    tops = [min(layout.lines(page, weighted=True), key=lambda ln: ln.y0) for page in read.pages]
+    assert len({ln.text for ln in tops}) == 1
+    assert tops[0].text in {cell for row in TABLE_ROWS for cell in row}

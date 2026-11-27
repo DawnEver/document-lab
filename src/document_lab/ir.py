@@ -100,6 +100,9 @@ class TextSpan:
     #: change of font, size or baseline inside a word (the ``2`` of ``H2O``). None: it continues none and none
     #: continues it. Its source decides where a word gap is; a reader setting spans into lines spaces them by it.
     unspaced: int | None = None
+    #: How its glyphs are painted, the PDF text render mode: 0 fill, 1 stroke, 2 both, 3 invisible (an OCR layer),
+    #: 4-7 those adding the glyphs to the clip. None: its source has no render modes.
+    render_mode: int | None = None
 
     @property
     def center(self) -> tuple[float, float]:

@@ -89,8 +89,8 @@ def _page(reader: _pdf.Reader, number: int, size: tuple[float, float], here: Pro
 
 
 def _span(row: tuple, here: Provenance) -> TextSpan:
-    text, font, size, bold, box, _mode, unspaced = row
-    return TextSpan(text, size, font, here.at(bbox=BBox(*box)), bold, unspaced)
+    text, font, size, bold, box, mode, unspaced = row
+    return TextSpan(text, size, font, here.at(bbox=BBox(*box)), bold, unspaced, mode)
 
 
 def _path(row: tuple, here: Provenance) -> VectorPath:

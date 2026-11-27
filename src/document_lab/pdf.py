@@ -9,6 +9,11 @@ reader's interpreter, text from its fonts' outlines; it refuses a region holding
 name -- D37 of task document-lab-pdf-reader; what text a region shows is `document_lab.ir.Page.shown`'s);
 an embedded file's bytes are :func:`read_attachment`'s.
 
+A tagged file's structure tree comes back as :attr:`~document_lab.ir.Document.structure`, each element holding the
+very values it covers: the spans, paths and figures drawn under its marked content, the annotations and images it
+refers to. An element's ``/ActualText`` is stated by the spans it covers, as a marked-content sequence's is: the
+first in order carries it, the others the empty text, each keeping the text it draws (``drawn``).
+
 What the reader refuses raises a :class:`Refused` of its kind -- :class:`NotPdf`, :class:`Locked` (the password
 opens no access), :class:`Unsupported`, :class:`Malformed` -- each a ``ValueError``.
 """
@@ -17,6 +22,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+from collections import defaultdict
 from collections.abc import Callable, Sequence
 from functools import partial
 from pathlib import Path
@@ -30,18 +36,24 @@ from document_lab._pdf import Locked, Malformed, NotPdf, Refused, Unsupported
 from document_lab.ir import (
     Action,
     Attachment,
+    Attribute,
     BBox,
     Destination,
     Document,
+    Element,
     Field,
     Figure,
     Info,
     Link,
+    Mark,
+    MarkedContent,
     Metadata,
+    ObjectReference,
     OutlineItem,
     Page,
     Provenance,
     Raster,
+    Structure,
     TextSpan,
     VectorPath,
     Widget,
@@ -132,11 +144,18 @@ def read_pdf(
     reading = {**flattening, 'annotations': annotations}
     outline, labels, metadata, fields, attachments, warnings = reader.document()
     here = Provenance(sha, uri)
+    pages: Sequence[Page] = _Pages(reader, sha, uri, reading)
+    tree = reader.structure()
+    structure = None
+    if tree is not None:
+        pages = _actual_texts(tree, tuple(pages))  # a tagged file's structure holds every page's values: read them now
+        structure = _structure(tree, pages)
     return Document(
         sha256=sha,
         uri=uri,
-        pages=_Pages(reader, sha, uri, reading),
+        pages=pages,
         repairs=_Repairs(reader),
+        structure=structure,
         outline=_outline(outline),
         page_labels=() if labels is None else tuple(labels),
         metadata=_metadata(*metadata),
@@ -144,6 +163,119 @@ def read_pdf(
         attachments=tuple(_attachment(row, here) for row in attachments),
         warnings=tuple(warnings),
     )
+
+
+type _Drawn = TextSpan | VectorPath | Figure
+
+
+def _drawn_under(pages: Sequence[Page]) -> dict[tuple[int, Mark], list[_Drawn]]:
+    """Every value drawn under a mark, by page and mark, in drawing order (an annotation's own content apart)."""
+    found: dict[tuple[int, Mark], list[_Drawn]] = defaultdict(list)
+    for page in pages:
+        for value in (*page.spans, *page.paths, *page.figures):
+            if value.mark is not None and (value.annotation is None or value.mark.stream is not None):
+                found[page.number, value.mark].append(value)
+    return found
+
+
+def _marks(tree: tuple, index: int) -> list[tuple[int, Mark]]:
+    """The marked content element ``index`` of ``tree`` and those below it cover, in order."""
+    elements = tree[0]
+    out = []
+    for kind, at, mcid, number, _ in elements[index][9]:
+        if kind == 'element':
+            out += _marks(tree, at)
+        elif kind == 'marked':
+            out.append((at, Mark(mcid, number)))
+    return out
+
+
+def _actual_texts(tree: tuple, pages: tuple[Page, ...]) -> tuple[Page, ...]:
+    """``pages`` with each element's ``/ActualText`` stated by the spans it covers.
+
+    The first carries it, every later one the empty text, each keeping the text it draws; an outer element's governs
+    an inner one's.
+    """
+    elements, roots, _ = tree
+    drawn = _drawn_under(pages)
+    replaced: dict[int, TextSpan] = {}
+
+    def visit(index: int) -> None:
+        actual = elements[index][5]
+        if actual is None:
+            for kind, at, *_ in elements[index][9]:
+                if kind == 'element':
+                    visit(at)
+            return
+        spans = [v for key in _marks(tree, index) for v in drawn.get(key, ()) if isinstance(v, TextSpan)]
+        for i, span in enumerate(spans):
+            replaced[id(span)] = dataclasses.replace(
+                span, text=actual if i == 0 else '', drawn=span.drawn if span.drawn is not None else span.text
+            )
+
+    for root in roots:
+        visit(root)
+    if not replaced:
+        return pages
+    return tuple(dataclasses.replace(page, spans=tuple(replaced.get(id(s), s) for s in page.spans)) for page in pages)
+
+
+def _structure(tree: tuple, pages: tuple[Page, ...]) -> Structure:
+    """The structure tree's rows as elements holding the values of ``pages`` they cover."""
+    elements, roots, warnings = tree
+    drawn = _drawn_under(pages)
+    placed: dict[tuple[int, int], tuple[Figure, ...]] = defaultdict(tuple)
+    for page in pages:
+        for figure in page.figures:
+            if figure.image is not None:
+                placed[page.number, figure.image] += (figure,)
+
+    def kid(row: tuple) -> Element | MarkedContent | ObjectReference:
+        kind, at, mcid, number, box = row
+        if kind == 'element':
+            return element(at)
+        if kind == 'marked':
+            mark = Mark(mcid, number)
+            values = drawn.get((at, mark), [])
+            return MarkedContent(
+                at,
+                mark,
+                spans=tuple(v for v in values if isinstance(v, TextSpan)),
+                paths=tuple(v for v in values if isinstance(v, VectorPath)),
+                figures=tuple(v for v in values if isinstance(v, Figure)),
+            )
+        return ObjectReference(
+            number,
+            page=at,
+            bbox=None if box is None else BBox(*box),
+            figures=placed.get((at, number), ()) if at is not None else (),
+        )
+
+    def element(index: int) -> Element:
+        role, standard, title, lang, alt, actual, expansion, attributes, page, kids = elements[index]
+        return Element(
+            role,
+            standard,
+            kids=tuple(kid(row) for row in kids),
+            title=title,
+            lang=lang,
+            alt=alt,
+            actual_text=actual,
+            expansion=expansion,
+            attributes=tuple(Attribute(owner, name, _frozen(value)) for owner, name, value in attributes),
+            page=page,
+        )
+
+    return Structure(tuple(element(i) for i in roots), tuple(warnings))
+
+
+def _frozen(value: object) -> object:
+    """An attribute's value with each list made a tuple: the IR is immutable."""
+    if isinstance(value, list):
+        return tuple(_frozen(v) for v in value)
+    if isinstance(value, tuple):
+        return tuple(_frozen(v) for v in value)
+    return value
 
 
 class _Repairs(Sequence[str]):
@@ -220,8 +352,18 @@ def _page(
         spans=tuple(_span(row, cite) for row in spans),
         paths=_paths(paths, cite),
         figures=tuple(
-            Figure(cite(bbox=box), w, h, image, hidden=hidden, inkless=inkless, annotation=annotation)
-            for box, w, h, image, _, _, (hidden, inkless, annotation) in images
+            Figure(
+                cite(bbox=box),
+                w,
+                h,
+                image,
+                hidden=hidden,
+                inkless=inkless,
+                annotation=annotation,
+                mark=_mark(marked),
+                artifact=marked[2],
+            )
+            for box, w, h, image, _, _, (hidden, inkless, annotation), marked in images
         ),
         links=tuple(
             Link(here.at(bbox=BBox(*box)), _destination(destination), _action(action))
@@ -229,6 +371,11 @@ def _page(
         ),
         warnings=(*warnings, *link_warnings),
     )
+
+
+def _mark(row: tuple[int | None, int | None, bool]) -> Mark | None:
+    mcid, stream, _ = row
+    return None if mcid is None else Mark(mcid, stream)
 
 
 def _destination(row: tuple | None) -> Destination | None:
@@ -312,9 +459,10 @@ def _attachment(row: tuple, here: Provenance) -> Attachment:
 
 
 def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
-    text, font, size, bold, box, mode, unspaced, vertical, direction, layer, paint, continues_run = row
+    text, font, size, bold, box, mode, unspaced, vertical, direction, layer, paint, run_and_mark = row
     hidden, _, annotation = layer
     fill, in_background_color = paint
+    continues_run, drawn, marked = run_and_mark
     return TextSpan(
         text,
         size,
@@ -328,6 +476,9 @@ def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
         hidden=hidden,
         annotation=annotation,
         fill=None if fill is None else tuple(fill),
+        drawn=drawn,
+        mark=_mark(marked),
+        artifact=marked[2],
         continues_run=continues_run,
         in_background_color=in_background_color,
     )
@@ -354,8 +505,9 @@ def _paths(columns: tuple, cite: Callable[..., Provenance]) -> tuple[VectorPath,
             hidden,
             inkless,
             annotation,
+            marked,
         )
-        for stroke, width, dashes, phase, fill, rule, pattern, (hidden, inkless, annotation) in styles
+        for stroke, width, dashes, phase, fill, rule, pattern, (hidden, inkless, annotation), marked in styles
     ]
     out = []
     for start, end, box, shut, group in zip(
@@ -366,7 +518,7 @@ def _paths(columns: tuple, cite: Callable[..., Provenance]) -> tuple[VectorPath,
         np.frombuffer(groups, dtype=np.int64).tolist(),
         strict=True,
     ):
-        stroke, width, dashes, phase, fill, even_odd, pattern, hidden, inkless, annotation = painted[group]
+        stroke, width, dashes, phase, fill, even_odd, pattern, hidden, inkless, annotation, marked = painted[group]
         out.append(
             VectorPath(
                 points=xy[start:end],
@@ -383,6 +535,8 @@ def _paths(columns: tuple, cite: Callable[..., Provenance]) -> tuple[VectorPath,
                 hidden=hidden,
                 inkless=inkless,
                 annotation=annotation,
+                mark=_mark(marked),
+                artifact=marked[2],
             )
         )
     return tuple(out)
@@ -469,7 +623,7 @@ def _alone(spans: Sequence[TextSpan], paths: tuple, bbox: BBox) -> bool:
     """
     _, _, boxes, _, groups, styles = paths
     widths = [width for _, width, *_ in styles]
-    shows = [not (hidden or inkless) for *_, (hidden, inkless, _) in styles]
+    shows = [not (hidden or inkless) for *_, (hidden, inkless, _), _ in styles]
     for (x0, y0, x1, y1), group in zip(
         np.frombuffer(boxes, dtype=np.float64).reshape(-1, 4).tolist(),
         np.frombuffer(groups, dtype=np.int64).tolist(),
@@ -514,7 +668,7 @@ def _samples(reader: _pdf.Reader, under: list, bbox: BBox, dpi: float) -> np.nda
     """
     if len(under) != 1:
         return None
-    box, width, height, number, _, placement, _ = under[0]
+    box, width, height, number, _, placement, *_ = under[0]
     if number is None or placement is None:  # inline, or skewed
         return None
     turned, rows_reversed, columns_reversed = placement  # as the reader places its samples

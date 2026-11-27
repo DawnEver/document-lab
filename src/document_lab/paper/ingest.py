@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from document_lab.formula import Formulas, Model
-    from document_lab.paper.convert import Tool
+    from document_lab.paper.convert import Tool, ToolChoice
 
 __all__ = ['Ingested', 'NoSections', 'ingest']
 
@@ -39,9 +39,9 @@ class NoSections(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class Ingested:
-    """What one ingest wrote: the tool, the counts of the main paper, and one directory per appended paper."""
+    """What one ingest wrote: the converter's choice, the main paper's counts, one directory per appended paper."""
 
-    tool: Tool
+    choice: ToolChoice
     sections: int
     figures: int
     tables: int
@@ -88,7 +88,7 @@ def ingest(
     formulas: Formulas | None = None,
     formula_model: Model = 'texteller',
 ) -> Ingested:
-    """Convert ``pdf`` (with ``tool``, else the best available) and write its paper layout into ``out_dir``.
+    """Convert ``pdf`` (with ``tool``, else the IR path) and write its paper layout into ``out_dir``.
 
     ``formulas``: ``latex`` writes each equation crop's LaTeX under its image, read by ``formula_model``
     (`document_lab.formula`); refused by :class:`document_lab.formula.FormulaUnavailable` before anything is written
@@ -97,7 +97,7 @@ def ingest(
     transcribe = None if formulas is None else formula.transcriber(formulas, model=formula_model)
     pdf = pdf.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    md_text, used = convert(pdf, out_dir, tool=tool)
+    md_text, choice = convert(pdf, out_dir, tool=tool)
     main, appended = clean_sections(split_sections(md_text))
     if not main and md_text.strip():
         # A drawing or data sheet, not a paper: every fragment is too short for the paper filters, so the
@@ -106,7 +106,7 @@ def ingest(
     if not main:
         scanned = _scanned_pages(pdf, out_dir)
         if scanned:
-            return Ingested(used, scanned, scanned, 0, ())
+            return Ingested(choice, scanned, scanned, 0, ())
         msg = f'{pdf.name}: the converted markdown has no section'
         raise NoSections(msg)
     n_sec, n_fig, n_tbl = write_paper_output(main, out_dir, md_text, pdf_path=pdf, transcribe=transcribe)
@@ -126,4 +126,4 @@ def ingest(
         written.append(target)
 
     shutil.rmtree(out_dir / 'img' / 'flat', ignore_errors=True)
-    return Ingested(used, n_sec, n_fig, n_tbl, tuple(written))
+    return Ingested(choice, n_sec, n_fig, n_tbl, tuple(written))

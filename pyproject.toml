@@ -120,8 +120,11 @@ unproduced = ["gpu", "vendor", "papers", "reference", "ocr"]
 # The OS parts run on their own hosted runner (`windows`, `macos`, `linux`); the linux runner has no display, so its
 # setup starts a virtual one (Xvfb) with a window manager on it (openbox: the EWMH lists the capture reads) and names
 # it for the steps after it -- a process started in a step lives until the job ends (its output let go, so the step
-# does not wait on it).
-hosted = { corpus = { setup = "uv run --no-sync python -m tests.corpus.sources" }, linux = { setup = "sudo apt-get update && sudo apt-get install -y xvfb openbox && (Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp >/dev/null 2>&1 &) && sleep 2 && (DISPLAY=:99 openbox >/dev/null 2>&1 &) && sleep 2 && echo DISPLAY=:99 >> \"$GITHUB_ENV\"" } }
+# does not wait on it). The overlay, the panel and the test viewer are Tk windows, and uv builds a hosted job's venv on
+# the runner's own interpreter, which ships without Tk: on linux /usr/bin/python3, whose tkinter Debian packages
+# apart (python3-tk); on macos Homebrew's python@X.Y, whose _tkinter is the python-tk@X.Y formula, X.Y read off the
+# venv. Both setups run after the sync and before the tests, and the venv reads its stdlib from that interpreter.
+hosted = { corpus = { setup = "uv run --no-sync python -m tests.corpus.sources" }, linux = { setup = "sudo apt-get update && sudo apt-get install -y xvfb openbox python3-tk && (Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp >/dev/null 2>&1 &) && sleep 2 && (DISPLAY=:99 openbox >/dev/null 2>&1 &) && sleep 2 && echo DISPLAY=:99 >> \"$GITHUB_ENV\"" }, macos = { setup = '''brew install "python-tk@$(uv run --no-sync python -c 'import sys; print("%d.%d" % sys.version_info[:2])')"''' } }
 
 # The extras every environment carries: `dev` (the kit, pytest, ruff; it carries `ai`). `gpu` (marker-pdf -> torch)
 # is installed only for an environment whose need-set holds the `gpu` resource marker; `dev` carries `capture`.

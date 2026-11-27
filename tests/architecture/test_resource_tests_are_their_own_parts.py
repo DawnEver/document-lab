@@ -2,8 +2,9 @@
 (a local corpus of real PDFs), `ocr` (Tesseract), the OS parts `windows`, `macos` and `linux` (a desktop of each) and
 `corpus` (public PDFs fetched from their URLs) are declared resources: base never selects them, so they cannot skip
 inside it. The first five are declared unproduced on hosted runners (none exists there); an OS part runs on its OS's
-hosted runner, the linux one after a setup that starts a display; `corpus` needs the network a hosted runner has, so it
-runs there in a job of its own whose setup fetches the sources."""
+hosted runner, the linux and macos ones after a setup that gives the job's interpreter Tk (the overlay, the panel and
+the viewer are Tk windows), the linux one starting a display as well; `corpus` needs the network a hosted runner has, so
+it runs there in a job of its own whose setup fetches the sources."""
 
 import tomllib
 from pathlib import Path
@@ -46,8 +47,8 @@ def test_all_but_the_os_parts_and_corpus_are_declared_unproduced():
     assert unproduced(PYPROJECT.read_text(encoding='utf-8')) == frozenset(UNPRODUCED)
 
 
-def test_the_hosted_setups_are_the_linux_display_and_the_corpus_fetch():
-    assert set(hosted_parts(PYPROJECT.read_text(encoding='utf-8'))) == {'linux', 'corpus'}
+def test_the_hosted_setups_are_tk_for_linux_and_macos_and_the_corpus_fetch():
+    assert set(hosted_parts(PYPROJECT.read_text(encoding='utf-8'))) == {'linux', 'macos', 'corpus'}
 
 
 def test_the_linux_part_starts_a_display_and_a_window_manager_before_it_runs():
@@ -55,6 +56,19 @@ def test_the_linux_part_starts_a_display_and_a_window_manager_before_it_runs():
     assert 'Xvfb' in setup
     assert 'openbox' in setup
     assert 'GITHUB_ENV' in setup
+
+
+def test_the_linux_part_gives_the_system_python_tk():
+    """uv builds the job's venv on the runner's /usr/bin/python3, whose tkinter Debian ships apart (python3-tk)."""
+    assert 'python3-tk' in hosted_parts(PYPROJECT.read_text(encoding='utf-8'))['linux'].setup.split()
+
+
+def test_the_macos_part_gives_the_venv_interpreter_tk():
+    """uv builds the job's venv on Homebrew's python@X.Y, whose _tkinter is the separate python-tk@X.Y formula."""
+    setup = hosted_parts(PYPROJECT.read_text(encoding='utf-8'))['macos'].setup
+    assert setup.startswith('brew install')
+    assert 'python-tk@' in setup
+    assert 'uv run --no-sync python' in setup  # the version is the venv's own, never a pinned one
 
 
 def test_corpus_is_hosted_with_its_sources_fetched_first():

@@ -25,8 +25,8 @@ consumer's vocabulary here -- schemas live in consumers. Modules and usage: `REA
   STRUCTURALLY against what each PDF says (`tests/paper/structure.py`), every check paired with a planted wrong truth
   it must report.
 - `windows`, `macos`, `linux` (`tests/<os>`: a real window, `tests/capture_viewer.py`, scrolled and captured; one
-  body, `tests/capture_part.py`) are OS parts: CI runs each on its hosted runner (`linux` after a setup starting Xvfb
-  and openbox, `[tool.dev_lab.parts] hosted`). `gpu` (marker-pdf), `vendor` (`DOCUMENT_LAB_VENDOR_PDF=<pdf>`), `papers`
+  body, `tests/capture_part.py`) are OS parts: CI runs each on its hosted runner (`linux` and `macos` after a setup
+  giving the runner's interpreter Tk, `linux`'s also starting Xvfb and openbox: `[tool.dev_lab.parts] hosted`). `gpu` (marker-pdf), `vendor` (`DOCUMENT_LAB_VENDOR_PDF=<pdf>`), `papers`
   (`DOCUMENT_LAB_PAPERS=<dir>`), `reference` (`DOCUMENT_LAB_REFERENCE_PDFS=<pdfs or dirs>`: the reader accepted
   against PyMuPDF, the previous implementation, within declared tolerances) and `ocr` (Tesseract) are declared
   resource parts, unproduced on hosted runners: base never selects them, and they FAIL where their resource is

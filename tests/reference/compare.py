@@ -10,10 +10,15 @@ its clip hides, and its clip is a box holding the true one (`pdf::interpret`), s
 An image of ours PyMuPDF does not place there is ``invented``; PyMuPDF's placements we do not report are ``clipped``.
 Rendered ink cannot judge a clipped one: a Form showing part of an embedded page hides images that another Form,
 showing another part of the same page, draws in the very place.
+
+The outline is compared item by item -- depth, title (whitespace collapsed) and the page it leads to -- and each page's
+label as a string (no label: empty, as PyMuPDF gives it). PyMuPDF leaves a label prefix stated as a UTF-16 text string
+in its hex form (``<FEFF004B>1`` for ``K1``, a text string by ISO 32000-2 7.9.2.2): that form is decoded on its side.
 """
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -23,11 +28,19 @@ import pymupdf
 from document_lab.pdf import Locked, read_pdf
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
+
+    from document_lab.ir import OutlineItem
+
+#: An outline item as both readers state it: depth (1 top level), title, the 1-based page it leads to (-1: none).
+Entry = tuple[int, str, int]
 
 UNKNOWN = '\N{REPLACEMENT CHARACTER}'
 #: Points two placements of an image may differ by and be one.
 PLACED = 0.5
+#: A UTF-16 text string PyMuPDF leaves in its hex form inside a page label.
+_HEX_TEXT = re.compile(r'<(FEFF(?:[0-9A-Fa-f]{4})*)>')
 
 
 @dataclass(frozen=True)
@@ -59,6 +72,11 @@ class Compared:
     locked: bool
     pages: tuple[Page, ...]
     reference_pages: int
+    outline: tuple[Entry, ...] = ()
+    reference_outline: tuple[Entry, ...] = ()
+    #: Each page's label, ours and PyMuPDF's.
+    labels: tuple[str, ...] = ()
+    reference_labels: tuple[str, ...] = ()
 
     @property
     def agreement(self) -> float:
@@ -94,6 +112,17 @@ def _images(ours: list, theirs: pymupdf.Page) -> dict[str, int]:
     return {'images': len(ours), 'invented': invented, 'clipped': len(unmatched)}
 
 
+def _entries(items: tuple[OutlineItem, ...], depth: int = 1) -> Iterator[Entry]:
+    for item in items:
+        page = item.destination.page if item.destination is not None else -1
+        yield depth, ' '.join((item.title or '').split()), page
+        yield from _entries(item.children, depth + 1)
+
+
+def _text(hex_string: re.Match) -> str:
+    return bytes.fromhex(hex_string[1]).decode('utf-16')
+
+
 def compare(path: Path, reference_path: Path | None = None) -> Compared:
     """``path`` read by both, page by page; refused by both for a password, ``locked``.
 
@@ -124,4 +153,16 @@ def compare(path: Path, reference_path: Path | None = None) -> Compared:
                     **_images([f.provenance.bbox for f in ours.figures], theirs),
                 )
             )
-        return Compared(path, locked=False, pages=tuple(pages), reference_pages=reference.page_count)
+        labels = doc.page_labels or ('',) * len(doc.pages)
+        return Compared(
+            path,
+            locked=False,
+            pages=tuple(pages),
+            reference_pages=reference.page_count,
+            outline=tuple(_entries(doc.outline)),
+            reference_outline=tuple(
+                (level, ' '.join(title.split()), page) for level, title, page in reference.get_toc()
+            ),
+            labels=tuple(label or '' for label in labels),
+            reference_labels=tuple(_HEX_TEXT.sub(_text, page.get_label()) for page in reference),
+        )

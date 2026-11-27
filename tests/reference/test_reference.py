@@ -2,9 +2,10 @@
 
 ``DOCUMENT_LAB_REFERENCE_PDFS`` names PDFs, or directories searched for them, ``os.pathsep``-separated (real
 documents are never committed); the part FAILS without one rather than skip. Every document must read whole, refuse
-a password exactly when PyMuPDF does, match PyMuPDF's page count and page sizes, and place no image PyMuPDF does not;
-its text must agree with PyMuPDF's within the tolerances below (`tests.reference.compare` says how text and images are
-compared). The planted control: each document's text checked against another document's must be reported.
+a password exactly when PyMuPDF does, match PyMuPDF's page count and page sizes, place no image PyMuPDF does not, and
+state the outline and page labels PyMuPDF states; its text must agree with PyMuPDF's within the tolerances below
+(`tests.reference.compare` says how each is compared). The planted control: each document's text and outline checked
+against another document's must be reported.
 
 The tolerances were measured on 283 local PDFs (6499 pages: papers, standards, theses) on 2026-11-26: page sizes
 within 3e-5 pt, no image invented, text agreeing 0.99994 on average and 0.9939 at worst -- that document's own
@@ -65,6 +66,16 @@ def problems(found: Compared) -> list[str]:
             if max(p.stated, p.reference - p.unknown) - p.matched > PAGE_SLACK
         ]
         out.append(f'text agrees {found.agreement:.4f} < {DOCUMENT_AGREEMENT}; pages {", ".join(pages[:10])}')
+    if found.outline != found.reference_outline:
+        first = next(
+            (i for i, (a, b) in enumerate(zip(found.outline, found.reference_outline, strict=False)) if a != b),
+            min(len(found.outline), len(found.reference_outline)),
+        )
+        ours, theirs = len(found.outline), len(found.reference_outline)
+        out.append(f'outline of {ours} items, PyMuPDF {theirs}; first apart at item {first}')
+    if found.labels != found.reference_labels:
+        apart = [i + 1 for i, (a, b) in enumerate(zip(found.labels, found.reference_labels, strict=False)) if a != b]
+        out.append(f'page labels apart from PyMuPDF on pages {apart[:10]}')
     return out
 
 
@@ -92,6 +103,8 @@ def test_another_documents_text_is_reported(pdf):
     if other is None:
         return
     planted = compare(pdf, other)
+    if planted.outline != planted.reference_outline:  # either states an outline: the other's must be told apart
+        assert any(p.startswith('outline') for p in problems(planted)), f"{other.name}'s outline passed as {pdf.name}'s"
     if sum(p.reference for p in planted.pages) == 0:
         return
     assert any('text agrees' in p for p in problems(planted)), f'{other.name} passed as {pdf.name}'

@@ -18,7 +18,7 @@
 //! spans into lines spaces them by that and measures no gap of its own.
 //!
 //! An accent drawn as a glyph of its own over (or under) a letter, as TeX without T1 encoding draws `ü` (`u` and
-//! `¨`), is one glyph with it before spans are made: the two composed as [`crate::accents`] says, the letter's
+//! `¨`), is one glyph with it before spans are made: the two composed as `accents` says, the letter's
 //! place in the drawing order kept, its box spanning both. One set on no letter stays as it is (a lone `¨`).
 //!
 //! A fill change splits a run (a scan's glyphs each a grey of their own, a colored digit): the piece after it says it

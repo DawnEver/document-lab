@@ -4,7 +4,7 @@
 //! with the origin top-left and y growing down. Layout, regions and pixels are not this crate's.
 //!
 //! Layers, each depending only on those above it: [`error`], [`object`] (the values), [`parser`] (bytes to
-//! values), [`filter`] (stream data decoded), [`crypt`] (strings and streams decrypted), [`xref`] (where each object is), [`file`] (a PDF opened: objects
+//! values), [`filter`] (stream data decoded), [`crypt`] (strings and streams decrypted), [`xref`] (where each object is), [`file`](mod@file) (a PDF opened: objects
 //! resolved by reference), [`page`] (the page tree), [`content`] (a content stream's operations), [`font`] and [`cmap`] (with [`shape`]: a glyph's outline, from its font program or a substitute), [`function`] (PDF functions), [`icc`] (ICC profiles), [`color`] and
 //! [`geometry`], [`image`] (an image's samples), [`optional`] (which optional content shows), and [`interpret`] (what a
 //! page draws, as events in page space),

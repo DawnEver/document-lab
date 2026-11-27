@@ -1,5 +1,5 @@
 //! Name trees and number trees (ISO 32000-2 sections 7.9.6, 7.9.7): sorted keys to values, spread over nodes. A
-//! node met twice, a tree nested past [`MAX_DEPTH`] and a node that is no dictionary are cut, each in a warning.
+//! node met twice, a tree nested past `MAX_DEPTH` and a node that is no dictionary are cut, each in a warning.
 
 use std::collections::HashSet;
 

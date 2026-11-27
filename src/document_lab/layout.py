@@ -3,9 +3,11 @@
 - The page's way: :func:`reading_way` is the way most of its text reads -- the quarter turn more of its characters
   read along than any other, vertical writing counted upright (its glyphs stand as the page's do) -- so a landscape
   table printed sideways under an upright running head reads sideways, and an upright page beside a long stamp up its
-  margin reads upright. A page with no such way -- two ways tie for most, or text askew off every quarter turn reads
-  most -- has none: it is read as it stands, upright, and none of its text is furniture. It is the one source of a
-  page's frame: each :class:`Line` carries it (``page_way``), and :func:`holder` reads a placed block's place in it.
+  margin reads upright. A page with no such way -- two ways tie for most, text askew off every quarter turn reads
+  most, or the way that reads most is one line while another way's text runs to more (a long stamp up the margin of
+  a sparse page) -- has none: it is read as it stands, upright, and none of its text is furniture. It is the one
+  source of a page's frame: each :class:`Line` carries it (``page_way``), and :func:`holder` reads a placed block's
+  place in it.
 - Furniture: text turned against the page's way (standing in another quarter turn, or askew) wholly outside the box
   of the text that reads the page's way -- an arXiv stamp up the margin of an upright page, the upright running head
   over a sideways table -- is :func:`furniture` and makes no line; turned text inside that box (a figure's axis label)
@@ -52,7 +54,7 @@ from __future__ import annotations
 
 import itertools
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from statistics import median
 from typing import TYPE_CHECKING, Final
@@ -274,15 +276,34 @@ def reading_way(spans: Iterable[TextSpan]) -> Way | None:
 
     Characters are counted spaces aside, each span's for the way its glyphs stand in (:func:`_standing`: vertical
     writing as upright). None when no quarter turn reads most: two ways tie for most, text askew off every quarter
-    turn reads most, or there is no text.
+    turn reads most, the way that reads most is one line (:func:`_one_line`) while text standing another way runs to
+    more -- a long stamp up a sparse page's margin may outnumber its few upright lines, a figure's one-line caption
+    its sideways labels: one line against lines is no sure count, so neither makes the other furniture -- or there is
+    no text.
     """
-    counts: Counter[Way] = Counter()
+    texts: dict[Way, list[TextSpan]] = defaultdict(list)
     for span in spans:
-        counts[_standing(span)] += len(''.join(spaced(span.text).split()))
+        if ''.join(spaced(span.text).split()):
+            texts[_standing(span)].append(span)
+    counts = Counter({way: sum(len(''.join(spaced(s.text).split())) for s in held) for way, held in texts.items()})
     ranked = counts.most_common(2)
-    if not ranked or not ranked[0][1] or (len(ranked) > 1 and ranked[1][1] == ranked[0][1]):
+    if not ranked:
         return None
-    return ranked[0][0] if ranked[0][0] in QUARTERS else None
+    (way, most), *rest = ranked
+    lined = _one_line(texts[way]) and any(not _one_line(held) for other, held in texts.items() if other != way)
+    if rest and (rest[0][1] == most or lined):
+        return None
+    return way if way in QUARTERS else None
+
+
+def _one_line(spans: Sequence[TextSpan]) -> bool:
+    """Do ``spans`` lie along one line: all reading one direction, their boxes in its frame sharing a band across it?"""
+    ways = {_way(s) for s in spans}
+    if len(ways) > 1:
+        return False
+    (way,) = ways
+    boxes = [framed(s.provenance.bbox, way) for s in spans]
+    return max(b.y0 for b in boxes) < min(b.y1 for b in boxes)
 
 
 def furniture(page: Page) -> list[TextSpan]:

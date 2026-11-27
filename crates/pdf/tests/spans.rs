@@ -623,3 +623,78 @@ fn a_stroked_glyph_reaches_past_its_box() {
     // The planted control: a hairline outline stays inside its glyph's box, clear of the text.
     assert!(unseen(0.0));
 }
+
+/// A line through the middle of the text's box, from `from` to `to` along it.
+fn level(from: f64, to: f64, b: f64, t: f64) -> String {
+    let y = f64::midpoint(b, t);
+    format!("{from} {y} m {to} {y} l")
+}
+
+#[test]
+fn a_thick_band_holding_text_in_its_color_covers_it() {
+    // Stroked in black, the default stroke color. A 30 wide black rule across the text: its band holds the box, so the page's white under it is hidden.
+    assert!(hidden_by(|x0, b, x1, t| format!(
+        "30 w {} S",
+        level(x0 - 5.0, x1 + 5.0, b, t)
+    )));
+    // A corner of it: one piece's band holds the box, the other's turns away.
+    assert!(hidden_by(|x0, b, x1, t| format!(
+        "30 w {} {} {} l S",
+        level(x0 - 5.0, x1 + 5.0, b, t),
+        x1 + 5.0,
+        b - 60.0
+    )));
+    // Clipped to a rectangle round the text: the clip covers it too.
+    assert!(hidden_by(|x0, b, x1, t| format!(
+        "q {} W n 30 w {} S Q",
+        around(x0, b, x1, t, 3.0),
+        level(x0 - 5.0, x1 + 5.0, b, t)
+    )));
+    // Filled white under its black band (`B` of a closed rectangle 30 wide round the line): the band is on top.
+    assert!(hidden_by(|x0, b, x1, t| {
+        let y = f64::midpoint(b, t);
+        format!(
+            "1 g 30 w {} {y} m {} {y} l {} {} l h B",
+            x0 - 5.0,
+            x1 + 5.0,
+            x1 + 5.0,
+            y - 80.0
+        )
+    }));
+}
+
+#[test]
+fn a_band_that_may_leave_some_of_the_text_unpainted_covers_nothing() {
+    // The planted wrong truths: each the rule above, or near it, leaving the page's white somewhere in the box.
+    // Dashed: its gaps may fall anywhere along it.
+    assert!(!hidden_by(|x0, b, x1, t| format!(
+        "30 w [3 2] 0 d {} S",
+        level(x0 - 5.0, x1 + 5.0, b, t)
+    )));
+    // Thinner than the text is tall: its band reaches only part of the box.
+    assert!(!hidden_by(|x0, b, x1, t| format!(
+        "6 w {} S",
+        level(x0 - 5.0, x1 + 5.0, b, t)
+    )));
+    // Ending inside the text, butt capped.
+    assert!(!hidden_by(|x0, b, x1, t| format!(
+        "30 w 0 J {} S",
+        level(x0 - 5.0, f64::midpoint(x0, x1), b, t)
+    )));
+    // Clipped to half the text.
+    assert!(!hidden_by(|x0, b, x1, t| format!(
+        "q {} {} {} {} re W n 30 w {} S Q",
+        x0 - 3.0,
+        b - 3.0,
+        (x1 - x0) / 2.0,
+        t - b + 6.0,
+        level(x0 - 5.0, x1 + 5.0, b, t)
+    )));
+    // In a color of its own.
+    assert!(!hidden_by(|x0, b, x1, t| format!(
+        "1 0 0 RG 30 w {} S",
+        level(x0 - 5.0, x1 + 5.0, b, t)
+    )));
+    // Black text on the white page: the visible control.
+    assert!(!hidden_by(|_, _, _, _| String::new()));
+}

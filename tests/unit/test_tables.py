@@ -11,6 +11,7 @@ from document_lab.ir import BBox, Page
 from document_lab.pdf import read_pdf
 from document_lab.tables import NotATable, grids, tables
 from tests.synthetic import (
+    BANDED_ROWS,
     GROUPED_HEADER,
     GROUPED_ROWS,
     LIST_ROWS,
@@ -24,6 +25,7 @@ from tests.synthetic import (
     PlotSpec,
     broken_rules,
     double_border,
+    draw_banded_table,
     draw_booktabs,
     draw_grouped_rows,
     draw_plot,
@@ -130,6 +132,29 @@ def test_a_cells_lines_read_top_to_bottom_and_words_apart(tmp_path):
 
     (table,) = tables(_page(tmp_path, draw))
     assert table.rows == (('Top Rated voltage', 'V'), ('x', 'y'))
+
+
+def test_a_table_ruled_every_few_rows_reads_a_row_per_line_its_rules_leave_unparted(tmp_path):
+    """A band whose every cell holds as many lines, on common levels, is rows its rules did not part: each a row, its
+    cells' boxes the band's shares, top to bottom. The header band, its cells wrapped alike, stays one row."""
+    page = _page(tmp_path, draw_banded_table)
+    (table,) = tables(page)
+    header, *bands = BANDED_ROWS
+    wrapped = tuple(f'{a} {b}' for a, b in zip(*header, strict=True))
+    assert table.rows == (wrapped, *(row for band in bands for row in band))
+    tops = [boxes[0].y0 for boxes in table.cell_bboxes]
+    assert tops == sorted(tops) and len(set(tops)) == len(tops)
+    for row, boxes in zip(table.rows[1:], table.cell_bboxes[1:], strict=True):  # each line in its own share
+        for cell, box in zip(row, boxes, strict=True):
+            assert any(s.text == cell and box.contains(*s.center) for s in page.spans)
+
+
+def test_a_band_with_a_cell_wrapped_beside_cells_of_one_line_stays_one_row(tmp_path):
+    """The planted wrong truth: a cell of two lines beside cells of one (a note wrapped under its value) is one row
+    whose cell wraps, not two rows -- the counts of lines differ."""
+    bands = (BANDED_ROWS[0], (('4', '6', '+0,15'), ('', '', 'see note')))
+    (table,) = tables(_page(tmp_path, lambda page: draw_banded_table(page, bands)))
+    assert table.rows[1:] == (('4', '6', '+0,15 see note'),)
 
 
 def test_two_tables_are_numbered_top_to_bottom(tmp_path):

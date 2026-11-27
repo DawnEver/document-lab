@@ -77,6 +77,12 @@ class PlotSpec:
     )
     frame: pymupdf.Rect = field(default_factory=lambda: pymupdf.Rect(FRAME))
     tick_marks: bool = True
+    #: Tick marks drawn as thin filled bars (:data:`TICK_BAR` thick), not stroked lines, as some figures export them.
+    filled_ticks: bool = False
+    #: Points between a y label's end and the frame.
+    y_label_gap: float = 4.0
+    #: Further thin filled bars, (x0, y0, x1, y1) each: ink that is no tick of the frame.
+    bars: Sequence[tuple[float, float, float, float]] = ()
     grid: bool = False
     grid_grey: float = 0.7  # the major grid's grey level (0 black .. 1 white)
     minor_grid: bool = False  # a log axis also gets grid lines at 2..9 x each decade
@@ -102,6 +108,23 @@ class PlotSpec:
     markers: Sequence[tuple[str, Sequence[tuple[float, float]], tuple[float, float, float]]] = ()
     #: Legend entries inside the frame's top left: (glyph, label, color), the glyph with its label just right of it.
     marker_legend: Sequence[tuple[str, str, tuple[float, float, float]]] = ()
+
+
+#: A filled tick mark's thickness and length (points).
+TICK_BAR = (0.32, 1.8)
+
+
+def _tick(page: pymupdf.Page, spec: PlotSpec, a: tuple[float, float], b: tuple[float, float]) -> None:
+    """A tick mark from ``a`` to ``b`` (axis-parallel): a stroked line, or a bar :data:`TICK_BAR` filled from ``a``."""
+    if not spec.filled_ticks:
+        page.draw_line(a, b, color=(0, 0, 0), width=0.5)
+        return
+    thick, long = TICK_BAR
+    (ax, ay), (bx, by) = a, b
+    ex, ey = ax + math.copysign(long, bx - ax) * (bx != ax), ay + math.copysign(long, by - ay) * (by != ay)
+    across_x, across_y = (thick / 2, 0.0) if ax == bx else (0.0, thick / 2)
+    rect = pymupdf.Rect(min(ax, ex) - across_x, min(ay, ey) - across_y, max(ax, ex) + across_x, max(ay, ey) + across_y)
+    page.draw_rect(rect, color=None, fill=(0, 0, 0), width=0)
 
 
 def to_page(spec: PlotSpec, x: float, y: float) -> tuple[float, float]:
@@ -307,7 +330,7 @@ def _y_axis(page: pymupdf.Page, spec: PlotSpec) -> None:
     for i, v in enumerate(spec.y.ticks):
         _, py = to_page(spec, spec.x.ticks[0], v)
         if spec.tick_marks:
-            page.draw_line((f.x0, py), (f.x0 + 4, py), color=(0, 0, 0), width=0.5)
+            _tick(page, spec, (f.x0, py), (f.x0 + 4, py))
         if spec.grid and not (spec.filled_frame and i in (0, len(spec.y.ticks) - 1)):
             page.draw_line((f.x0, py), (f.x0 + spec.grid_reach * f.width, py), color=(spec.grid_grey,) * 3, width=0.3)
         py += spec.y.label_drop
@@ -332,9 +355,19 @@ def _y_axis(page: pymupdf.Page, spec: PlotSpec) -> None:
             continue
         width = pymupdf.get_text_length(text, fontname='helv', fontsize=FONT_SIZE)
         if spec.y.span_minus and text.startswith('-'):
-            _minus_span(page, text, f.x0 - 4 - width / 2, py, spec.y.minus_glyph)
+            _minus_span(page, text, f.x0 - spec.y_label_gap - width / 2, py, spec.y.minus_glyph)
             continue
-        _centered(page, text, f.x0 - 4 - width / 2, py)
+        _centered(page, text, f.x0 - spec.y_label_gap - width / 2, py)
+
+
+def _draw_stray(page: pymupdf.Page, spec: PlotSpec) -> None:
+    """``spec``'s ink beside the plot: its bars and its stray text."""
+    for bar in spec.bars:
+        page.draw_rect(pymupdf.Rect(bar), color=None, fill=(0, 0, 0), width=0)
+    for text, x, y, size in spec.stray:  # a font object sets every character Helvetica has (``Ω``), not only Latin-1
+        writer = pymupdf.TextWriter(page.rect)
+        writer.append((x, y), text, font=pymupdf.Font('helv'), fontsize=size)
+        writer.write_text(page)
 
 
 def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
@@ -343,17 +376,14 @@ def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
     for i, v in enumerate(spec.x.ticks):
         px, _ = to_page(spec, v, spec.y.ticks[0])
         if spec.tick_marks:
-            page.draw_line((px, f.y1), (px, f.y1 - 4), color=(0, 0, 0), width=0.5)
+            _tick(page, spec, (px, f.y1), (px, f.y1 - 4))
         if spec.grid and not (spec.filled_frame and i in (0, len(spec.x.ticks) - 1)):
             cuts = [f.y0, *(f.y0 + k * f.height for gap in spec.grid_gaps for k in gap), f.y1]
             for top, bottom in itertools.batched(cuts, 2):
                 page.draw_line((px, top), (px, bottom), color=(spec.grid_grey,) * 3, width=0.3)
         _x_label(page, spec, spec.x.labels[i] if spec.x.labels else _label(v), px)
     _y_axis(page, spec)
-    for text, x, y, size in spec.stray:  # a font object sets every character Helvetica has (``Ω``), not only Latin-1
-        writer = pymupdf.TextWriter(page.rect)
-        writer.append((x, y), text, font=pymupdf.Font('helv'), fontsize=size)
-        writer.write_text(page)
+    _draw_stray(page, spec)
     if spec.y_title is not None:
         text, x, y, size = spec.y_title
         page.insert_text((x, y), text, fontname='helv', fontsize=size, rotate=90)
@@ -740,6 +770,37 @@ def draw_ruled_table(
             if _merged_block(merged, r, c)[:2] == (r, c) and text:
                 rect = table_cell_rect(r, c)
                 page.insert_text((rect.x0 + 4, rect.y1 - 6), text, fontname='helv', fontsize=9)
+
+
+#: A table ruled every few rows, as a standard's tolerance table is: bands of rows, no rule between a band's rows; the
+#: first band its header, its cells wrapped over two lines alike.
+BANDED_ROWS = (
+    (('Nominal', 'Nominal', 'Tolerance'), ('from', 'to', 'mm')),
+    (('4', '6', '+0,15'), ('6', '8', '+0,20'), ('8', '10', '+0,25')),
+    (('10', '13', '+0,30'), ('13', '16', '+0,35')),
+)
+
+
+def draw_banded_table(
+    page: pymupdf.Page, bands: Sequence[Sequence[Sequence[str]]] = BANDED_ROWS, *, pitch: float = 14.0
+) -> None:
+    """``bands`` in a grid ruled round each band alone, at :data:`TABLE_ORIGIN`, :data:`TABLE_CELL` wide columns:
+    each band's rows set ``pitch`` points apart in its ruled cells, no rule between them (an empty string sets
+    nothing)."""
+    x0, y0 = TABLE_ORIGIN
+    width, columns = TABLE_CELL[0], len(bands[0][0])
+    tops = [y0]
+    for band in bands:
+        tops.append(tops[-1] + pitch * len(band) + 6)
+    for y in tops:
+        page.draw_line((x0, y), (x0 + width * columns, y), color=(0, 0, 0), width=0.5)
+    for c in range(columns + 1):
+        page.draw_line((x0 + width * c, y0), (x0 + width * c, tops[-1]), color=(0, 0, 0), width=0.5)
+    for band, top in zip(bands, tops, strict=False):
+        for k, row in enumerate(band):
+            for c, text in enumerate(row):
+                if text:
+                    page.insert_text((x0 + width * c + 4, top + 12 + pitch * k), text, fontname='helv', fontsize=9)
 
 
 #: Booktabs' rules: the top and bottom rules heavier than the one under the header (0.08 em and 0.05 em at 10 pt).

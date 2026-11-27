@@ -9,7 +9,15 @@ from document_lab.ink import Drawing
 from document_lab.ir import BBox
 from document_lab.pdf import read_pdf
 from document_lab.regions import regions
-from tests.synthetic import LANDSCAPE_CAPTION, TABLE_ROWS, hidden_layer, in_background_color, landscape_pdf
+from tests.synthetic import (
+    LANDSCAPE_CAPTION,
+    TABLE_ROWS,
+    hidden_layer,
+    in_background_color,
+    landscape_pdf,
+    turned,
+    turned_text_pdf,
+)
 
 PROSE = 'The rated output is the mechanical power available at the shaft and shall be expressed in watts.'
 
@@ -366,6 +374,48 @@ def test_rows_ruled_apart_with_text_are_a_table_a_striped_icon_without_text_is_n
     icon = _drawn((200, 260, 260, 320), rules=(5, 0), loose=8)
     found = regions(page, face, [ruled, icon])
     assert [(r.kind, r.label) for r in found] == [('table', 'Untitled table 1'), ('figure', 'Untitled figure 1')]
+
+
+#: A drawn table's page, as set upright: prose above, three rows of cells, a note under them (twelve words and more),
+#: each ``(x, baseline, text)``; the table's drawing is ruled by its rows alone (four level rules).
+NOTED_TABLE = (
+    *((60, 100 + 14 * k, PROSE) for k in range(4)),
+    *((x, y, text) for y in (325, 355, 385) for x, text in ((110, 'Grade M235-35A'), (330, '2.35 W/kg'))),
+    (100, 440, 'NOTE The values in this table are typical of the grades the standard lists above.'),
+)
+TABLE_DRAWING = (100.0, 300.0, 430.0, 420.0)
+#: A link's frame round the note's words.
+NOTE_FRAME = (96.0, 429.0, 440.0, 445.0)
+
+
+def _noted(tmp_path, turn):
+    """:data:`NOTED_TABLE` on a letter page, upright (``turn`` 0) or turned a quarter (-90: read bottom to top, as a
+    landscape table is printed), with the drawings of its table (rules, level and upright, turned with it) and of the
+    frame round its note."""
+    runs = [(*(turned(x, y, turn) if turn else (x, y)), text, -turn) for x, y, text in NOTED_TABLE]
+    path = turned_text_pdf(tmp_path / f'noted{turn}.pdf', runs)
+
+    def drawn(box, rules):
+        corners = [turned(x, y, turn) for x in box[::2] for y in box[1::2]]
+        xs, ys = [x for x, _ in corners], [y for _, y in corners]
+        return _drawn((min(xs), min(ys), max(xs), max(ys)), rules=rules[::-1] if turn else rules, loose=5)
+
+    read = read_pdf(path)
+    return read.page(1), layout.body_face(read), drawn(TABLE_DRAWING, (4, 0)), drawn(NOTE_FRAME, (2, 2))
+
+
+@pytest.mark.parametrize('turn', [0, -90])
+def test_a_drawn_table_beside_a_long_note_is_found_on_a_landscape_page_as_on_an_upright_one(tmp_path, turn):
+    """Drawings are judged in the page's way: on a landscape page, judged as the page stands, the sideways note under
+    the table ran as long down the page as the table, so the table's drawing read as a frame round the note's words;
+    and its rows, ruled down the page, counted as no rows."""
+    page, face, table, frame = _noted(tmp_path, turn)
+    assert layout.reading_way(page.spans) == ((0.0, -1.0) if turn else layout.UP)
+    (region,) = regions(page, face, [table])
+    assert (region.kind, region.label) == ('table', 'Untitled table 1')
+    assert region.bbox.contains(table.box.x0, table.box.y0) and region.bbox.contains(table.box.x1, table.box.y1)
+    # The planted wrong truth: a frame round the note's words is no region, in the page's way as upright.
+    assert regions(page, face, [frame]) == []
 
 
 def test_a_caption_up_the_side_of_a_landscape_table_cuts_its_region_in_its_own_frame(tmp_path):

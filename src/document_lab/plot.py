@@ -357,10 +357,10 @@ def plots(
         include_inkless=include_inkless,
         include_in_background_color=include_in_background_color,
     )
-    edges = _edges(page.paths)
-    dashes = _dashes(page.paths)
+    edges, dashes = _edges(page.paths), _dashes(page.paths)
+    frames = _frames(edges)
     labels = _labels(page.spans, dashes)
-    filled, (drawn, lettering_paths) = _outline_words(page.paths), _stroke_words(page.paths)
+    filled, (drawn, lettering_paths) = _outline_words(_without_ticks(page.paths, frames)), _stroke_words(page.paths)
     outlined = [*filled, *drawn]
     labels += _outline_labels(outlined, dashes)
     unread = [box for value, text, box in filled if value is None and text is None]
@@ -369,7 +369,7 @@ def plots(
     words = [*page.spans, *_text_spans(page, outlined)]  # a legend may be outlined
     # A grid line may stop short of the far edge (a legend sits there), so a long rule anchored on an edge counts.
     found, unread_frames, stroked = [], [], []
-    for frame in _frames(edges):
+    for frame in frames:
         x_marks, y_marks = _marks(frame, edges, vertical=True), _marks(frame, edges, vertical=False)
         xs = _aligned(_one_size(_x_labels(frame, labels)), vertical=False)
         ys = _aligned(_one_size(_y_labels(frame, labels)), vertical=True)
@@ -628,6 +628,25 @@ def _edges(paths: Sequence[VectorPath]) -> list[_Edge]:
             elif abs(y0 - y1) <= AXIS_TOL < abs(x0 - x1):
                 out.append(_Edge(vertical=False, at=(y0 + y1) / 2, lo=min(x0, x1), hi=max(x0, x1)))
     return out
+
+
+def _without_ticks(paths: Sequence[VectorPath], frames: Sequence[BBox]) -> list[VectorPath]:
+    """``paths`` less the thin filled rectangles that are tick marks of one of ``frames`` (:func:`_tick`).
+
+    A tick drawn as a fill is the axis's ink, never a glyph of its labels: the stub of the x axis's first tick stands
+    beside the y axis's corner label, as close as its glyphs stand to each other, and read with it as a mark it made
+    the ``0`` a word of no number that refused the frame.
+    """
+    return [
+        path
+        for path in paths
+        if not (
+            path.stroke is None
+            and path.provenance.bbox is not None
+            and min(path.provenance.bbox.width, path.provenance.bbox.height) <= RULE_MAX
+            and any(_tick(frame, edge) for edge in _edges([path]) for frame in frames)
+        )
+    ]
 
 
 def _is_rectangle(path: VectorPath, box: BBox) -> bool:
@@ -1239,11 +1258,23 @@ def _marks(frame: BBox, edges: Sequence[_Edge], *, vertical: bool) -> list[float
     for e in edges:
         if e.vertical != vertical or not first - EDGE_TOL <= e.at <= last + EDGE_TOL:
             continue
-        on_edge = any(abs(b - e.lo) <= EDGE_TOL or abs(b - e.hi) <= EDGE_TOL for b in (lo_edge, hi_edge))
-        inside = min(e.hi, hi_edge) - max(e.lo, lo_edge)
-        if (on_edge and e.length <= TICK_MAX) or inside >= GRID_SPAN * span:
+        if _tick(frame, e) or min(e.hi, hi_edge) - max(e.lo, lo_edge) >= GRID_SPAN * span:
             marks.append(e.at)
     return marks
+
+
+def _tick(frame: BBox, edge: _Edge) -> bool:
+    """Whether ``edge`` is a tick mark of ``frame``: at most ``TICK_MAX`` long, ending on a side it runs across.
+
+    It runs across the axis it marks, within the frame's extent along that axis.
+    """
+    lo_edge, hi_edge = (frame.y0, frame.y1) if edge.vertical else (frame.x0, frame.x1)
+    first, last = (frame.x0, frame.x1) if edge.vertical else (frame.y0, frame.y1)
+    return (
+        first - EDGE_TOL <= edge.at <= last + EDGE_TOL
+        and edge.length <= TICK_MAX
+        and any(abs(b - edge.lo) <= EDGE_TOL or abs(b - edge.hi) <= EDGE_TOL for b in (lo_edge, hi_edge))
+    )
 
 
 def _snap(

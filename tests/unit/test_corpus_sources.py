@@ -174,3 +174,31 @@ def test_the_license_rule_can_say_no():
         license_url='https://creativecommons.org/licenses/by-sa/4.0/',
     )
     assert not zero_risk(share_alike)
+
+
+def _racing(path: Path, held: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sibling worker renames its copy into ``path`` first and holds it open: Windows refuses our rename over it."""
+    replace = type(path).replace
+
+    def refused(self: Path, target: Path) -> Path:
+        if target == path:
+            path.write_bytes(held)
+            raise PermissionError(13, 'Access is denied', str(target))
+        return replace(self, target)
+
+    monkeypatch.setattr(type(path), 'replace', refused)
+
+
+def test_a_sibling_that_renamed_the_pinned_bytes_first_wins(server: str, tmp_path: Path, monkeypatch):
+    _Served.routes['/original.pdf'] = (200, BODY)
+    path = tmp_path / f'{SHA}.pdf'
+    _racing(path, BODY, monkeypatch)
+    assert fetch_into(_source(server), tmp_path).read_bytes() == BODY
+    assert [p.name for p in tmp_path.iterdir()] == [path.name]  # our partial download is gone
+
+
+def test_a_refused_rename_over_other_bytes_is_still_raised(server: str, tmp_path: Path, monkeypatch):
+    _Served.routes['/original.pdf'] = (200, BODY)
+    _racing(tmp_path / f'{SHA}.pdf', b'damaged', monkeypatch)
+    with pytest.raises(PermissionError):
+        fetch_into(_source(server), tmp_path)

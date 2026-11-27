@@ -84,7 +84,7 @@ impl<'a> Parser<'a> {
         if got == word {
             Ok(())
         } else {
-            Err(Error::at(
+            Err(Error::malformed_at(
                 at,
                 format!("expected `{}`, found `{}`", show(word), show(got)),
             ))
@@ -100,7 +100,7 @@ impl<'a> Parser<'a> {
         let at = self.pos;
         let got = self.token();
         parse_unsigned(got).ok_or_else(|| {
-            Error::at(
+            Error::malformed_at(
                 at,
                 format!("expected an unsigned integer, found `{}`", show(got)),
             )
@@ -118,7 +118,7 @@ impl<'a> Parser<'a> {
 
     fn object_at_depth(&mut self, depth: usize) -> Result<Object> {
         if depth > MAX_DEPTH {
-            return Err(Error::at(
+            return Err(Error::malformed_at(
                 self.pos,
                 "arrays and dictionaries nested too deep",
             ));
@@ -126,7 +126,10 @@ impl<'a> Parser<'a> {
         self.skip_whitespace();
         let at = self.pos;
         let Some(&b) = self.data.get(at) else {
-            return Err(Error::at(at, "end of data where an object was expected"));
+            return Err(Error::malformed_at(
+                at,
+                "end of data where an object was expected",
+            ));
         };
         match b {
             b'/' => {
@@ -155,7 +158,7 @@ impl<'a> Parser<'a> {
                             self.pos += 1;
                             return Ok(Object::Array(items));
                         }
-                        None => return Err(Error::at(at, "array not closed")),
+                        None => return Err(Error::malformed_at(at, "array not closed")),
                         _ => items.push(self.object_at_depth(depth + 1)?),
                     }
                 }
@@ -167,8 +170,11 @@ impl<'a> Parser<'a> {
                     b"true" => Ok(Object::Bool(true)),
                     b"false" => Ok(Object::Bool(false)),
                     b"null" => Ok(Object::Null),
-                    b"" => Err(Error::at(at, format!("unexpected `{}`", show(&[b])))),
-                    _ => Err(Error::at(
+                    b"" => Err(Error::malformed_at(
+                        at,
+                        format!("unexpected `{}`", show(&[b])),
+                    )),
+                    _ => Err(Error::malformed_at(
                         at,
                         format!("unexpected keyword `{}`", show(word)),
                     )),
@@ -180,8 +186,8 @@ impl<'a> Parser<'a> {
     fn number_or_reference(&mut self) -> Result<Object> {
         let at = self.pos;
         let word = self.token();
-        let number =
-            number(word).ok_or_else(|| Error::at(at, format!("not a number: `{}`", show(word))))?;
+        let number = number(word)
+            .ok_or_else(|| Error::malformed_at(at, format!("not a number: `{}`", show(word))))?;
         if let Object::Integer(num) = number
             && let (Ok(num), true) = (u32::try_from(num), word[0].is_ascii_digit())
         {
@@ -222,7 +228,7 @@ impl<'a> Parser<'a> {
         let mut depth = 1usize;
         loop {
             let Some(&b) = self.data.get(self.pos) else {
-                return Err(Error::at(start, "string not closed"));
+                return Err(Error::malformed_at(start, "string not closed"));
             };
             self.pos += 1;
             match b {
@@ -292,7 +298,7 @@ impl<'a> Parser<'a> {
         let mut high: Option<u8> = None;
         loop {
             let Some(&b) = self.data.get(self.pos) else {
-                return Err(Error::at(start, "hex string not closed"));
+                return Err(Error::malformed_at(start, "hex string not closed"));
             };
             self.pos += 1;
             if b == b'>' {
@@ -305,7 +311,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
             let v = hex_digit(b).ok_or_else(|| {
-                Error::at(self.pos - 1, format!("not a hex digit: `{}`", show(&[b])))
+                Error::malformed_at(self.pos - 1, format!("not a hex digit: `{}`", show(&[b])))
             })?;
             match high.take() {
                 Some(h) => out.push((h << 4) | v),
@@ -333,8 +339,13 @@ impl<'a> Parser<'a> {
                         dict.insert(key, value);
                     }
                 }
-                None => return Err(Error::at(start, "dictionary not closed")),
-                Some(_) => return Err(Error::at(self.pos, "a dictionary key must be a name")),
+                None => return Err(Error::malformed_at(start, "dictionary not closed")),
+                Some(_) => {
+                    return Err(Error::malformed_at(
+                        self.pos,
+                        "a dictionary key must be a name",
+                    ));
+                }
             }
         }
     }
@@ -355,9 +366,10 @@ impl<'a> Parser<'a> {
         let num = self.unsigned()?;
         let generation = self.unsigned()?;
         self.expect(b"obj")?;
-        let num = u32::try_from(num).map_err(|_| Error::at(at, "object number out of range"))?;
+        let num = u32::try_from(num)
+            .map_err(|_| Error::malformed_at(at, "object number out of range"))?;
         let generation = u16::try_from(generation)
-            .map_err(|_| Error::at(at, "generation number out of range"))?;
+            .map_err(|_| Error::malformed_at(at, "generation number out of range"))?;
         let id = ObjRef { num, generation };
         let value = self.object()?;
         let value = match value {
@@ -398,7 +410,7 @@ impl<'a> Parser<'a> {
             }
         }
         let found = find(&self.data[start..], b"endstream")
-            .ok_or_else(|| Error::at(start, "stream without `endstream`"))?;
+            .ok_or_else(|| Error::malformed_at(start, "stream without `endstream`"))?;
         let mut end = start + found;
         self.pos = end + b"endstream".len();
         // The end-of-line before `endstream` is not data.

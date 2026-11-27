@@ -151,6 +151,29 @@ def _heads(md: str) -> list[str]:
     return [line for line in md.splitlines() if line[:1] == '#']
 
 
+def test_a_bold_letter_in_a_data_sheets_table_heads_nothing(tmp_path):
+    """A ferrite handbook's tables head their columns with bold dimension letters (``A B``, ``C Dmin``) and a
+    material sheet letter-spaces its bold column heads (``U N I T``), all in the body size: none is an appendix
+    section, which is set larger than its body. A lettered clause (``A.1``) heads in the body size, as ``1.1`` does.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    _write(page, 57, 80, '1 Scope', font='tibo')
+    _write(page, 57, 100, 'The cores of this sheet are made of a ferrite material for power use.')
+    for x, label in ((57, 'A'), (90, 'B'), (123, 'C'), (156, 'Dmin'), (200, 'U'), (215, 'CORES')):
+        _write(page, x, 130, label, font='tibo')  # a table's head row, its cells a few ems apart
+    for i, letter in enumerate('UNIT'):
+        _write(page, 300 + 9 * i, 130, letter, font='tibo')
+    _write(page, 57, 150, '0.464 mm 71300 mm3 182 mm')
+    _write(page, 57, 180, 'A.1 Dimensions', font='tibo')
+    _write(page, 57, 200, 'The dimensions of the cores are given in the table above for each type.')
+    sheet = doc.new_page(width=595, height=842)
+    _write(sheet, 113, 190, 'C O N D I T I O N S', size=12, font='tibo')  # letter-spaced, larger: one span
+    _write(sheet, 113, 210, '25 C; 10 kHz; 0.25 mT')
+    doc.save(tmp_path / 's.pdf')
+    assert _heads(to_markdown(read_pdf(tmp_path / 's.pdf'))) == ['## 1 Scope', '### A.1 Dimensions']
+
+
 def test_a_stamp_set_sideways_in_the_margin_is_neither_title_nor_text(tmp_path):
     """arXiv 2204.08094: the margin's sideways stamp, the largest text on page 1, was the title and joined the
     abstract's line beside it. Text turned sideways outside the page's text frame is furniture; text turned sideways

@@ -7,9 +7,11 @@ Lines and their reading order are `document_lab.layout`'s.
   whatever its size; else a line at least :data:`TITLE_SCALE` times the body size is a title (``#``: a paper bound in
   after the first opens with one); else an all-bold line numbered ``2`` / ``2.1`` is a section (``##``, ``###`` per
   depth); else page 1's largest text is its title when at least :data:`PAGE_TITLE_SCALE` times the body; else an
-  all-bold line lettered as an appendix's ``A`` / ``A.1`` is a section. No heading is set smaller than
-  :data:`HEADING_FLOOR` times the body (a footnote's number is). A document with no bold text at all (OCR'd: it
-  carries no weight) cannot be judged by weight: there a short numbered line that is no sentence heads its clause,
+  all-bold line lettered as an appendix's ``A.1`` is a section, and one lettered ``A`` alone when set at least
+  :data:`LETTER_SCALE` times the body (in the body size a bold letter is a table's label), its title read as words
+  (not a letter-spaced ``C O N D I T I O N S``). No heading is set smaller than :data:`HEADING_FLOOR` times the
+  body (a footnote's number is). A document with no bold text at all (OCR'd: it carries no weight) cannot be judged
+  by weight: there a short numbered line that is no sentence heads its clause,
   and any heading must read as words (`document_lab.layout.wordy`) -- a figure's labels, OCR'd, do not. A line
   without a letter (a page number), a run of four dots (a contents leader, however garbled) or a contents entry (a
   leader then a page number) never heads, nor does any line of a table-of-contents page (:data:`TOC_LINES` such
@@ -42,6 +44,8 @@ TITLE_SCALE: Final = 1.6
 PAGE_TITLE_SCALE: Final = 1.2
 #: A heading is set at least this many times the body size: a footnote, set smaller, heads nothing.
 HEADING_FLOOR: Final = 0.9
+#: An appendix lettered alone (``A``) is set at least this many times the body: a table's bold label is not.
+LETTER_SCALE: Final = 1.1
 #: Prefix that keeps body text starting with "#" from reading as a markdown heading.
 ESCAPE: Final = chr(92)
 #: Unweighted: a numbered line of at most this many words, not ending a sentence, heads its clause.
@@ -133,8 +137,10 @@ def _heading(line: layout.Line, body: float, title: float | None, *, weighted: b
     if title is not None and line.size >= title:
         return f'# {text}'
     lettered = _LETTERED.match(text) if weighted else None
-    if lettered and clause:
-        return f'{"#" * (lettered.group(1).count(".") + 2)} {text}'
+    # Its title reads as words: a letter-spaced word (``C O N``) is no title.
+    letter = lettered.group(1) if lettered and layout.wordy(text[lettered.end(1) :]) else None
+    if letter and clause and ('.' in letter or line.size >= LETTER_SCALE * body):
+        return f'{"#" * (letter.count(".") + 2)} {text}'
     return None
 
 

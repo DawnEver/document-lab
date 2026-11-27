@@ -42,5 +42,6 @@ def test_a_wheel_goes_where_the_window_server_routes_it_not_to_the_screen_wide_d
 def test_a_wheel_the_window_server_routes_elsewhere_is_refused_naming_where(monkeypatch, hit, named):
     monkeypatch.setattr(quartz, '_infos', lambda *_: _CENSUS)
     monkeypatch.setattr(quartz, '_hit', lambda *_: hit)
+    monkeypatch.setattr(quartz, '_nobody', lambda *_: 'what each says is there')
     with pytest.raises(OSError, match=f'^{named}.* covers the middle of'):
         quartz._require_on_top(_VIEWER, 380, 382)

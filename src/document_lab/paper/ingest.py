@@ -97,6 +97,7 @@ def ingest(
     outline: bool = True,
     formulas: Formulas | None = None,
     formula_model: Model = 'texteller',
+    include_hidden: bool = False,
     include_in_background_color: bool = False,
 ) -> Ingested:
     """Convert ``pdf`` (with ``tool``, else the IR path) and write its paper layout into ``out_dir``.
@@ -106,14 +107,20 @@ def ingest(
     same (`document_lab.paper.convert.convert`). ``formulas``: ``latex`` writes each equation crop's LaTeX under its
     image, read by ``formula_model`` (`document_lab.formula`); refused by
     :class:`document_lab.formula.FormulaUnavailable` before anything is written when that model cannot run.
-    ``include_in_background_color``: the text filled in the color under it is read too, by the markdown and the
-    regions a picture page's text locates (see `document_lab.ir`).
+    Every step reading text reads the paper as its default view shows it (`document_lab.ir.Page.shown`): its
+    markdown and running heads, its captions and equations; ``include_hidden``: what hidden layers draw is read
+    too, ``include_in_background_color``: the text filled in the color under it.
     """
     transcribe = None if formulas is None else formula.transcriber(formulas, model=formula_model)
     pdf = pdf.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     md_text, choice, structure = convert(
-        pdf, out_dir, tool=tool, outline=outline, include_in_background_color=include_in_background_color
+        pdf,
+        out_dir,
+        tool=tool,
+        outline=outline,
+        include_hidden=include_hidden,
+        include_in_background_color=include_in_background_color,
     )
     stated = frozenset(structure.named) if structure is not None else frozenset()
     main, appended = clean_sections(split_sections(md_text), stated=stated)
@@ -134,6 +141,7 @@ def ingest(
         pdf_path=pdf,
         renderer=renderer,
         transcribe=transcribe,
+        include_hidden=include_hidden,
         include_in_background_color=include_in_background_color,
     )
 
@@ -154,6 +162,7 @@ def ingest(
             title_override=title,
             pdf_path=pdf,
             renderer=renderer,
+            include_hidden=include_hidden,
             include_in_background_color=include_in_background_color,
             transcribe=transcribe,
         )

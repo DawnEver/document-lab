@@ -72,11 +72,11 @@ class _Capture:
         """Page ``index``'s (0-based) image; refused unless the page holds exactly one."""
         if index not in self._images:
             number, page_width, _ = self.reader.pages[index]
-            _, _, placed, _ = self.reader.page(number, _CURVE_SAMPLES)
+            _, _, placed, _ = self.reader.page(number, curve_samples=_CURVE_SAMPLES)
             if len(placed) != 1 or placed[0][3] is None:
                 msg = f'page {number} of {self.path.name} holds {len(placed)} image(s), not one: it is no capture'
                 raise ValueError(msg)
-            _, width, height, obj, _ = placed[0]
+            _, width, height, obj, *_ = placed[0]
             self._images[index] = _Image(obj, width, height, page_width)
         return self._images[index]
 
@@ -91,7 +91,7 @@ class _Capture:
 
     def rows(self, index: int) -> np.ndarray:
         """Page ``index``'s pixels, ``(h, w, 3)`` uint8."""
-        width, height, space, components, bits, data, codec, _, _ = self.reader.image(self.image(index).object)
+        width, height, space, components, bits, data, codec, *_ = self.reader.image(self.image(index).object)
         if codec is not None or bits != 8 or components not in {1, 3}:  # noqa: PLR2004 -- 8-bit samples
             msg = (
                 f'page {index + 1} of {self.path.name} is a {space} image of {components} x {bits}-bit samples'

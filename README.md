@@ -149,5 +149,6 @@ Everything runs in one thread, in order -- grab, scroll, stitch, write -- so not
 
 ## Install
 
-`pip install "document_lab @ git+https://github.com/DawnEver/document-lab.git"`; extras: `gpu` (marker-pdf),
-`ai` (ai-lab), `capture` (no packages beyond the base). Domain schemas live in the consumers.
+`pip install "document_lab @ git+https://github.com/DawnEver/document-lab.git"`; extras: `gpu` (marker-pdf;
+its OCR model, surya, is served by Docker's `vllm/vllm-openai` on an NVIDIA GPU, or by a `llama-server` with
+`SURYA_INFERENCE_BACKEND=llamacpp`), `ai` (ai-lab), `capture` (no packages beyond the base). Domain schemas live in the consumers.

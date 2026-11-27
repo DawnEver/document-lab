@@ -25,7 +25,11 @@ dependencies = [
 
 [project.optional-dependencies]
 # `document-lab paper` through marker-pdf when a GPU with >= 4 GB VRAM is present (else the base package's IR path).
-gpu = ["marker-pdf"]
+# Below 2.2: marker-pdf 2.2.0 requires indra-ocr, which requires onnxruntime, and onnxruntime has no cp315 wheel
+# (measured 2026-11-26 on 1.32.0). torch and torchvision (marker's and surya's) are named so `[tool.uv.sources]`,
+# which applies to direct requirements only, gives them their CUDA build on Windows. six: marker-pdf 2.1.0's
+# markdown renderer imports it without declaring it (measured 2026-11-26).
+gpu = ["marker-pdf<2.2", "six", "torch", "torchvision"]
 # Values a model reads out of a document (`document_lab.ai`), through the family's one model interface.
 ai = ["ai_lab @ git+https://github.com/DawnEver/ai-lab.git"]
 # `document_lab.capture` / `document-lab capture`: a window or screen region, scrolled and stitched, to a PDF. Windows
@@ -52,6 +56,17 @@ document-lab = "document_lab.__main__:main"
 override-dependencies = ["pillow>=13", "filelock>=4.2.1"]
 # uv keys a path build on pyproject.toml's mtime alone; the mixed wheel must rebuild for a Rust OR a Python edit.
 cache-keys = [{ file = "pyproject.toml" }, { file = "Cargo.toml" }, { file = "crates/**/*.rs" }, { file = "src/**/*.py" }]
+
+# PyPI's Windows torch is CPU-only, so the `gpu` extra would run marker on the CPU; Windows takes torch and
+# torchvision from PyTorch's CUDA 13.2 index (sm_120 Blackwell included). Linux's PyPI torch is already a CUDA build.
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu132", marker = "sys_platform == 'win32'" }]
+torchvision = [{ index = "pytorch-cu132", marker = "sys_platform == 'win32'" }]
 
 [tool.maturin]
 python-source = "src"

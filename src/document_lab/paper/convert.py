@@ -46,15 +46,16 @@ def detect_gpu_vram_gb() -> float:
 
 
 def find_marker_single() -> str | None:
-    """The ``marker_single`` executable on PATH or beside this interpreter, else ``None``."""
-    found = shutil.which('marker_single')
-    if found:
-        return found
+    """The ``marker_single`` beside this interpreter (the ``gpu`` extra's), else the one on PATH, else ``None``.
+
+    This environment's own comes first: one on PATH may be another install (a ``uv tool``) with its own marker and
+    torch, which this package neither pins nor tests.
+    """
     name = 'marker_single.exe' if sys.platform == 'win32' else 'marker_single'
     for folder in (Path(sys.executable).parent, Path(sys.prefix) / 'bin'):
         if (folder / name).is_file():
             return str(folder / name)
-    return None
+    return shutil.which('marker_single')
 
 
 def choose_tool() -> Tool:

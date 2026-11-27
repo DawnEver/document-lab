@@ -552,12 +552,13 @@ def _cells(page: _Page, region: Region) -> Table | None:
 
 
 def _turned(span: TextSpan, way: layout.Way) -> TextSpan:
-    """``span`` as it stands in the frame of ``way``: its box framed, its direction turned with it."""
+    """``span`` as it stands in the frame of ``way``: its box and its words' framed, its direction turned with it."""
     if way == layout.UP:
         return span
     (dx, dy), (wx, wy) = span.direction, way
     here = span.provenance.at(bbox=layout.framed(span.provenance.bbox, way))
-    return replace(span, provenance=here, direction=(dx * wx + dy * wy, dy * wx - dx * wy))
+    words = tuple(layout.framed(w, way) for w in span.words)
+    return replace(span, provenance=here, direction=(dx * wx + dy * wy, dy * wx - dx * wy), words=words)
 
 
 def _turned_back(table: Table, way: layout.Way) -> Table:

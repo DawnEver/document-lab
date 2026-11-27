@@ -567,7 +567,7 @@ def test_a_landscape_table_s_caption_heads_it_and_its_region_is_cut_and_linked(t
 
 
 def test_a_region_s_text_reading_more_rows_but_fewer_columns_than_its_rules_gives_way_to_them(tmp_path):
-    """A captioned ruled table whose first column's words run up to its rule (the next column's 4 points on) and
+    """A captioned ruled table whose first column's words run up to its rule (the next column's 3 points on) and
     whose first cell wraps: its text reads four rows in two columns, its rules three rows in three. Text that runs
     columns its rules part into one reads less, however many rows it makes: the ruled table is written."""
     rows = (('Grade', 'Flux mT', 'Hc kA/m'), ('AlNiCo 9/5', '550', '44'), ('AlNiCo 12/6', '630', '52'))
@@ -583,7 +583,7 @@ def test_a_region_s_text_reading_more_rows_but_fewer_columns_than_its_rules_give
                     x = (
                         rect.x1 - 2 - pymupdf.get_text_length(line, fontname=font, fontsize=9)
                         if c == 0
-                        else rect.x0 + 2
+                        else rect.x0 + 1
                     )
                     y = rect.y1 - 6 if len(lines) == 1 else rect.y0 + 9 + 9 * i
                     page.insert_text((x, y), line, fontname=font, fontsize=9)

@@ -68,11 +68,19 @@ ALPHABET: Final = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxy
 ASCENT: Final = 0.73
 #: Weight of a glyph's top and bottom (ems from the baseline) in a word reading's distance.
 PLACE_WEIGHT: Final = 8.0
-#: Two characters whose references (nearest phases, with place) are this close are one shape to the reader. Over 14
-#: to 64 rows (measured 2026-11-27), ``I``/``l`` lie farther apart than this at 5 heights and ``O``/``Q`` within it
-#: at 4; PyMuPDF's references at 1.8 had left ``I``/``l`` apart at 15 heights and twinned ``O``/``Q`` or ``C``/``O``
-#: at 15. At 32 rows ``I``/``l`` are 1.45 apart, the nearest distinct pair ``O``/``Q`` 1.59.
+#: Two characters whose references (nearest phases, with place) are this close at a glyph's height are one shape to
+#: the reader there. Over 14 to 128 rows (measured 2026-11-27) it twins ``O``/``Q`` at 4 heights and parts ``I``/``l``
+#: at 5 (27, 31, 37, 44 and 54 rows: sampling noise, 1.68 at most), which ``DESIGN_TWIN`` twins; at 32 rows, an
+#: outline's, ``I``/``l`` are 1.45 apart, ``O``/``Q`` 1.59. At 1.7 it would twin ``O``/``Q`` at 33 heights, 32 rows
+#: among them; PyMuPDF's references at 1.8 had left ``I``/``l`` apart at 15 heights and twinned ``O``/``Q`` or
+#: ``C``/``O`` at 15.
 TWIN: Final = 1.5
+#: Two characters whose references lie this close at ``DESIGN_ROWS`` rows, where sampling no longer parts them, are
+#: drawn by the font as one shape, and are twins at EVERY height: in Nimbus Sans ``I`` and ``l`` (0.02-0.04 apart at
+#: 64-128 rows); the next pair, ``x``/``X`` by shape alone, lies 0.72 apart, ``O``/``Q`` placed 1.72 (2026-11-27).
+DESIGN_TWIN: Final = 0.5
+#: The height (rows) a font's own twins (``DESIGN_TWIN``) are judged at.
+DESIGN_ROWS: Final = 128
 #: A minus' center sits at least this far (ems) above the baseline; a point (as wide as tall) sits on it.
 MINUS_FLOOR: Final = 0.12
 #: A mark taller than wide whose bottom sits at least this far (ems) above the baseline is a prime (``mu'``).
@@ -318,7 +326,7 @@ def _word_chars(glyphs: Sequence[Glyph], font: Font) -> list[str | UnreadableGly
         readings.append(
             _marked([r if isinstance(r, UnreadableGlyph) else r[0] for r in read], ordered, baseline, em, font)
         )
-        distances.append(sum(0.0 if isinstance(r, UnreadableGlyph) else r[1] for r in read) / len(read))
+        distances.append(sum(0.0 if isinstance(r, UnreadableGlyph) else r[1] for r in read) / max(len(read), 1))
     best = min(readings, key=lambda r: sum(isinstance(c, UnreadableGlyph) for c in r))
     clean = [k for k, r in enumerate(readings) if not any(isinstance(c, UnreadableGlyph) for c in r)]
     if len(clean) > 1 and readings[0] != readings[1]:
@@ -400,8 +408,19 @@ def _nearest(ink: np.ndarray, place: tuple[float, float] | None, font: Font) -> 
 
 @functools.cache
 def _twins(rows: int, font: Font, *, placed: bool = True) -> dict[str, tuple[str, ...]]:
-    """Per ``font`` character, the others whose reference (shape, and place when ``placed``) is within ``TWIN``."""
+    """Per ``font`` character, the others it cannot be told from at ``rows`` (``TWIN``) or ever (``DESIGN_TWIN``).
+
+    A twin's reference (shape, and place when ``placed``) is within ``TWIN`` of it at ``rows``, or the font draws them
+    as one shape: within ``DESIGN_TWIN`` at ``DESIGN_ROWS``.
+    """
     refs = font.letters(rows)
+    design = _within(font.letters(DESIGN_ROWS), DESIGN_TWIN, placed=placed)
+    near = _within(refs, TWIN, placed=placed)
+    return {a: tuple(b for b in refs if b in near[a] or b in design.get(a, ())) for a in refs}
+
+
+def _within(refs: Shapes, limit: float, *, placed: bool) -> dict[str, set[str]]:
+    """Per character of ``refs``, the others whose reference (shape, and place when ``placed``) is within ``limit``."""
 
     def distance(a: str, b: str) -> float:
         (top_a, bottom_a), (top_b, bottom_b) = refs[a][1], refs[b][1]
@@ -412,7 +431,7 @@ def _twins(rows: int, font: Font, *, placed: bool = True) -> dict[str, tuple[str
         )
         return shape + (PLACE_WEIGHT * (abs(top_a - top_b) + abs(bottom_a - bottom_b)) if placed else 0.0)
 
-    return {a: tuple(b for b in refs if b != a and distance(a, b) <= TWIN) for a in refs}
+    return {a: {b for b in refs if b != a and distance(a, b) <= limit} for a in refs}
 
 
 def read_number(glyphs: Sequence[Glyph], font: Font = SANS) -> float:

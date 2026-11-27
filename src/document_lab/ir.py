@@ -155,7 +155,10 @@ class Provenance:
 
 @dataclass(frozen=True, slots=True)
 class TextSpan:
-    """A run of text in one font and size: along a baseline, or down a column when written vertically."""
+    """A run of text in one font, size and fill: along a baseline, or down a column when written vertically.
+
+    Its fill is a color as in :class:`VectorPath`.
+    """
 
     text: str
     size: float
@@ -180,6 +183,9 @@ class TextSpan:
     hidden: bool = False
     #: The subtype of the annotation whose appearance draws it; None for the page's content.
     annotation: str | None = None
+    #: The color its glyphs are filled with; None when they are not filled (stroked or invisible text) or the source
+    #: states no fill.
+    fill: tuple[float, ...] | None = None
 
     @property
     def center(self) -> tuple[float, float]:

@@ -4,6 +4,7 @@ import numpy as np
 import pymupdf
 import pytest
 
+from document_lab import _pdf
 from document_lab.ir import BBox
 from document_lab.pdf import CURVE_SAMPLES, Locked, Malformed, NotPdf, Refused, Unsupported, read_pdf, read_raster
 from tests.synthetic import RED, image_pdf, mixed_pdf, table_cell_rect
@@ -134,6 +135,17 @@ def test_a_bold_span_says_so(tmp_path):
     assert spans == {'Strong': True, 'plain': False}
 
 
+def test_a_span_carries_its_fill_and_text_not_filled_has_none(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), 'red', fontname='helv', fontsize=10, color=RED)
+    page.insert_text((72, 100), 'plain', fontname='helv', fontsize=10)
+    page.insert_text((72, 128), 'hidden', fontname='helv', fontsize=10, render_mode=3)  # an OCR layer's mode
+    doc.save(tmp_path / 'c.pdf')
+    fills = {s.text: s.fill for s in read_pdf(tmp_path / 'c.pdf').spans()}
+    assert fills == {'red': (1.0, 0.0, 0.0), 'plain': (0.0, 0.0, 0.0), 'hidden': None}
+
+
 def test_a_span_says_which_way_its_baseline_runs(tmp_path):
     doc = pymupdf.open()
     page = doc.new_page()
@@ -186,6 +198,7 @@ def test_a_raster_renders_at_the_native_resolution_of_the_image_under_it(doc, tm
     raster = read_raster(path, 1, BBox(72, 600, 172, 700))
     rows, columns = raster.pixels.shape[:2]  # 8 samples across 100 points: 5.76 dpi, a pixel per sample
     assert abs(rows - 8) <= 1 and abs(columns - 8) <= 1  # the renderer rounds the clip's edges outward
+    assert raster.provenance.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 SAMPLES = np.random.default_rng(7).integers(0, 256, (40, 60, 3), dtype=np.uint8)  # rows x columns x RGB
@@ -332,9 +345,20 @@ def test_part_of_an_image_or_another_resolution_is_rendered(tmp_path):
     assert np.array_equal(_whole_page(path, dpi=144), _shown(path, zoom=2))
 
 
-def test_a_missing_file_raises(tmp_path):
-    with pytest.raises(FileNotFoundError):
+def test_a_missing_file_raises_naming_it(tmp_path):
+    with pytest.raises(FileNotFoundError, match=r'absent\.pdf'):
         read_pdf(tmp_path / 'absent.pdf')
+
+
+def test_a_file_opened_by_its_path_reads_as_its_bytes_in_memory(tmp_path):
+    path = mixed_pdf(tmp_path / 'mixed.pdf')
+    by_path, in_memory = _pdf.open(path, b''), _pdf.open(path.read_bytes(), b'')
+    assert by_path.sha256 == in_memory.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert _pdf.open(str(path), b'').sha256 == by_path.sha256
+    assert by_path.pages == in_memory.pages
+    assert repr(by_path.page(1, annotations=False, curve_samples=8)) == repr(
+        in_memory.page(1, annotations=False, curve_samples=8)
+    )
 
 
 def _raw_page(tmp_path, resources: str, content: bytes, objects: dict[str, str]):

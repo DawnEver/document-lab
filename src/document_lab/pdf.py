@@ -10,7 +10,6 @@ opens no access), :class:`Unsupported`, :class:`Malformed` -- each a ``ValueErro
 
 from __future__ import annotations
 
-import hashlib
 import math
 from collections.abc import Callable, Sequence
 from functools import partial
@@ -47,6 +46,9 @@ CURVE_SAMPLES: Final = 8
 VECTOR_DPI: Final = 300.0
 #: How far (in pixels) a placed image's edges and sides may miss a region's and the region still be the image whole.
 WHOLE_IMAGE_SLACK: Final = 0.25
+#: Where a span row and an image row (``Reader.page``) hold their layer.
+_SPAN_LAYER: Final = 9
+_IMAGE_LAYER: Final = 6
 #: The text rendering mode that neither fills nor strokes (an OCR layer): text that shows nothing.
 INVISIBLE_TEXT: Final = 3
 #: Gray depths whose levels spread over 0..255 exactly (255 is a multiple of each level count less one).
@@ -67,8 +69,9 @@ def read_pdf(
 ) -> Document:
     """The PDF at ``path``, opened with ``password`` when it is encrypted; each page read when first asked for.
 
-    The file is read whole here, hashed, and kept in memory for the document's life: no file handle stays open,
-    and the pages read later are those of the bytes hashed, whatever becomes of the file.
+    The reader reads the file whole, hashes it, and keeps it in its memory for the document's life (Python holds no
+    copy): no file handle stays open, and the pages read later are those of the bytes hashed, whatever becomes of
+    the file.
 
     Each curve of a vector path is flattened into a polyline: into as few segments as keep it within ``flatness``
     points of the curve, or into ``curve_samples`` segments each, whatever its size; neither given, into
@@ -98,10 +101,8 @@ def read_pdf(
         msg = f'a curve is flattened within a flatness above 0, or into curve_samples of 1 or more: {flattening}'
         raise ValueError(msg)
     path = Path(path)
-    data = path.read_bytes()
-    sha = hashlib.sha256(data).hexdigest()
-    uri = file_uri(path.resolve())
-    reader = _pdf.open(data, password.encode())
+    reader = _pdf.open(path, password.encode())
+    sha, uri = reader.sha256, file_uri(path.resolve())
     reading = {**flattening, 'annotations': annotations}
     return Document(sha256=sha, uri=uri, pages=_Pages(reader, sha, uri, reading), repairs=_Repairs(reader))
 
@@ -187,7 +188,7 @@ def _page(
 
 
 def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
-    text, font, size, bold, box, mode, unspaced, vertical, direction, (hidden, annotation) = row
+    text, font, size, bold, box, mode, unspaced, vertical, direction, (hidden, annotation), fill = row
     return TextSpan(
         text,
         size,
@@ -200,6 +201,7 @@ def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
         direction=direction,
         hidden=hidden,
         annotation=annotation,
+        fill=None if fill is None else tuple(fill),
     )
 
 
@@ -266,23 +268,23 @@ def read_raster(path: Path | str, page: int, bbox: BBox, *, dpi: float | None = 
     them as the page shows them (:func:`_samples`); any other region is rendered by PyMuPDF.
     """
     path = Path(path)
-    data = path.read_bytes()
+    data = path.read_bytes()  # rendered and cited alike: the pixels are those of the bytes hashed
     reader = _pdf.open(data, password.encode())
     spans, paths, images, _ = reader.page(page, annotations=True, curve_samples=1)
-    spans, images = _shown(spans), _shown(images)
+    spans, images = _shown(spans, _SPAN_LAYER), _shown(images, _IMAGE_LAYER)
     under = [row for row in images if _meets(row[0], bbox)]
     if dpi is None:
         dpi = max(filter(None, map(_native, under)), default=VECTOR_DPI)
     pixels = _samples(reader, under, bbox, dpi) if _alone(spans, paths, bbox) else None
     if pixels is None:
         pixels = _rendered(data, page, bbox, dpi, password)
-    here = Provenance(hashlib.sha256(data).hexdigest(), file_uri(path.resolve()), page=page, bbox=bbox)
+    here = Provenance(reader.sha256, file_uri(path.resolve()), page=page, bbox=bbox)
     return Raster(pixels, here)
 
 
-def _shown(rows: list) -> list:
-    """The rows (spans or images, each ending in its layer) no hidden layer draws."""
-    return [row for row in rows if not row[-1][0]]
+def _shown(rows: list, layer: int) -> list:
+    """The rows (spans or images, each holding its layer at index ``layer``) no hidden layer draws."""
+    return [row for row in rows if not row[layer][0]]
 
 
 def _meets(box: tuple[float, float, float, float], bbox: BBox) -> bool:

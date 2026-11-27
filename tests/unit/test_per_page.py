@@ -415,19 +415,20 @@ def test_text_drawn_inside_an_untitled_figure_goes_with_it_not_into_the_body(tmp
     assert blocks[figure - 1].endswith(prose) and blocks[figure + 2].startswith(prose)
 
 
-def test_text_filled_in_the_color_under_it_is_written_only_when_the_command_asks(tmp_path):
+@pytest.mark.parametrize('kind', ['hidden', 'in_background_color'])
+def test_text_the_page_does_not_show_is_written_only_when_its_own_flag_asks(tmp_path, kind):
     with pymupdf.open() as doc:
         page = doc.new_page(width=400, height=300)
         page.insert_text((40, 60), 'Words the page shows.', fontsize=10)
-        page.insert_text((40, 100), 'Words white on the white page.', fontsize=10, color=(1, 1, 1))
+        _unshown(doc, page, (40, 100), 'Words the page does not show.', kind, fontsize=10)
         doc.save(tmp_path / 'std.pdf')
-    for asked in (False, True):
-        out = tmp_path / f'asked-{asked}'
-        flag = ['--include-in-background-color'] if asked else []
-        assert main(['pages', str(tmp_path / 'std.pdf'), str(out), *flag]) == 0
-        text = (out / 'page-001.md').read_text(encoding='utf-8')
-        assert 'Words the page shows.' in text
-        assert ('white on the white page' in text) is asked
+    own, other = ('--include-hidden', '--include-in-background-color')[:: 1 if kind == 'hidden' else -1]
+    for flags, read in (([], False), ([other], False), ([own], True)):  # the other flag: the planted control
+        out = tmp_path / '-'.join(['out', *flags])
+        assert main(['pages', str(tmp_path / 'std.pdf'), str(out), *flags]) == 0
+        written = (out / 'page-001.md').read_text(encoding='utf-8')
+        assert 'Words the page shows.' in written
+        assert ('does not show' in written) is read, flags
 
 
 #: The text a page draws but its default view does not show, planted two ways, and the option that reads it.

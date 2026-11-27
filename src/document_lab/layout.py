@@ -19,7 +19,8 @@
   built and measured from runs, so a scan's glyphs each in a grey of their own read as the run their source set.
 - Lines: runs on one baseline running one way, each starting within :data:`LINE_GAP` font sizes of the line's
   end, its middle across within 0.4 of a size of the line's own (never the last run's); a column gutter is wider, so
-  two columns' lines at one height stay two lines. A line's text spaces two
+  two columns' lines at one height stay two lines, and an equation's number set alone in the gutter takes nothing of
+  the next column's line on its baseline. A line's text spaces two
   neighboring spans apart unless they share an ``unspaced`` number (:class:`~document_lab.ir.TextSpan`): where a
   word gap is, is the spans' source's to say, never measured here. A bare clause number takes the text set apart
   beside it, within :data:`CLAUSE_GAP` font sizes, as a standard sets ``4.1    General`` and a paper
@@ -363,8 +364,12 @@ def _run_box(run: list[TextSpan], way: Way) -> BBox:
     return BBox(min(b.x0 for b in boxes), min(b.y0 for b in boxes), max(b.x1 for b in boxes), max(b.y1 for b in boxes))
 
 
-def _joins(line: Line, run: list[TextSpan], *, weighted: bool) -> bool:
-    """Does ``run`` continue ``line`` in its frame: starting within reach of its end, its middle on the line's?"""
+def _joins(line: Line, run: list[TextSpan], *, weighted: bool, mid: float) -> bool:
+    """Does ``run`` continue ``line`` in its frame: starting within reach of its end, its middle on the line's?
+
+    A line that is an equation's number alone (:data:`EQUATION_NUMBER`, set in the gutter) takes no run of another
+    page column (``mid``: where the page's columns part): the next column's words on its baseline are their own line.
+    """
     span = run[0]
     frame, box = line.frame, _run_box(run, line.way)
     if span.vertical:  # an em across, its box's width
@@ -372,7 +377,12 @@ def _joins(line: Line, run: list[TextSpan], *, weighted: bool) -> bool:
     else:
         em, reach = max(span.size, line.size), _reach(line, span, weighted=weighted)
     near = -GUTTER <= box.x0 - frame.x1 <= reach * em
-    return near and abs((frame.y0 + frame.y1) / 2 - (box.y0 + box.y1) / 2) <= 0.4 * em
+    if not (near and abs((frame.y0 + frame.y1) / 2 - (box.y0 + box.y1) / 2) <= 0.4 * em):
+        return False
+    if EQUATION_NUMBER.fullmatch(line.text):
+        here, there = line.page_frame, framed(unframed(box, line.way), line.page_way)
+        return column(here.x0, here.x1, mid) == column(there.x0, there.x1, mid)
+    return True
 
 
 def _start(span: TextSpan) -> tuple[float, float]:
@@ -399,7 +409,7 @@ def lines(page: Page, *, weighted: bool) -> list[Line]:
         span = run[0]
         for line in found:
             same = line.vertical == span.vertical and (span.vertical or _same_way(line.spans[0], span))
-            if same and _joins(line, run, weighted=weighted):
+            if same and _joins(line, run, weighted=weighted, mid=mid):
                 line.spans.extend(run)
                 break
         else:
@@ -614,7 +624,10 @@ def running(doc: Document) -> list[Running]:
     A line repeats when :data:`RUNNING_PAGES` pages (every page of a shorter document, two at least) set its text --
     as :func:`_furniture_key` compares it, so a page number repeats -- at its place. The head is the page's lines
     from the top while each repeats, the foot from the bottom: a repeated line inside the body (a heading each page
-    opens a table with) is not reached. Only a whole document can tell, and a page alone has none. Built on
+    opens a table with) is not reached, and a head stands above the page's other lines, a foot below them: a line
+    level with the body's text (an integral's limit ``0`` at a column's last baseline, repeated by chance where
+    other pages set a limit or a tick label) is the body's however it repeats. Only a whole document can tell, and a
+    page alone has none. Built on
     :func:`lines`, it never sees a page's :func:`furniture` (a sideways stamp): a span is one or the other, never both.
     A line turned sideways is no running line (:func:`_across`): the cells of a landscape table continued over pages
     recur at the page's top, its running head over them.
@@ -645,6 +658,11 @@ def running(doc: Document) -> list[Running]:
         head = list(itertools.takewhile(lambda ln, n=number: repeats(n, ln), found))
         rest = found[len(head) :]
         foot = list(itertools.takewhile(lambda ln, n=number: repeats(n, ln), reversed(rest)))
+        body = rest[: len(rest) - len(foot)]
+        if body:  # a head stands above the body, a foot below it: a line level with the body's text is the body's
+            top, bottom = min(ln.y0 for ln in body), max(ln.y1 for ln in body)
+            head = list(itertools.takewhile(lambda ln, top=top: (ln.y0 + ln.y1) / 2 < top, head))
+            foot = list(itertools.takewhile(lambda ln, bottom=bottom: (ln.y0 + ln.y1) / 2 > bottom, foot))
         out.append(Running(tuple(head), tuple(reversed(foot))))
     return out
 

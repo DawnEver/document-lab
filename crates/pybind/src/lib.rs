@@ -1,8 +1,9 @@
 //! `document_lab._pdf`: the `pdf` crate, exposed to Python as plain values -- no PDF logic of its own.
 //!
 //! `open(data, password)` reads a file; its `page(number, curve_samples)` returns what the page draws as tuples,
-//! which `document_lab.pdf` turns into the IR, and its `image(object)` an image's samples. `create(path)` writes a
-//! PDF of image pages, or of pages copied from a `Reader` (`document_lab.capture`).
+//! which `document_lab.pdf` turns into the IR, and its `image(object)` an image's samples. `create(path, level)` writes a
+//! PDF of image pages, or of pages copied from a `Reader` (`document_lab.capture`), perhaps with a text layer laid
+//! over them (`document_lab.ocr`).
 //!
 //! A refusal raises by its kind: [`Refused`] and its kinds when the reader refuses the input, `ValueError` for a
 //! request it cannot honor, `OSError` when writing fails.
@@ -13,6 +14,7 @@ use std::path::PathBuf;
 
 use pdf::error::Kind;
 use pdf::geometry::Rect;
+use pdf::image::Placement;
 use pdf::interpret::{Event, PathEvent};
 use pdf::writer::Image;
 use pyo3::create_exception;
@@ -53,8 +55,19 @@ create_exception!(
 /// A box as `(x0, y0, x1, y1)`.
 type Box4 = (f64, f64, f64, f64);
 /// A span: text, font name (no subset tag), size, bold, box, render mode, the number it shares with the spans its
-/// words run on into with no space between (None: none), and whether it is written vertically.
-type SpanRow = (String, String, f64, bool, Box4, i64, Option<usize>, bool);
+/// words run on into with no space between (None: none), whether it is written vertically, and the unit vector its
+/// baseline runs along (page space, y down).
+type SpanRow = (
+    String,
+    String,
+    f64,
+    bool,
+    Box4,
+    i64,
+    Option<usize>,
+    bool,
+    (f64, f64),
+);
 /// A path (one subpath): points, closed, stroke color, line width, dashes, dash phase, fill color, even-odd, and
 /// the index of the painted path it belongs to on its page.
 type PathRow = (
@@ -68,14 +81,17 @@ type PathRow = (
     bool,
     usize,
 );
-/// An image: box, sample width and height, object number (None inline), and the matrix `(a, b, c, d, e, f)` from
-/// its unit square to page space.
-type ImageRow = (Box4, i64, i64, Option<u32>, [f64; 6]);
+/// An image: box, sample width and height, object number (None inline), the matrix `(a, b, c, d, e, f)` from its
+/// unit square to page space, and how it shows its samples (`pdf::image::Placement`: turned, rows reversed, columns
+/// reversed; None when it is skewed).
+type ImageRow = (Box4, i64, i64, Option<u32>, [f64; 6], Option<PlacementRow>);
+/// An image placed square to the page: whether its rows run down the page, and its rows and columns shown reversed.
+type PlacementRow = (bool, bool, bool);
 /// What a page draws: spans, paths, images, warnings.
 type PageRows = (Vec<SpanRow>, Vec<PathRow>, Vec<ImageRow>, Vec<String>);
 /// An image's samples: width, height, color space family (None: a stencil mask), components, bits per component,
 /// the data after every lossless filter, the image codec it is still in (None: raw samples), its `/Decode` array
-/// (None: not stated) and whether it states a mask.
+/// (None: not stated), whether it states a mask, and its fax coding when its codec is `CCITTFaxDecode`.
 type SamplesRow = (
     i64,
     i64,
@@ -86,7 +102,10 @@ type SamplesRow = (
     Option<String>,
     Option<Vec<f64>>,
     bool,
+    Option<FaxRow>,
 );
+/// A `CCITTFaxDecode` image's coding: K, columns, end-of-line codes, rows byte-aligned, 1 bits black.
+type FaxRow = (i64, i64, bool, bool, bool);
 
 /// A PDF opened.
 #[pyclass(unsendable)]
@@ -138,6 +157,7 @@ impl Reader {
                     s.render_mode,
                     s.unspaced,
                     s.vertical,
+                    s.direction,
                 )
             })
             .collect();
@@ -157,6 +177,8 @@ impl Reader {
                         image.height,
                         image.object,
                         image.matrix.0,
+                        Placement::of(&image.matrix)
+                            .map(|p| (p.turned, p.rows_reversed, p.columns_reversed)),
                     ));
                 }
                 Event::Text(_) => {}
@@ -168,6 +190,10 @@ impl Reader {
     /// The samples of the image `XObject` `object`.
     fn image(&self, object: u32) -> PyResult<SamplesRow> {
         let samples = self.file.image(object).map_err(|e| refused(&e))?;
+        let fax = match &samples.codec {
+            Some(codec) => codec.fax().map_err(|e| refused(&e))?,
+            None => None,
+        };
         let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
         Ok((
             samples.width,
@@ -182,6 +208,7 @@ impl Reader {
             samples.codec.map(|c| text(&c.name)),
             samples.decode,
             samples.masked,
+            fax.map(|f| (f.k, f.columns, f.end_of_line, f.byte_align, f.black_is_1)),
         ))
     }
 }
@@ -193,16 +220,22 @@ struct Writer {
     inner: Option<pdf::writer::Writer<BufWriter<fs::File>>>,
 }
 
-/// Start a PDF at `path` (created, or emptied).
+/// Start a PDF at `path` (created, or emptied), the streams it builds compressed at zlib `level` (0-10).
 #[pyfunction]
+#[pyo3(signature = (path, level = pdf::writer::LEVEL))]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "pyo3 hands a path over owned"
 )]
-fn create(path: PathBuf) -> PyResult<Writer> {
+fn create(path: PathBuf, level: u8) -> PyResult<Writer> {
+    if level > 10 {
+        return Err(PyValueError::new_err(format!(
+            "a compression level is 0 to 10, not {level}"
+        )));
+    }
     let file = fs::File::create(&path)
         .map_err(|e| PyOSError::new_err(format!("{}: {e}", path.display())))?;
-    let inner = pdf::writer::Writer::new(BufWriter::new(file)).map_err(|e| refused(&e))?;
+    let inner = pdf::writer::Writer::new(BufWriter::new(file), level).map_err(|e| refused(&e))?;
     Ok(Writer { inner: Some(inner) })
 }
 
@@ -264,6 +297,36 @@ impl Writer {
         let page = reader.at(number)?;
         self.open()?
             .copy_page(&reader.file, page)
+            .map_err(|e| refused(&e))
+    }
+
+    /// Add page `number` (1-based) of `reader` as the next page, with `words` -- `(text, (x0, y0, x1, y1))`, each
+    /// box in page space -- laid over it as an invisible text layer.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "pyo3 hands a list over owned"
+    )]
+    fn copy_page_with_text(
+        &mut self,
+        reader: &Reader,
+        number: usize,
+        words: Vec<(String, Box4)>,
+    ) -> PyResult<()> {
+        let page = reader.at(number)?;
+        let words: Vec<pdf::writer::Word> = words
+            .iter()
+            .map(|(text, (x0, y0, x1, y1))| pdf::writer::Word {
+                text,
+                bbox: Rect {
+                    x0: *x0,
+                    y0: *y0,
+                    x1: *x1,
+                    y1: *y1,
+                },
+            })
+            .collect();
+        self.open()?
+            .copy_page_with_text(&reader.file, page, &words)
             .map_err(|e| refused(&e))
     }
 

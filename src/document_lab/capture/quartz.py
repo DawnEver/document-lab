@@ -34,6 +34,7 @@ import numpy as np
 from document_lab.capture.screen import SCROLL_METHODS, Region, Window
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 __all__ = ['census', 'client', 'grab', 'monitors', 'open_file', 'owned', 'problem', 'scroll', 'window', 'windows']
@@ -59,6 +60,7 @@ _NO_INTERPOLATION: Final = 1  # kCGInterpolationNone
 #: program's pixels. It is opaque, so the window's alpha does not show it (measured on macOS 26: one point, tinted).
 _RING: Final = 1
 _PROBE: Final = 64  # points: the bottom of a window read for its rounded corners, at most
+_NOTCH_GAP: Final = 0.01  # seconds between a wheel's notches: each its own event, none merged with the next
 FRONT_TRIES: Final = 5  # tries to bring a window to the front before it is refused
 _SCREEN_RECORDING: Final = (
     'macOS has not let this program record the screen: in System Settings > Privacy & Security > Screen & System '
@@ -562,11 +564,19 @@ def _cursor() -> _Point:
         _cf().CFRelease(event)
 
 
-def _wheel(notches: int, x: int, y: int) -> int:
-    """A wheel event of ``notches`` lines (down when > 0) at ``x, y``; the caller releases it."""
-    event = _cg().CGEventCreateScrollWheelEvent2(None, _LINE, 1, -notches, 0, 0)
-    _cg().CGEventSetLocation(event, _Point(x, y))
-    return event
+def _wheel(notches: int, x: int, y: int, post: Callable[[int], None]) -> None:
+    """``notches`` wheel notches (down when > 0) at ``x, y``, each handed to ``post`` as its own one-line event.
+
+    One event a notch, as a wheel sends them: Tk 9 on macOS scrolls one notch for an event of any number of lines, so a
+    capture pacing its steps by notches would double them until the event's delta overflows (2**16 lines: nothing).
+    """
+    cg, cf = _cg(), _cf()
+    for _ in range(abs(notches)):
+        event = cg.CGEventCreateScrollWheelEvent2(None, _LINE, 1, -1 if notches > 0 else 1, 0, 0)
+        cg.CGEventSetLocation(event, _Point(x, y))
+        post(event)
+        cf.CFRelease(event)
+        time.sleep(_NOTCH_GAP)
 
 
 def _copy(element: int, attribute: str) -> int | None:
@@ -638,7 +648,7 @@ def _bring_to_front(window: Window) -> None:
 
 
 def scroll(target: Window | Region, notches: int, method: str) -> None:
-    """Scroll the view under ``target``'s center ``notches`` lines (or arrow presses): down, up if < 0."""
+    """Scroll the view under ``target``'s center ``notches`` wheel notches (or arrow presses): down, up if < 0."""
     if method not in SCROLL_METHODS:
         msg = f'scroll method {method!r} is not one of {SCROLL_METHODS}'
         raise ValueError(msg)
@@ -649,9 +659,7 @@ def scroll(target: Window | Region, notches: int, method: str) -> None:
         _require_on_top(target, x, y)
         was = _cursor()
         cg.CGWarpMouseCursorPosition(_Point(x, y))
-        event = _wheel(notches, x, y)
-        cg.CGEventPost(_HID_TAP, event)
-        cf.CFRelease(event)
+        _wheel(notches, x, y, lambda event: cg.CGEventPost(_HID_TAP, event))
         time.sleep(0.05)  # the wheel goes to the window under the pointer when it is processed
         cg.CGWarpMouseCursorPosition(was)
     elif method == 'message':
@@ -659,9 +667,7 @@ def scroll(target: Window | Region, notches: int, method: str) -> None:
         if under is None:
             msg = f'no window is under the middle of {target} ({_nobody(x, y)})'
             raise OSError(msg)
-        event = _wheel(notches, x, y)
-        cg.CGEventPostToPid(under.pid, event)
-        cf.CFRelease(event)
+        _wheel(notches, x, y, lambda event: cg.CGEventPostToPid(under.pid, event))
     else:
         under = _under(x, y)
         if not isinstance(target, Window) and under is None:

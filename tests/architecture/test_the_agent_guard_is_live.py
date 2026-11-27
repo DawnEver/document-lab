@@ -38,6 +38,7 @@ _SHIPPED: Final = frozenset(
         'GIT-STAGE-EVERYTHING',
         'GIT-STASH',
         'HEAVY-IS-THE-MAIN-SESSIONS',  # gained 2026-11-17 with dev-lab b9875921
+        'HOOKS-ARE-WIRED',  # gained 2026-11-27 with dev-lab fa9d6f2b
         'HPC-THROUGH-THE-DOOR',  # gained 2026-11-07 with dev-lab 8c4ab734
         'LEDGER-WRITES-THROUGH-ITS-DOOR',  # gained 2026-11-26 with dev-lab 3a494be5
         'MACHINE-FILE-IS-RENDERED',  # gained 2026-11-21 with dev-lab 5e4e0334

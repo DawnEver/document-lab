@@ -3,22 +3,18 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from document_lab import layout, png
 from document_lab.ir import BBox
-from document_lab.paper.crop import crop_figure, get_equation_context
-from document_lab.paper.pagemap import (
-    FIG_TABLE_RE,
-    build_equation_page_map,
-    build_figure_page_map,
-    build_page_section_map,
-)
+from document_lab.paper.crop import crop_figure, equation_context
+from document_lab.paper.pagemap import FIG_TABLE_RE, build_figure_page_map, build_page_section_map
 from document_lab.paper.text import RN_PATTERN as _RN
 from document_lab.paper.text import slug
 from document_lab.pdf import read_pdf, read_raster
-from document_lab.regions import equation, regions
+from document_lab.regions import Region, equations, regions
 
 if TYPE_CHECKING:
     from document_lab.ir import Document, Page
@@ -78,27 +74,73 @@ def _render(pdf: Path, read: Document, page_num: int, img_path: Path, crop: BBox
     img_path.write_bytes(png.encode(pixels))
 
 
-def _render_one_equation(
-    pdf: Path,
+@dataclass(frozen=True)
+class _Equation:
+    """A display equation of the paper (`document_lab.regions.equations`), numbered or not.
+
+    Its 0-based ``page`` and its ``region``, the section that owns it (``owning``) and the text around it
+    (``lead_in``, ``formula``: `document_lab.paper.crop.equation_context`).
+    """
+
+    page: int
+    region: Region
+    owning: int
+    lead_in: str | None
+    formula: str | None
+
+    @property
+    def number(self) -> str | None:
+        """Its number as printed (``3``, ``16a``, ``A.1``), or None: a display without one."""
+        return self.region.label.strip('()') if self.region.captioned else None
+
+    @property
+    def alt(self) -> str:
+        """Its link's text: ``Equation 3``, or ``Untitled equation 2`` (the second without a number on its page)."""
+        return f'Equation {self.number}' if self.number is not None else self.region.label
+
+    @property
+    def image(self) -> str:
+        """Its image, relative to the paper's directory: ``img/sec02/page-03-equation-3.png``.
+
+        A display without a number is named by its page and its order there, as `document_lab.per_page` names it:
+        ``page-03-equation-untitled-2.png``.
+        """
+        label = self.number if self.number is not None else 'untitled-' + self.region.label.rsplit(' ', 1)[-1]
+        name = f'page-{self.page + 1:02d}-equation-{label.lower()}.png'
+        return f'img/sec{self.owning:02d}/{name}'
+
+
+def _equations(
+    read: Document,
     paper: Document,
     face: tuple[str, float],
-    page_num: int,
-    eq_num: str,
-    img_path: Path,
-    located: _Located | None,
-    renderer: Renderer,
-) -> None:
-    """Equation ``(eq_num)`` of page ``page_num`` of ``paper`` (read without its running lines) to ``img_path``."""
-    if img_path.exists():
-        return
-    page = paper.pages[page_num]
-    if is_full_page_image(page):  # a picture page: where its text locates the number, if it does
-        crop = located.crop(page_num, f'({eq_num})') if located is not None else None
-    else:
-        crop = equation(page, eq_num, face)
-    if crop is None:
-        return  # equation position not found on page; skip
-    _render(pdf, paper, page_num, img_path, crop, renderer)
+    body_sections: list[tuple[str, str]],
+    page_section_map: dict[int, int],
+) -> list[_Equation]:
+    """Every display equation of the paper, numbered or not, in reading order, each with the section that owns it.
+
+    Read off ``paper`` (``read`` without its running lines) by `document_lab.regions.equations`; on a page that is one
+    picture (:func:`is_full_page_image`), where its text locates them (`document_lab.regions.regions`, which sees the
+    running lines: they set the text's width). A page no section owns goes to the section that prints the number, else
+    to the nearest page's section; with none at all, nothing is written.
+    """
+    out = []
+    for number, page in enumerate(paper.pages):
+        if is_full_page_image(read.pages[number]):
+            found = [r for r in regions(read.pages[number], face) if r.kind == 'equation']
+        else:
+            found = equations(page, face)
+        for region in found:
+            owning = page_section_map.get(number)
+            printed = region.label if region.captioned else None
+            if owning is None and printed is not None:
+                pattern = re.compile(r'\( ?' + re.escape(printed.strip('()')) + r' ?\)')
+                owning = next((i for i, (_, body) in enumerate(body_sections, 1) if pattern.search(body)), None)
+            if owning is None and page_section_map:
+                owning = page_section_map[min(page_section_map, key=lambda p, n=number: abs(p - n))]
+            if owning is not None:
+                out.append(_Equation(number, region, owning, *equation_context(page, region.bbox)))
+    return out
 
 
 # ── Markdown insertion helpers ────────────────────────────────────────────────
@@ -147,134 +189,84 @@ def _insert_figures_inline(
     return len(insertions)
 
 
-def _insert_equations_inline(
-    section_file: Path,
-    section_idx: int,
-    eq_page_map: dict[str, int],
-    figure_images: dict[str, str],
-    page_section_map: dict[int, int],
-    eq_context: dict[str, tuple[str | None, str | None]] | None = None,
-) -> None:
+def _definition(content: str, number: str) -> int | None:
+    """Where ``(number)`` stands as its equation's own mark in ``content``, else None.
+
+    Nothing after it on its line, no letter before it: ``from (5) and (6)`` cites it.
+    """
+    for m in re.finditer(rf'\(\s*{re.escape(number)}\s*\)', content):
+        start = content.rfind('\n', 0, m.start()) + 1
+        end = content.find('\n', m.end())
+        after = content[m.end() : end if end != -1 else len(content)].strip()
+        if not after and not re.search(r'[a-zA-Z]', content[start : m.start()]):
+            return m.start()
+    return None
+
+
+def _after_lead_in(content: str, lead_in: str, start: int) -> int | None:
+    """Where the paragraph gap after ``lead_in`` is in ``content``, at or past ``start``, else None.
+
+    Its last 40, 28 or 16 characters, found exactly, else allowing ``_x_`` italic marks round short words.
+    """
+    found = -1
+    for suffix_len in (40, 28, 16):
+        key = lead_in.strip()[-suffix_len:]
+        if not key:
+            continue
+        p = content.lower().find(key.lower())
+        if p != -1:
+            found = p + len(key)
+            break
+        tokens = re.split(r'(\w+)', key)
+        pattern = ''.join(
+            rf'_?{re.escape(t)}_?\s*' if re.match(r'^\w{1,4}$', t) and not t.isdigit() else re.escape(t) for t in tokens
+        )
+        if m := re.search(pattern, content, re.IGNORECASE):
+            found = m.end()
+            break
+    if found == -1 or (line_end := content.find('\n', found)) == -1:
+        return None
+    search_from = max(line_end, start)
+    gap = re.search(r'\n+', content[search_from : search_from + 300])
+    return search_from + gap.start() + 1 if gap else search_from + 1
+
+
+def _insert_equations_inline(section_file: Path, found: list[_Equation], placed: set[int], *, cited: bool) -> None:
+    """Link each equation of ``found`` not yet ``placed`` where ``section_file`` sets it, in reading order.
+
+    Where its number stands as its own mark (:func:`_definition`); else after the paragraph its lead-in sentence ends
+    (:func:`_after_lead_in`), with its formula's text and its number -- a display without a number is placed so alone.
+    ``cited``: the last resort for a numbered one placed nowhere else, at its first mention ``(N)`` in its own section.
+    An equation placed is added to ``placed``: it is linked once, in one section.
+    """
     content = section_file.read_text(encoding='utf-8')
     changed = False
-    seen: set[str] = set()
-    # Tracks the minimum content position for the next insertion to preserve order
-    # when multiple equations share the same lead-in sentence.
-    min_insert_pos = 0
-
-    for eq_label in sorted(eq_page_map, key=lambda k: int(k.split()[-1])):
-        if eq_label in seen:
+    start = 0  # the next one goes after the last placed: reading order holds
+    for eq in found:
+        if id(eq) in placed:
             continue
-        eq_num = eq_label.split()[-1]
-        img_rel = figure_images.get(eq_label)
-        if not img_rel:
+        if Path(eq.image).name in content:
+            placed.add(id(eq))
             continue
-        owning = page_section_map.get(eq_page_map[eq_label])
-        img_path = (
-            f'../img/sec{owning:02d}/{Path(img_rel).name}'
-            if owning is not None and owning != section_idx
-            else f'../{img_rel}'
-        )
-
-        img_name = Path(img_rel).name
-        if img_name in content:
-            seen.add(eq_label)
+        link = f'![{eq.alt}](../{eq.image})'
+        if cited:
+            m = re.search(rf'\(\s*{re.escape(eq.number)}\s*\)', content) if eq.number is not None else None
+            at, insertion = (m.start(), f'\n\n{link}\n\n') if m else (None, '')
+        elif eq.number is not None and (at := _definition(content, eq.number)) is not None:
+            insertion = f'\n\n{link}\n\n'
+        elif eq.lead_in and (at := _after_lead_in(content, eq.lead_in, start)) is not None:
+            formula = f'\n*{eq.formula}*' if eq.formula else ''
+            number = f'\n({eq.number})' if eq.number is not None else ''
+            insertion = f'\n{link}{formula}{number}\n'
+        else:
             continue
-
-        seen.add(eq_label)
-
-        # ── Primary: explicit (N) reference present in markdown ──────────────
-        # Don't advance min_insert_pos for (N) insertions — these happen
-        # in-place at the (N) marker, which can be anywhere in the document
-        # (including later than lead-in insertion positions for other equations).
-        m = re.search(rf'\(\s*{eq_num}\s*\)', content)
-        cross_ref_m = None  # saved for last-resort fallback
-        if m:
-            # Distinguish definition occurrence from a cross-reference like "from (5) and (6)".
-            # A definition has nothing alphabetic before (N) on the same line AND nothing after.
-            nl_before = content.rfind('\n', 0, m.start())
-            text_before_on_line = content[nl_before + 1 : m.start()]
-            nl_after = content.find('\n', m.end())
-            text_after_on_line = content[m.end() : nl_after].strip() if nl_after != -1 else content[m.end() :].strip()
-            is_cross_ref = bool(text_after_on_line) or bool(re.search(r'[a-zA-Z]', text_before_on_line))
-            if not is_cross_ref:
-                preceding = content[max(0, m.start() - 200) : m.start()]
-                if not re.search(rf'!\[.*?[Ee]equation.*?{eq_num}.*?\]', preceding):
-                    insertion = f'\n\n![{eq_label}]({img_path})\n\n'
-                    insert_at = max(m.start(), min_insert_pos)
-                    content = content[:insert_at] + insertion + content[insert_at:]
-                    min_insert_pos = insert_at + len(insertion)
-                    changed = True
-                continue
-            cross_ref_m = m  # remember for last-resort fallback below
-
-        # ── Fallback: locate insertion by lead-in text ────────────────────────
-        ctx = (eq_context or {}).get(eq_label, (None, None))
-        lead_in, formula_text = ctx
-
-        key_pos = -1
-        key_len = 0
-        if lead_in:
-            for suffix_len in (40, 28, 16):
-                key = lead_in.strip()[-suffix_len:]
-                if not key:
-                    continue
-                # Exact match first
-                p = content.lower().find(key.lower())
-                if p != -1:
-                    key_pos, key_len = p, len(key)
-                    break
-                # Regex allowing _X_ markdown italic wrappers and spacing around them
-                try:
-                    tokens = re.split(r'(\w+)', key)
-                    pat = ''.join(
-                        # Short word: allow _word_ and trailing whitespace from removed markers
-                        f'_?{re.escape(t)}_?\\s*' if (re.match(r'^\w{1,4}$', t) and not t.isdigit()) else re.escape(t)
-                        for t in tokens
-                    )
-                    m_key = re.search(pat, content, re.IGNORECASE)
-                    if m_key:
-                        key_pos, key_len = m_key.start(), m_key.end() - m_key.start()
-                        break
-                except re.error:
-                    pass
-
-        # ── Last resort: if lead-in not found, fall back to the cross-ref (N) ─
-        if key_pos == -1:
-            if cross_ref_m is None:
-                continue
-            # Re-search since content may have been modified by earlier insertions
-            m2 = re.search(rf'\(\s*{eq_num}\s*\)', content)
-            if m2 is None:
-                continue
-            preceding = content[max(0, m2.start() - 200) : m2.start()]
-            if not re.search(rf'!\[.*?[Ee]equation.*?{eq_num}.*?\]', preceding):
-                insertion = f'\n\n![{eq_label}]({img_path})\n\n'
-                insert_at = max(m2.start(), min_insert_pos)
-                content = content[:insert_at] + insertion + content[insert_at:]
-                # Advance min_insert_pos so later lead-in equations don't precede
-                # this cross-ref insertion in the output.
-                min_insert_pos = insert_at + len(insertion)
-                changed = True
+        if at is None:
             continue
-
-        # Find end of the lead-in line
-        line_end = content.find('\n', key_pos + key_len)
-        if line_end == -1:
-            continue
-
-        # Start the gap search from whichever is later: end of lead-in line or
-        # min_insert_pos (so consecutive equations maintain correct order).
-        search_from = max(line_end, min_insert_pos)
-        gap_m = re.search(r'\n+', content[search_from : search_from + 300])
-        insert_pos = search_from + gap_m.start() + 1 if gap_m else search_from + 1
-
-        formula_part = f'\n*{formula_text}*' if formula_text else ''
-        insertion = f'\n![{eq_label}]({img_path}){formula_part}\n({eq_num})\n'
-        content = content[:insert_pos] + insertion + content[insert_pos:]
-        min_insert_pos = insert_pos + len(insertion)
+        at = max(at, start)
+        content = content[:at] + insertion + content[at:]
+        start = at + len(insertion)
+        placed.add(id(eq))
         changed = True
-
     if changed:
         section_file.write_text(content, encoding='utf-8')
 
@@ -396,51 +388,30 @@ def render_equation_images(
     *,
     renderer: Renderer = 'pymupdf',
 ) -> dict[str, str]:
-    """Render equation images (by ``renderer``) and insert them at equation number positions.
+    """Render every display equation of the paper, numbered or not (by ``renderer``), and link each in its section.
 
-    The equations are read off the paper without its running heads and feet (`document_lab.layout.without_running`).
-    Returns updated figure_images dict with equation entries added.
+    The equations are found on the paper without its running heads and feet (`document_lab.layout.without_running`,
+    :func:`_equations`), each cut out with its number when one is printed, and linked once
+    (:func:`_insert_equations_inline`): first where any section sets its number or its lead-in, then a numbered one
+    still unplaced at its first mention in its own section. Returns ``figure_images`` with each equation's image
+    added, under ``Equation 3`` -- one without a number under ``Untitled equation 2, page 3``.
     """
     read = read_pdf(pdf_path)
     paper, face = layout.without_running(read), layout.body_face(read)
-    eq_page_map = build_equation_page_map(paper)
-    if not eq_page_map:
-        return figure_images
+    found = _equations(read, paper, face, body_sections, page_section_map)
+    for eq in found:
+        _render(pdf_path, read, eq.page, out_dir / eq.image, eq.region.bbox, renderer)
+        key = eq.alt if eq.number is not None else f'{eq.alt}, page {eq.page + 1}'
+        figure_images[key] = eq.image
 
-    located = _Located(read) if any(is_full_page_image(read.pages[p]) for p in eq_page_map.values()) else None
-
-    for eq_label, page_num in eq_page_map.items():
-        eq_num = eq_label.split()[-1]
-        owning = page_section_map.get(page_num)
-        if owning is None:
-            for idx, (_heading, body) in enumerate(body_sections, 1):
-                if re.search(rf'\( ?{eq_num} ?\)', body):
-                    owning = idx
-                    break
-        # Last fallback: nearest mapped page's section (handles pages where figure
-        # captions weren't extracted to markdown but equations still live there)
-        if owning is None and page_section_map:
-            nearest = min(page_section_map, key=lambda p: abs(p - page_num))
-            owning = page_section_map[nearest]
-        if owning is None:
-            continue
-
-        img_name = f'page-{page_num + 1:02d}-{eq_label.lower().replace(" ", "-")}.png'
-        img_path = out_dir / 'img' / f'sec{owning:02d}' / img_name
-        _render_one_equation(pdf_path, paper, face, page_num, eq_num, img_path, located, renderer)
-        figure_images[eq_label] = f'img/sec{owning:02d}/{img_name}'
-
-    # Build context (lead-in + formula text) for equations that may lack (N) in markdown
-    eq_context: dict[str, tuple[str | None, str | None]] = {}
-    for eq_label, page_num in eq_page_map.items():
-        eq_num = eq_label.split()[-1]
-        lead_in, formula_text = get_equation_context(paper.pages[page_num], eq_num)
-        eq_context[eq_label] = (lead_in, formula_text)
-
-    for idx, (heading, _) in enumerate(body_sections, 1):
-        sec_slug = slug(heading) or 'body'
-        sec_file = out_dir / 'md' / f'{idx:02d}-{sec_slug}.md'
-        if sec_file.exists():
-            _insert_equations_inline(sec_file, idx, eq_page_map, figure_images, page_section_map, eq_context)
-
+    files = [
+        (idx, path)
+        for idx, (heading, _) in enumerate(body_sections, 1)
+        if (path := out_dir / 'md' / f'{idx:02d}-{slug(heading) or "body"}.md').exists()
+    ]
+    placed: set[int] = set()
+    for _, path in files:
+        _insert_equations_inline(path, found, placed, cited=False)
+    for idx, path in files:
+        _insert_equations_inline(path, [eq for eq in found if eq.owning == idx], placed, cited=True)
     return figure_images

@@ -1,10 +1,12 @@
 """Figure images: a page that is one picture (a screen-captured PDF) is linked whole, once, never cropped into copies;
-a drawn page is still cropped per label."""
+a drawn page is still cropped per label. Equation images: every display, numbered or not, cut out and linked once."""
 
 import numpy as np
 import pymupdf
 
-from document_lab.paper.render import is_full_page_image, render_figure_pages
+from document_lab import layout
+from document_lab.markdown import to_markdown
+from document_lab.paper.render import is_full_page_image, render_equation_images, render_figure_pages
 from document_lab.pdf import read_pdf
 
 
@@ -66,3 +68,42 @@ def test_a_figure_on_a_picture_page_its_text_locates_is_cut_out_not_linked_whole
     assert images['Figure 4'] == 'img/sec01/page-01-figure-4.png'
     pix = pymupdf.Pixmap(str(out / images['Figure 4']))
     assert pix.height < pix.width  # the band between the prose and the caption, not the whole page
+
+
+def test_every_display_equation_is_written_and_linked_once_numbered_or_not(tmp_path):
+    """A paper page: a display without a number after its lead-in, a numbered one, and prose with a formula in it.
+    Both displays are cut out -- the unnumbered one named by its page and order -- and each linked once where its
+    section sets it; the inline formula is no image."""
+    words = 'the rated output is the mechanical power available at the shaft and shall be expressed in watts'
+    pdf = tmp_path / 'paper.pdf'
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    lines = [
+        (72, 100, f'{words} while'),
+        (72, 112, 'the machine runs at its rated speed, and the stored energy is defined as follows:'),
+        (250, 134, 'W = L i2 / 2'),
+        (72, 156, f'{words} when'),
+        (72, 168, 'where the power P = T w is the product of the torque and the speed at the shaft, as'),
+        (250, 190, 'P = T w + k'),
+        (525, 190, '(3)'),
+        (72, 212, f'{words} and'),
+    ]
+    for x, y, text in lines:
+        page.insert_text((x, y), text, fontname='tiit' if '=' in text and x > 72 else 'helv', fontsize=10)
+    doc.save(pdf)
+    out = tmp_path / 'out'
+    (out / 'md').mkdir(parents=True)
+    body = to_markdown(layout.without_running(read_pdf(pdf)))
+    (out / 'md' / '01-power.md').write_text(body, encoding='utf-8')
+    images = render_equation_images(pdf, out, [('## Power', body)], {}, {0: 1})
+    assert images == {
+        'Untitled equation 1, page 1': 'img/sec01/page-01-equation-untitled-1.png',
+        'Equation 3': 'img/sec01/page-01-equation-3.png',
+    }  # planted: the inline formula is no image
+    assert sorted(p.name for p in (out / 'img' / 'sec01').glob('*.png')) == [
+        'page-01-equation-3.png',
+        'page-01-equation-untitled-1.png',
+    ]
+    md = (out / 'md' / '01-power.md').read_text(encoding='utf-8')
+    assert md.count('page-01-equation-untitled-1.png') == md.count('page-01-equation-3.png') == 1
+    assert md.index('defined as follows') < md.index('equation-untitled-1') < md.index('equation-3')

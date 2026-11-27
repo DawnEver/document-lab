@@ -7,12 +7,13 @@ Prose is a line that reads as words (`document_lab.layout.wordy`), set near the 
 width or :data:`PROSE_WORDS` words long. A mention in prose (``Table 7, item 1d``) or a contents entry (a leader) is
 no caption. A figure or table spans the text width; its label is the caption's, as read.
 
-An equation number ending a line right of :data:`NUMBER_RIGHT` of its column -- alone, or after a formula (``(3)``,
-``(A.1)``) -- is an equation, cut out by :func:`equation`: its formula's lines from the number to the prose around it,
-in the number's column on a page set in two columns there (a left column's number stands short of the page's middle),
-across both when the formula does, with the bars and small images set among its lines; a formula OCR'd reads as noise
-and is taken all the same. One function crops every numbered equation -- a paper's (`document_lab.paper`) and a captured
-standard's -- so each is cut alike.
+Every display equation is found by its own content, numbered or not (:func:`equations`): a number ending a line
+right of :data:`NUMBER_RIGHT` of its column -- alone, or after a formula (``(3)``, ``(A.1)``) -- or a formula's line
+that is no prose and states a relation; from either, its formula's lines to the prose around it, in its column on a
+page set in two columns there, across both when the formula is, with the bars and small images set among its lines --
+and its number when one is printed. A formula OCR'd reads as noise and is taken all the same; prose with a formula in
+it is prose. One function finds every equation -- a paper's (`document_lab.paper`) and a captured standard's -- so
+each is cut alike; one without a number is labeled ``Untitled equation N``.
 
 A table without a caption (a standard's normative-reference annex, a list set in columns) is told by its rows:
 :data:`TABLE_ROWS` or more bands of :data:`ROW_CELLS` or more cells side by side, set near the body size, no prose
@@ -24,10 +25,10 @@ be told by here, and is not found.
 
 The caller that holds the page's picture may also hand over its drawings (`document_lab.ink`): a drawing no caption,
 number or row of cells told is a region too -- a ruled table of two columns, a figure without a caption
-(``Untitled figure N``), an equation without a number (``Untitled equation N``). Regions still read no pixels: a
-drawing is its box and what it is drawn with. Drawings are one figure unless prose runs between them or, set apart by
-white space, each stands under its own title (a data sheet's dimensional drawing, circuit and reel); a short drawing
-is an equation only when its text reads as math (a sign, a Greek letter, a math font) -- a logo is a figure. A region
+(``Untitled figure N``), a formula drawn (:func:`_drawn_formula`: its text reads as math -- a sign, a Greek
+letter, a math font -- an equation's; a logo is a figure). Regions still read no pixels: a drawing is its box and what
+it is drawn with. Drawings are one figure unless prose runs between them or, set apart by white space, each stands
+under its own title (a data sheet's dimensional drawing, circuit and reel). A region
 the page's edge leaves without area (its text set across the edge) shows nothing and is none.
 """
 
@@ -41,7 +42,7 @@ from typing import TYPE_CHECKING, Final, Literal
 
 from document_lab import layout
 from document_lab.ir import BBox, union
-from document_lab.tables import SHORT_CELL, aligned
+from document_lab.tables import SHORT_CELL, aligned, tables
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -49,7 +50,7 @@ if TYPE_CHECKING:
     from document_lab.ink import Drawing
     from document_lab.ir import Page, Table, TextSpan
 
-__all__ = ['Region', 'equation', 'regions']
+__all__ = ['Region', 'equations', 'regions']
 
 #: A caption: ``Figure``/``Table``, its number (``2``, ``A.1``), then a dash, as standards set it.
 _CAPTION: Final = re.compile(
@@ -60,6 +61,8 @@ _CAPTION: Final = re.compile(
 _NUMBERED: Final = re.compile(r'\(\s*((?:[A-Z]\.?)?[1-9]\d*(?:\.\d+)*[a-z]?)\s*\)$')
 #: A number found on a page ends right of this share of its column's width (a list's ``(1)`` stands at its left).
 NUMBER_RIGHT: Final = 0.6
+#: A number is set at least this share of the body size: a plot's legend ``(1)`` and a matrix's mark are smaller.
+NUMBER_SIZE: Final = 0.8
 #: Prose is set within this factor of the body size; it spans at least PROSE_WIDTH of the width it is set across --
 #: the text's (around a caption), its column's (around an equation).
 PROSE_SIZE: Final = 1.4
@@ -107,9 +110,11 @@ RULED_ROWS: Final = 3
 #: A drawing in a text line's band at most this many times the line's height frames its words (a link, a header).
 FRAME_LINES: Final = 3.0
 FRAME_FILL: Final = 0.8
-#: A drawing at most this many body sizes high whose text reads as no word, and as math, is an equation without a
-#: number.
+#: A drawing at most this many body sizes high whose text reads as no word, and as math, is a formula drawn; ink
+#: at most so high is a piece an equation may take, and a drawing taller and wider is a figure.
 EQUATION_HEIGHT: Final = 4.0
+#: An image covering this share of the page is the page's own picture (a scan, a capture), no figure.
+PAGE_PICTURE: Final = 0.9
 #: Math: a relation or operator sign, a Greek letter, or a math font (TeX's, a Unicode math font).
 _MATH_SIGNS: Final = frozenset(
     '=<>+'
@@ -118,7 +123,13 @@ _MATH_SIGNS: Final = frozenset(
     '\N{ALMOST EQUAL TO}\N{NOT EQUAL TO}\N{IDENTICAL TO}\N{LESS-THAN OR EQUAL TO}'
     '\N{GREATER-THAN OR EQUAL TO}\N{PROPORTIONAL TO}'
 )
-_MATH_FONT: Final = re.compile(r'(?i)math|cmmi|cmsy|cmex|stix')
+_MATH_FONT: Final = re.compile(r'(?i)math|cmmi|cmsy|cmex|stix|msbm|msam|eufm|rsfs|mtmi|mtsy|txmi|txsy|pxmi|lmmi')
+#: A typewriter font: a code listing's, whose ``x = 1;`` is no formula.
+_CODE_FONT: Final = re.compile(r'(?i)mono|courier|cmtt|typewriter|consolas|lmtt')
+#: A formula line flush with its column within this many body sizes below a line of prose is the paragraph's tail.
+TAIL_GAP: Final = 0.4
+#: A relation a display states: what tells a formula's line, numbered or not.
+_RELATIONS: Final = frozenset('=<>≈≠≡≤≥∝≃≅≜≔≪≫→⇒⇔⟶')
 #: Drawings further apart than this many body sizes, each under its own title, are separate figures.
 JOIN_GAP: Final = 3.0
 #: A drawing's title: the nearest line of words above it, across it, within this many body sizes.
@@ -290,10 +301,9 @@ def _drawn(page: _Page, drawings: Sequence[Drawing], held: list[Region]) -> list
     draw none), crosses no prose (a box round a note, links over lines do) unless its rows are ruled apart, and lies
     in no region found. A drawing ruled with a frame and a rule inside it, or with :data:`RULED_ROWS` rules across
     it, nothing off its rules larger than a body size (words, which may be too small for OCR to read), is a table;
-    a bare rectangle round words (a link's frame) is no region. Other
-    drawings are joined into figures (:func:`_joined`); one at most :data:`EQUATION_HEIGHT` body sizes high whose text
-    reads as no word and as math (:func:`_math`: a formula, OCR'd or set, its fraction bars drawn) is an equation,
-    else a figure -- a cover's logo, drawn without text or round its brand's, is no formula.
+    a bare rectangle round words (a link's frame) is no region. Other drawings are joined into figures
+    (:func:`_joined`). A formula drawn is an equation's (:func:`equations` finds it first); a cover's logo, drawn
+    without text or round its brand's, is a figure.
     """
     found: list[Region] = []
     pieces: list[BBox] = []
@@ -330,21 +340,19 @@ def _drawn(page: _Page, drawings: Sequence[Drawing], held: list[Region]) -> list
             found.append(Region('table', _UNTITLED + 'table', grown))
         else:
             pieces.append(grown)
-    for box in _joined(page, pieces):
-        words = [ln for ln in page.lines if box.x0 <= ln.x0 and ln.x1 <= box.x1 and box.y0 <= ln.y0 and ln.y1 <= box.y1]
-        formula = not any(layout.wordy(ln.text) for ln in words) and _math(words)
-        if box.height <= EQUATION_HEIGHT * page.body and formula:
-            found.append(Region('equation', _UNTITLED + 'equation', box))
-        else:
-            found.append(Region('figure', _UNTITLED + 'figure', box))
+    found += [Region('figure', _UNTITLED + 'figure', box) for box in _joined(page, pieces)]
     return found
 
 
 def _math(lines: list[layout.Line]) -> bool:
     """Does the text of ``lines`` read as math: a relation or operator sign, a Greek letter, or set in a math font?"""
     text = ''.join(ln.text for ln in lines)
-    signs = any(c in _MATH_SIGNS or unicodedata.name(c, '').startswith('GREEK') for c in text)
-    return signs or any(_MATH_FONT.search(s.font) for ln in lines for s in ln.spans)
+    return _math_text(text) or any(_MATH_FONT.search(s.font) for ln in lines for s in ln.spans)
+
+
+def _math_text(text: str) -> bool:
+    """Does ``text`` hold a relation or operator sign, or a Greek letter?"""
+    return any(c in _MATH_SIGNS or c in _RELATIONS or unicodedata.name(c, '').startswith('GREEK') for c in text)
 
 
 def _joined(page: _Page, boxes: list[BBox]) -> list[BBox]:
@@ -432,69 +440,109 @@ def _cells(page: _Page, region: Region) -> Table | None:
     return aligned([s for s in page.page.spans if box.x0 <= s.center[0] <= box.x1 and below < s.center[1] <= box.y1])
 
 
-def equation(page: Page, number: str, face: tuple[str, float]) -> BBox | None:
-    """The box of display equation ``(number)`` on ``page``: the formula and its number, nothing else.
+def equations(
+    page: Page, face: tuple[str, float], drawings: Sequence[Drawing] = (), *, include_hidden: bool = False
+) -> list[Region]:
+    """Every display equation of ``page``, numbered or not, top to bottom: its formula and its number, nothing else.
 
     ``face``: the font and size the document's prose is set in (`document_lab.layout.body_face`); ``page`` is best
     handed without its running heads and feet (`document_lab.layout.without_running`), which no equation holds.
+    ``drawings``: the page's drawn ink (`document_lab.ink`), when the caller holds its picture: a formula's bars and
+    the glyphs OCR read as nothing. ``include_hidden``: what hidden layers draw counts too (see `document_lab.ir`).
 
-    - The number: the line ending ``(number)`` that is the number alone, or a formula then its number (a line that
-      reads as words, ending in a reference, is neither); of several, the one line that is the number alone. None
-      when no line is it, or several are and not one of them stands alone.
+    A numbered equation is labeled by its number as read (``(3)``, ``(16a)``), one without ``Untitled equation N``
+    in page order. Each is found by what the page states, never guessed:
+
+    - A number: a line ending ``(N)`` alone or after a formula (:func:`_numbered`: a line reading as words, ending in
+      a reference, is none), its right end past :data:`NUMBER_RIGHT` of the column it stands in. A number printed
+      more than once is the one a formula stands level with (:func:`_number`: a figure's legend repeats ``(1)`` alone).
+    - A display without a number: a line of its formula -- no prose (:class:`_Around`), stating a relation
+      (:data:`_RELATIONS`: ``=``, ``<``, an arrow) -- or a short drawing whose text reads as math and as no word
+      (:func:`_drawn_formula`); none set inside a figure (:func:`_figures`). Prose with a formula in it is prose:
+      inline math is no display.
+    - From its number or its line, the equation takes its formula's pieces (:func:`_equation_box`).
+    """
+    page = page.shown(include_hidden=include_hidden)
+    if not page.spans or face[1] <= 0:
+        return []
+    return _in_order(_equations(page, face, drawings))
+
+
+def _equations(page: Page, face: tuple[str, float], drawings: Sequence[Drawing]) -> list[Region]:
+    """The page's display equations (:func:`equations`), the unnumbered ones labeled ``Untitled equation``."""
+    body = face[1]
+    lines = layout.lines(page, weighted=True)
+    ink = [d.box for d in drawings if d.box.height <= EQUATION_HEIGHT * body]
+    labels: list[str] = []
+    for line in lines:
+        label = _Around(page, lines, _middle(line), face).number(line) if _numbered(line, face) else None
+        if label is not None and label not in labels:
+            labels.append(label)
+    found: list[Region] = []
+    for label in labels:
+        if (line := _number(page, lines, label, face)) is not None:
+            box = _equation_box(page, lines, _spans_box(line), line, face=face, ink=ink, ocr=_ocr(line))
+            found.append(Region('equation', f'({label})', box))
+    seeds: list[tuple[BBox, layout.Line | None, bool]] = [(_spans_box(ln), ln, _ocr(ln)) for ln in lines if _states(ln)]
+    seeds += [(d.box, None, any(map(_ocr, inside))) for d in drawings if (inside := _drawn_formula(d, lines, body))]
+    figures = _figures(page, drawings, body)
+    for box, line, ocr in sorted(seeds, key=lambda seed: seed[0].y0):
+        cx, cy = (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2
+        if any(f.contains(cx, cy) for f in [*figures, *(r.bbox for r in found)]):
+            continue
+        around = _Around(page, lines, cy, face)
+        if line is not None and (around.prose(line) or around.inline(line)):
+            continue  # prose with a formula in it: inline math
+        eq = _equation_box(page, lines, box, line, face=face, ink=ink, ocr=ocr)
+        if eq.height <= EQUATION_IMAGE * body:  # taller, and no number: a figure's labels, a listing
+            found.append(Region('equation', _UNTITLED + 'equation', eq))
+    return sorted(found, key=lambda r: r.bbox.y0)
+
+
+def _equation_box(
+    page: Page,
+    lines: list[layout.Line],
+    seed: BBox,
+    own: layout.Line | None,
+    *,
+    face: tuple[str, float],
+    ink: Sequence[BBox],
+    ocr: bool,
+) -> BBox:
+    """The box of the equation grown from ``seed`` -- its number's box, or its formula's line ``own`` -- on ``page``.
+
     - The column: where lines of words (:data:`TEXT_WORDS` words or more) within :data:`COLUMN_WINDOW` body sizes of
-      the number are set mostly in two columns, a number in the left column takes the left column's lines, one in the
+      the seed are set mostly in two columns, a seed in the left column takes the left column's lines, one in the
       right column the right column's -- and every column's when what it takes crosses the page middle, or the left
       column holds level with it a formula's pieces alone, no prose and no number (an equation set across both
       columns); else the page is set in one column there and the equation may span it all. Never past the page's
       lines of words by more than a body size (a line number in the margin).
-    - The pieces: from the number, every piece -- a line that is not prose, an image no taller than
-      :data:`EQUATION_IMAGE` body sizes -- within :data:`EQUATION_REACH` body sizes of what is taken (:data:`OCR_REACH`
-      where the number is OCR'd), until none is left; never past the prose above or below the number, and never a
-      piece nearer another equation's number between them. A piece's box is its spans' whole boxes (a sum's limits,
-      a big bracket), not a line's median.
-    - Prose: a line that reads as words -- a word of four letters set in ``face``'s font, or two in any font (an
-      italic heading; :func:`_words`) -- and spans :data:`PROSE_WIDTH` of its column or starts within
-      :data:`PROSE_INDENT` body sizes of the column's left edge, as a paragraph's last line does (``values [13].``
-      above a formula). A formula's letters (``cos hweTs`` flush left, ``Lvsd =``, ``Ie5jwet``) and its short words
-      set inside it (``with``, ``otherwise``) are no prose.
+    - The pieces: from the seed, every piece -- a line that is no prose (:meth:`_Around.prose`), an image no taller
+      than :data:`EQUATION_IMAGE` body sizes, a short drawing of ``ink`` -- within :data:`EQUATION_REACH` body sizes of
+      what is taken (:data:`OCR_REACH` where the seed is OCR'd), until none is left; never past the prose above or
+      below the seed, and never a piece nearer another equation's number between them (:meth:`_Around.number`: a mark
+      ``(1)`` inside a matrix is none). A piece's box is its spans' whole boxes (a sum's limits, a big bracket), not a
+      line's median.
     - The drawings whose middle lies in what is taken (a fraction's bar, a root's) are taken too; the box stands
       :data:`EQUATION_PAD` body sizes clear of it all, inside the page -- but never into text it leaves out
       (:func:`_padded`: the next equation set a point below).
     """
-    if face[1] <= 0:
-        return None
-    lines = layout.lines(page, weighted=True)
-    found = _number(lines, number, face)
-    return None if found is None else _equation_box(page, lines, found, face)
-
-
-def _equation_box(page: Page, lines: list[layout.Line], found: layout.Line, face: tuple[str, float]) -> BBox:
-    """The box of the equation numbered on line ``found`` of ``lines`` (``page``'s), as :func:`equation` says."""
     body = face[1]
-    seed = _spans_box(found)
     middle = (seed.y0 + seed.y1) / 2
-    columns = _Columns(page, lines, middle, body)
-    ocr = all(s.render_mode == INVISIBLE for s in found.spans)
-
-    def prose(line: layout.Line) -> bool:
-        left, width = columns.edge(line)
-        return _reads(line.spans, line.text, face) and (
-            line.x1 - line.x0 >= PROSE_WIDTH * width or line.x0 - left <= PROSE_INDENT * body
-        )
+    around = _Around(page, lines, middle, face)
 
     def take(*, across: bool) -> BBox:
-        here = [ln for ln in lines if ln is not found and columns.holds(_spans_box(ln), ln.column, seed, across=across)]
-        bounds = [_spans_box(ln) for ln in here if prose(ln)]
+        here = [ln for ln in lines if ln is not own and around.holds(_spans_box(ln), ln.column, seed, across=across)]
+        bounds = [_spans_box(ln) for ln in here if around.prose(ln)]
         top = max((b.y1 for b in bounds if (b.y0 + b.y1) / 2 < middle), default=0.0)
         bottom = min((b.y0 for b in bounds if (b.y0 + b.y1) / 2 > middle), default=page.height)
         # the other equations' numbers between the prose that bounds it
-        numbers = [m for ln in here if _numbered(ln, face) and top <= (m := _middle(ln)) <= bottom]
-        pieces = [_spans_box(ln) for ln in here if not prose(ln)]
+        numbers = [m for ln in here if around.number(ln) and top <= (m := _middle(ln)) <= bottom]
+        pieces = [_spans_box(ln) for ln in here if not around.prose(ln)]
         pieces += [
             b
-            for b in _images(page)
-            if b.height <= EQUATION_IMAGE * body
-            and columns.holds(b, layout.column(b.x0, b.x1, columns.mid), seed, across=across)
+            for b in [*(i for i in _images(page) if i.height <= EQUATION_IMAGE * body), *ink]
+            if around.holds(b, layout.column(b.x0, b.x1, around.mid), seed, across=across)
         ]
         pieces = [
             b
@@ -511,10 +559,10 @@ def _equation_box(page: Page, lines: list[layout.Line], found: layout.Line, face
     def open_left(box: BBox) -> bool:
         """Does the left column hold, level with ``box``, a formula's pieces alone -- no prose, no number of its own?"""
         level = [ln for ln in lines if ln.column == 'L' and _spans_box(ln).y0 < box.y1 and box.y0 < _spans_box(ln).y1]
-        return bool(level) and not any(prose(ln) or _numbered(ln, face) for ln in level)
+        return bool(level) and not any(around.prose(ln) or around.number(ln) for ln in level)
 
     box = take(across=False)
-    if columns.two and not columns.left_of(seed) and (box.x0 < columns.mid - layout.GUTTER or open_left(box)):
+    if around.two and not around.left_of(seed) and (box.x0 < around.mid - layout.GUTTER or open_left(box)):
         box = take(across=True)  # an equation set across both columns
     drawn = [
         d
@@ -526,23 +574,64 @@ def _equation_box(page: Page, lines: list[layout.Line], found: layout.Line, face
     return _padded(page, union([box, *drawn]), EQUATION_PAD * body)
 
 
-def _equations(page: Page, face: tuple[str, float]) -> list[Region]:
-    """The page's numbered equations, each number once, labeled as read (``(3)``): see :func:`equation`.
+def _in_order(found: list[Region]) -> list[Region]:
+    """``found`` top to bottom, its untitled regions numbered in page order within their kind (``Untitled table 2``)."""
+    counts: dict[str, int] = {}
+    out = []
+    for r in sorted(found, key=lambda r: r.bbox.y0):
+        if not r.captioned:
+            counts[r.kind] = counts.get(r.kind, 0) + 1
+            r = replace(r, label=f'{_UNTITLED}{r.kind} {counts[r.kind]}')  # noqa: PLW2901
+        out.append(r)
+    return out
 
-    A number counts where it ends its line right of :data:`NUMBER_RIGHT` of the column it stands in, judged as
-    :func:`equation` judges columns; a number the page prints twice refuses, as there.
+
+def _states(line: layout.Line) -> bool:
+    """Does ``line`` state a relation (:data:`_RELATIONS`) between terms, as a formula's line does?
+
+    Something besides the signs (an arrow drawn over a vector's letter is none), and not set in a typewriter font
+    (:data:`_CODE_FONT`: a listing's ``x = 1;``).
     """
-    lines = layout.lines(page, weighted=True)
-    labels: list[str] = []
-    for line in lines:
-        label = _numbered(line, face)
-        if label is None or label in labels:
-            continue
-        left, width = _Columns(page, lines, _middle(line), face[1]).edge(line)
-        if line.x1 >= left + NUMBER_RIGHT * width:
-            labels.append(label)
-    found = [(label, _number(lines, label, face)) for label in labels]
-    return [Region('equation', f'({label})', _equation_box(page, lines, ln, face)) for label, ln in found if ln]
+    text = line.text
+    return (
+        any(c in _RELATIONS for c in text)
+        and any(c.isalnum() for c in text)
+        and not all(_CODE_FONT.search(s.font) for s in line.spans)
+    )
+
+
+def _ocr(line: layout.Line) -> bool:
+    """Is ``line`` OCR'd: every span of it invisible over the picture it was read from?"""
+    return all(s.render_mode == INVISIBLE for s in line.spans)
+
+
+def _drawn_formula(drawing: Drawing, lines: list[layout.Line], body: float) -> list[layout.Line]:
+    """The lines of ``drawing`` when it is a formula drawn, else none.
+
+    At least :data:`DRAWN_MIN` and at most :data:`EQUATION_HEIGHT` body sizes high, drawing a stroke
+    :data:`DRAWN_STROKE` body sizes long (a bar; words OCR missed draw none), its text reading as math (:func:`_math`)
+    and as no word -- a logo drawn round its brand's name is none.
+    """
+    box = drawing.box
+    if not DRAWN_MIN * body <= box.height <= EQUATION_HEIGHT * body or drawing.stroke < DRAWN_STROKE * body:
+        return []
+    inside = [ln for ln in lines if box.x0 <= ln.x0 and ln.x1 <= box.x1 and box.y0 <= ln.y0 and ln.y1 <= box.y1]
+    return inside if not any(layout.wordy(ln.text) for ln in inside) and _math(inside) else []
+
+
+def _figures(page: Page, drawings: Sequence[Drawing], body: float) -> list[BBox]:
+    """The boxes of the page's figures and ruled tables, which no equation is set inside.
+
+    A plot's legend states ``k = 1``, a table's row ``Ldev -> MSE``. An image taller than :data:`EQUATION_IMAGE`
+    body sizes that is not the page's own picture (a scan's, covering :data:`PAGE_PICTURE` of the page), a painted
+    path or a drawing (``drawings``) taller and wider than :data:`EQUATION_HEIGHT` body sizes (a plot's frame, a block
+    diagram), and a table its rules make (`document_lab.tables.tables`).
+    """
+    area = page.width * page.height
+    images = [b for b in _images(page) if b.height > EQUATION_IMAGE * body and b.width * b.height < PAGE_PICTURE * area]
+    drawn = [*_painted(page), *(d.box for d in drawings)]
+    ruled = [t.provenance.bbox for t in tables(page) if t.provenance.bbox is not None]
+    return images + [b for b in drawn if min(b.width, b.height) > EQUATION_HEIGHT * body] + ruled
 
 
 def _spans_box(line: layout.Line) -> BBox:
@@ -570,18 +659,51 @@ def _reads(spans: list[TextSpan], text: str, face: tuple[str, float]) -> bool:
 
 
 def _numbered(line: layout.Line, face: tuple[str, float]) -> str | None:
-    """The equation number ``line`` ends in -- alone, or after a formula, not after words -- else None."""
+    """The equation number ``line`` ends in -- alone, or after a formula, not after words -- else None.
+
+    A line set smaller than :data:`NUMBER_SIZE` of the body size ends in none: a plot's legend ``(1)``, a matrix's
+    mark.
+    """
     found = _NUMBERED.search(line.text)
-    if found is None or _reads(line.spans, line.text[: found.start()], face):
+    if found is None or line.size < NUMBER_SIZE * face[1] or _reads(line.spans, line.text[: found.start()], face):
         return None
     return found.group(1)
 
 
-def _number(lines: list[layout.Line], number: str, face: tuple[str, float]) -> layout.Line | None:
-    """The line that ends in equation number ``(number)`` (:func:`_numbered`), of several the one that is it alone."""
+def _number(page: Page, lines: list[layout.Line], number: str, face: tuple[str, float]) -> layout.Line | None:
+    """The line that ends in equation number ``(number)`` (:func:`_numbered`), or None.
+
+    Of several, the one a formula stands level with (:func:`_level_formula`): a figure's legend repeats ``(1)`` alone,
+    its formula nowhere. Of several so, none; of none so, the one line that is the number alone (``as (11)`` ends a
+    short line of prose), else none.
+    """
     found = [ln for ln in lines if _numbered(ln, face) == number]
+    if len(found) <= 1:
+        return found[0] if found else None
+    level = [ln for ln in found if _level_formula(page, lines, ln, face)]
+    if len(level) == 1:
+        return level[0]
     alone = [ln for ln in found if _NUMBERED.fullmatch(ln.text.strip())]
-    return found[0] if len(found) == 1 else alone[0] if len(alone) == 1 else None
+    return alone[0] if not level and len(alone) == 1 else None
+
+
+def _level_formula(page: Page, lines: list[layout.Line], number: layout.Line, face: tuple[str, float]) -> bool:
+    """Does a formula stand level with the line ending in a number?
+
+    Math before the number on its own line (:func:`_math_text`), or a line of no prose to its left in its column, its
+    middle within the number's height.
+    """
+    found = _NUMBERED.search(number.text)
+    if found is not None and _math_text(number.text[: found.start()]):
+        return True
+    box = _spans_box(number)
+    around = _Around(page, lines, (box.y0 + box.y1) / 2, face)
+    for line in lines:
+        b = _spans_box(line)
+        level = line is not number and box.y0 <= (b.y0 + b.y1) / 2 <= box.y1 and b.x1 <= box.x0
+        if level and around.holds(b, line.column, box, across=False) and not around.prose(line):
+            return True
+    return False
 
 
 def _padded(page: Page, box: BBox, pad: float) -> BBox:
@@ -603,23 +725,24 @@ def _padded(page: Page, box: BBox, pad: float) -> BBox:
             x0 = max(x0, (b.x1 + box.x0) / 2, b.x1)
         elif level and cx > box.x1:
             x1 = min(x1, (b.x0 + box.x1) / 2, b.x0)
-    return BBox(x0, y0, x1, y1)
+    # never into the box itself: a span reaching across its edge stops the edge at the box
+    return BBox(min(x0, box.x0), min(y0, box.y0), max(x1, box.x1), max(y1, box.y1))
 
 
-class _Columns:
-    """How a page is set in columns around one equation's number, and the edges its lines are judged by."""
+class _Around:
+    """A page around one equation's place: its columns there, and which of its lines are prose or a number."""
 
-    def __init__(self, page: Page, lines: list[layout.Line], middle: float, body: float) -> None:
-        self.mid, self.body = page.width / 2, body
+    def __init__(self, page: Page, lines: list[layout.Line], middle: float, face: tuple[str, float]) -> None:
+        self.mid, self.face, self.body, self.lines = page.width / 2, face, face[1], lines
         text = [ln for ln in lines if len(ln.text.split()) >= TEXT_WORDS and layout.wordy(ln.text)]
-        near = [ln for ln in text if abs(_middle(ln) - middle) <= COLUMN_WINDOW * body] or text
+        near = [ln for ln in text if abs(_middle(ln) - middle) <= COLUMN_WINDOW * self.body] or text
         self.two = sum(ln.column != 'F' for ln in near) > sum(ln.column == 'F' for ln in near)
         self.left = min((ln.x0 for ln in text), default=0.0)
         self.right = max((ln.x1 for ln in text), default=page.width)
         self.right_column = min((ln.x0 for ln in text if ln.column == 'R'), default=self.mid)
 
     def left_of(self, box: BBox) -> bool:
-        """Is ``box`` (a number) in the left column?"""
+        """Is ``box`` (a number, a formula's line) in the left column?"""
         return box.x1 <= self.mid + layout.GUTTER
 
     def edge(self, line: layout.Line) -> tuple[float, float]:
@@ -630,12 +753,61 @@ class _Columns:
             return self.right_column, self.right - self.right_column
         return self.left, self.right - self.left
 
-    def holds(self, box: BBox, side: str, number: BBox, *, across: bool) -> bool:
-        """May the equation of ``number`` take ``box``, standing in column ``side``: its column's, inside the text?"""
+    def holds(self, box: BBox, side: str, seed: BBox, *, across: bool) -> bool:
+        """May the equation of ``seed`` take ``box``, standing in column ``side``: its column's, inside the text?"""
         inside = box.x0 >= self.left - self.body and box.x1 <= self.right + self.body
         if not self.two or across:
             return inside
-        return inside and (side == 'L' if self.left_of(number) else side != 'L')
+        return inside and (side == 'L' if self.left_of(seed) else side != 'L')
+
+    def prose(self, line: layout.Line) -> bool:
+        """Is ``line`` prose, which bounds an equation and is never a piece of one?
+
+        A line that reads as words (:func:`_reads`: a word of four letters set in the body's font, or two in any font
+        -- an italic heading) and starts within :data:`PROSE_INDENT` body sizes of its column's left edge (a
+        paragraph's line, ``values [13].`` above a formula), or spans :data:`PROSE_WIDTH` of its column with no math
+        in it (:func:`_math`): a cases row set in from the edge (``(x) > 0 Solid material``) and a matrix's row are a
+        formula's. A line that reads as no word is prose only as a paragraph's tail: at the edge, in the body's font,
+        no math (``[55]:``). A formula's letters (``cos hweTs`` flush left, ``Lvsd =``, ``Ie5jwet``) and its short
+        words set inside it (``with``, ``otherwise``) are no prose.
+        """
+        left, width = self.edge(line)
+        flush = line.x0 - left <= PROSE_INDENT * self.body
+        full = left + width - line.x1 <= self.body  # it reaches its column's right edge: a justified line
+        if not _reads(line.spans, line.text, self.face):
+            return flush and (full or (all(s.font == self.face[0] for s in line.spans) and not _math([line])))
+        return flush or (line.x1 - line.x0 >= PROSE_WIDTH * width and (full or not _math([line])))
+
+    def inline(self, line: layout.Line) -> bool:
+        """Is the formula on ``line`` set in a paragraph, no display?
+
+        Level with a line of prose of its column, beside or across it (a sub- or superscript the reader set apart from
+        its line: ``R>=0``), or the paragraph's tail: flush with the column, within :data:`TAIL_GAP` body sizes below
+        a line of prose (``eta2 = 99.15 %.`` ending a caption).
+        """
+        box = _spans_box(line)
+        left, _ = self.edge(line)
+        flush = line.x0 - left <= PROSE_INDENT * self.body
+        for other in self.lines:
+            if other is line or self.edge(other)[0] != left or not self.prose(other):
+                continue
+            b = _spans_box(other)
+            level = min(b.y1, box.y1) - max(b.y0, box.y0) >= (box.y1 - box.y0) / 2
+            if level and b.x0 < box.x1 + self.body and box.x0 < b.x1 + self.body:
+                return True
+            if flush and 0 <= box.y0 - b.y1 <= TAIL_GAP * self.body:
+                return True
+        return False
+
+    def number(self, line: layout.Line) -> str | None:
+        """The equation number ``line`` ends in (:func:`_numbered`), where it ends right of its column's middle.
+
+        Right of :data:`NUMBER_RIGHT` of its column, else None: a list's ``(1)`` stands at its left, a matrix's mark
+        ``(1)`` inside it.
+        """
+        label = _numbered(line, self.face)
+        left, width = self.edge(line)
+        return label if label is not None and line.x1 >= left + NUMBER_RIGHT * width else None
 
 
 def _images(page: Page) -> list[BBox]:
@@ -671,18 +843,14 @@ def regions(
         if caption := _caption(line):
             kind, label = caption
             found.append(_figure(judged, line, label) if kind == 'figure' else _table(judged, line, label))
-    found += _equations(page, face)
+    captioned = [r.bbox for r in found]
+    for r in _equations(page, face, drawings):  # one without a number inside a captioned figure is the figure's
+        middle = ((r.bbox.x0 + r.bbox.x1) / 2, (r.bbox.y0 + r.bbox.y1) / 2)
+        if r.captioned or not any(box.contains(*middle) for box in captioned):
+            found.append(r)
     found += _untitled_tables(judged, found)
     found += _drawn(judged, drawings, found)
     found = [replace(r, table=_cells(judged, r)) if r.kind == 'table' else r for r in found]
     # Clamped to the page, a region its text sets across the page's edge can be left without area (a caption the foot
     # cuts, prose right above it: its figure's top falls below the foot); it shows nothing and is none.
-    shown = sorted((r for r in found if r.bbox.x1 > r.bbox.x0 and r.bbox.y1 > r.bbox.y0), key=lambda r: r.bbox.y0)
-    counts: dict[str, int] = {}
-    out = []
-    for r in shown:  # untitled ones numbered in page order, whichever way each was told
-        if not r.captioned:
-            counts[r.kind] = counts.get(r.kind, 0) + 1
-            r = replace(r, label=f'{_UNTITLED}{r.kind} {counts[r.kind]}')  # noqa: PLW2901
-        out.append(r)
-    return out
+    return _in_order([r for r in found if r.bbox.x1 > r.bbox.x0 and r.bbox.y1 > r.bbox.y0])

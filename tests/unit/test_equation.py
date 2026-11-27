@@ -1,4 +1,4 @@
-"""Equation crops (`document_lab.regions.equation`): one display equation and its number, nothing else -- read off
+"""Equation crops (`document_lab.regions.equations`): one display equation and its number, nothing else -- read off
 synthetic pages whose boxes are known.
 
 Each layout is one the real papers set (and the old crop got wrong): an equation across a one-column page, one across
@@ -16,7 +16,7 @@ import pymupdf
 from document_lab import layout
 from document_lab.ir import BBox
 from document_lab.pdf import read_pdf
-from document_lab.regions import equation, regions
+from document_lab.regions import equations, regions
 from tests.synthetic import Run, text_pdf
 
 if TYPE_CHECKING:
@@ -57,23 +57,29 @@ def read(tmp_path: Path, *pages: list[Run], bars: tuple[list[pymupdf.Rect], ...]
     return read_pdf(text_pdf(tmp_path / 'page.pdf', pages, bars))
 
 
-def crop(doc: Document, n: int, page: int = 0) -> BBox | None:
-    return equation(doc.pages[page], str(n), layout.body_face(doc))
+def numbered(page: Page, n: int | str, face: tuple[str, float]) -> BBox | None:
+    """The box of the equation numbered ``(n)`` on ``page``, as `document_lab.regions.equations` finds it."""
+    found = [r.bbox for r in equations(page, face) if r.label == f'({n})']
+    return found[0] if found else None
+
+
+def crop(doc: Document, n: int | str, page: int = 0) -> BBox | None:
+    return numbered(doc.pages[page], n, layout.body_face(doc))
 
 
 def faults(page: Page, box: BBox | None, formula: list[Run]) -> list[str]:
     """How ``box`` departs from holding exactly ``formula`` (its runs, the number among them): a run cut, one let in."""
     if box is None:
         return ['no crop']
-    held = {text for _, _, text, _, _ in formula}
     found = []
     for span in page.spans:
         b = span.provenance.bbox
         inside = box.x0 <= b.x0 and b.x1 <= box.x1 and box.y0 <= b.y0 and b.y1 <= box.y1
         meets = b.x0 < box.x1 and box.x0 < b.x1 and b.y0 < box.y1 and box.y0 < b.y1
-        if span.text in held and not inside:
+        held = any(span.text == text and abs(b.x0 - x) < 1 and b.y0 < y < b.y1 for x, y, text, _, _ in formula)
+        if held and not inside:
             found.append(f'{span.text!r} cut')
-        elif span.text not in held and meets:
+        elif not held and meets:
             found.append(f'{span.text!r} let in')
     return found
 
@@ -161,7 +167,7 @@ def test_a_running_page_number_is_no_part_of_an_equation_at_the_head_of_a_page(t
         pages.append([(530, 48, str(70 + n), 'helv', 10), *formula, *column(72, 468, range(90 + y, 300 + y, 12))])
     doc = read(tmp_path, *pages)
     body = layout.without_running(doc)
-    box = equation(body.pages[1], '2', layout.body_face(doc))
+    box = numbered(body.pages[1], 2, layout.body_face(doc))
     formula = [math(200, 62, 'u = R i + L d2'), number(525, 62, 2)]
     assert faults(doc.pages[1], box, formula) == []
     assert faults(doc.pages[1], crop(doc, 2, page=1), formula)  # planted: the page with its running lines
@@ -172,8 +178,8 @@ def test_a_reference_in_prose_is_no_equation_number_and_two_numbers_refuse(tmp_p
     formula = [math(200, 220, 'P = T w'), number(525, 220, 3)]
     doc = read(tmp_path, [*column(72, 468, range(100, 112, 12)), reference, *formula])
     assert faults(doc.pages[0], crop(doc, 3), formula) == []
-    twice = read(tmp_path, [*formula, number(525, 400, 3)])
-    assert crop(twice, 3) is None  # planted: an ambiguous number refuses, never a guess
+    twice = read(tmp_path, [*formula, math(200, 400, 'Q = T v'), number(525, 400, 3)])
+    assert crop(twice, 3) is None  # planted: a number printed twice, each beside a formula, refuses, never a guess
 
 
 def test_a_formula_row_set_flush_left_is_no_prose(tmp_path):
@@ -297,7 +303,124 @@ def test_a_value_in_parentheses_is_no_equation_number_a_chapter_s_number_is(tmp_
     """A table's spread ``(0.167)`` set alone at a line's right reads like a number; none starts with 0."""
     value = [noise(150, 300, 'x = 0.5'), (270, 300, '(0.167)', 'helv', 10)]
     doc = read(tmp_path, [*column(50, 250, range(100, 290, 12)), *value, *column(50, 250, range(320, 400, 12))])
-    assert found(doc) == []
+    assert [label for label, _ in found(doc)] == ['Untitled equation 1']  # its formula, no number
     chapter = [noise(150, 300, 'x = 0.5'), (270, 300, '(2.8)', 'helv', 10)]
     doc = read(tmp_path, [*column(50, 250, range(100, 290, 12)), *chapter, *column(50, 250, range(320, 400, 12))])
     assert [label for label, _ in found(doc)] == ['(2.8)']  # planted: a number that is one
+
+
+def displays(doc: Document, page: int = 0) -> list[tuple[str, BBox]]:
+    """The display equations `document_lab.regions.equations` finds on the page -- as `document-lab paper` cuts them
+    out -- each its label and box."""
+    return [(r.label, r.bbox) for r in equations(doc.pages[page], layout.body_face(doc))]
+
+
+def test_a_display_without_a_number_is_found_by_its_formula(tmp_path):
+    formula = [math(250, 220, 'E = m c2 + k')]
+    doc = read(tmp_path, [*column(72, 468, range(100, 200, 12)), *formula, *column(72, 468, range(250, 330, 12))])
+    ((label, box),) = displays(doc)
+    assert label == 'Untitled equation 1'
+    assert faults(doc.pages[0], box, formula) == []
+    assert faults(doc.pages[0], without(box, right=30), formula)  # planted: its right part cut off
+
+
+def test_a_display_without_a_number_in_a_column_takes_nothing_of_the_other(tmp_path):
+    formula = [math(400, 300, 'a + b = g')]
+    right = [*column(312, 250, range(100, 290, 12)), *formula, *column(312, 250, range(320, 500, 12))]
+    doc = read(tmp_path, [*column(50, 250, range(100, 500, 12)), *right])
+    ((label, box),) = displays(doc)
+    assert label == 'Untitled equation 1'
+    assert faults(doc.pages[0], box, formula) == []
+    assert faults(doc.pages[0], without(box, left=-150), formula)  # planted: grown over the left column
+
+
+def test_inline_math_in_prose_is_no_display(tmp_path):
+    """A line of prose with a formula in it -- flush with its column, set among its paragraph's lines -- stays prose;
+    the same formula set apart on its own line is a display."""
+    inline = (72, 208, 'where the power P = T w is the product of the torque and the speed at the shaft', 'helv', 10)
+    above, below = column(72, 468, range(100, 200, 12)), column(72, 468, range(220, 300, 12))
+    assert displays(read(tmp_path, [*above, inline, *below])) == []
+    apart = [
+        *above,
+        (72, 208, 'where the power is', 'helv', 10),
+        math(250, 226, 'P = T w'),
+        *column(72, 468, range(250, 300, 12)),
+    ]
+    assert [label for label, _ in displays(read(tmp_path, apart))] == ['Untitled equation 1']  # planted: a display
+
+
+def test_a_cases_block_whose_rows_read_as_words_is_taken_whole(tmp_path):
+    """A definition by cases in the right column, its rows set in from the column's edge: ``f(x) > 0 Solid magnetic
+    material`` reads as words and spans half the column, and is a formula's row all the same (it states ``>``)."""
+    rows = [
+        math(376, 300, 'f(x) < 0 air'),
+        math(336, 312, 'f(x) = { f(x) = 0 boundary edge'),
+        math(376, 324, 'f(x) > 0 Solid magnetic material'),
+    ]
+    formula = [*rows, number(548, 312, 2)]
+    right = [*column(312, 250, range(100, 290, 12)), *formula, *column(312, 250, range(345, 500, 12))]
+    doc = read(tmp_path, [*column(50, 250, range(100, 500, 12)), *right])
+    box = crop(doc, 2)
+    assert faults(doc.pages[0], box, formula) == []
+    assert faults(doc.pages[0], without(box, bottom=12), formula)  # planted: its last row cut off
+
+
+def test_a_sub_numbered_pair_is_two_equations(tmp_path):
+    first = [math(150, 216, 'B n = 0'), math(300, 216, 'on G1,'), (505, 216, '(16a)', 'helv', 10)]
+    second = [math(146, 231, 'n x H = 0'), math(300, 231, 'on G2,'), (505, 231, '(16b)', 'helv', 10)]
+    doc = read(
+        tmp_path, [*column(72, 468, range(100, 200, 12)), *first, *second, *column(72, 468, range(250, 330, 12))]
+    )
+    assert faults(doc.pages[0], crop(doc, '16a'), first) == []
+    assert faults(doc.pages[0], crop(doc, '16b'), second) == []
+    assert faults(doc.pages[0], without(crop(doc, '16a'), bottom=-15), first)  # planted: grown into (16b)
+
+
+def test_a_number_printed_twice_is_the_one_beside_its_formula(tmp_path):
+    """A figure's legend in the right column repeats ``(1)`` alone; the equation's ``(1)`` has its formula level with
+    it in the left column. Once the page refused both."""
+    formula = [math(110, 300, 'L = a + b'), number(282, 300, 1)]
+    left = [*column(50, 250, range(100, 290, 12)), *formula, *column(50, 250, range(320, 500, 12))]
+    legend = [(330, 250, 'Tab', 'helv', 10), (540, 262, '(1)', 'helv', 10)]  # set as large as a number
+    right = [*column(312, 250, range(100, 230, 12)), *legend, *column(312, 250, range(300, 500, 12))]
+    doc = read(tmp_path, [*left, *right])
+    box = crop(doc, 1)
+    assert faults(doc.pages[0], box, formula) == []
+    assert faults(doc.pages[0], BBox(536, 252, 560, 266), formula)  # planted: the legend's number taken
+
+
+def test_a_paragraph_tail_that_is_no_word_is_left_out(tmp_path):
+    """A paragraph ends ``... the constitutive relation reads [55]:`` -- its last line ``[55]:``, flush with the
+    column, in the body's font, no word and no math -- right above the formula."""
+    tail = (72, 192, '[55]:', 'helv', 10)
+    formula = [math(250, 210, 'B = u H + Br'), number(525, 210, 3)]
+    doc = read(tmp_path, [*column(72, 468, range(100, 190, 12)), tail, *formula, *column(72, 468, range(240, 300, 12))])
+    box = crop(doc, 3)
+    assert faults(doc.pages[0], box, formula) == []
+    assert faults(doc.pages[0], without(box, top=-20), formula)  # planted: grown over the tail
+
+
+def test_a_mark_inside_a_matrix_is_no_number(tmp_path):
+    """A tall matrix whose entries carry ``(1)`` marks set inside it: they stand short of the column's right, so no
+    piece of the matrix is taken for another equation's."""
+    rows = [math(250, y, f'| a{i} b{i} |') for i, y in enumerate(range(200, 270, 10))]
+    marks = [(300, 214, '(1)', 'helv', 6), (300, 244, '(1)', 'helv', 6)]
+    formula = [*rows, *marks, number(525, 230, 19)]
+    doc = read(tmp_path, [*column(72, 468, range(100, 190, 12)), *formula, *column(72, 468, range(290, 360, 12))])
+    box = crop(doc, 19)
+    assert faults(doc.pages[0], box, formula) == []
+    assert faults(doc.pages[0], without(box, top=20), formula)  # planted: the matrix's top rows cut off
+
+
+def test_a_formula_set_in_a_paragraph_or_a_listing_is_no_display(tmp_path):
+    """A relation the reader split off a line of prose (a subscript ``<0``), a paragraph's flush tail stating one
+    (``e = 99 %.``), and a code listing's ``x = 1;`` are no displays; the same tail set apart below its paragraph is."""
+    above, below = column(72, 468, range(100, 200, 12)), column(72, 468, range(240, 300, 12))
+    line = prose(72, 208, 300)
+    subscript = [line, (73 + pymupdf.get_text_length(line[2], 'helv', 10), 210, 'a<0', 'helv', 6)]
+    tail = [prose(72, 208, 468), (72, 220, 'e = 99 %.', 'helv', 10)]
+    listing = [(100, 214, 'x = 1;', 'cour', 10), (100, 226, 'y = x + 2;', 'cour', 10)]
+    for inline in (subscript, tail, listing):
+        assert displays(read(tmp_path, [*above, *inline, *below])) == []
+    apart = [prose(72, 208, 468), math(250, 230, 'e = 99 %'), *column(72, 468, range(256, 300, 12))]
+    assert [label for label, _ in displays(read(tmp_path, [*above, *apart]))] == ['Untitled equation 1']  # planted

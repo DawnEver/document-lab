@@ -9,8 +9,9 @@ consumer's vocabulary here -- schemas live in consumers. Modules and usage: `REA
 
 ## Rules here
 
-- Dependency arrow: `paper`, `ai` -> `extract`; `paper` -> `markdown`, `regions`, `pdf`; `per_page` -> `markdown`, `regions`,
-  `ink`, `pdf`; `markdown`, `regions` -> `layout` -> `ir`; `ink` -> `ir` (`regions` takes its drawings as boxes, never pixels);
+- Dependency arrow: `paper`, `ai` -> `extract`; `paper` -> `agreement`, `markdown`, `regions`, `pdf`; `per_page` ->
+  `agreement`, `markdown`, `regions`, `ink`, `pdf`; `agreement` -> `markdown`, `regions`; `markdown`, `regions` -> `tags`
+  -> `layout` -> `ir`; `ink` -> `ir` (`regions` takes its drawings as boxes, never pixels);
   `extract` -> `plot`, `pdf`, `html` -> `numbers`, `ir`; `plot` -> `glyphs` -> `strokefont`; `strokes` -> `plot`, `ir`; `ocr` imports
   nothing of ours; `capture` is apart (`cli` -> `session` -> `stitch`; `cli` -> `desktop`, `export`, `ocr`, `files` ->
   `desktop`, `export`; `join` -> `export`, `stitch`), imported only by `__main__`. PDF bytes are `_pdf`'s (the Rust

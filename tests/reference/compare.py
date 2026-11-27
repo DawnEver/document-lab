@@ -6,7 +6,7 @@ U+FFFD here (never a guess) while PyMuPDF prints something for it -- its glyph i
 counted apart (``unknown``), out of the agreement. A symbol font's code PyMuPDF prints as the private-use code point
 its ``ToUnicode`` or ``cmap`` states (U+F0xx) reads here as the symbol shown (`pdf::font`), so each private-use
 character of PyMuPDF's we do not print pairs with one of ours it does not match, and both are counted apart
-(``private``), out of the agreement.
+(``private``), out of the agreement and out of where the text stands.
 
 Where the text stands is compared character by character, since the two cut a page's text into runs differently: a
 character of one of our spans is ``located`` when PyMuPDF states the same character with its origin (the start of its
@@ -118,6 +118,11 @@ class Page:
         """Matched over :attr:`whole`: 1 when neither states a character."""
         return 1.0 if self.whole <= 0 else self.matched / self.whole
 
+    @property
+    def locatable(self) -> int:
+        """The characters we state that PyMuPDF can state the same: the private taken out."""
+        return self.stated - self.private
+
 
 @dataclass(frozen=True)
 class Compared:
@@ -142,9 +147,9 @@ class Compared:
 
     @property
     def location(self) -> float:
-        """The share of the characters we state that are located: 1 when we state none."""
-        stated = sum(p.stated for p in self.pages)
-        return 1.0 if stated == 0 else sum(p.located for p in self.pages) / stated
+        """The share of the :attr:`Page.locatable` characters that are located: 1 when there are none."""
+        locatable = sum(p.locatable for p in self.pages)
+        return 1.0 if locatable <= 0 else sum(p.located for p in self.pages) / locatable
 
     def baselines(self) -> list[tuple[int, float]]:
         """Each measured span's page and how far its :attr:`Edges.baseline` lies from its font's median in the document.

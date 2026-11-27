@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/pdf", "crates/pybind"]
+members = ["crates/pdf", "crates/pybind", "crates/render"]
 
 [workspace.package]
 # THE version of document-lab: maturin reads it for the Python package, and a release tag must match.
@@ -10,6 +10,7 @@ license = "MIT"
 
 [workspace.dependencies]
 pdf = { path = "crates/pdf" }
+render = { path = "crates/render" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

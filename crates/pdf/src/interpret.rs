@@ -3,7 +3,9 @@
 //! The graphics state is tracked across `q`/`Q`, `cm`, colors, line style and Form `XObject`s; each painted path,
 //! each image placed, each string shown and each shading painted (`sh`) is an event, its geometry already in page
 //! space (points, y down). A fill or stroke with a pattern is a path event whose color names the pattern
-//! ([`crate::color::Pattern`]); a pattern's own content (a tiling cell, a shading's colors) is not interpreted.
+//! ([`crate::color::Pattern`]); a pattern's own content (a tiling cell, a shading's colors) is not interpreted. A
+//! fill or stroke in the colorant `None` marks nothing ([`crate::color::Space::paints`]): it is no paint of the event,
+//! and a path painted in it alone is no event.
 //!
 //! The clip is tracked as the box it lies in -- the page's crop box, narrowed by each clipping path's bounds, each
 //! Form's `/BBox` and, at `ET`, the union of the boxes of the glyphs shown in a clipping text mode (4-7) -- and a
@@ -24,10 +26,15 @@
 //! Annotations are drawn when asked, after the page's content: each one's normal appearance (`/AP /N`, its `/AS`
 //! state's when it has states) mapped onto its `/Rect` (12.5.5), from the page's initial state, its events in the
 //! annotation's [`Layer::annotation`]. A popup, an annotation flagged Hidden or `NoView`, and one with no
-//! appearance draw nothing: no appearance is made up from an annotation's other entries.
+//! appearance draw nothing: no appearance is made up from an annotation's other entries. The interactive form's
+//! default resources (`/AcroForm /DR`, 12.7.4.3: the resources form field appearance streams use) are an
+//! appearance's resources when it has none, and give a font it names that its own resources lack. Its default
+//! appearance string (`/DA`) is not applied: it is the recipe for making an appearance, not part of drawing one.
 //!
 //! Not interpreted: a pattern's content and optional content usage ([`crate::optional`] says which). An operation
-//! that cannot be read is skipped and named in [`Content::warnings`], never silently.
+//! that cannot be read is skipped and named in [`Content::warnings`], never silently; a color whose space or tint
+//! transform does not read is set by its components alone, with no RGB, and named there too -- never left in the
+//! space set before.
 
 use std::rc::Rc;
 
@@ -252,9 +259,9 @@ impl State {
         Self {
             ctm,
             clip,
-            stroke_color: Space::Gray.initial(),
+            stroke_color: Color::black(),
             stroke_space: Space::Gray,
-            fill_color: Space::Gray.initial(),
+            fill_color: Color::black(),
             fill_space: Space::Gray,
             line_width: 1.0,
             dashes: Vec::new(),
@@ -301,6 +308,9 @@ struct Interpreter<'a> {
     hiding_entries: usize,
     /// The `/Subtype` of the annotation whose appearance is being drawn.
     annotation: Option<String>,
+    /// The interactive form's default resources (`/AcroForm /DR`), read when annotations are drawn; empty when it
+    /// has none.
+    form_resources: Dict,
     out: Content,
 }
 
@@ -357,6 +367,7 @@ impl File {
             actual: None,
             hiding_entries: 0,
             annotation: None,
+            form_resources: Dict::new(),
             out: Content::default(),
         };
         interpreter.run(&data, &page.resources, 0);
@@ -832,28 +843,46 @@ impl Interpreter<'_> {
         self.text_matrix = Matrix([1.0, 0.0, 0.0, 1.0, tx, ty]).then(self.text_matrix);
     }
 
+    /// The font `resources` name `name` -- in an annotation's appearance, the form's default resources' when
+    /// `resources` lack it.
     fn load_font(&mut self, name: &[u8], resources: &Dict) -> Result<Rc<Font>> {
-        let Some(Object::Dict(fonts)) = self.file.get(resources, b"Font")? else {
-            return Err(Error::malformed("no /Font resources"));
-        };
-        let reference = fonts.get(name).ok_or_else(|| {
+        let mut reference = self.font_entry(resources, name)?;
+        if reference.is_none() && self.annotation.is_some() {
+            reference = self.font_entry(&self.form_resources, name)?;
+        }
+        let reference = reference.ok_or_else(|| {
             Error::malformed(format!("no font /{}", String::from_utf8_lossy(name)))
         })?;
         let number = reference.as_reference().map(|r| r.num);
         if let Some(font) = number.and_then(|n| self.file.fonts.borrow().get(&n).cloned()) {
             return Ok(font);
         }
-        let Object::Dict(dict) = self.file.resolve(reference)? else {
+        let Object::Dict(dict) = self.file.resolve(&reference)? else {
             return Err(Error::malformed(format!(
                 "font /{} is not a dictionary",
                 String::from_utf8_lossy(name)
             )));
         };
         let font = Rc::new(self.file.font(&dict)?);
+        for warning in &font.warnings {
+            self.out.warnings.push(format!(
+                "font /{} ({}): {warning}",
+                String::from_utf8_lossy(name),
+                font.info.name
+            ));
+        }
         if let Some(n) = number {
             self.file.fonts.borrow_mut().insert(n, Rc::clone(&font));
         }
         Ok(font)
+    }
+
+    /// The entry `name` in the fonts of `resources`; None when they have no such font.
+    fn font_entry(&self, resources: &Dict, name: &[u8]) -> Result<Option<Object>> {
+        Ok(match self.file.get(resources, b"Font")? {
+            Some(Object::Dict(fonts)) => fonts.get(name).cloned(),
+            _ => None,
+        })
     }
 
     fn show(&mut self, bytes: &[u8]) {
@@ -972,20 +1001,32 @@ impl Interpreter<'_> {
     ) -> Result<bool> {
         let (space, color) = match operator {
             b"CS" | b"cs" => {
-                let space = self
-                    .file
-                    .color_space(operands.first().unwrap_or(&Object::Null), resources)?;
-                let color = space.initial();
+                let value = operands.first().unwrap_or(&Object::Null);
+                let space = match self.file.color_space(value, resources) {
+                    Ok(space) => space,
+                    Err(e) => {
+                        // Its colors are known by their components alone until another space is set.
+                        self.warn(operator, &format!("a color space that does not read: {e}"));
+                        let named = value.as_name().or_else(|| {
+                            value
+                                .as_array()
+                                .and_then(|a| a.first())
+                                .and_then(Object::as_name)
+                        });
+                        Space::Other(named.unwrap_or(b"Unknown").to_vec(), 1)
+                    }
+                };
+                let color = self.converted(operator, &space, space.initial_components());
                 (space, color)
             }
             b"SC" | b"SCN" => {
                 let space = self.state.stroke_space.clone();
-                let color = self.color(&space, operands, resources)?;
+                let color = self.color(operator, &space, operands, resources)?;
                 (space, color)
             }
             b"sc" | b"scn" => {
                 let space = self.state.fill_space.clone();
-                let color = self.color(&space, operands, resources)?;
+                let color = self.color(operator, &space, operands, resources)?;
                 (space, color)
             }
             b"G" | b"g" | b"RG" | b"rg" | b"K" | b"k" => {
@@ -994,7 +1035,8 @@ impl Interpreter<'_> {
                     b"RG" | b"rg" => Space::Rgb,
                     _ => Space::Cmyk,
                 };
-                let color = space.color(numbers(operands, space.components())?);
+                let color =
+                    self.converted(operator, &space, numbers(operands, space.components())?);
                 (space, color)
             }
             _ => return Ok(false),
@@ -1007,10 +1049,37 @@ impl Interpreter<'_> {
         Ok(true)
     }
 
+    fn warn(&mut self, operator: &[u8], message: &str) {
+        self.out.warnings.push(format!(
+            "`{}`: {message}",
+            String::from_utf8_lossy(operator)
+        ));
+    }
+
+    /// The color of `components` in `space`; when the space gives them no RGB for a cause (a tint transform's
+    /// error), the components alone, the cause named in a warning.
+    fn converted(&mut self, operator: &[u8], space: &Space, components: Vec<f64>) -> Color {
+        space.color(components.clone()).unwrap_or_else(|e| {
+            self.warn(operator, &format!("its color has no RGB: {e}"));
+            Color {
+                space: space.family(),
+                components,
+                rgb: None,
+                pattern: None,
+            }
+        })
+    }
+
     /// The color `operands` set in `space`: in `Pattern`, the pattern the last operand names (after an uncolored
     /// pattern's tint).
-    fn color(&self, space: &Space, operands: &[Object], resources: &Dict) -> Result<Color> {
-        let mut color = space.color(numbers_in(operands));
+    fn color(
+        &mut self,
+        operator: &[u8],
+        space: &Space,
+        operands: &[Object],
+        resources: &Dict,
+    ) -> Result<Color> {
+        let mut color = self.converted(operator, space, numbers_in(operands));
         if *space == Space::Pattern {
             let name = operands
                 .last()
@@ -1050,7 +1119,10 @@ impl Interpreter<'_> {
 
     fn paint(&mut self, stroke: bool, fill: Option<bool>) {
         let bounds = bounds(&self.path);
-        if bounds.is_some_and(|b| b.meets(self.state.clip)) {
+        // A paint in the colorant `None` marks nothing: the path ends as `n` ends it.
+        let stroke = stroke && self.state.stroke_space.paints();
+        let fill = fill.filter(|_| self.state.fill_space.paints());
+        if (stroke || fill.is_some()) && bounds.is_some_and(|b| b.meets(self.state.clip)) {
             let layer = self.layer();
             let state = &self.state;
             let scale = state.ctm.scale();
@@ -1209,6 +1281,12 @@ impl Interpreter<'_> {
                 return;
             }
         };
+        match self.form_resources() {
+            Ok(resources) => self.form_resources = resources,
+            Err(e) => self.out.warnings.push(format!(
+                "the form's default resources (/AcroForm /DR) unreadable: {e}"
+            )),
+        }
         for (i, annotation) in annotations.iter().enumerate() {
             if let Err(e) = self.annotation(annotation, initial) {
                 self.out
@@ -1217,6 +1295,17 @@ impl Interpreter<'_> {
             }
         }
         self.annotation = None;
+    }
+
+    /// The interactive form's default resources (`/AcroForm /DR`); empty when the file has none.
+    fn form_resources(&self) -> Result<Dict> {
+        let Some(Object::Dict(form)) = self.file.get(&self.file.catalog()?, b"AcroForm")? else {
+            return Ok(Dict::new());
+        };
+        Ok(match self.file.get(&form, b"DR")? {
+            Some(Object::Dict(resources)) => resources,
+            _ => Dict::new(),
+        })
     }
 
     /// The annotation `value`'s normal appearance (12.5.5), unless it is a popup or flagged hidden or not to view:
@@ -1296,7 +1385,8 @@ impl Interpreter<'_> {
         self.stack.clear();
         self.annotation = Some(String::from_utf8_lossy(subtype).into_owned());
         self.hiding_entries += hides;
-        let drawn = self.form(&stream, &Dict::new(), 0);
+        let defaults = self.form_resources.clone();
+        let drawn = self.form(&stream, &defaults, 0);
         self.hiding_entries -= hides;
         drawn
     }

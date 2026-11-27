@@ -155,7 +155,10 @@ class Provenance:
 
 @dataclass(frozen=True, slots=True)
 class TextSpan:
-    """A run of text in one font and size: along a baseline, or down a column when written vertically."""
+    """A run of text in one font, size and fill: along a baseline, or down a column when written vertically.
+
+    Its fill is a color as in :class:`VectorPath`.
+    """
 
     text: str
     size: float
@@ -180,6 +183,9 @@ class TextSpan:
     hidden: bool = False
     #: The subtype of the annotation whose appearance draws it; None for the page's content.
     annotation: str | None = None
+    #: The color its glyphs are filled with; None when they are not filled (stroked or invisible text) or the source
+    #: states no fill.
+    fill: tuple[float, ...] | None = None
 
     @property
     def center(self) -> tuple[float, float]:
@@ -195,9 +201,11 @@ class TextSpan:
 class VectorPath:
     """One subpath of a page's vector drawing, curves flattened to points (as ``read_pdf`` says).
 
-    A color is RGB in 0..1 when its color space defines one, else its own components (a separation's tint); a
-    pattern's has none but an uncolored tiling's tint. A shading painted over the clip (``sh``) is the closed
-    rectangle of the box it may cover, filled with a ``'shading'`` pattern.
+    A color is sRGB in 0..1 -- a separation's or DeviceN's through its tint transform, a Lab color by the CIE
+    formulas (the reader's ``pdf::color`` says how each space converts) -- else, when the reader cannot convert it,
+    its own components; a pattern's has none but an uncolored tiling's tint. A paint in the colorant ``None`` marks
+    nothing and is no fill or stroke. A shading painted over the clip (``sh``) is the closed rectangle of the box it
+    may cover, filled with a ``'shading'`` pattern.
 
     A path is compared and hashed by identity (``eq=False``): it is one mark drawn on its page -- two drawn alike
     are still two -- and its points, an array, have no single truth value to compare by.

@@ -27,9 +27,6 @@ def chunk(kind: bytes, data: bytes) -> bytes:
 
 def header(width: int, height: int, channels: int) -> bytes:
     """The ``IHDR`` chunk of an 8-bit image of ``channels`` (1 gray, 3 RGB), ``width`` x ``height``."""
-    if width < 1 or height < 1:  # ISO/IEC 15948 11.2.2: zero is an invalid width or height
-        msg = f'a PNG holds at least one pixel: {width} x {height}'
-        raise ValueError(msg)
     if channels not in _COLOR_TYPE:
         msg = f'a PNG here is gray or RGB: {channels} channels'
         raise ValueError(msg)
@@ -47,6 +44,9 @@ def scanlines(rows: np.ndarray) -> bytes:
 def encode(image: np.ndarray) -> bytes:
     """``image`` -- ``(h, w)`` gray or ``(h, w, 3)`` RGB, ``uint8`` -- as a PNG file's bytes."""
     channels = 1 if image.ndim == 2 else image.shape[2]  # noqa: PLR2004 -- rows x columns
+    if not image.shape[0] or not image.shape[1]:  # ISO/IEC 15948 11.2.2: zero is an invalid width or height
+        msg = f'a PNG holds at least one pixel: {image.shape[1]} x {image.shape[0]}'
+        raise ValueError(msg)
     return b''.join(
         [
             SIGNATURE,

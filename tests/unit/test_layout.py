@@ -85,3 +85,39 @@ def test_a_vertical_block_across_the_middle_is_full_width_and_reads_right_to_lef
 def test_vertical_columns_stacked_read_top_band_first():
     page = _page(_vertical('LOW', 500, 300), _vertical('TOP2', 485, 100), _vertical('TOP1', 500, 100))
     assert [ln.text for ln in layout.ordered(layout.lines(page, weighted=True))] == ['TOP1', 'TOP2', 'LOW']
+
+
+def _running_pdf(path, pages=4):
+    """A data sheet's pages: a running head (title left, part number right) and a foot (page number, issue)."""
+    doc = pymupdf.open()
+    for number in range(1, pages + 1):
+        page = doc.new_page(width=595, height=842)
+        page.insert_text((42, 60), 'Data and Signal Line Chokes', fontsize=11)
+        page.insert_text((499, 60), 'ACT1210', fontsize=11)
+        page.insert_text((37, 120), f'Section {number} opens the page with its own words', fontsize=11)
+        page.insert_text((37, 400), 'Notes', fontsize=11)  # the same words, the same place, in the body
+        page.insert_text((37, 600), 'The body closes the page' + ' here' * number, fontsize=11)
+        page.insert_text((291, 822), str(number), fontsize=11)
+        page.insert_text((319, 822), '6/25', fontsize=11)
+    doc.save(path)
+    return path
+
+
+def test_running_heads_and_feet_repeat_at_the_page_edges_page_numbers_varying(tmp_path):
+    found = layout.running(read_pdf(_running_pdf(tmp_path / 'sheet.pdf')))
+    assert [[ln.text for ln in page.head] for page in found] == [['Data and Signal Line Chokes', 'ACT1210']] * 4
+    assert [[ln.text for ln in page.foot] for page in found] == [[str(n), '6/25'] for n in range(1, 5)]
+
+
+def test_a_page_alone_and_a_line_on_too_few_pages_run_nowhere(tmp_path):
+    assert [(p.head, p.foot) for p in layout.running(read_pdf(_running_pdf(tmp_path / 'one.pdf', pages=1)))] == [
+        ((), ())
+    ]
+    doc = pymupdf.open()
+    for number in range(4):  # a head on two pages of four: what most pages lack is no running head
+        page = doc.new_page(width=595, height=842)
+        if number < 2:
+            page.insert_text((42, 60), 'Draft for comment', fontsize=11)
+        page.insert_text((37, 120), f'Clause {number} text', fontsize=11)
+    doc.save(tmp_path / 'few.pdf')
+    assert all(p.head == () for p in layout.running(read_pdf(tmp_path / 'few.pdf')))

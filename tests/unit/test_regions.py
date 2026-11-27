@@ -21,8 +21,8 @@ def _page(tmp_path, draw):
     return read.pages[0], layout.body_size(read)
 
 
-def _text(page, y, text, *, x=50, size=10):
-    page.insert_text((x, y), text, fontsize=size)
+def _text(page, y, text, *, x=50, size=10, ocr=False):
+    page.insert_text((x, y), text, fontsize=size, render_mode=3 if ocr else 0)
 
 
 def test_a_figure_runs_from_the_prose_above_down_to_its_caption(tmp_path):
@@ -86,9 +86,9 @@ def test_a_mention_in_prose_or_a_contents_entry_is_no_caption(tmp_path):
     assert regions(*_page(tmp_path, draw)) == []
 
 
-def _row(page, y, cells, size=10):
+def _row(page, y, cells, size=10, *, ocr=False):
     for x, text in cells:
-        _text(page, y, text, x=x, size=size)
+        _text(page, y, text, x=x, size=size, ocr=ocr)
 
 
 def test_a_table_without_a_caption_is_found_by_its_columns(tmp_path):
@@ -160,9 +160,10 @@ def test_two_columns_of_prose_split_into_three_pieces_are_no_table(tmp_path):
 
 
 def test_rows_with_specks_read_as_cells_are_no_table(tmp_path):
-    def draw(page):  # columns of prose with OCR specks beside them: a speck is no cell
+    def draw(page):  # columns of prose with OCR specks beside them, an OCR layer: a speck is no cell
         for y in (100, 120, 140):
-            _row(page, y, ((50, 'All documentation'), (200, 'is current in BSI'), (380, 'oo'), (420, '.'), (460, 'i')))
+            cells = ((50, 'All documentation'), (200, 'is current in BSI'), (380, 'oo'), (420, '.'), (460, 'i'))
+            _row(page, y, cells, ocr=True)
 
     assert regions(*_page(tmp_path, draw)) == []
 
@@ -285,7 +286,8 @@ def test_drawings_under_their_own_titles_and_apart_are_separate_figures(tmp_path
     below, a blister tape (two parts close together) and a reel (two views) under theirs -- once one figure."""
     page, body = _page(tmp_path, _data_sheet_drawings)
     views = [_drawn((36.9, 119.0, 159.8, 263.4)), _drawn((139.6, 119.0, 229.8, 213.0))]
-    layout_, circuit = _drawn((313.3, 119.0, 419.9, 212.6)), _drawn((42.7, 315.3, 122.4, 382.4))
+    layout_ = _drawn((313.3, 119.0, 419.9, 212.6))
+    circuit = _drawn((42.7, 315.3, 122.4, 382.4), stroke=19.7)  # its longest line: a pin to its coil
     tape = [_drawn((124.3, 442.4, 293.7, 610.8)), _drawn((45.6, 490.4, 105.1, 571.5))]
     reel = [_drawn((434.3, 442.9, 514.9, 586.4)), _drawn((359.9, 447.2, 416.0, 573.4))]
     found = regions(page, body, [*views, layout_, circuit, *tape, *reel])
@@ -300,3 +302,26 @@ def test_drawings_under_their_own_titles_and_apart_are_separate_figures(tmp_path
         ]
 
     assert len({*holding(*views), *holding(layout_), *holding(circuit), *holding(*tape), *holding(*reel)}) == 5
+
+
+def test_a_unit_row_of_lone_signs_the_document_sets_is_a_row_of_its_table(tmp_path):
+    """ACT1210's ordering codes: a units row (uH, mA, an ohm sign alone) under the header; set, not OCR'd."""
+
+    def draw(page):
+        _text(page, 100, PROSE)
+        _row(page, 150, ((50, 'L'), (150, 'I'), (250, 'R'), (350, 'Ordering code')))
+        _row(page, 165, ((50, 'uH'), (150, 'mA'), (250, 'W')))
+        for y, (value, code) in zip((185, 200, 215), (('11', 'B110'), ('22', 'B220'), ('51', 'B510')), strict=True):
+            _row(page, y, ((50, value), (150, '300'), (250, '0.4'), (350, code)))
+        _text(page, 300, PROSE)
+
+    found = regions(*_page(tmp_path, draw))
+    assert [(r.kind, r.label) for r in found] == [('table', 'Untitled table 1')]
+    assert found[0].bbox.y0 < 140  # its header and units rows inside it
+    assert found[0].table.rows == (
+        ('L', 'I', 'R', 'Ordering code'),
+        ('uH', 'mA', 'W', ''),
+        ('11', '300', '0.4', 'B110'),
+        ('22', '300', '0.4', 'B220'),
+        ('51', '300', '0.4', 'B510'),
+    )

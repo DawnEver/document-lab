@@ -15,10 +15,13 @@
   font sizes to the left, its page column the whole block's; lines side by side read right to left.
 - Words: :func:`wordy` tells text that reads as words from OCR noise (a figure's labels, a garbled leader);
   :func:`body_size` is the size most of a document's text is set in.
+- Running heads and feet: :func:`running` finds the lines at a page's top and foot that recur at the same place
+  on :data:`RUNNING_PAGES` pages (a page number its digits aside): a document's furniture, not its body.
 """
 
 from __future__ import annotations
 
+import itertools
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -37,12 +40,16 @@ __all__ = [
     'CLAUSE_GAP',
     'GUTTER',
     'LINE_GAP',
+    'RUNNING_PAGES',
     'Block',
     'Line',
+    'Running',
     'blocks',
     'body_size',
+    'column',
     'lines',
     'ordered',
+    'running',
     'wordy',
 ]
 
@@ -57,6 +64,9 @@ GUTTER: Final = 5.0
 #: Words: a word of at least this many letters, and letters (and spaces) this share of the text.
 WORD_LETTERS: Final = 4
 LETTER_SHARE: Final = 0.6
+#: A line runs (a running head or foot) when this many pages -- every page of a shorter document, two at least -- set
+#: it at the same place: within one font size of it down the page, its left, right or middle within one across.
+RUNNING_PAGES: Final = 3
 _CLAUSE: Final = re.compile(r'^(?:\d+(?:\.\d+)*\.?|[-\N{EN DASH}\N{EM DASH}\N{BULLET}])$')  # a clause number, a bullet
 
 
@@ -137,16 +147,16 @@ def lines(page: Page, *, weighted: bool) -> list[Line]:
         else:
             found.append(Line([span], ''))
     for line in found:
-        line.column = _column(line.x0, line.x1, mid)
+        line.column = column(line.x0, line.x1, mid)
     columns = _columns_down(s for s in page.spans if s.vertical)
     for block in _vertical_blocks(columns):
-        column = _column(min(ln.x0 for ln in block), max(ln.x1 for ln in block), mid)
+        side = column(min(ln.x0 for ln in block), max(ln.x1 for ln in block), mid)
         for line in block:
-            line.column = column
+            line.column = side
     return [line for line in found + columns if line.text]
 
 
-def _column(x0: float, x1: float, mid: float) -> str:
+def column(x0: float, x1: float, mid: float) -> str:
     """The page column a line (or a vertical block) from ``x0`` to ``x1`` stands in: L, R or F (across ``mid``)."""
     return 'L' if x1 <= mid + GUTTER else 'R' if x0 >= mid - GUTTER else 'F'
 
@@ -273,3 +283,56 @@ def body_size(doc: Document) -> float:
     for span in doc.spans():
         sizes[round(span.size, 1)] += len(span.text)
     return sizes.most_common(1)[0][0] if sizes else 0.0
+
+
+@dataclass(frozen=True)
+class Running:
+    """A page's running ``head`` and ``foot``: its furniture lines at its top and its foot, each top to bottom."""
+
+    head: tuple[Line, ...]
+    foot: tuple[Line, ...]
+
+
+def running(doc: Document) -> list[Running]:
+    """Each page's running head and foot: the lines at its top, and at its foot, that other pages repeat.
+
+    A line repeats when :data:`RUNNING_PAGES` pages (every page of a shorter document, two at least) set its text --
+    as :func:`_furniture_key` compares it, so a page number repeats -- at its place. The head is the page's lines
+    from the top while each repeats, the foot from the bottom: a repeated line inside the body (a heading each page
+    opens a table with) is not reached. Only a whole document can tell, and a page alone has none.
+    """
+    pages = [sorted(lines(page, weighted=True), key=lambda ln: (ln.y0, ln.x0)) for page in doc.pages]
+    need = max(2, min(RUNNING_PAGES, len(pages)))
+    seen: dict[str, list[tuple[int, Line]]] = {}
+    for number, found in enumerate(pages):
+        for line in found:
+            seen.setdefault(_furniture_key(line.text), []).append((number, line))
+
+    def repeats(number: int, line: Line) -> bool:
+        reach = line.size
+        here = {
+            other
+            for other, them in seen[_furniture_key(line.text)]
+            if abs((them.y0 + them.y1) / 2 - (line.y0 + line.y1) / 2) <= reach
+            and min(abs(them.x0 - line.x0), abs(them.x1 - line.x1), abs(them.x0 + them.x1 - line.x0 - line.x1) / 2)
+            <= reach
+        }
+        return len(here | {number}) >= need
+
+    out = []
+    for number, found in enumerate(pages):
+        head = list(itertools.takewhile(lambda ln, n=number: repeats(n, ln), found))
+        rest = found[len(head) :]
+        foot = list(itertools.takewhile(lambda ln, n=number: repeats(n, ln), reversed(rest)))
+        out.append(Running(tuple(head), tuple(reversed(foot))))
+    return out
+
+
+def _furniture_key(text: str) -> str:
+    """``text`` as running lines are compared: case and spacing aside.
+
+    In a line without a letter (a page number, ``- 3 -``) each run of digits is one ``#``; a line of words
+    (``Section 2``) must repeat as it is.
+    """
+    text = ' '.join(text.casefold().split())
+    return text if any(c.isalpha() for c in text) else re.sub(r'\d+', '#', text)

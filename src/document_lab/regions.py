@@ -30,17 +30,17 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Literal
 
 from document_lab import layout
-from document_lab.ir import BBox
+from document_lab.ir import BBox, Table, union
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from document_lab.ink import Drawing
-    from document_lab.ir import Page
+    from document_lab.ir import Page, TextSpan
 
 __all__ = ['Region', 'regions']
 
@@ -71,11 +71,18 @@ ROW_GAP: Final = 3.0
 SHORT_CELL: Final = 3
 #: A cell reads at least this many letters or digits (or is a dash); fewer is a speck OCR read.
 CELL_CHARS: Final = 2
+#: The PDF text render mode of an OCR layer: its glyphs invisible over the picture they were read from.
+INVISIBLE: Final = 3
 _DASHES: Final = frozenset('-\N{HYPHEN}\N{EN DASH}\N{EM DASH}\N{MINUS SIGN}')
 #: A drawing at least this many body sizes high and wide may be a region (`document_lab.ink`); a rule is not.
 DRAWN_MIN: Final = 1.5
 #: ...and draws a straight stroke at least this many body sizes long: words OCR missed are glyphs, none so long.
-DRAWN_STROKE: Final = 2.0
+DRAWN_STROKE: Final = 1.5
+#: A table's columns stand at least this many body sizes apart: wider than a word space, as no cell's words are.
+COLUMN_GAP: Final = 0.5
+#: A drawing of at least this many rules across it, only words off them, is a table even where lines long enough to
+#: be prose cross it (a data sheet's two columns of names and values, its rows ruled apart).
+RULED_ROWS: Final = 3
 #: A drawing in a text line's band at most this many times the line's height frames its words (a link, a header).
 FRAME_LINES: Final = 3.0
 FRAME_FILL: Final = 0.8
@@ -95,6 +102,8 @@ _MATH_FONT: Final = re.compile(r'(?i)math|cmmi|cmsy|cmex|stix')
 JOIN_GAP: Final = 3.0
 #: A drawing's title: the nearest line of words above it, across it, within this many body sizes.
 TITLE_REACH: Final = 3.0
+#: An untitled region's label starts so: no caption or number told it.
+_UNTITLED: Final = 'Untitled '
 _HEADING: Final = re.compile(r'^\d+(?:\.\d+)*\.?\s+[A-Z]')
 
 Kind = Literal['figure', 'table', 'equation']
@@ -102,11 +111,21 @@ Kind = Literal['figure', 'table', 'equation']
 
 @dataclass(frozen=True)
 class Region:
-    """A ``figure``, ``table`` or ``equation`` region of a page: its ``label`` as read, its ``bbox`` in points."""
+    """A ``figure``, ``table`` or ``equation`` region of a page: its ``label`` as read, its ``bbox`` in points.
+
+    ``table``: a table's cells as its text sets them (:func:`_cells`), its box theirs; None for a figure or an
+    equation, and for a table whose text does not make two rows of two columns (its words unread).
+    """
 
     kind: Kind
     label: str
     bbox: BBox
+    table: Table | None = None
+
+    @property
+    def captioned(self) -> bool:
+        """Was it told by its caption or number (``Table 1``, ``(3)``), not as an ``Untitled ...`` one?"""
+        return not self.label.startswith(_UNTITLED)
 
 
 class _Page:
@@ -177,10 +196,15 @@ def _bands(page: _Page) -> list[list[layout.Line]]:
     return _bands_of(page, page.lines)
 
 
-def _noise(text: str) -> bool:
-    """A speck OCR read as a cell: under :data:`CELL_CHARS` letters or digits, and not a dash (an empty entry)."""
-    stripped = text.strip()
-    return sum(c.isalnum() for c in stripped) < CELL_CHARS and stripped not in _DASHES
+def _speck(line: layout.Line) -> bool:
+    """A speck OCR read as a cell.
+
+    OCR'd (an invisible text layer), under :data:`CELL_CHARS` letters or digits, and not a dash (an empty entry).
+    Text the document sets itself is what it sets: a lone sign is no speck.
+    """
+    stripped = line.text.strip()
+    ocr = all(s.render_mode == INVISIBLE for s in line.spans)
+    return ocr and sum(c.isalnum() for c in stripped) < CELL_CHARS and stripped not in _DASHES
 
 
 def _row(page: _Page, band: list[layout.Line]) -> bool:
@@ -188,14 +212,15 @@ def _row(page: _Page, band: list[layout.Line]) -> bool:
 
     :data:`ROW_CELLS` of them are set near the body size and none larger (a lone ``-`` may read smaller); one is short,
     at most :data:`SHORT_CELL` words -- a code, a year, a dash -- which columns of prose, however OCR splits them,
-    are not.
+    are not. No cell is a speck OCR read (:func:`_speck`); a unit row's lone sign the document sets itself (an ohm
+    sign) is a cell.
     """
     near = [ln for ln in band if page.body / ROW_SIZE <= ln.size <= ROW_SIZE * page.body]
     short = any(len(ln.text.split()) <= SHORT_CELL for ln in band)  # a code, a year, a '-': columns of prose have none
     return (
         len(near) >= ROW_CELLS
         and short
-        and not any(_noise(ln.text) for ln in band)
+        and not any(_speck(ln) for ln in band)
         and all(ln.size <= ROW_SIZE * page.body and not page.prose(ln) and '....' not in ln.text for ln in band)
     )
 
@@ -242,7 +267,7 @@ def _untitled_tables(page: _Page, held: list[Region]) -> list[Region]:
         inside = any(r.bbox.y0 <= top <= r.bbox.y1 for r in held)
         if rows >= TABLE_ROWS and not inside:
             box = page.box(top - PAD * page.body, bottom + PAD * page.body)
-            found.append(Region('table', f'Untitled table {len(found) + 1}', box))
+            found.append(Region('table', _UNTITLED + 'table', box))
         i = j if rows >= TABLE_ROWS else i + 1
     return found
 
@@ -253,27 +278,32 @@ def _drawn(page: _Page, drawings: Sequence[Drawing], held: list[Region]) -> list
     A drawing counts when it lies within the text's column (a margin's sideways license note, a cover's band to the
     page edge do not), is at least :data:`DRAWN_MIN` body sizes high and wide (a rule under a header is not), is no
     box round a line's words (a link's frame), draws a stroke :data:`DRAWN_STROKE` body sizes long (words OCR missed
-    draw none), crosses no prose (a box round a note, links over lines do) and lies in no region found.
-    A drawing ruled with a frame and a rule inside it, nothing off its rules larger than a body size (words, which
-    may be too small for OCR to read), is a table; a bare rectangle round words (a link's frame) is no region. Other
+    draw none), crosses no prose (a box round a note, links over lines do) unless its rows are ruled apart, and lies
+    in no region found. A drawing ruled with a frame and a rule inside it, or with :data:`RULED_ROWS` rules across
+    it, nothing off its rules larger than a body size (words, which may be too small for OCR to read), is a table;
+    a bare rectangle round words (a link's frame) is no region. Other
     drawings are joined into figures (:func:`_joined`); one at most :data:`EQUATION_HEIGHT` body sizes high whose text
     reads as no word and as math (:func:`_math`: a formula, OCR'd or set, its fraction bars drawn) is an equation,
     else a figure -- a cover's logo, drawn without text or round its brand's, is no formula.
     """
     found: list[Region] = []
-    tables = sum(r.label.startswith('Untitled table') for r in held)
     pieces: list[BBox] = []
     for drawing in drawings:
         box = drawing.box
         cx, cy = (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2
+        words_only = drawing.loose <= page.body  # off its rules, only words
+        rowed = drawing.rules[0] >= RULED_ROWS and words_only  # rows ruled apart: a table, its lines however long
         if (
             box.x0 < page.left - page.body
             or box.x1 > page.right + page.body
             or min(box.width, box.height) < DRAWN_MIN * page.body
             or any(_round_words(box, ln) for ln in page.lines)
-            or any(
-                page.prose(ln) and ln.x0 < box.x1 and box.x0 < ln.x1 and ln.y0 < box.y1 and box.y0 < ln.y1
-                for ln in page.lines
+            or (
+                not rowed
+                and any(
+                    page.prose(ln) and ln.x0 < box.x1 and box.x0 < ln.x1 and ln.y0 < box.y1 and box.y0 < ln.y1
+                    for ln in page.lines
+                )
             )
             or any(r.bbox.x0 <= cx <= r.bbox.x1 and r.bbox.y0 <= cy <= r.bbox.y1 for r in [*held, *found])
             or (drawing.rules == (2, 2) and drawing.loose <= page.body)  # a bare rectangle, words at most
@@ -283,21 +313,17 @@ def _drawn(page: _Page, drawings: Sequence[Drawing], held: list[Region]) -> list
         pad = PAD * page.body
         grown = BBox(max(box.x0 - pad, 0.0), max(box.y0 - pad, 0.0), box.x1 + pad, box.y1 + pad)
         ruled = min(drawing.rules) >= 2 and max(drawing.rules) >= 3  # noqa: PLR2004 -- a frame and a rule in it
-        if ruled and drawing.loose <= page.body:  # off the rules, only words
-            tables += 1
-            found.append(Region('table', f'Untitled table {tables}', grown))
+        if (ruled and words_only) or rowed:
+            found.append(Region('table', _UNTITLED + 'table', grown))
         else:
             pieces.append(grown)
-    equations = figures = 0
     for box in _joined(page, pieces):
         words = [ln for ln in page.lines if box.x0 <= ln.x0 and ln.x1 <= box.x1 and box.y0 <= ln.y0 and ln.y1 <= box.y1]
         formula = not any(layout.wordy(ln.text) for ln in words) and _math(words)
         if box.height <= EQUATION_HEIGHT * page.body and formula:
-            equations += 1
-            found.append(Region('equation', f'Untitled equation {equations}', box))
+            found.append(Region('equation', _UNTITLED + 'equation', box))
         else:
-            figures += 1
-            found.append(Region('figure', f'Untitled figure {figures}', box))
+            found.append(Region('figure', _UNTITLED + 'figure', box))
     return found
 
 
@@ -383,6 +409,73 @@ def _bands_of(page: _Page, lines: list[layout.Line]) -> list[list[layout.Line]]:
     return bands
 
 
+def _cells(page: _Page, region: Region) -> Table | None:
+    """The cells of table ``region`` as its text sets them: columns apart by white space, rows by baseline.
+
+    Its text is the spans whose middle lies in it, below its caption. A column is a run across the region that some
+    span covers, apart from the next by :data:`COLUMN_GAP` body sizes that no span of any row crosses; a row is spans
+    whose middles lie within half a body size. A row with nothing in the first column carries on the cells of the row
+    above (a value wrapped onto a second line). A cell's text is its spans as a line (`document_lab.layout`). None
+    when the text does not make two rows of two columns.
+    """
+    caption = next((ln for ln in page.lines if (c := _caption(ln)) and c[1] == region.label), None)
+    box, below = region.bbox, caption.y1 if caption is not None else region.bbox.y0
+    spans = [
+        s
+        for s in page.page.spans
+        if s.text.strip() and not s.vertical and box.x0 <= s.center[0] <= box.x1 and below < s.center[1] <= box.y1
+    ]
+    columns = _columns(spans, COLUMN_GAP * page.body)
+    rows: list[list[list[TextSpan]]] = []
+    for band in _span_bands(spans, page.body / 2):
+        row: list[list[TextSpan]] = [[] for _ in columns]
+        for s in band:
+            row[next(i for i, (x0, x1) in enumerate(columns) if x0 <= s.provenance.bbox.x0 <= x1)].append(s)
+        if rows and not row[0]:  # no first cell: the row above, carried on
+            for cell, more in zip(rows[-1], row, strict=True):
+                cell.append(more)
+        else:
+            rows.append([[cell] for cell in row])
+    if len(rows) < TABLE_ROWS or len(columns) < 2:  # noqa: PLR2004 -- a label and its value
+        return None
+
+    def text(lines: list[list[TextSpan]]) -> str:
+        return ' '.join(layout.Line(line, '').text for line in lines if line)
+
+    def bbox(lines: list[list[TextSpan]]) -> BBox | None:
+        boxes = [s.provenance.bbox for line in lines for s in line]
+        return union(boxes) if boxes else None
+
+    return Table(
+        tuple(tuple(text(cell) for cell in row) for row in rows),
+        tuple(tuple(bbox(cell) for cell in row) for row in rows),
+        spans[0].provenance.at(bbox=union([s.provenance.bbox for s in spans])),
+    )
+
+
+def _columns(spans: list[TextSpan], gap: float) -> list[tuple[float, float]]:
+    """The runs across the page ``spans`` cover, left to right, each apart from the next by ``gap`` points or more."""
+    runs: list[list[float]] = []
+    for s in sorted(spans, key=lambda s: s.provenance.bbox.x0):
+        b = s.provenance.bbox
+        if runs and b.x0 - runs[-1][1] < gap:
+            runs[-1][1] = max(runs[-1][1], b.x1)
+        else:
+            runs.append([b.x0, b.x1])
+    return [(x0, x1) for x0, x1 in runs]
+
+
+def _span_bands(spans: list[TextSpan], reach: float) -> list[list[TextSpan]]:
+    """``spans`` in bands top to bottom: each span within ``reach`` points down of its band's first middle."""
+    bands: list[list[TextSpan]] = []
+    for s in sorted(spans, key=lambda s: s.center[1]):
+        if bands and s.center[1] - bands[-1][0].center[1] <= reach:
+            bands[-1].append(s)
+        else:
+            bands.append([s])
+    return bands
+
+
 def regions(page: Page, body: float, drawings: Sequence[Drawing] = ()) -> list[Region]:
     """The figures, tables and equations of ``page`` (``body``: the document's body size), top to bottom.
 
@@ -401,6 +494,15 @@ def regions(page: Page, body: float, drawings: Sequence[Drawing] = ()) -> list[R
             found.append(_equation(judged, line, f'({number.group(1)})'))
     found += _untitled_tables(judged, found)
     found += _drawn(judged, drawings, found)
+    found = [replace(r, table=_cells(judged, r)) if r.kind == 'table' else r for r in found]
     # Clamped to the page, a region its text sets across the page's edge can be left without area (a caption the foot
     # cuts, prose right above it: its figure's top falls below the foot); it shows nothing and is none.
-    return sorted((r for r in found if r.bbox.x1 > r.bbox.x0 and r.bbox.y1 > r.bbox.y0), key=lambda r: r.bbox.y0)
+    shown = sorted((r for r in found if r.bbox.x1 > r.bbox.x0 and r.bbox.y1 > r.bbox.y0), key=lambda r: r.bbox.y0)
+    counts: dict[str, int] = {}
+    out = []
+    for r in shown:  # untitled ones numbered in page order, whichever way each was told
+        if not r.captioned:
+            counts[r.kind] = counts.get(r.kind, 0) + 1
+            r = replace(r, label=f'{_UNTITLED}{r.kind} {counts[r.kind]}')  # noqa: PLW2901
+        out.append(r)
+    return out

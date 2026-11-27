@@ -12,6 +12,9 @@ Lines and their reading order are `document_lab.layout`'s.
   page (:data:`TOC_LINES` such entries): it names the sections, it does not open them.
 - Paragraphs: lines of one column closer than :data:`PARAGRAPH_GAP` line heights join with a space (a hyphen at a
   line end joins the word); a larger gap, a heading or a column change starts a new paragraph.
+- Placed blocks: a caller that knows a page's regions (`document_lab.per_page`) hands boxes with their own markdown
+  (:data:`Placed`: a table read from its cells, a figure's link); the lines inside a box leave the paragraphs, and the
+  block stands where the box does in reading order. :func:`table` writes rows as a markdown table.
 """
 
 from __future__ import annotations
@@ -20,11 +23,18 @@ import re
 from typing import TYPE_CHECKING, Final
 
 from document_lab import layout
+from document_lab.ir import BBox, Provenance, TextSpan
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from document_lab.ir import Document, Page
 
-__all__ = ['page_markdowns', 'to_markdown']
+__all__ = ['Placed', 'page_markdowns', 'table', 'to_markdown']
+
+#: A box of a page and the markdown that stands for the lines inside it.
+type Placed = tuple[BBox, str]
+_HOLDER: Final = '\N{OBJECT REPLACEMENT CHARACTER}'  # the text of the line that holds a placed block's place
 
 #: A gap between lines larger than this many line heights starts a paragraph.
 PARAGRAPH_GAP: Final = 0.6
@@ -53,33 +63,46 @@ def to_markdown(doc: Document) -> str:
     return '\n\n'.join(_rejoin([block for page in _blocks(doc) for block in page])) + '\n'
 
 
-def page_markdowns(doc: Document) -> list[str]:
+def page_markdowns(doc: Document, placed: Sequence[Sequence[Placed]] = ()) -> list[str]:
     """Each page's own markdown, in order (empty for a page without text).
 
     Body size and title are judged over the whole document; nothing is joined across a page break: a page stands alone.
+    ``placed``: each page's placed blocks (none for a page past its end).
     """
-    return ['\n\n'.join(_rejoin(page)) + '\n' if page else '' for page in _blocks(doc)]
+    return ['\n\n'.join(_rejoin(page)) + '\n' if page else '' for page in _blocks(doc, placed)]
 
 
-def _blocks(doc: Document) -> list[list[str]]:
+def table(rows: Sequence[Sequence[str]]) -> str:
+    """``rows`` as a markdown table, the first its header; a ``|`` in a cell escaped, a short row padded."""
+    width = max(len(row) for row in rows)
+    cells = [[c.replace('|', ESCAPE + '|') for c in row] + [''] * (width - len(row)) for row in rows]
+    lines = [f'| {" | ".join(row)} |' for row in cells]
+    return '\n'.join([lines[0], '|' + ' --- |' * width, *lines[1:]])
+
+
+def _blocks(doc: Document, placed: Sequence[Sequence[Placed]] = ()) -> list[list[str]]:
     weighted = any(span.bold for span in doc.spans())
     body = layout.body_size(doc)
     title_size = max((s.size for s in doc.pages[0].spans), default=0.0) if doc.pages else 0.0
-    return [_page_blocks(page, body, title_size, weighted=weighted) for page in doc.pages]
+    return [
+        _page_blocks(page, body, title_size, placed[i] if i < len(placed) else (), weighted=weighted)
+        for i, page in enumerate(doc.pages)
+    ]
 
 
 def _rejoin(blocks: list[str]) -> list[str]:
     """Paragraphs cut by a column or page break, joined again.
 
     A block starting lower-case continues the nearest earlier paragraph (within :data:`REJOIN_REACH` blocks,
-    skipping page furniture between them) that ends unterminated; a heading stops the search.
+    skipping page furniture between them) that ends unterminated; a heading or a placed block (a region's link
+    leads it) stops the search.
     """
     out: list[str] = []
     for block in blocks:
         target = None
         if block[:1].islower():
             for i in range(len(out) - 1, max(-1, len(out) - 1 - REJOIN_REACH), -1):
-                if out[i].startswith('#'):
+                if out[i].startswith(('#', '![')):
                     break
                 if not out[i].rstrip().endswith(('.', ':', '?', '!')):
                     target = i
@@ -109,18 +132,47 @@ def _heading(line: layout.Line, body: float, title_size: float | None, *, weight
     return None
 
 
-def _page_blocks(page: Page, body: float, title_size: float | None, *, weighted: bool) -> list[str]:
+def _with_placed(page: Page, lines: list[layout.Line], placed: Sequence[Placed]) -> dict[int, str]:
+    """``lines`` less those inside a placed box, a line holding each block's place added; the blocks by holder id."""
+    held: dict[int, str] = {}
+
+    def inside(line: layout.Line) -> bool:
+        cx, cy = (line.x0 + line.x1) / 2, (line.y0 + line.y1) / 2
+        return any(box.x0 <= cx <= box.x1 and box.y0 <= cy <= box.y1 for box, _ in placed)
+
+    lines[:] = [ln for ln in lines if not inside(ln)]
+    for box, text in placed:
+        here = Provenance('', '', page=page.number, bbox=box)
+        holder = layout.Line([TextSpan(_HOLDER, 0.0, '', here)], layout.column(box.x0, box.x1, page.width / 2))
+        lines.append(holder)
+        held[id(holder)] = text
+    return held
+
+
+def _page_blocks(
+    page: Page, body: float, title_size: float | None, placed: Sequence[Placed] = (), *, weighted: bool
+) -> list[str]:
     blocks: list[str] = []
     paragraph: list[str] = []
     previous: layout.Line | None = None
     title: list[str] = []
+    beside: list[str] = []  # placed blocks met while a title wraps on: they follow it, not cut it
 
     def end_paragraph() -> None:
         if paragraph:
             blocks.append(' '.join(paragraph))
             paragraph.clear()
 
-    lines = layout.ordered(layout.lines(page, weighted=weighted))
+    def end_title() -> None:
+        end_paragraph()
+        blocks.append('# ' + ' '.join(title))
+        blocks.extend(beside)
+        title.clear()
+        beside.clear()
+
+    found = layout.lines(page, weighted=weighted)
+    held = _with_placed(page, found, placed)
+    lines = layout.ordered(found)
     contents = sum(bool(_TOC_ENTRY.match(line.text)) for line in lines) >= TOC_LINES
     for line in lines:
         heading = None if contents else _heading(line, body, title_size, weighted=weighted)
@@ -128,10 +180,16 @@ def _page_blocks(page: Page, body: float, title_size: float | None, *, weighted:
             title.append(line.text)  # a title wraps over several lines
             previous = line
             continue
+        if id(line) in held:
+            if title:
+                beside.append(held[id(line)])
+            else:
+                end_paragraph()
+                blocks.append(held[id(line)])
+                previous = None
+            continue
         if title:
-            end_paragraph()
-            blocks.append('# ' + ' '.join(title))
-            title.clear()
+            end_title()
         if heading:
             end_paragraph()
             blocks.append(heading)
@@ -154,8 +212,7 @@ def _page_blocks(page: Page, body: float, title_size: float | None, *, weighted:
             paragraph.append(ESCAPE + line.text if line.text.startswith('#') else line.text)
         previous = line
     if title:
-        end_paragraph()
-        blocks.append('# ' + ' '.join(title))
+        end_title()
     end_paragraph()
     return blocks
 

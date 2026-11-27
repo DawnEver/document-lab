@@ -483,3 +483,200 @@ fn a_predefined_v_cmap_writes_vertically() {
         stops(&events[0])
     );
 }
+
+/// The text of the one-byte `codes` (hex) in the simple font `/BaseFont /<name>` of `subtype`, whose `ToUnicode`
+/// states `to_unicode` (`bfrange`/`bfchar` blocks; none when empty), with the descriptor flags `flags`.
+fn simple_text(name: &str, subtype: &str, flags: u32, to_unicode: &str, codes: &str) -> String {
+    let cmap = common::stream(
+        "",
+        &format!("1 begincodespacerange <00> <FF> endcodespacerange {to_unicode}"),
+    );
+    let reference = if to_unicode.is_empty() {
+        ""
+    } else {
+        "/ToUnicode 7 0 R"
+    };
+    let font = format!(
+        "<< /Type /Font /Subtype /{subtype} /BaseFont /{name} /FontDescriptor 6 0 R {reference} >>"
+    );
+    let descriptor = format!("<< /Type /FontDescriptor /FontName /{name} /Flags {flags} >>");
+    let (events, _) = texts(
+        &format!("BT /F1 10 Tf 0 50 Td <{codes}> Tj ET"),
+        &font,
+        &[&descriptor, &cmap],
+    );
+    text(&events[0])
+}
+
+/// A `ToUnicode` stating each code `c` as U+F000 + `c`: the (3,0) symbol `cmap` convention (ISO 32000-2 9.6.5.4).
+const PRIVATE_USE: &str = "1 beginbfrange <00> <FF> <F000> endbfrange";
+
+#[test]
+fn a_symbol_fonts_private_use_text_reads_through_the_symbol_encoding() {
+    // Omega, greaterequal, lessequal, copyrightsans, copyrightserif, parenlefttp, radicalex: the private-use code
+    // less U+F000 is the Symbol code (Annex D.5); a corporate-use code Adobe's table gives for a glyph Unicode has
+    // since encoded is that character (Apple's Symbol table); the radical extender, which Unicode does not encode,
+    // stays as Adobe states it.
+    for name in ["SymbolMT", "ABCDEF+SymbolMT", "Symbol", "Symbol,Bold"] {
+        assert_eq!(
+            simple_text(name, "TrueType", 4, PRIVATE_USE, "57B3A3E3D3E660"),
+            "\u{2126}\u{2265}\u{2264}\u{A9}\u{A9}\u{239B}\u{F8E5}",
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_dingbat_fonts_private_use_text_reads_through_its_table() {
+    for (name, expected) in [
+        // Wingdings: black small square, check mark, black medium square, a space; w-1255 (code FF, not encoded in
+        // Unicode) stays as stated, as does a code a font has no glyph for (Wingdings 2 and 3 end before FC).
+        ("Wingdings", "\u{25AA}\u{2713}\u{25FC} \u{F0FF}"),
+        (
+            "ABCDEF+Wingdings-Regular",
+            "\u{25AA}\u{2713}\u{25FC} \u{F0FF}",
+        ),
+        ("Wingdings2", "\u{1F794}\u{F0FC}\u{2464} \u{F0FF}"),
+        ("Wingdings#202", "\u{1F794}\u{F0FC}\u{2464} \u{F0FF}"),
+        ("Wingdings3", "\u{1F824}\u{F0FC}\u{1F858} \u{F0FF}"),
+        ("Webdings", "\u{1F56E}\u{1F30D}\u{2B24} \u{1F54A}"),
+    ] {
+        assert_eq!(
+            simple_text(name, "TrueType", 4, PRIVATE_USE, "A7FC6E20FF"),
+            expected,
+            "{name}"
+        );
+    }
+    // ZapfDingbats: a20 (heavy check mark), a89 (Adobe's corporate use; U+2768 since Unicode 3.2).
+    assert_eq!(
+        simple_text("ZapfDingbats", "Type1", 4, PRIVATE_USE, "3480"),
+        "\u{2714}\u{2768}"
+    );
+}
+
+#[test]
+fn a_stated_character_wins_and_other_fonts_private_use_stays() {
+    // A ToUnicode stating a real character is read as stated, in a symbol font too.
+    let stated = "2 beginbfchar <57> <03A9> <61> <0061> endbfchar";
+    assert_eq!(
+        simple_text("SymbolMT", "TrueType", 4, stated, "5761"),
+        "\u{3A9}a"
+    );
+    // A font other than the symbol fonts keeps its private-use text: nothing says what it shows.
+    assert_eq!(
+        simple_text("ArialMT", "TrueType", 4, PRIVATE_USE, "41FC"),
+        "\u{F041}\u{F0FC}"
+    );
+    assert_eq!(
+        simple_text("WingdingsLookalike", "TrueType", 4, PRIVATE_USE, "FC"),
+        "\u{F0FC}"
+    );
+}
+
+#[test]
+fn a_symbol_font_without_text_reads_its_codes_through_its_own_encoding() {
+    // A symbolic TrueType font, not embedded, no ToUnicode: its codes select glyphs through its (3,0) cmap, which
+    // for these fonts is their encoding.
+    assert_eq!(
+        simple_text("Wingdings", "TrueType", 4, "", "A7FC"),
+        "\u{25AA}\u{2713}"
+    );
+    assert_eq!(
+        simple_text("SymbolMT", "TrueType", 4, "", "57E3"),
+        "\u{2126}\u{A9}"
+    );
+    // A Type 1 font named for Symbol, without an encoding: Symbol's built-in one, its corporate-use codes resolved.
+    assert_eq!(
+        simple_text("SymbolMT", "Type1", 4, "", "61E3E6"),
+        "\u{3B1}\u{A9}\u{239B}"
+    );
+    assert_eq!(
+        simple_text("Symbol", "Type1", 4, "", "61E3E6"),
+        "\u{3B1}\u{A9}\u{239B}"
+    );
+}
+
+#[test]
+fn a_glyph_name_adobe_gave_a_corporate_use_code_reads_as_the_character_unicode_since_encoded() {
+    // A TeX extension font names its bracket pieces as Symbol does; the Adobe Glyph List gives them U+F8xx, Unicode
+    // 3.2 their own characters. A `uniF8EB` name states the private-use code itself, which stays.
+    let font = "<< /Type /Font /Subtype /Type1 /BaseFont /CMEX10
+        /Encoding << /Type /Encoding /Differences [65 /parenlefttp /bracketleftex /integralex /uniF8EB] >> >>";
+    let (events, _) = texts("BT /F1 10 Tf 0 50 Td (ABCD) Tj ET", font, &[]);
+    assert_eq!(text(&events[0]), "\u{239B}\u{23A2}\u{23AE}\u{F8EB}");
+}
+
+/// A TrueType program, as ASCII hex, holding only a `name` table whose PostScript name (name ID 6, Windows Unicode)
+/// is `name`.
+fn sfnt_named(name: &str) -> String {
+    let utf16: Vec<u8> = name.encode_utf16().flat_map(u16::to_be_bytes).collect();
+    let mut table = Vec::new();
+    for v in [
+        0u16,
+        1,
+        18,
+        3,
+        1,
+        0x409,
+        6,
+        u16::try_from(utf16.len()).unwrap(),
+        0,
+    ] {
+        table.extend(v.to_be_bytes());
+    }
+    table.extend(&utf16);
+    let mut data = Vec::new();
+    data.extend(0x0001_0000u32.to_be_bytes());
+    for v in [1u16, 16, 0, 0] {
+        data.extend(v.to_be_bytes());
+    }
+    data.extend(b"name");
+    for v in [0u32, 28, u32::try_from(table.len()).unwrap()] {
+        data.extend(v.to_be_bytes());
+    }
+    data.extend(table);
+    let mut hex: String = data
+        .iter()
+        .flat_map(|b| [b >> 4, b & 15].map(|n| char::from_digit(u32::from(n), 16).unwrap_or('0')))
+        .collect();
+    hex.push('>');
+    hex
+}
+
+/// The text of `<codes>` in a composite font `/BaseFont /<base>` whose embedded TrueType program names itself
+/// `program`, its `ToUnicode` stating each code as U+F000 + code.
+fn embedded_text(base: &str, program: &str, codes: &str) -> String {
+    let font = format!(
+        "<< /Type /Font /Subtype /Type0 /BaseFont /{base} /Encoding /Identity-H /DescendantFonts [6 0 R]
+        /ToUnicode 7 0 R >>"
+    );
+    let cid =
+        format!("<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{base} /FontDescriptor 8 0 R >>");
+    let cmap = common::stream(
+        "",
+        "1 begincodespacerange <0000> <FFFF> endcodespacerange 1 beginbfrange <0000> <00FF> <F000> endbfrange",
+    );
+    let descriptor =
+        format!("<< /Type /FontDescriptor /FontName /{base} /Flags 4 /FontFile2 9 0 R >>");
+    let program = common::stream("/Filter /ASCIIHexDecode", &sfnt_named(program));
+    let (events, _) = texts(
+        &format!("BT /F1 10 Tf 0 50 Td <{codes}> Tj ET"),
+        &font,
+        &[&cid, &cmap, &descriptor, &program],
+    );
+    text(&events[0])
+}
+
+#[test]
+fn a_symbol_font_under_a_generic_name_is_known_by_its_programs_own_name() {
+    // A producer's `CIDFont+F7` whose program names itself SymbolMT: Omega and greaterequal.
+    assert_eq!(
+        embedded_text("CIDFont+F7", "SymbolMT", "005700B3"),
+        "\u{2126}\u{2265}"
+    );
+    // A program naming itself anything else says nothing of what its private-use codes show.
+    assert_eq!(
+        embedded_text("CIDFont+F5", "ArialMT", "005700B3"),
+        "\u{F057}\u{F0B3}"
+    );
+}

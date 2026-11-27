@@ -23,6 +23,10 @@ pub struct Samples {
     pub data: Vec<u8>,
     /// The image codec `data` is still encoded in.
     pub codec: Option<Codec>,
+    /// Its `/Decode` array, when it states one: how each sample maps into its component's range.
+    pub decode: Option<Vec<f64>>,
+    /// Whether it states a mask (`/SMask` or `/Mask`): what shows of it is then more than its samples.
+    pub masked: bool,
 }
 
 impl File {
@@ -51,6 +55,11 @@ impl File {
                 .ok_or_else(|| Error::malformed(format!("image {num} states no /ColorSpace")))?;
             Some(self.color_space(&value, &Dict::new())?)
         };
+        let decode = self.get(dict, b"Decode")?.and_then(|v| {
+            v.as_array()
+                .map(|a| a.iter().filter_map(Object::as_number).collect())
+        });
+        let masked = self.get(dict, b"SMask")?.is_some() || self.get(dict, b"Mask")?.is_some();
         let decoded = self.decode(&stream)?;
         Ok(Samples {
             width: int(b"Width")?.unwrap_or(0),
@@ -63,6 +72,8 @@ impl File {
             },
             data: decoded.data,
             codec: decoded.codec,
+            decode,
+            masked,
         })
     }
 }

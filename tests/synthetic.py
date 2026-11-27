@@ -758,6 +758,91 @@ def draw_booktabs(
     return pymupdf.Rect(x0, y0, right, y0 + len(rows) * h)
 
 
+#: A table ruled under every row whose cells wrap, each cell its lines: row 1 holds cells of one, two and three lines,
+#: row 2 two cells of two lines beside short ones (alone, rows of their own to the eye), row 3 one line each.
+WRAPPED_ROWS = (
+    (('Ref.',), ('Domain',), ('Objective',), ('Remarks',)),
+    (('[1]',), ('Stator',), ('Minimize the noise', 'and vibration'), ('Mesh dependence', 'was not studied', 'at all')),
+    (('[2]',), ('Rotor',), ('Minimize torque', 'ripple'), ('Only half a pole', 'was modeled')),
+    (('[3]',), ('Rotor poles',), ('Maximize torque',), ('N/A',)),
+)
+#: A wrapped table's columns, each this many points wide, and the step from one line of a cell to the next.
+WRAPPED_WIDTHS, LINE_PITCH = (60.0, 80.0, 110.0, 110.0), 11.0
+
+
+def draw_wrapped_rows(
+    page: pymupdf.Page,
+    rows: Sequence[Sequence[Sequence[str]]] = WRAPPED_ROWS,
+    *,
+    at: tuple[float, float] = TABLE_ORIGIN,
+    first_ruled: bool = True,
+) -> None:
+    """``rows`` ruled under every row, as IEEE sets a table: each cell's lines centered down its row, as tall as its
+    tallest cell, and a rule between every two rows -- under the first column too unless not ``first_ruled`` (the
+    rules between rows then start at the second column, the first ruled apart: a reference beside its rows)."""
+    x0, y = at
+    right = x0 + sum(WRAPPED_WIDTHS)
+    _rule(page, pymupdf.Point(x0, y), pymupdf.Point(right, y), filled=True, width=TOP_RULE)
+    for r, row in enumerate(rows):
+        height = max(len(cell) for cell in row) * LINE_PITCH + 6
+        x = x0
+        for cell, width in zip(row, WRAPPED_WIDTHS, strict=True):
+            top = y + (height - len(cell) * LINE_PITCH) / 2
+            for i, line in enumerate(cell):
+                page.insert_text((x + 4, top + i * LINE_PITCH + 9), line, fontname='helv', fontsize=9)
+            x += width
+        y += height
+        last = r == len(rows) - 1
+        start = x0 if r == 0 or last or first_ruled else x0 + WRAPPED_WIDTHS[0]
+        thick = TOP_RULE if last else MID_RULE
+        _rule(page, pymupdf.Point(start, y), pymupdf.Point(right, y), filled=True, width=thick)
+        if not (first_ruled or r == 0 or last):  # the first column's own short rule
+            _rule(page, pymupdf.Point(x0, y), pymupdf.Point(x0 + 20, y), filled=True, width=MID_RULE)
+
+
+#: A table ruled between groups of rows: each group's label, set beside its rows and centered down them, then its rows.
+GROUPED_HEADER = ('Data', 'Split', 'P', 'R')
+GROUPED_ROWS = (
+    ('DI', (('DI', '0.847', '0.798'), ('AMP', '0.771', '0.677'), ('Guitar', '0.879', '0.849'))),
+    ('AMP', (('DI', '0.853', '0.836'), ('AMP', '0.824', '0.781'))),
+)
+
+
+def draw_grouped_rows(page: pymupdf.Page, *, at: tuple[float, float] = TABLE_ORIGIN) -> None:
+    """:data:`GROUPED_ROWS` as booktabs sets groups: a rule under the header and between groups, none between rows."""
+    x0, y = at
+    w = TABLE_CELL[0]
+    right = x0 + len(GROUPED_HEADER) * w
+    _rule(page, pymupdf.Point(x0, y), pymupdf.Point(right, y), filled=True, width=TOP_RULE)
+    for c, text in enumerate(GROUPED_HEADER):
+        page.insert_text((x0 + c * w + 4, y + 13), text, fontname='helv', fontsize=9)
+    y += LINE_PITCH + 6
+    for g, (label, rows) in enumerate(GROUPED_ROWS):
+        _rule(page, pymupdf.Point(x0, y), pymupdf.Point(right, y), filled=True, width=MID_RULE)
+        page.insert_text((x0 + 4, y + 3 + len(rows) * LINE_PITCH / 2 + 3.5), label, fontname='helv', fontsize=9)
+        for r, row in enumerate(rows):
+            for c, text in enumerate(row, start=1):
+                page.insert_text((x0 + c * w + 4, y + 3 + r * LINE_PITCH + 9), text, fontname='helv', fontsize=9)
+        y += len(rows) * LINE_PITCH + 6
+        if g == len(GROUPED_ROWS) - 1:
+            _rule(page, pymupdf.Point(x0, y), pymupdf.Point(right, y), filled=True, width=TOP_RULE)
+
+
+def draw_sideways_booktabs(page: pymupdf.Page, rows: Sequence[Sequence[str]] = TABLE_ROWS, turn: int = -90) -> None:
+    """:func:`draw_booktabs`' table turned ``turn`` degrees clockwise about :data:`SCAN_PAGE`'s center, its text with
+    it: a table ruled by its rows printed sideways (-90: read bottom to top)."""
+    x0, y0 = TABLE_ORIGIN
+    w, h = TABLE_CELL
+    right = x0 + len(rows[0]) * w
+    for r in (0, 1, len(rows)):
+        y = y0 + r * h
+        page.draw_line(turned(x0, y, turn), turned(right, y, turn), color=(0, 0, 0), width=MID_RULE)
+    for r, row in enumerate(rows):
+        for c, text in enumerate(row):
+            at = turned(x0 + c * w + 4, y0 + (r + 1) * h - 6, turn)
+            page.insert_text(at, text, fontname='helv', fontsize=9, rotate=-turn % 360)
+
+
 #: A list set between rules, as booktabs rules a table: a heading, then each item after its enumerator.
 LIST_ROWS = (
     ('Steps', ''),

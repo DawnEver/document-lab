@@ -11,21 +11,27 @@ from document_lab.ir import BBox, Page
 from document_lab.pdf import read_pdf
 from document_lab.tables import NotATable, grids, tables
 from tests.synthetic import (
+    GROUPED_HEADER,
+    GROUPED_ROWS,
     LIST_ROWS,
     MERGED,
     MERGED_ROWS,
     RED,
     SCAN_PAGE,
     TABLE_ROWS,
+    WRAPPED_ROWS,
     Axis,
     PlotSpec,
     broken_rules,
     double_border,
     draw_booktabs,
+    draw_grouped_rows,
     draw_plot,
     draw_ruled_table,
+    draw_sideways_booktabs,
     draw_sideways_table,
     draw_table,
+    draw_wrapped_rows,
     mixed_pdf,
     scan_image,
     table_cell_rect,
@@ -561,3 +567,158 @@ def test_rules_round_a_list_a_figure_or_prose_are_no_table(tmp_path, draw, reaso
     (grid,) = grids(page)
     assert isinstance(grid, NotATable)
     assert reason in grid.reason
+
+
+def _cell_differences(table, rows):
+    """How ``table``'s cells differ from ``rows``: its shape, else each cell whose text is not the one set."""
+    if [len(row) for row in table.rows] != [len(row) for row in rows]:
+        return [f'shape {[len(row) for row in table.rows]}, set {[len(row) for row in rows]}']
+    return [
+        f'cell ({r}, {c}) reads {got!r}, set {want!r}'
+        for r, (read, row) in enumerate(zip(table.rows, rows, strict=True))
+        for c, (got, want) in enumerate(zip(read, row, strict=True))
+        if got != want
+    ]
+
+
+def _joined(rows):
+    """Each cell of ``rows`` (its lines) as one text."""
+    return tuple(tuple(' '.join(cell) for cell in row) for row in rows)
+
+
+@pytest.mark.parametrize('first_ruled', [True, False], ids=['ruled across', 'its first column ruled apart'])
+def test_a_table_ruled_under_every_row_reads_each_row_whole_its_wrapped_cells_centered(tmp_path, first_ruled):
+    """IEEE sets a rule under every row and centers each cell down its row: a short cell stands between the lines of
+    a wrapped one. Row 2 alone -- two cells of two lines beside short ones -- looks like two rows with labels; row 1,
+    whose cells of one, two and three lines stand on no common lines, proves each row ruled. Ruled apart, the rules
+    under the rows start at the second column, and the first column's own short rules make no table."""
+    (table,) = tables(_page(tmp_path, lambda p: draw_wrapped_rows(p, first_ruled=first_ruled)))
+    assert _cell_differences(table, _joined(WRAPPED_ROWS)) == []
+    as_rows = (*_joined(WRAPPED_ROWS[:2]), ('[2]', 'Rotor', 'Minimize torque', 'Only half a pole'))
+    as_rows += (('[2]', 'Rotor', 'ripple', 'was modeled'), *_joined(WRAPPED_ROWS[3:]))
+    assert _cell_differences(table, as_rows)  # a planted wrong truth: row 2 read as two rows, its labels in each
+    one_a_line = (*_joined(WRAPPED_ROWS[:1]), ('', '', 'Minimize the noise', 'Mesh dependence'))
+    assert _cell_differences(table, one_a_line)  # ... and the table read one line a row
+
+
+def test_a_table_ruled_between_groups_reads_the_rows_of_each_group_its_label_in_each(tmp_path):
+    """Rules between groups of rows, none between rows; a group's label set beside its rows, centered down them, as a
+    merged cell is (repeated in each row). The first row of a group holds no first cell: it carries on no row across
+    the rule above it."""
+    (table,) = tables(_page(tmp_path, draw_grouped_rows))
+    groups = tuple((label, *row) for label, rows in GROUPED_ROWS for row in rows)
+    assert _cell_differences(table, (GROUPED_HEADER, *groups)) == []
+    once = tuple(
+        (label if r == len(rows) // 2 else '', *row) for label, rows in GROUPED_ROWS for r, row in enumerate(rows)
+    )
+    assert _cell_differences(table, (GROUPED_HEADER, *once))  # a planted wrong truth: the label in one row
+    whole = tuple((label, *(' '.join(column) for column in zip(*rows, strict=True))) for label, rows in GROUPED_ROWS)
+    assert _cell_differences(table, (GROUPED_HEADER, *whole))  # ... and each group read as one row
+
+
+def test_a_header_cell_wrapped_beside_centered_ones_is_one_cell(tmp_path):
+    """A header cell set on two lines, its neighbors centered beside them: its lines stand on no common levels with
+    theirs, so the header is one row -- and nothing of the body carries into it across the rule under it."""
+
+    def draw(page):
+        for y in (400, 424, 484):
+            page.draw_rect(pymupdf.Rect(72, y - 0.4, 432, y + 0.4), color=None, fill=(0, 0, 0))
+        for x, y, text in ((76, 415, 'Parameter'), (196, 410, 'Value'), (196, 420, '(SI)'), (316, 415, 'Unit')):
+            page.insert_text((x, y), text, fontname='helv', fontsize=9)
+        for r, row in enumerate(TABLE_ROWS[1:]):
+            for c, text in enumerate(row):
+                page.insert_text((76 + 120 * c, 438 + 20 * r), text, fontname='helv', fontsize=9)
+
+    (table,) = tables(_page(tmp_path, draw))
+    header = ('Parameter', 'Value (SI)', 'Unit')
+    assert _cell_differences(table, (header, *TABLE_ROWS[1:])) == []
+    two = (('', 'Value', ''), ('Parameter', '(SI)', 'Unit'), *TABLE_ROWS[1:])
+    assert _cell_differences(table, two)  # a planted wrong truth: the header read as two rows
+
+
+def _sideways_stack_differences(table, page, turn):
+    """How ``table`` differs from :func:`draw_sideways_booktabs`' drawn ``turn`` degrees: its rows, its box (the
+    rules' outline turned), and each cell's box (its text's, as the page shows it)."""
+    out = [] if table.rows == TABLE_ROWS else [f'rows {table.rows}']
+    drawn = table_cell_rect(0, 0) | table_cell_rect(3, 2)
+    corners = [turned(x, y, turn) for x in (drawn.x0, drawn.x1) for y in (drawn.y0, drawn.y1)]
+    xs, ys = [x for x, _ in corners], [y for _, y in corners]
+    if tuple(table.provenance.bbox) != pytest.approx((min(xs), min(ys), max(xs), max(ys)), abs=0.5):
+        out.append(f'box {table.provenance.bbox}')
+    spans = {s.text: s.provenance.bbox for s in page.spans}
+    for r, row in enumerate(TABLE_ROWS):
+        for c, text in enumerate(row):
+            box = table.cell_bboxes[r][c]
+            if tuple(box) != pytest.approx(tuple(spans[text]), abs=0.01):
+                out.append(f'cell ({r}, {c}) at {box}')
+    return out
+
+
+@pytest.mark.parametrize('turn', [-90, 90], ids=['read bottom to top', 'read top to bottom'])
+def test_a_table_ruled_by_its_rows_printed_sideways_reads_in_the_frame_its_text_stands_upright_in(tmp_path, turn):
+    """Its rules stand upright on the page: read a quarter turn round, as a grid printed sideways is."""
+
+    def head(page):
+        page.insert_text((72, 60), 'An upright running head', fontsize=10)
+
+    page = _page(tmp_path, head, lambda p: draw_sideways_booktabs(p, turn=turn))
+    (table,) = tables(page)
+    assert _sideways_stack_differences(table, page, turn) == []
+    assert table.provenance.locator == 'table[0]'
+    assert _sideways_stack_differences(table, page, -turn)  # a planted wrong truth: turned the other way
+    mirrored = dataclasses.replace(table, rows=tuple(row[::-1] for row in table.rows))
+    assert _sideways_stack_differences(mirrored, page, turn)  # ... and its cells read in another order
+
+
+#: Columns set close: each value of the second column flush right, the value of the third a set gap after it.
+CLOSE_ROWS = (
+    ('Parameter', 'Min', 'Max'),
+    ('Rated speed', '1.25', '2.50'),
+    ('beta', '-3', '4'),
+    ('gamma', '450', '600'),
+)
+
+
+def _close_columns(rows=CLOSE_ROWS, *, apart, font='helv'):
+    """``rows`` between booktabs' rules, the third column ``apart`` text sizes after the second, row by row: closer
+    than the reader's word break (a text size), each row's two values are one span, its words apart."""
+
+    def draw(page):
+        for y in (400, 420, 500):
+            page.draw_rect(pymupdf.Rect(72, y - 0.4, 432, y + 0.4), color=None, fill=(0, 0, 0))
+        for r, (name, low, high) in enumerate(rows):
+            y = 414 + (r and 20 * r + 6)
+            page.insert_text((76, y), name, fontname=font, fontsize=9)
+            page.insert_text((240 - pymupdf.get_text_length(low, font, 9), y), low, fontname=font, fontsize=9)
+            page.insert_text((240 + apart * 9, y), high, fontname=font, fontsize=9)
+
+    return draw
+
+
+@pytest.mark.parametrize(
+    ('apart', 'font'),
+    [(0.7, 'helv'), (0.42, 'tiro')],
+    ids=['closer than the reader s word break', 'closer than COLUMN_GAP, wider than the table s word spaces'],
+)
+def test_columns_set_close_part_where_the_words_of_a_span_stand_apart(tmp_path, apart, font):
+    """Two values under a text size apart, drawn one after the other, are one span (a gap under a text size reads as a
+    space): its words, as the reader places them, stand in two columns, so the span parts between them. Two columns
+    0.42 text sizes apart stand closer than :data:`COLUMN_GAP`, but wider than one and a half of the table's own word
+    space (Times' 0.25 em, between ``Rated`` and ``speed``, ``Parameter`` across it): its columns all the same."""
+    page = _page(tmp_path, _close_columns(apart=apart, font=font))
+    assert '1.25 2.50' in {s.text for s in page.spans}  # the reader joined them: one span, two words
+    (table,) = tables(page)
+    assert _cell_differences(table, CLOSE_ROWS) == []
+    joined = tuple((row[0], f'{row[1]} {row[2]}') for row in CLOSE_ROWS)
+    assert _cell_differences(table, joined)  # a planted wrong truth: each pair read as one cell
+    words = next(s for s in page.spans if s.text == '1.25 2.50').words
+    assert (table.cell_bboxes[1][1], table.cell_bboxes[1][2]) == words  # each cell's box its word's, as placed
+
+
+def test_a_table_stating_no_word_space_parts_its_columns_at_column_gap(tmp_path):
+    """No cell of two words, no word space of its own: columns 0.42 text sizes apart stand closer than
+    :data:`COLUMN_GAP`, and nothing the table states says they are columns (a value it does not state is no guess)."""
+    rows = tuple((('alpha' if row[0] == 'Rated speed' else row[0]), *row[1:]) for row in CLOSE_ROWS)
+    (table,) = tables(_page(tmp_path, _close_columns(rows, apart=0.42, font='tiro')))
+    assert _cell_differences(table, tuple((row[0], f'{row[1]} {row[2]}') for row in rows)) == []
+    assert _cell_differences(table, rows)  # a planted wrong truth: the columns parted without a measure

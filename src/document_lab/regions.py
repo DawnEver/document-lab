@@ -653,16 +653,21 @@ def _painted(page: Page) -> list[BBox]:
 
 
 def regions(
-    page: Page, face: tuple[str, float], drawings: Sequence[Drawing] = (), *, include_hidden: bool = False
+    page: Page,
+    face: tuple[str, float],
+    drawings: Sequence[Drawing] = (),
+    *,
+    include_hidden: bool = False,
+    include_in_background_color: bool = False,
 ) -> list[Region]:
     """The figures, tables and equations of ``page``, top to bottom.
 
     ``face``: the font and size the document's prose is set in (`document_lab.layout.body_face`), its size the body
     size every measure here is in. ``drawings``: the page's drawn ink (`document_lab.ink`), when the caller holds its
-    picture; without them a region is told by its words alone. ``include_hidden``: what hidden layers draw counts too
-    (see `document_lab.ir`).
+    picture; without them a region is told by its words alone. ``include_hidden``: what hidden layers draw counts too;
+    ``include_in_background_color``: the text filled in the color under it too (see `document_lab.ir`).
     """
-    page = page.shown(include_hidden=include_hidden)
+    page = page.shown(include_hidden=include_hidden, include_in_background_color=include_in_background_color)
     if not page.spans or face[1] <= 0:
         return []
     judged = _Page(page, face[1])

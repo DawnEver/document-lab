@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pymupdf
 import pytest
 
+from document_lab.__main__ import main
 from document_lab.paper.ingest import NoSections, ingest
 
 if TYPE_CHECKING:
@@ -80,3 +81,17 @@ def test_a_stated_outline_names_the_sections_and_inferring_is_the_option(tmp_pat
     inferred = ingest(pdf, tmp_path / 'inferred', tool='ir', outline=False)
     assert inferred.structure.source == 'inferred'
     assert inferred.sections < done.sections  # the planted control: the rules alone miss the plain-word headings
+
+
+def test_text_filled_in_the_color_under_it_is_written_only_when_the_command_asks(tmp_path: Path) -> None:
+    doc = pymupdf.open(_outlined_paper(tmp_path / 'outlined.pdf'))
+    words = 'Words set white on the white page, which a reader of the printed paper never sees.'
+    doc[0].insert_text((72, 172), words, fontsize=8, color=(1, 1, 1))
+    doc.save(tmp_path / 'white.pdf')
+    for asked in (False, True):
+        out = tmp_path / f'asked-{asked}'
+        flag = ['--include-in-background-color'] if asked else []
+        assert main(['paper', str(tmp_path / 'white.pdf'), str(out), *flag]) == 0
+        body = ''.join(p.read_text(encoding='utf-8') for p in (out / 'md').glob('*.md'))
+        assert 'This paragraph carries enough words' in body
+        assert ('Words set white' in body) is asked

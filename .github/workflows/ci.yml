@@ -467,7 +467,7 @@
         },
         {
           "name": "Set up tests/corpus",
-          "run": "uv run --no-sync python -m tests.corpus.sources"
+          "run": "uv run --no-sync python -m dev_lab.dev.hostedsetup corpus"
         },
         {
           "name": "Produce and post the part",
@@ -525,7 +525,7 @@
         },
         {
           "name": "Set up tests/linux",
-          "run": "sudo apt-get update && sudo apt-get install -y xvfb openbox python3-tk && (Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp >/dev/null 2>&1 &) && sleep 2 && (DISPLAY=:99 openbox >/dev/null 2>&1 &) && sleep 2 && echo DISPLAY=:99 >> \"$GITHUB_ENV\""
+          "run": "uv run --no-sync python -m dev_lab.dev.hostedsetup linux"
         },
         {
           "name": "Produce and post the part",
@@ -583,7 +583,7 @@
         },
         {
           "name": "Set up tests/macos",
-          "run": "brew install \"python-tk@$(uv run --no-sync python -c 'import sys; print(\"%d.%d\" % sys.version_info[:2])')\""
+          "run": "uv run --no-sync python -m dev_lab.dev.hostedsetup macos"
         },
         {
           "name": "Produce and post the part",

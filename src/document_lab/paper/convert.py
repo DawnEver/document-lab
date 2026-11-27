@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 from document_lab.markdown import to_markdown
 from document_lab.pdf import read_pdf
-from document_lab.tags import USES
+from document_lab.tags import DEFAULT_USES
 
 __all__ = [
     'MARKER_MIN_VRAM_GB',
@@ -68,7 +68,9 @@ def choose_tool() -> Tool:
     return 'ir'
 
 
-def convert(pdf: Path, out_dir: Path, *, tool: Tool | None = None, tagged: Collection[str] = USES) -> tuple[str, Tool]:
+def convert(
+    pdf: Path, out_dir: Path, *, tool: Tool | None = None, tagged: Collection[str] = DEFAULT_USES
+) -> tuple[str, Tool]:
     """The markdown of ``pdf`` and the tool used (``tool``, else :func:`choose_tool`).
 
     marker's images land in ``out_dir/img/flat``; the IR path writes none (figures are cropped later). ``tagged``: on

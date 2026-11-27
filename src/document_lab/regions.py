@@ -398,7 +398,7 @@ def regions(
     *,
     include_hidden: bool = False,
     structure: Structure | None = None,
-    tagged: Collection[str] = tags.USES,
+    tagged: Collection[str] = tags.DEFAULT_USES,
 ) -> list[Region]:
     """The figures, tables and equations of ``page`` (``body``: the document's body size), top to bottom.
 

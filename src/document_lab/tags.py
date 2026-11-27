@@ -2,9 +2,10 @@
 
 A tagged PDF (ISO 32000-2 14.7-14.8) states what document-lab otherwise infers from where text stands
 (`document_lab.layout`). This module reads :attr:`~document_lab.ir.Document.structure` into those terms for the
-modules that infer them. Each use is an option of its own (:data:`USES`, all on by default; the inferred kept as the
-alternative; `document_lab.agreement` sets the two side by side): ``order`` (reading order), ``headings``,
-``paragraphs`` (`document_lab.markdown`), ``tables`` and ``figures`` (`document_lab.regions`). Roles are judged by
+modules that infer them. Each use is an option of its own (:data:`USES`; :data:`DEFAULT_USES`, all but figures, on
+by default; the inferred kept as the alternative; `document_lab.agreement` sets the two side by side): ``order``
+(reading order), ``headings``, ``paragraphs`` (`document_lab.markdown`), ``tables`` and ``figures``
+(`document_lab.regions`). Roles are judged by
 the standard role each maps to; a title is also an element whose role as stated is ``Title`` (a word processor maps
 its title style to ``P``).
 
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     'BLOCKS',
+    'DEFAULT_USES',
     'USES',
     'Reading',
     'TaggedRegion',
@@ -59,6 +61,9 @@ __all__ = [
 
 #: What a tagged PDF's tags may give in place of the inference, each its own option.
 USES: Final = frozenset({'order', 'headings', 'paragraphs', 'tables', 'figures'})
+#: The uses on by default: all but ``figures`` (D53 of task document-lab-pdf-reader). Tagged figures in the wild are
+#: mostly logos, inline symbols and page-wide wrappers, their ``/Alt`` mostly a generator's placeholder.
+DEFAULT_USES: Final = USES - {'figures'}
 
 
 def checked(uses: Collection[str]) -> frozenset[str]:

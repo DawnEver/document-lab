@@ -18,8 +18,11 @@ from document_lab.capture import cli as capture_cli
 __all__ = ['main']
 
 
-_ALL = 'order,headings,paragraphs,tables,figures'
-_TAGS_HELP = f"what a tagged PDF's tags give in place of inference, comma-separated (default {_ALL}; 'none' infers all)"
+_DEFAULT = 'order,headings,paragraphs,tables'
+_TAGS_HELP = (
+    f"what a tagged PDF's tags give in place of inference, comma-separated (default {_DEFAULT}; also figures; "
+    "'none' infers all)"
+)
 
 
 def _uses(text: str) -> frozenset[str]:
@@ -49,12 +52,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     pages.add_argument('pdf', type=Path)
     pages.add_argument('out', type=Path, help='the directory to write the pages into, or a .zip archive')
-    pages.add_argument('--tags', type=_uses, default=_ALL, help=_TAGS_HELP)
+    pages.add_argument('--tags', type=_uses, default=_DEFAULT, help=_TAGS_HELP)
     paper = sub.add_parser('paper', help='a paper PDF to per-section markdown and cropped figures')
     paper.add_argument('pdf', type=Path)
     paper.add_argument('out', type=Path, help='the directory to write the paper layout into')
     paper.add_argument('--tool', choices=('marker', 'ir'), help='force a converter (default: best available)')
-    paper.add_argument('--tags', type=_uses, default=_ALL, help=_TAGS_HELP)
+    paper.add_argument('--tags', type=_uses, default=_DEFAULT, help=_TAGS_HELP)
     return parser
 
 

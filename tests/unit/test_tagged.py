@@ -179,12 +179,14 @@ def test_a_tagged_figure_keeps_its_alt_and_an_uncovered_page_is_inferred(tmp_pat
             'cap': '<< /S /Caption /Pg {page1} /K 1 >>',
         },
     )
-    (stated,) = regions(doc.page(1), 10.0, structure=doc.structure)
+    # Figures from tags are off by default (D53): asked for, the tagged figure stands in for the inferred.
+    assert all(r.alt is None for r in regions(doc.page(1), 10.0, structure=doc.structure))
+    (stated,) = regions(doc.page(1), 10.0, structure=doc.structure, tagged=tags.USES)
     assert (stated.kind, stated.label, stated.alt) == ('figure', 'Figure 7', 'a filled box')
     # The box drawn from y 100 up to 180 on a 300-point page stands from 120 down to 200, padded.
     assert stated.bbox.y0 < 120
     assert stated.bbox.y1 > 200
-    (inferred,) = regions(doc.page(2), 10.0, structure=doc.structure)
+    (inferred,) = regions(doc.page(2), 10.0, structure=doc.structure, tagged=tags.USES)
     assert (inferred.label, inferred.alt) == ('Figure 2', None)
 
 

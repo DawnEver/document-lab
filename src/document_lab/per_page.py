@@ -164,10 +164,11 @@ def _clauses(markdown: str) -> str:
     return '; '.join(line.lstrip('#').strip() for line in markdown.splitlines() if line.startswith('##'))
 
 
-def write_pages(pdf: Path, out: Path, *, tagged: Collection[str] = tags.USES) -> Paged:
+def write_pages(pdf: Path, out: Path, *, tagged: Collection[str] = tags.DEFAULT_USES) -> Paged:
     """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive.
 
-    ``tagged``: what a tagged PDF's tags give (`document_lab.tags.USES`); none infers it all from layout.
+    ``tagged``: what a tagged PDF's tags give (`document_lab.tags.USES`; by default ``DEFAULT_USES``, all but
+    figures); none infers it all from layout.
     """
     read = read_pdf(pdf)
     body = layout.body_size(read)

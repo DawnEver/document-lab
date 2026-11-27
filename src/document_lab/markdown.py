@@ -64,7 +64,7 @@ _TOC_ENTRY: Final = re.compile(r'^(?=.*[A-Za-z]).*?(?:(?:\.\s?){4,}|\u2026{2,}|\
 TOC_LINES: Final = 3
 
 
-def to_markdown(doc: Document, *, include_hidden: bool = False, tagged: Collection[str] = tags.USES) -> str:
+def to_markdown(doc: Document, *, include_hidden: bool = False, tagged: Collection[str] = tags.DEFAULT_USES) -> str:
     """The document as markdown, page after page: a paragraph a page break cut is joined again.
 
     ``include_hidden``: the text hidden layers draw is written too (see `document_lab.ir`). ``tagged``: what a tagged
@@ -74,7 +74,9 @@ def to_markdown(doc: Document, *, include_hidden: bool = False, tagged: Collecti
     return '\n\n'.join(_rejoin([block for page in blocks for block in page])) + '\n'
 
 
-def page_markdowns(doc: Document, *, include_hidden: bool = False, tagged: Collection[str] = tags.USES) -> list[str]:
+def page_markdowns(
+    doc: Document, *, include_hidden: bool = False, tagged: Collection[str] = tags.DEFAULT_USES
+) -> list[str]:
     """Each page's own markdown, in order (empty for a page without text).
 
     Body size and title are judged over the whole document; nothing is joined across a page break: a page stands alone.
@@ -87,7 +89,7 @@ def page_markdowns(doc: Document, *, include_hidden: bool = False, tagged: Colle
 
 
 def headings(
-    doc: Document, *, include_hidden: bool = False, tagged: Collection[str] = tags.USES
+    doc: Document, *, include_hidden: bool = False, tagged: Collection[str] = tags.DEFAULT_USES
 ) -> list[tuple[int, str]]:
     """Each heading :func:`page_markdowns` writes, as ``(page, heading line)`` in order."""
     return [

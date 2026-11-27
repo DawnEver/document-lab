@@ -12,8 +12,8 @@ from document_lab.capture.files import document_window, held, listed, page_box, 
 
 
 @dataclass(frozen=True)
-class _Window:  # what document_window reads of a window: its handle and title (desktop.Window is the real one)
-    hwnd: int
+class _Window:  # what document_window reads of a window: its handle and title (screen.Window is the real one)
+    handle: int
     title: str
 
 

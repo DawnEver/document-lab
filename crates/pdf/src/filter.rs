@@ -18,6 +18,61 @@ pub struct Codec {
     pub params: Option<Dict>,
 }
 
+/// A `CCITTFaxDecode` codec's parameters (ISO 32000-2 Table 11): each as stated, else the standard's default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fax {
+    /// The coding: negative pure two-dimensional (Group 4), 0 one-dimensional (Group 3), positive mixed (Group 3,
+    /// two-dimensional).
+    pub k: i64,
+    /// Samples across a row.
+    pub columns: i64,
+    /// Whether each row begins with an end-of-line code.
+    pub end_of_line: bool,
+    /// Whether each encoded row begins on a byte boundary.
+    pub byte_align: bool,
+    /// Whether 1 bits are black (else 0 bits are).
+    pub black_is_1: bool,
+}
+
+impl Codec {
+    /// Its parameters when it is `CCITTFaxDecode`; None for any other codec.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a parameter of the wrong kind.
+    pub fn fax(&self) -> Result<Option<Fax>> {
+        if self.name != b"CCITTFaxDecode" {
+            return Ok(None);
+        }
+        let empty = Dict::new();
+        let params = self.params.as_ref().unwrap_or(&empty);
+        let int = |key: &str, default: i64| match params.get(key.as_bytes()) {
+            None => Ok(default),
+            Some(v) => v.as_integer().ok_or_else(|| {
+                Error::malformed(format!(
+                    "CCITTFaxDecode's /{key} is an integer, not a {}",
+                    v.kind()
+                ))
+            }),
+        };
+        let flag = |key: &str, default: bool| match params.get(key.as_bytes()) {
+            None => Ok(default),
+            Some(Object::Bool(b)) => Ok(*b),
+            Some(v) => Err(Error::malformed(format!(
+                "CCITTFaxDecode's /{key} is a boolean, not a {}",
+                v.kind()
+            ))),
+        };
+        Ok(Some(Fax {
+            k: int("K", 0)?,
+            columns: int("Columns", 1728)?,
+            end_of_line: flag("EndOfLine", false)?,
+            byte_align: flag("EncodedByteAlign", false)?,
+            black_is_1: flag("BlackIs1", false)?,
+        }))
+    }
+}
+
 /// A stream's data after every lossless filter, and the image codec it is still in, if any.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decoded {

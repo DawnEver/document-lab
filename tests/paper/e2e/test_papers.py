@@ -1,4 +1,6 @@
-"""The three real papers, ingested on the IR path, checked STRUCTURALLY against what each PDF itself says.
+"""The ``papers`` part: three real papers, ingested on the IR path, checked STRUCTURALLY against what each PDF says.
+
+The papers are local only (``DOCUMENT_LAB_PAPERS``, `tests.paper.support.paper`): its own part, never tests/base.
 
 The ground truth below was read off the PDFs (headings, caption numbers), not off any converter's output. Every
 check can fail: test_a_wrong_truth_is_found plants one wrong fact per kind and requires a finding for each.
@@ -9,8 +11,10 @@ import dataclasses
 import pymupdf
 import pytest
 
-from tests.paper.structure import Paper, problems
-from tests.paper.support import DATA, ingested
+from tests.paper.structure import CHECKS, WRONG, Paper, problems
+from tests.paper.support import ingested, paper
+
+pytestmark = pytest.mark.papers
 
 IEEE = Paper(
     'ieee-conference.pdf',
@@ -64,15 +68,15 @@ PAPERS = (IEEE, LIANG, HAIRPIN)
 def bound(tmp_path_factory):
     """liang with hairpin bound in after it: one PDF, the main paper plus one appended paper."""
     path = tmp_path_factory.mktemp('bound') / 'liang-then-hairpin.pdf'
-    with pymupdf.open(DATA / LIANG.pdf) as doc, pymupdf.open(DATA / HAIRPIN.pdf) as tail:
+    with pymupdf.open(paper(LIANG.pdf)) as doc, pymupdf.open(paper(HAIRPIN.pdf)) as tail:
         doc.insert_pdf(tail)
         doc.save(path)
     return ingested(path, 'ir', tmp_path_factory)
 
 
-@pytest.mark.parametrize('paper', PAPERS, ids=lambda p: p.pdf)
-def test_the_ingested_paper_has_the_pdfs_structure(paper, tmp_path_factory):
-    assert problems(ingested(DATA / paper.pdf, 'ir', tmp_path_factory), paper) == []
+@pytest.mark.parametrize('truth', PAPERS, ids=lambda p: p.pdf)
+def test_the_ingested_paper_has_the_pdfs_structure(truth, tmp_path_factory):
+    assert problems(ingested(paper(truth.pdf), 'ir', tmp_path_factory), truth) == []
 
 
 def test_a_second_paper_bound_in_is_split_off(bound):
@@ -81,26 +85,13 @@ def test_a_second_paper_bound_in_is_split_off(bound):
     assert HAIRPIN.title in (appended / 'paper.md').read_text(encoding='utf-8')
 
 
-WRONG = {
-    'title': lambda p: dataclasses.replace(p, title='Some Other Title'),
-    'a section dropped': lambda p: dataclasses.replace(p, sections=p.sections[:-1]),
-    'sections reordered': lambda p: dataclasses.replace(p, sections=(p.sections[1], p.sections[0], *p.sections[2:])),
-    'a heading misspelt': lambda p: dataclasses.replace(p, sections=(p.sections[0] + 'X', *p.sections[1:])),
-    'a figure invented': lambda p: dataclasses.replace(p, figures=p.figures | {99}),
-    'a figure missed': lambda p: dataclasses.replace(p, figures=p.figures - {max(p.figures)}),
-    'a table invented': lambda p: dataclasses.replace(p, tables=p.tables | {'IX'}),
-    'a table missed': lambda p: dataclasses.replace(p, tables=frozenset()),
-    'an appended paper invented': lambda p: dataclasses.replace(p, appended=1),
-    'a skipped number indexed': lambda p: dataclasses.replace(p, absent_figures=frozenset({min(p.figures)})),
-}
-
-
 @pytest.mark.parametrize('wrong', sorted(WRONG))
-@pytest.mark.parametrize('paper', PAPERS, ids=lambda p: p.pdf)
-def test_a_wrong_truth_is_found(paper, wrong, tmp_path_factory):
+@pytest.mark.parametrize('truth', PAPERS, ids=lambda p: p.pdf)
+def test_a_wrong_truth_is_found(truth, wrong, tmp_path_factory):
     """The planted control: the same check against a falsified truth must report it."""
-    out = ingested(DATA / paper.pdf, 'ir', tmp_path_factory)
-    assert problems(out, WRONG[wrong](paper)), f'{wrong}: the check could not say no'
+    out = ingested(paper(truth.pdf), 'ir', tmp_path_factory)
+    kind, falsify = WRONG[wrong]
+    assert CHECKS[kind](out, falsify(truth)), f'{wrong}: the {kind} check could not say no'
 
 
 def test_the_split_check_can_say_no(bound):

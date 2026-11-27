@@ -7,6 +7,7 @@ is a known function sampled at known points, so a digitizer that is wrong cannot
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -385,6 +386,63 @@ def raster_pdf(
     return path, clip
 
 
+def image_pdf(
+    path: Path,
+    stored: bytes,
+    image: str,
+    *,
+    size: tuple[float, float],
+    matrix: Sequence[float] | None = None,
+    deflate: bool = True,
+    rotate: int = 0,
+    soft_mask: bytes | None = None,
+    over: Callable[[pymupdf.Page], object] | None = None,
+) -> Path:
+    """A one-page PDF of ``size`` points placing one image XObject, saved to ``path``.
+
+    ``image`` is the image dictionary's own entries (``/Width 4 /Height 2 /ColorSpace /DeviceGray ...``), ``stored``
+    its stream: deflated when ``deflate``, else stored as given (a codec's ``/Filter`` stated in ``image``).
+    ``matrix`` is the ``cm`` placing it (PDF space, y up; default the whole page, upright); ``rotate`` the page's
+    ``/Rotate``; ``soft_mask`` the 8-bit gray samples of an ``/SMask`` its size; ``over`` draws on the page after.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=size[0], height=size[1])
+    if soft_mask is not None:
+        mask = doc.get_new_xref()
+        width, height = (re.search(rf'/{k} (\d+)', image)[1] for k in ('Width', 'Height'))  # type: ignore[index]
+        entries = f'/Width {width} /Height {height} /ColorSpace /DeviceGray /BitsPerComponent 8'
+        doc.update_object(mask, f'<< /Type /XObject /Subtype /Image {entries} >>')
+        doc.update_stream(mask, soft_mask)
+        image += f' /SMask {mask} 0 R'
+    xobject = doc.get_new_xref()
+    doc.update_object(xobject, f'<< /Type /XObject /Subtype /Image {image} >>')
+    doc.update_stream(xobject, stored, compress=deflate)
+    if not deflate:  # storing it as given drops the dictionary's /Filter and its parameters: state them again
+        doc.update_object(xobject, f'<< /Type /XObject /Subtype /Image {image} /Length {len(stored)} >>')
+    content = doc.get_new_xref()
+    doc.update_object(content, '<< >>')
+    cm = ' '.join(f'{v:g}' for v in (matrix or (size[0], 0, 0, size[1], 0, 0)))
+    doc.update_stream(content, f'q {cm} cm /Im1 Do Q\n'.encode())
+    doc.xref_set_key(page.xref, 'Resources', f'<< /XObject << /Im1 {xobject} 0 R >> >>')
+    doc.xref_set_key(page.xref, 'Contents', f'{content} 0 R')
+    if rotate:
+        page.set_rotation(rotate)
+    if over is not None:
+        over(page)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def fax_g4(white: np.ndarray) -> bytes:
+    """``white`` -- rows of 1 white, 0 black, as CCITT fax decodes by default -- coded Group 4 by MuPDF."""
+    rows, columns = white.shape
+    packed = np.packbits(white.astype(np.uint8), axis=1).tobytes()
+    stride = len(packed) // rows
+    coded = pymupdf.mupdf.fz_compress_ccitt_fax_g4(pymupdf.mupdf.python_buffer_data(packed), columns, rows, stride)
+    return bytes(coded.fz_buffer_extract())
+
+
 TABLE_ROWS = (('Parameter', 'Value', 'Unit'), ('alpha', '1.25', 'mm'), ('beta', '-3', 'kg'), ('gamma', '4.5e2', 's'))
 TABLE_ORIGIN = (72.0, 400.0)
 TABLE_CELL = (120.0, 20.0)
@@ -402,6 +460,63 @@ def draw_table(page: pymupdf.Page, rows: Sequence[Sequence[str]] = TABLE_ROWS) -
             rect = table_cell_rect(r, c)
             page.draw_rect(rect, color=(0, 0, 0), width=0.5)
             page.insert_text((rect.x0 + 4, rect.y1 - 6), text, fontname='helv', fontsize=9)
+
+
+#: A table with merged cells: ``Parameter`` spans rows 0-1, ``Limits`` columns 1-2 -- each slot it covers repeats it.
+MERGED_ROWS = (
+    ('Parameter', 'Limits', 'Limits'),
+    ('Parameter', 'min', 'max'),
+    ('alpha', '1.0', '2.5'),
+    ('beta', '-3', '4'),
+)
+#: ``MERGED_ROWS``' merged blocks: (first row, first column, last row, last column).
+MERGED = ((0, 0, 1, 0), (0, 1, 0, 2))
+
+
+def _merged_block(merged: Sequence[tuple[int, int, int, int]], r: int, c: int) -> tuple[int, int, int, int]:
+    return next((b for b in merged if b[0] <= r <= b[2] and b[1] <= c <= b[3]), (r, c, r, c))
+
+
+def _rule(page: pymupdf.Page, a: pymupdf.Point, b: pymupdf.Point, *, filled: bool, width: float) -> None:
+    if filled:
+        half = width / 2
+        box = pymupdf.Rect(min(a.x, b.x) - half, min(a.y, b.y) - half, max(a.x, b.x) + half, max(a.y, b.y) + half)
+        page.draw_rect(box, color=None, fill=(0, 0, 0), width=0)
+    else:
+        page.draw_line(a, b, color=(0, 0, 0), width=width)
+
+
+def draw_ruled_table(
+    page: pymupdf.Page,
+    rows: Sequence[Sequence[str]] = TABLE_ROWS,
+    *,
+    merged: Sequence[tuple[int, int, int, int]] = (),
+    filled: bool = False,
+    width: float = 0.5,
+) -> None:
+    """``rows`` as one grid of rules, each cell side drawn once: a stroked line or (``filled``) a thin filled bar.
+
+    No rule is drawn inside a ``merged`` block (first row, first column, last row, last column); its text is set once,
+    in its top-left slot.
+    """
+    n_rows, n_cols = len(rows), len(rows[0])
+    for r in range(n_rows + 1):
+        for c in range(n_cols):
+            if r in {0, n_rows} or _merged_block(merged, r - 1, c) != _merged_block(merged, r, c):
+                cell = table_cell_rect(min(r, n_rows - 1), c)
+                y = cell.y1 if r == n_rows else cell.y0
+                _rule(page, pymupdf.Point(cell.x0, y), pymupdf.Point(cell.x1, y), filled=filled, width=width)
+    for r in range(n_rows):
+        for c in range(n_cols + 1):
+            if c in {0, n_cols} or _merged_block(merged, r, c - 1) != _merged_block(merged, r, c):
+                cell = table_cell_rect(r, min(c, n_cols - 1))
+                x = cell.x1 if c == n_cols else cell.x0
+                _rule(page, pymupdf.Point(x, cell.y0), pymupdf.Point(x, cell.y1), filled=filled, width=width)
+    for r, row in enumerate(rows):
+        for c, text in enumerate(row):
+            if _merged_block(merged, r, c)[:2] == (r, c) and text:
+                rect = table_cell_rect(r, c)
+                page.insert_text((rect.x0 + 4, rect.y1 - 6), text, fontname='helv', fontsize=9)
 
 
 def mixed_pdf(path: Path) -> Path:

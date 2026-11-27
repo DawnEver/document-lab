@@ -59,6 +59,7 @@ __all__ = [
     'CLAUSE_GAP',
     'COLUMN_GAP',
     'DOWN_GAP',
+    'EQUATION_NUMBER',
     'GUTTER',
     'LINE_GAP',
     'RUNNING_PAGES',
@@ -111,7 +112,10 @@ LETTER_SHARE: Final = 0.6
 RUNNING_PAGES: Final = 3
 _CLAUSE: Final = re.compile(r'^(?:\d+(?:\.\d+)*\.?|[-\N{EN DASH}\N{EM DASH}\N{BULLET}])$')  # a clause number, a bullet
 _NUMBER: Final = re.compile(r'^(?:\d+|[A-Z])(?:\.\d+)*\.?$')  # a heading's number: 2, 2.1, an appendix's A, A.1
-_EQUATION_NUMBER: Final = re.compile(r'^\( ?\d+ ?\)$')  # an equation's number: never a running line
+#: An equation's number, in parentheses: ``(3)``, ``(12b)``, an annex's ``(A.1)``, a chapter's ``(4.23)`` -- never a
+#: value such as ``(0.167)``, as no number starts with 0. Never a running line (:func:`running`); `document_lab.regions`
+#: finds equations by it.
+EQUATION_NUMBER: Final = re.compile(r'\(\s*((?:[A-Z]\.?)?[1-9]\d*(?:\.\d+)*[a-z]?)\s*\)')
 _UP: Final = (1.0, 0.0)  # the way upright text reads: its frame is the page's
 _QUARTERS: Final = (_UP, (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0))
 
@@ -591,6 +595,6 @@ def _furniture_key(text: str) -> str:
     equation set its number at the text's last baseline, each its own.
     """
     text = ' '.join(text.casefold().split())
-    if any(c.isalpha() for c in text) or _EQUATION_NUMBER.match(text):
+    if any(c.isalpha() for c in text) or EQUATION_NUMBER.fullmatch(text):
         return text
     return re.sub(r'\d+', '#', text)

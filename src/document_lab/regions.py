@@ -56,9 +56,8 @@ __all__ = ['Region', 'equations', 'regions']
 _CAPTION: Final = re.compile(
     r'^(Figure|Table)\s+([A-Z]?\.?\d+(?:\.\d+)?)\s*[-\N{HYPHEN}\N{EN DASH}\N{EM DASH}\N{MINUS SIGN}]'
 )
-#: An equation number ending a line: ``(3)``, ``(12b)``, an annex's ``(A.1)``, a chapter's ``(3.2)`` -- never a value
-#: such as ``(0.167)``, as no number starts with 0.
-_NUMBERED: Final = re.compile(r'\(\s*((?:[A-Z]\.?)?[1-9]\d*(?:\.\d+)*[a-z]?)\s*\)$')
+#: An equation number ending a line (`document_lab.layout.EQUATION_NUMBER`: ``(3)``, ``(12b)``, ``(A.1)``, ``(3.2)``).
+_NUMBERED: Final = re.compile(layout.EQUATION_NUMBER.pattern + '$')
 #: A number found on a page ends right of this share of its column's width (a list's ``(1)`` stands at its left).
 NUMBER_RIGHT: Final = 0.6
 #: Prose is set within this factor of the body size; it spans at least PROSE_WIDTH of the width it is set across --
@@ -806,11 +805,12 @@ class _Around:
     def inline(self, line: layout.Line) -> bool:
         """Is the formula on ``line`` set in a paragraph, a caption or a table, no display?
 
-        It opens a caption (``Fig. 3.``, ``FIGURE 21.``, a subfigure's ``(b)``); or it stands level with a line of prose
-        of its column, beside or across it (a sub- or superscript the reader set apart from its line: ``R>=0``); or it
-        is the tail of a paragraph, a list's item or a caption: within :data:`TAIL_GAP` body sizes below a line of prose
-        or a caption's, flush with the column or starting where that line starts (``eta2 = 99.15 %.``, ``complex with
-        p = 1;``); or :data:`ROW_CELLS` lines more stand level with it in its column, a table's row (``M = 10 [Nm]``).
+        It opens a caption (``Fig. 3.``, ``FIGURE 21.``, a subfigure's ``(b)``); or it touches a line of prose of its
+        column, or stands level with one beside it (a sub- or superscript, a sum's limits the reader set apart from
+        its line: ``R>=0``); or it is the tail of a paragraph, a list's item or a caption: within :data:`TAIL_GAP` body
+        sizes below a line of prose or a caption's, flush with the column, starting where that line starts or
+        centered under it (``eta2 = 99.15 %.``, ``complex with p = 1;``); or :data:`ROW_CELLS` lines more stand level
+        with it in its column, a table's row (``M = 10 [Nm]``).
         """
         if _CAPTION_OPENS.match(line.text):
             return True
@@ -826,9 +826,11 @@ class _Around:
             cells += level and abs(_middle(other) - _middle(line)) <= self.body / 2
             if not (self.prose(other) or _CAPTION_OPENS.match(other.text)):
                 continue
-            if level and b.x0 < box.x1 + self.body and box.x0 < b.x1 + self.body:
+            touches = b.x0 < box.x1 and box.x0 < b.x1 and b.y0 < box.y1 and box.y0 < b.y1
+            if touches or (level and b.x0 < box.x1 + self.body and box.x0 < b.x1 + self.body):
                 return True
-            aligned = flush or abs(box.x0 - b.x0) <= TAIL_GAP * self.body
+            centered = abs((box.x0 + box.x1) - (b.x0 + b.x1)) / 2 <= self.body  # a centered caption's next line
+            aligned = flush or centered or abs(box.x0 - b.x0) <= TAIL_GAP * self.body
             if aligned and 0 <= box.y0 - b.y1 <= TAIL_GAP * self.body:
                 return True
         return cells >= ROW_CELLS

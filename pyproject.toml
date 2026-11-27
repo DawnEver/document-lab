@@ -38,6 +38,8 @@ ai = ["ai_lab @ git+https://github.com/DawnEver/ai-lab.git"]
 # nothing; python-xlib speaks the X protocol on Linux, installed there alone. tkinter draws the overlay and the panel,
 # the package's own writer (`document_lab._pdf`) writes the PDF.
 capture = ["python-xlib; sys_platform == 'linux'"]
+# `--formulas latex` on `paper` / `pages`: each equation crop transcribed to LaTeX in-process (`document_lab.formula`).
+formula = ["torch", "transformers"]
 # The family's development kit: rules registry, rendered configs, shared test bodies, verify entry.
 dev = [
     # The build backend: this repo's own tool, not the test kit's.
@@ -59,8 +61,9 @@ override-dependencies = ["pillow>=13", "filelock>=4.2.1"]
 # uv keys a path build on pyproject.toml's mtime alone; the mixed wheel must rebuild for a Rust OR a Python edit.
 cache-keys = [{ file = "pyproject.toml" }, { file = "Cargo.toml" }, { file = "crates/**/*.rs" }, { file = "src/**/*.py" }]
 
-# PyPI's Windows torch is CPU-only, so the `gpu` extra would run marker on the CPU; Windows takes torch and
-# torchvision from PyTorch's CUDA 13.2 index (sm_120 Blackwell included). Linux's PyPI torch is already a CUDA build.
+# PyPI's Windows torch is CPU-only, so the `gpu` extra would run marker, and the `formula` extra its models, on the
+# CPU; Windows takes torch and torchvision from PyTorch's CUDA 13.2 index (sm_120 Blackwell included), one index
+# and one source each for both extras. Linux's PyPI torch is already a CUDA build.
 [[tool.uv.index]]
 name = "pytorch-cu132"
 url = "https://download.pytorch.org/whl/cu132"
@@ -87,6 +90,7 @@ markers = [
     "macos: drives a real window on the macOS desktop: its own part (tests/macos), never tests/base",
     "linux: drives a real window on an X11 desktop on Linux: its own part (tests/linux), never tests/base",
     "ocr: lays a Tesseract text layer over a capture: its own part (tests/ocr), never tests/base",
+    "formula: reads an equation as LaTeX with the formula extra's model and its weights: its own part (tests/formula), never tests/base",
     "corpus: reads real public PDFs fetched from their original URLs, pinned by sha256 (tests/corpus/sources.py): its own part (tests/corpus), never tests/base",
 ]
 
@@ -127,9 +131,10 @@ max_idle = "24 h"  # a branch idle 24 h is pruned when merged, alarmed when not
 output = "output/logs"
 # No resource exists on a hosted runner: `gpu` needs a CUDA GPU and the gpu extra, `vendor` a vendor PDF and
 # `papers` the real papers and `reference` a corpus of real PDFs, none of which may be committed (the repo is
-# public), `ocr` Tesseract with English data. This repo's tests run on GitHub Actions alone (user ruling 2026-11-11),
-# so no part here produces them: they stay marked, and a consumer's unified run selects them by marker.
-unproduced = ["gpu", "vendor", "papers", "reference", "ocr"]
+# public), `ocr` Tesseract with English data, `formula` the formula extra (torch) and its model's weights (1.2 GB).
+# This repo's tests run on GitHub Actions alone (user ruling 2026-11-11), so no part here produces them: they stay
+# marked, and a consumer's unified run selects them by marker.
+unproduced = ["gpu", "vendor", "papers", "reference", "ocr", "formula"]
 # `corpus` needs the network a hosted runner has: its setup fetches every source (tests/corpus/sources.py), so a
 # source down or changed fails the job before any test runs -- posted `class=environment`, never the code's red.
 # The OS parts run on their own hosted runner (`windows`, `macos`, `linux`); the linux runner has no display, so its
@@ -142,14 +147,15 @@ unproduced = ["gpu", "vendor", "papers", "reference", "ocr"]
 hosted = { corpus = { setup = "uv run --no-sync python -m tests.corpus.sources" }, linux = { setup = "sudo apt-get update && sudo apt-get install -y xvfb openbox python3-tk && (Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp >/dev/null 2>&1 &) && sleep 2 && (DISPLAY=:99 openbox >/dev/null 2>&1 &) && sleep 2 && echo DISPLAY=:99 >> \"$GITHUB_ENV\"" }, macos = { setup = '''brew install "python-tk@$(uv run --no-sync python -c 'import sys; print("%d.%d" % sys.version_info[:2])')"''' } }
 
 # The extras every environment carries: `dev` (the kit, pytest, ruff; it carries `ai`). `gpu` (marker-pdf -> torch)
-# is installed only for an environment whose need-set holds the `gpu` resource marker; `dev` carries `capture`.
+# and `formula` (torch, transformers) are installed only for an environment whose need-set holds their resource
+# marker; `dev` carries `capture`.
 [tool.dev_lab.dep]
 extras = ["dev"]
-needs = { gpu = "gpu" }
+needs = { gpu = "gpu", formula = "formula" }
 
 [tool.lab_commons.tests]
 produce = ["-m", "dev_lab.dev.verify", "--part", "{part}"]
-resources = ["gpu", "vendor", "papers", "reference", "ocr", "windows", "macos", "linux", "corpus"]
+resources = ["gpu", "vendor", "papers", "reference", "ocr", "formula", "windows", "macos", "linux", "corpus"]
 
 # The family branch flow: integrate/main coordinates; main moves only by `integrate promote` (fast-forward).
 [tool.dev_lab.integrator]

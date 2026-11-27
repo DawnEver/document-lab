@@ -1,6 +1,8 @@
 # The repo's own placement, beyond the family's (dev_lab.dev.codeplace): its keys, then [layout].
 # A worktree is a real second tree, judged by the run inside it.
 pruned_paths = ['.claude/worktrees']
+# The Rust crates are code, beyond the family's roots.
+code_roots = ['crates/']
 
 # DECLARED-LAYOUT (dev_lab.dev.layout): the WHOLE tree as an allow-list -- each directory pattern (one glob per
 # segment; the deepest matching row judges) and the formats a file there may be ('.suffix', an exact name, "" for
@@ -46,7 +48,7 @@ pruned_paths = ['.claude/worktrees']
 'crates/*/tests/common' = ['.rs']
 'crates/*/tests/fixtures' = ['.pdf', '.py']  # synthetic fixtures and the script that makes them
 'crates/*/data' = ['.py']  # generators of the crate's data tables
-'src/document_lab' = ['.py', '.pyd', '.so']  # .pyd/.so: the Rust extension maturin builds in place
+'src/document_lab' = ['.py', '.pyd', '.so', '.pdb']  # .pyd/.so: the Rust extension maturin builds in place; .pdb: its Windows debug symbols
 'src/document_lab/*' = ['.py']
 'tests/*' = ['.py']
 'tests/paper/e2e' = ['.py']

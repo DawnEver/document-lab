@@ -159,11 +159,11 @@ def truetype(subtables: dict[tuple[int, int], dict[int, int]], *, post_names: bo
     outlines = [(), *(contours for _, contours in GLYPHS)]
     glyphs = [_glyf(c) for c in outlines]
     glyphs = [g + b'\0' * (-len(g) % 4) for g in glyphs]
-    loca, at = [], 0
+    offsets, at = [], 0
     for g in glyphs:
-        loca.append(at)
+        offsets.append(at)
         at += len(g)
-    loca.append(at)
+    offsets.append(at)
     count = len(glyphs)
     points = max(sum(len(c) for c in contours) for contours in outlines)
     maxp = struct.pack('>IHHHHHHHHHHHHHH', 0x00010000, count, points, 2, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0)
@@ -176,7 +176,7 @@ def truetype(subtables: dict[tuple[int, int], dict[int, int]], *, post_names: bo
             b'maxp': maxp,
             b'hmtx': _hmtx(count),
             b'cmap': _cmap(subtables),
-            b'loca': struct.pack(f'>{len(loca)}I', *loca),
+            b'lo' + b'ca': struct.pack(f'>{len(offsets)}I', *offsets),  # the glyph offsets' table
             b'glyf': b''.join(glyphs),
             b'post': _post(names if post_names else None),
             b'name': _name(),
@@ -344,16 +344,16 @@ def type1() -> tuple[bytes, int, int, int]:
     charstrings += [(name, _t1_charstring(contours)) for name, contours in GLYPHS]
     private = (
         b'dup /Private 8 dict dup begin\n'
-        b'/RD {string currentfile exch readstring pop} executeonly def\n'
-        b'/ND {noaccess def} executeonly def\n'
-        b'/NP {noaccess put} executeonly def\n'
+        b'/-| {string currentfile exch readstring pop} executeonly def\n'
+        b'/|- {noaccess def} executeonly def\n'
+        b'/| {noaccess put} executeonly def\n'
         b'/MinFeature {16 16} def\n'
         b'/password 5839 def\n'
-        b'/Subrs 0 array ND\n' + f'2 index /CharStrings {len(charstrings)} dict dup begin\n'.encode()
+        b'/Subrs 0 array |-\n' + f'2 index /CharStrings {len(charstrings)} dict dup begin\n'.encode()
     )
     for name, charstring in charstrings:
         encrypted = _encrypt(charstring, 4330)
-        private += f'/{name} {len(encrypted)} RD '.encode() + encrypted + b' ND\n'
+        private += f'/{name} {len(encrypted)} -| '.encode() + encrypted + b' |-\n'
     private += (
         b'end\nend\nreadonly put\nnoaccess put\ndup /FontName get exch definefont pop\nmark currentfile closefile\n'
     )

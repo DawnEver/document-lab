@@ -4,7 +4,7 @@ import pymupdf
 import pytest
 
 from document_lab.ir import BBox
-from document_lab.markdown import page_markdowns, table, to_markdown
+from document_lab.markdown import headings, page_markdowns, table, to_markdown
 from document_lab.pdf import read_pdf
 from tests.synthetic import actual_text_pdf
 
@@ -161,6 +161,130 @@ def test_text_of_a_layer_turned_off_is_written_only_when_asked(tmp_path):
     assert 'Off too.' not in page_markdowns(read)[0]
     assert 'Off too.' in to_markdown(read, include_hidden=True)
     assert 'Off too.' in page_markdowns(read, include_hidden=True)[0]
+
+
+def _outlined(tmp_path, toc, lines_per_page):
+    """A PDF whose pages set ``lines_per_page`` (each ``(y, text, size)``) and whose outline is ``toc``."""
+    doc = pymupdf.open()
+    for lines in lines_per_page:
+        page = doc.new_page(width=612, height=792)
+        for y, text, size in lines:
+            _write(page, LEFT, y, text, size=size)
+    doc.set_toc(
+        [
+            [level, title, page, {'kind': pymupdf.LINK_GOTO, 'page': page - 1, 'to': pymupdf.Point(LEFT, y)}]
+            for level, title, page, y in toc
+        ]
+    )
+    doc.save(tmp_path / 'o.pdf')
+    return read_pdf(tmp_path / 'o.pdf')
+
+
+BODY = 'The body of a section runs on in plain words for a line.'
+
+
+def test_a_stated_outline_names_the_sections_the_rules_miss(tmp_path):
+    doc = _outlined(
+        tmp_path,
+        [(1, 'Overview', 1, 90), (2, 'Scope of work', 1, 150), (1, 'Results and their meaning', 2, 90)],
+        [
+            [(100, 'Overview', 12), (120, BODY, 10), (160, 'Scope of', 11), (174, 'work', 11), (190, BODY, 10)],
+            [(100, 'RESULTS AND THEIR MEANING', 12), (120, BODY, 10)],
+        ],
+    )
+    found = headings(doc)
+    assert (found.source, found.stated, found.disagreements) == ('outline', 3, ())
+    md = to_markdown(doc, sections=found)
+    assert [line for line in md.splitlines() if line.startswith('#')] == [
+        '## Overview',
+        '### Scope of work',  # a title wrapped over two lines is one heading
+        '## RESULTS AND THEIR MEANING',  # matched up to case
+    ]
+    inferred = headings(doc, outline=False)
+    assert (inferred.source, inferred.stated) == ('inferred', 0)
+    heads = [line for line in to_markdown(doc, sections=inferred).splitlines() if line.startswith('#')]
+    assert heads == ['# Overview']  # page 1's largest text is its title by the rules, which head no section
+
+
+def test_the_headings_judged_are_the_heading_lines_the_markdown_writes(tmp_path):
+    doc = _outlined(
+        tmp_path,
+        [(1, 'Overview', 1, 150), (1, 'Scope of work', 1, 210)],
+        [
+            [
+                (100, 'A Title Set Larger', 18),
+                (124, 'Than Its Body', 18),
+                (160, 'Overview', 12),
+                (180, BODY, 10),
+                (220, 'Scope of', 11),
+                (234, 'work', 11),
+                (250, BODY, 10),
+            ],
+        ],
+    )
+    for found in (headings(doc), headings(doc, outline=False)):
+        written = [(1, line) for line in page_markdowns(doc, sections=found)[0].splitlines() if line.startswith('#')]
+        assert list(found.written) == written
+    assert headings(doc).written == (
+        (1, '# A Title Set Larger Than Its Body'),
+        (1, '## Overview'),
+        (1, '## Scope of work'),
+    )
+
+
+def test_an_outline_not_found_on_its_pages_leaves_the_rules_to_head_and_says_why(tmp_path):
+    doc = _outlined(
+        tmp_path,
+        [(1, 'Introduction', 1, 90), (1, 'Page two', 2, 90)],
+        [[(100, '1 Introduction', 12), (120, BODY, 10)], [(100, '2 Method', 12), (120, BODY, 10)]],
+    )
+    found = headings(doc)
+    assert found.source == 'inferred'
+    assert found.unlocated == ("'Page two' (page 2)",)
+    assert found.disagreements == ("outline item 'Page two' (page 2) is not found on its page",)
+    md = to_markdown(doc, sections=found)
+    assert [line for line in md.splitlines() if line.startswith('#')] == ['## 1 Introduction', '## 2 Method']
+
+
+def test_headings_the_rules_find_beside_a_stated_outline_are_reported(tmp_path):
+    doc = _outlined(
+        tmp_path,
+        [(1, 'Introduction', 1, 90), (1, 'Method', 1, 690)],  # Method opens at the top of page 2, its anchor above
+        [
+            [(100, '1 Introduction', 12), (120, BODY, 10), (300, '1.1 Aside', 12), (320, BODY, 10)],
+            [(100, '2 Method', 12), (120, BODY, 10)],
+        ],
+    )
+    found = headings(doc)
+    assert found.source == 'outline'
+    assert found.unstated == ('1.1 Aside',)
+    md = page_markdowns(doc, sections=found)
+    assert md[1].startswith('## 2 Method')  # found on the page after its destination's
+    assert '1.1 Aside' in md[0]
+    assert not any(line.startswith('#') and 'Aside' in line for line in md[0].splitlines())  # the outline alone heads
+
+
+def test_an_outline_naming_none_of_the_headings_the_rules_find_is_no_section_structure(tmp_path):
+    """A repository's cover sheet: its outline names the title and the terms of use, found there, not the sections."""
+    doc = _outlined(
+        tmp_path,
+        [(1, 'Terms of use', 1, 90)],
+        [[(100, 'Terms of use', 10), (120, BODY, 10)], [(100, '1 Introduction', 12), (120, BODY, 10)]],
+    )
+    found = headings(doc)
+    assert (found.source, found.shared, found.unstated) == ('inferred', 0, ('1 Introduction',))
+    assert '## 1 Introduction' in to_markdown(doc, sections=found)
+
+
+def test_roman_numbers_and_untitled_items_do_not_keep_an_outline_from_its_pages(tmp_path):
+    doc = _outlined(
+        tmp_path,
+        [(1, 'I Introduction', 1, 90), (1, '', 1, 90), (1, 'II Method', 2, 90)],
+        [[(100, 'I. INTRODUCTION', 12), (120, BODY, 10)], [(100, 'II. METHOD', 12), (120, BODY, 10)]],
+    )
+    found = headings(doc)
+    assert (found.source, found.shared, found.untitled) == ('outline', 2, ('page 1',))
+    assert found.disagreements == ('an outline item (page 1) states no title: it names no heading',)
 
 
 def test_markdown_writes_a_stated_space_as_a_space_and_a_word_joiner_as_none(tmp_path):
@@ -450,3 +574,25 @@ def test_a_data_sheets_numbered_rows_in_another_face_head_nothing(tmp_path):
     _write(page, 57, 250, '2 Dimensions', font='tibo')
     doc.save(tmp_path / 's.pdf')
     assert _heads(to_markdown(read_pdf(tmp_path / 's.pdf'))) == ['## 1 Scope', '## 2 Dimensions']
+
+
+def test_text_filled_in_the_color_under_it_is_not_written(tmp_path):
+    """A manual (ACT1210 p3) sets a white ``T`` on the white page under a heading's first letter: it shows nothing, so
+    it is not written, and the page reads as printed. The control: the same white ``T`` on a black box is written."""
+
+    def page_md(name, *, box):
+        doc = pymupdf.open()
+        page = doc.new_page(width=612, height=792)
+        if box:
+            page.draw_rect(pymupdf.Rect(60, 80, 400, 110), color=None, fill=(0, 0, 0))
+        page.insert_text((72, 100), 'T', fontname='tiro', fontsize=10, color=(1, 1, 1))
+        _write(page, 72, 100, 'Tolerances of the drive')
+        _write(page, 72, 140, 'The body of the page is set in the body face, in roman, at the body size.')
+        doc.save(tmp_path / name)
+        return to_markdown(read_pdf(tmp_path / name))
+
+    printed = page_md('white.pdf', box=False)
+    assert 'Tolerances of the drive' in printed
+    assert 'T Tolerances' not in printed
+    assert 'TTolerances' not in printed
+    assert printed != page_md('black.pdf', box=True)  # the control: on a black box the white T shows

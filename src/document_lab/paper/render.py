@@ -6,9 +6,9 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from document_lab import layout, png
+from document_lab import formula, layout, png
 from document_lab.ir import BBox
-from document_lab.paper.crop import crop_equation, crop_figure, get_equation_context
+from document_lab.paper.crop import crop_figure, get_equation_context
 from document_lab.paper.pagemap import (
     FIG_TABLE_RE,
     build_equation_page_map,
@@ -18,9 +18,12 @@ from document_lab.paper.pagemap import (
 from document_lab.paper.text import RN_PATTERN as _RN
 from document_lab.paper.text import slug
 from document_lab.pdf import read_pdf, read_raster
-from document_lab.regions import regions
+from document_lab.regions import equation, regions
 
 if TYPE_CHECKING:
+    import numpy as np
+
+    from document_lab.formula import Transcribe
     from document_lab.ir import Document, Page
     from document_lab.pdf import Renderer
 
@@ -55,11 +58,11 @@ class _Located:
 
     def __init__(self, read: Document) -> None:
         self.read = read
-        self.body = layout.body_size(read)
+        self.face = layout.body_face(read)
 
     def crop(self, page_num: int, label: str) -> BBox | None:
         """The region labeled ``label`` (``Figure 2``, ``Table 1``, ``(3)``) on the page, or None."""
-        found = [r for r in regions(self.read.pages[page_num], self.body) if r.label == label]
+        found = [r for r in regions(self.read.pages[page_num], self.face) if r.label == label]
         return found[0].bbox if len(found) == 1 else None
 
 
@@ -67,15 +70,20 @@ class _Located:
 RENDER_DPI = 144.0
 
 
-def _render(pdf: Path, read: Document, page_num: int, img_path: Path, crop: BBox | None, renderer: Renderer) -> None:
-    """The page, or its ``crop``, rendered by ``renderer`` at :data:`RENDER_DPI` to ``img_path`` (once)."""
-    if img_path.exists():
-        return
+def _render(
+    pdf: Path, read: Document, page_num: int, img_path: Path, crop: BBox | None, renderer: Renderer
+) -> np.ndarray:
+    """The page, or its ``crop``, rendered by ``renderer`` at :data:`RENDER_DPI` to ``img_path``.
+
+    Always rendered and written, a file already there replaced (the render is deterministic, so a rerun writes the
+    same bytes): returns the pixels written -- a PNG is lossless, so they are the file's.
+    """
     page = read.pages[page_num]
     region = crop or BBox(0.0, 0.0, page.width, page.height)
     pixels = read_raster(pdf, page_num + 1, region, dpi=RENDER_DPI, renderer=renderer).pixels
     img_path.parent.mkdir(parents=True, exist_ok=True)
     img_path.write_bytes(png.encode(pixels))
+    return pixels
 
 
 def _render_one_equation(
@@ -87,18 +95,19 @@ def _render_one_equation(
     img_path: Path,
     located: _Located | None,
     renderer: Renderer,
-) -> None:
-    """Equation ``(eq_num)`` of page ``page_num`` of ``paper`` (read without its running lines) to ``img_path``."""
-    if img_path.exists():
-        return
+) -> np.ndarray | None:
+    """Equation ``(eq_num)`` of page ``page_num`` of ``paper`` (read without its running lines) to ``img_path``.
+
+    Returns the pixels written (:func:`_render`); None when the equation is not found.
+    """
     page = paper.pages[page_num]
     if is_full_page_image(page):  # a picture page: where its text locates the number, if it does
         crop = located.crop(page_num, f'({eq_num})') if located is not None else None
     else:
-        crop = crop_equation(page, eq_num, face)
+        crop = equation(page, eq_num, face)
     if crop is None:
-        return  # equation position not found on page; skip
-    _render(pdf, paper, page_num, img_path, crop, renderer)
+        return None  # equation position not found on page; skip
+    return _render(pdf, paper, page_num, img_path, crop, renderer)
 
 
 # ── Markdown insertion helpers ────────────────────────────────────────────────
@@ -154,6 +163,7 @@ def _insert_equations_inline(
     figure_images: dict[str, str],
     page_section_map: dict[int, int],
     eq_context: dict[str, tuple[str | None, str | None]] | None = None,
+    latex: dict[str, str] | None = None,
 ) -> None:
     content = section_file.read_text(encoding='utf-8')
     changed = False
@@ -180,6 +190,7 @@ def _insert_equations_inline(
         if img_name in content:
             seen.add(eq_label)
             continue
+        block = f'\n\n{latex[eq_label]}' if latex and eq_label in latex else ''  # beside the image it reads
 
         seen.add(eq_label)
 
@@ -200,7 +211,7 @@ def _insert_equations_inline(
             if not is_cross_ref:
                 preceding = content[max(0, m.start() - 200) : m.start()]
                 if not re.search(rf'!\[.*?[Ee]equation.*?{eq_num}.*?\]', preceding):
-                    insertion = f'\n\n![{eq_label}]({img_path})\n\n'
+                    insertion = f'\n\n![{eq_label}]({img_path}){block}\n\n'
                     insert_at = max(m.start(), min_insert_pos)
                     content = content[:insert_at] + insertion + content[insert_at:]
                     min_insert_pos = insert_at + len(insertion)
@@ -249,7 +260,7 @@ def _insert_equations_inline(
                 continue
             preceding = content[max(0, m2.start() - 200) : m2.start()]
             if not re.search(rf'!\[.*?[Ee]equation.*?{eq_num}.*?\]', preceding):
-                insertion = f'\n\n![{eq_label}]({img_path})\n\n'
+                insertion = f'\n\n![{eq_label}]({img_path}){block}\n\n'
                 insert_at = max(m2.start(), min_insert_pos)
                 content = content[:insert_at] + insertion + content[insert_at:]
                 # Advance min_insert_pos so later lead-in equations don't precede
@@ -270,7 +281,7 @@ def _insert_equations_inline(
         insert_pos = search_from + gap_m.start() + 1 if gap_m else search_from + 1
 
         formula_part = f'\n*{formula_text}*' if formula_text else ''
-        insertion = f'\n![{eq_label}]({img_path}){formula_part}\n({eq_num})\n'
+        insertion = f'\n![{eq_label}]({img_path}){block}{formula_part}\n({eq_num})\n'
         content = content[:insert_pos] + insertion + content[insert_pos:]
         min_insert_pos = insert_pos + len(insertion)
         changed = True
@@ -328,7 +339,7 @@ def render_figure_pages(
 
     A label on a page that is one picture (:func:`is_full_page_image`: a screen capture, a scan) has no drawn
     content to crop by: it is cut out where the page's text locates it (`document_lab.regions`: an OCR layer's
-    caption and the prose around it), and else links the whole page, rendered once as ``page-NN.png`` however many
+    caption and the prose around it), and else links the whole page, rendered once a run as ``page-NN.png`` however many
     such labels the page holds.
 
     Captions are found, and figures cropped, on the paper without its running heads and feet
@@ -363,6 +374,7 @@ def render_figure_pages(
             unique_entries.append((label, normalized, page_num, owning))
 
     located = _Located(read) if any(is_full_page_image(read.pages[e[2]]) for e in unique_entries) else None
+    rendered: set[Path] = set()
     for label, normalized, page_num, owning in unique_entries:
         page = paper.pages[page_num]
         own = f'page-{page_num + 1:02d}-{normalized.lower().replace(" ", "-")}.png'
@@ -373,7 +385,9 @@ def render_figure_pages(
         else:  # nothing locates it: the page itself, once, shared by every such label on it
             crop, img_name = None, f'page-{page_num + 1:02d}.png'
         img_path = out_dir / 'img' / f'sec{owning:02d}' / img_name
-        _render(pdf_path, read, page_num, img_path, crop, renderer)
+        if img_path not in rendered:  # a whole page several labels share is rendered once a run
+            _render(pdf_path, read, page_num, img_path, crop, renderer)
+            rendered.add(img_path)
         figure_images[normalized] = f'img/sec{owning:02d}/{img_name}'
 
     _fix_cross_section_image_refs(out_dir, body_sections, page_section_map)
@@ -395,11 +409,13 @@ def render_equation_images(
     page_section_map: dict[int, int],
     *,
     renderer: Renderer = 'pymupdf',
+    transcribe: Transcribe | None = None,
 ) -> dict[str, str]:
     """Render equation images (by ``renderer``) and insert them at equation number positions.
 
     The equations are read off the paper without its running heads and feet (`document_lab.layout.without_running`).
-    Returns updated figure_images dict with equation entries added.
+    ``transcribe`` (`document_lab.formula.transcriber`): each rendered crop's LaTeX follows its image as a display
+    block. Returns updated figure_images dict with equation entries added.
     """
     read = read_pdf(pdf_path)
     paper, face = layout.without_running(read), layout.body_face(read)
@@ -408,6 +424,7 @@ def render_equation_images(
         return figure_images
 
     located = _Located(read) if any(is_full_page_image(read.pages[p]) for p in eq_page_map.values()) else None
+    latex: dict[str, str] = {}
 
     for eq_label, page_num in eq_page_map.items():
         eq_num = eq_label.split()[-1]
@@ -427,8 +444,10 @@ def render_equation_images(
 
         img_name = f'page-{page_num + 1:02d}-{eq_label.lower().replace(" ", "-")}.png'
         img_path = out_dir / 'img' / f'sec{owning:02d}' / img_name
-        _render_one_equation(pdf_path, paper, face, page_num, eq_num, img_path, located, renderer)
+        written = _render_one_equation(pdf_path, paper, face, page_num, eq_num, img_path, located, renderer)
         figure_images[eq_label] = f'img/sec{owning:02d}/{img_name}'
+        if transcribe is not None and written is not None:
+            latex[eq_label] = formula.beside(transcribe(written), eq_num)
 
     # Build context (lead-in + formula text) for equations that may lack (N) in markdown
     eq_context: dict[str, tuple[str | None, str | None]] = {}
@@ -441,6 +460,6 @@ def render_equation_images(
         sec_slug = slug(heading) or 'body'
         sec_file = out_dir / 'md' / f'{idx:02d}-{sec_slug}.md'
         if sec_file.exists():
-            _insert_equations_inline(sec_file, idx, eq_page_map, figure_images, page_section_map, eq_context)
+            _insert_equations_inline(sec_file, idx, eq_page_map, figure_images, page_section_map, eq_context, latex)
 
     return figure_images

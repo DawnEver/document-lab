@@ -130,7 +130,7 @@ class TestChooseTool:
 
 class TestConvert:
     def test_reports_the_default(self, host, tmp_path):
-        text, choice = convert(_pdf(tmp_path / 'paper.pdf'), tmp_path / 'out')
+        text, choice, _ = convert(_pdf(tmp_path / 'paper.pdf'), tmp_path / 'out')
         assert text
         assert choice == convert_module.ToolChoice('ir', 'the default')
 
@@ -173,7 +173,7 @@ def _journal(tmp_path):
 def test_the_ir_markdown_leaves_out_running_heads_and_feet(tmp_path):
     """The running head and the page numbers repeat at every page's edge: the document's furniture, not its text."""
     pdf = _journal(tmp_path)
-    md, choice = convert(pdf, tmp_path / 'out', tool='ir')
+    md, choice, _ = convert(pdf, tmp_path / 'out', tool='ir')
     assert choice.tool == 'ir'
     assert 'Journal of Synthetic Results' not in md
     assert not re.search(r'^\d+$', md, re.MULTILINE)  # no page number stands as a paragraph

@@ -6,10 +6,9 @@
 - Frames: a line is built and read in its own frame -- x along its text, y down across its lines -- the page's own
   for upright text; text turned sideways reads along its baseline (a quarter turn exactly within :data:`UPRIGHT`),
   vertical writing down its column. A line's page box is its frame box turned back.
-- Runs: spans that continue one another in their source's order -- one font and size, each next starting near where
-  the last ends -- are one run whatever their fill (:func:`_runs`): a reader splits a run where its fill changes, and
-  a line is built and measured from runs, so a scan's glyphs each in a grey of their own read as the run their source
-  set.
+- Runs: a span that ``continues_run`` (:class:`~document_lab.ir.TextSpan`) is one run with the span before it
+  (:func:`_runs`): a reader splits a run where its fill changes and says which piece goes on with it, and a line is
+  built and measured from runs, so a scan's glyphs each in a grey of their own read as the run their source set.
 - Lines: runs on one baseline running one way, each starting within :data:`LINE_GAP` font sizes of the line's
   end, its middle across within 0.4 of a size of the line's own (never the last run's); a column gutter is wider, so
   two columns' lines at one height stay two lines. A line's text spaces two
@@ -62,8 +61,6 @@ __all__ = [
     'GUTTER',
     'LINE_GAP',
     'RUNNING_PAGES',
-    'RUN_BASELINE',
-    'RUN_BREAK',
     'SAME_WAY',
     'UPRIGHT',
     'Block',
@@ -93,10 +90,6 @@ BLOCK_GAP: Final = 0.6
 DOWN_GAP: Final = 1.5
 #: Vertical writing: columns this many ems or less apart are one block (columns are set up to an em apart).
 COLUMN_GAP: Final = 1.0
-#: A run (:func:`_runs`) goes on to a piece starting at most this many font sizes on from its end, its baseline within
-#: :data:`RUN_BASELINE` sizes of the last piece's: a reader's own rule for a run (document_lab.pdf, spans.rs).
-RUN_BREAK: Final = 1.0
-RUN_BASELINE: Final = 0.1
 #: Points a column line may cross the page middle.
 GUTTER: Final = 5.0
 #: A span runs left to right when its baseline's direction has at least this x component (within ~8 degrees).
@@ -263,42 +256,17 @@ def _reach(line: Line, span: TextSpan, *, weighted: bool) -> float:
 
 
 def _runs(spans: Iterable[TextSpan]) -> list[list[TextSpan]]:
-    """``spans``, in their source's order, as the runs it set: a span continues a run whatever its fill.
+    """``spans``, in their source's order, as the runs it set: a span that ``continues_run`` goes on with the last.
 
-    A reader splits a run where its fill changes (a scan's glyphs each a grey of their own, a colored digit); the next
-    piece is the next span in its source's order that continues the run in all but its fill (:func:`_continues`).
-    Spans in one fill the reader split for another reason (a baseline that jumps) stay apart. Read as one run -- its
-    box round its pieces -- a fill change moves no line and splits no paragraph.
+    Read as one run -- its box round its pieces -- a fill change moves no line and splits no paragraph.
     """
     out: list[list[TextSpan]] = []
     for span in spans:
-        if out and _continues(out[-1][-1], span):
+        if out and span.continues_run:
             out[-1].append(span)
         else:
             out.append([span])
     return out
-
-
-def _continues(last: TextSpan, span: TextSpan) -> bool:
-    """Is ``span`` the next piece of the run ``last`` ends, set apart from it by its fill alone?
-
-    Everything else holds as a run holds it: font, size, render mode, layer and way; ``span`` starting on from
-    ``last``'s end by at most :data:`RUN_BREAK` sizes (back by at most half a size), its baseline -- its box's middle,
-    in the same font and size -- within :data:`RUN_BASELINE` sizes of ``last``'s.
-    """
-    same = (span.font, span.size, span.render_mode, span.hidden, span.annotation, span.vertical) == (
-        last.font,
-        last.size,
-        last.render_mode,
-        last.hidden,
-        last.annotation,
-        last.vertical,
-    )
-    if span.fill == last.fill or not same or _way(span) != (way := _way(last)) or not _same_way(last, span):
-        return False
-    a, b = _framed(last.provenance.bbox, way), _framed(span.provenance.bbox, way)
-    near = -0.5 * span.size <= b.x0 - a.x1 <= RUN_BREAK * span.size
-    return near and abs((a.y0 + a.y1 - b.y0 - b.y1) / 2) <= RUN_BASELINE * span.size
 
 
 def _run_box(run: list[TextSpan], way: tuple[float, float]) -> BBox:
@@ -335,7 +303,7 @@ def lines(page: Page, *, weighted: bool) -> list[Line]:
     mid = page.width / 2
     margin = {id(s) for s in furniture(page)}
     found: list[Line] = []
-    runs = _runs(s for s in page.spans if id(s) not in margin)
+    runs = [r for run in _runs(page.spans) if (r := [s for s in run if id(s) not in margin])]
     for run in sorted(runs, key=lambda run: _start(run[0])):
         span = run[0]
         for line in found:

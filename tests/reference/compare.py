@@ -26,17 +26,22 @@ PyMuPDF gives a path filled and stroked as one drawing or as two, so each fill a
 of PyMuPDF's taken once. One of ours whose fill or stroke no drawing matches is ``unmatched``; a fill or stroke of
 PyMuPDF's no path of ours takes is ``unreported`` when it can show -- its box meets the page and its clip as PyMuPDF
 bounds them (the reader leaves out a path its clip box misses, `pdf::interpret`) -- and is no Type 3 glyph's ink
-(:class:`_Theirs`). A pattern's paint is not compared: ours states it with no components, PyMuPDF draws a clip and a
-shading. A color is compared when both state RGB (ours keeps a separation's tint), against PyMuPDF's color with its
-color management off and on: off, both convert a device color by ISO 32000's formulas; on, both convert an
-``ICCBased`` color through its profile (the reader by moxcms, PyMuPDF by lcms2) -- and the reader converts each space
-the one way, so a color matches either.
+(:class:`_Theirs`). A fill painted with a pattern (``VectorPath.pattern``) is not compared: PyMuPDF draws a clip and
+the pattern's shading or cells, never one solid fill -- an uncolored tiling's tint (a TikZ hatch) included. A color
+is compared when both state RGB (ours keeps a separation's tint), against PyMuPDF's color with its color management
+off and on: off, both convert a device color by ISO 32000's formulas; on, both convert an ``ICCBased`` color through
+its profile (the reader by moxcms, PyMuPDF by lcms2) -- and the reader converts each space the one way, so a color
+matches either.
 
 Images are compared by where they are placed. PyMuPDF lists every placement, seen or not; the reader leaves out what
 its clip hides, and its clip is a box holding the true one (`pdf::interpret`), so it leaves out only what cannot show.
 An image of ours PyMuPDF does not place there is ``invented``; PyMuPDF's placements we do not report are ``clipped``.
 Rendered ink cannot judge a clipped one: a Form showing part of an embedded page hides images that another Form,
 showing another part of the same page, draws in the very place.
+
+The outline is compared item by item -- depth, title (whitespace collapsed) and the page it leads to -- and each page's
+label as a string (no label: empty, as PyMuPDF gives it). PyMuPDF leaves a label prefix stated as a UTF-16 text string
+in its hex form (``<FEFF004B>1`` for ``K1``, a text string by ISO 32000-2 7.9.2.2): that form is decoded on its side.
 
 PyMuPDF reads the page unrotated; its coordinates are turned to the page as displayed, as ours are. The page is read
 one at a time and PyMuPDF's drawings are taken one by one (its ``callback``), so memory holds one document of ours
@@ -45,6 +50,7 @@ and one page of PyMuPDF's.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from collections import Counter, defaultdict
 from contextlib import contextmanager
@@ -60,11 +66,16 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
     from pathlib import Path
 
-    from document_lab.ir import BBox, TextSpan, VectorPath
+    from document_lab.ir import BBox, OutlineItem, TextSpan, VectorPath
+
+#: An outline item as both readers state it: depth (1 top level), title, the 1-based page it leads to (-1: none).
+Entry = tuple[int, str, int]
 
 UNKNOWN = '\N{REPLACEMENT CHARACTER}'
 #: Points two placements of an image may differ by and be one.
 PLACED = 0.5
+#: A UTF-16 text string PyMuPDF leaves in its hex form inside a page label.
+_HEX_TEXT = re.compile(r'<(FEFF(?:[0-9A-Fa-f]{4})*)>')
 #: Points a PyMuPDF character's origin may lie outside one of our spans' boxes and be located in it.
 LOCATED = 1.0
 #: Points a drawing's box may differ from one of our paths' and be its box.
@@ -134,6 +145,11 @@ class Compared:
     locked: bool
     pages: tuple[Page, ...]
     reference_pages: int
+    outline: tuple[Entry, ...] = ()
+    reference_outline: tuple[Entry, ...] = ()
+    #: Each page's label, ours and PyMuPDF's.
+    labels: tuple[str, ...] = ()
+    reference_labels: tuple[str, ...] = ()
 
     @property
     def agreement(self) -> float:
@@ -335,18 +351,19 @@ class _Drawn(NamedTuple):
 
 
 def _ours(paths: Sequence[VectorPath]) -> list[_Drawn]:
-    """Our painted paths, each its subpaths' box; one painted with a pattern alone left out (PyMuPDF draws none)."""
+    """Our painted paths, each its subpaths' box; a pattern's fill is none to compare (PyMuPDF draws no solid fill)."""
     groups: dict[int, list[VectorPath]] = {}
     for path in paths:
         groups.setdefault(path.group, []).append(path)
     out = []
     for subpaths in groups.values():
         first = subpaths[0]
-        if not (first.fill or first.stroke):
+        fill = None if first.pattern is not None else first.fill
+        if not (fill or first.stroke):
             continue
         boxes = [p.provenance.bbox for p in subpaths]
         box = (min(b.x0 for b in boxes), min(b.y0 for b in boxes), max(b.x1 for b in boxes), max(b.y1 for b in boxes))
-        out.append(_Drawn(box, first.stroke, first.width, first.dashes, first.fill, first.even_odd))
+        out.append(_Drawn(box, first.stroke, first.width, first.dashes, fill, first.even_odd))
     return out
 
 
@@ -489,7 +506,7 @@ def _paths(ours: list[_Drawn], theirs: _Theirs) -> tuple[int, int]:
         candidates = sorted(
             k for cell in _cells(x - DRAWN, y - DRAWN, x + DRAWN, y + DRAWN, _DRAWING_CELL) for k in grid.get(cell, ())
         )
-        # A pattern's paint (no components) PyMuPDF gives as a clip and its shading, not as a drawing.
+        # A stroke painted with a pattern (no components) PyMuPDF gives as a clip and its cells, not as a drawing.
         roles = [role for role, paint in enumerate((path.fill, path.stroke)) if paint]
         takes = [
             next((k for k in candidates if free[k][role] and _paints(path, theirs.drawn[k], role)), None)
@@ -543,6 +560,17 @@ def _images(ours: list, theirs: pymupdf.Page, to: _Mapping) -> dict[str, int]:
         else:
             unmatched.remove(match)
     return {'images': len(ours), 'invented': invented, 'clipped': len(unmatched)}
+
+
+def _entries(items: tuple[OutlineItem, ...], depth: int = 1) -> Iterator[Entry]:
+    for item in items:
+        page = item.destination.page if item.destination is not None else -1
+        yield depth, ' '.join((item.title or '').split()), page
+        yield from _entries(item.children, depth + 1)
+
+
+def _text(hex_string: re.Match) -> str:
+    return bytes.fromhex(hex_string[1]).decode('utf-16')
 
 
 @contextmanager
@@ -604,4 +632,16 @@ def compare(path: Path, reference_path: Path | None = None, plant: Plant | None 
                     unreported=unreported,
                 )
             )
-        return Compared(path, locked=False, pages=tuple(pages), reference_pages=reference.page_count)
+        labels = doc.page_labels or ('',) * len(doc.pages)
+        return Compared(
+            path,
+            locked=False,
+            pages=tuple(pages),
+            reference_pages=reference.page_count,
+            outline=tuple(_entries(doc.outline)),
+            reference_outline=tuple(
+                (level, ' '.join(title.split()), page) for level, title, page in reference.get_toc()
+            ),
+            labels=tuple(label or '' for label in labels),
+            reference_labels=tuple(_HEX_TEXT.sub(_text, page.get_label()) for page in reference),
+        )

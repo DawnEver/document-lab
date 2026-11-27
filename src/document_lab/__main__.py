@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from lab_commons.log import emit
 
 from document_lab.capture import cli as capture_cli
+from document_lab.formula import MODELS
 
 if TYPE_CHECKING:
     from document_lab.markdown import Headings
@@ -85,6 +86,7 @@ def _parser() -> argparse.ArgumentParser:
     pages.add_argument('--renderer', **_RENDERER)
     pages.add_argument('--tags', type=_uses, default=_DEFAULT, help=_TAGS_HELP)
     pages.add_argument('--no-outline', action='store_true', help=_NO_OUTLINE)
+    _formulas_option(pages)
     paper = sub.add_parser('paper', help='a paper PDF to per-section markdown and cropped figures')
     paper.add_argument('pdf', type=Path)
     paper.add_argument('out', type=Path, help='the directory to write the paper layout into')
@@ -96,7 +98,35 @@ def _parser() -> argparse.ArgumentParser:
     paper.add_argument('--renderer', **_RENDERER)
     paper.add_argument('--tags', type=_uses, default=_DEFAULT, help=_TAGS_HELP)
     paper.add_argument('--no-outline', action='store_true', help=_NO_OUTLINE)
+    _formulas_option(paper)
     return parser
+
+
+def _formulas_option(command: argparse.ArgumentParser) -> None:
+    command.add_argument(
+        '--formulas',
+        choices=('latex',),
+        help="write each equation crop's LaTeX beside it, read in-process ('formula' extra; default: the crop alone)",
+    )
+    command.add_argument(
+        '--formula-model',
+        choices=tuple(MODELS),
+        help='the model --formulas reads with: texteller (the default; Apache-2.0, fastest on a GPU) or codeformula-v2 '
+        "(docling's CodeFormulaV2; CDLA-Permissive-2.0 weights)",
+    )
+
+
+def _formulas(args: argparse.Namespace) -> dict[str, str]:
+    """The formula keywords of ``write_pages`` / ``ingest`` the command line asked for."""
+    asked = {'formulas': args.formulas}
+    if args.formula_model is not None:
+        asked['formula_model'] = args.formula_model
+    return asked
+
+
+def _refused(error: Exception) -> int:
+    emit(f'refused: {error}')
+    return 2
 
 
 def _off_or_float(value: str) -> float | None:
@@ -117,9 +147,20 @@ def _ocr(args: argparse.Namespace) -> int:
 
 
 def _pages(args: argparse.Namespace) -> int:
+    from document_lab.formula import FormulaUnavailable  # noqa: PLC0415
     from document_lab.per_page import write_pages  # noqa: PLC0415
 
-    done = write_pages(args.pdf, args.out, renderer=args.renderer, outline=not args.no_outline, tagged=args.tags)
+    try:
+        done = write_pages(
+            args.pdf,
+            args.out,
+            renderer=args.renderer,
+            outline=not args.no_outline,
+            tagged=args.tags,
+            **_formulas(args),
+        )
+    except FormulaUnavailable as refused:
+        return _refused(refused)
     emit(f'{done.out}: {done.pages} page(s)')
     _structure(done.structure)
     _disagreements(done.disagreements)
@@ -134,6 +175,7 @@ def _pages(args: argparse.Namespace) -> int:
 
 
 def _paper(args: argparse.Namespace) -> int:
+    from document_lab.formula import FormulaUnavailable  # noqa: PLC0415
     from document_lab.paper.convert import MarkerUnavailable  # noqa: PLC0415
     from document_lab.paper.ingest import ingest  # noqa: PLC0415
 
@@ -145,10 +187,10 @@ def _paper(args: argparse.Namespace) -> int:
             renderer=args.renderer,
             outline=not args.no_outline,
             tagged=args.tags,
+            **_formulas(args),
         )
-    except MarkerUnavailable as refused:
-        emit(f'refused: {refused}')
-        return 2
+    except (MarkerUnavailable, FormulaUnavailable) as refused:
+        return _refused(refused)
     emit(
         f'{args.out}: {done.sections} sections, {done.figures} figures, {done.tables} tables '
         f'({done.choice.tool}: {done.choice.why}); {len(done.appended)} appended paper(s)'
@@ -201,7 +243,10 @@ _RUN = {
 
 def main(argv: list[str] | None = None) -> int:
     """Parse ``argv`` and run its subcommand; the exit status."""
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if getattr(args, 'formula_model', None) is not None and args.formulas is None:
+        parser.error('--formula-model names the model --formulas reads with: add --formulas latex')
     return _RUN[args.command](args)
 
 

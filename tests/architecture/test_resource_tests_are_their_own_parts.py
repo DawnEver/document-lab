@@ -1,10 +1,11 @@
 """`gpu` (marker-pdf on a CUDA GPU), `vendor` (a real vendor PDF), `papers` (the real papers, local), `reference`
-(a local corpus of real PDFs), `ocr` (Tesseract), the OS parts `windows`, `macos` and `linux` (a desktop of each) and
-`corpus` (public PDFs fetched from their URLs) are declared resources: base never selects them, so they cannot skip
-inside it. The first five are declared unproduced on hosted runners (none exists there); an OS part runs on its OS's
-hosted runner, the linux and macos ones after a setup that gives the job's interpreter Tk (the overlay, the panel and
-the viewer are Tk windows), the linux one starting a display as well; `corpus` needs the network a hosted runner has, so
-it runs there in a job of its own whose setup fetches the sources."""
+(a local corpus of real PDFs), `ocr` (Tesseract), `formula` (the formula extra's model and weights), the OS parts
+`windows`, `macos` and `linux` (a desktop of each) and `corpus` (public PDFs fetched from their URLs) are declared
+resources: base never selects them, so they cannot skip inside it. The first six are declared unproduced on hosted
+runners (none exists there); an OS part runs on its OS's hosted runner, the linux and macos ones after a setup that
+gives the job's interpreter Tk (the overlay, the panel and the viewer are Tk windows), the linux one starting a display
+as well; `corpus` needs the network a hosted runner has, so it runs there in a job of its own whose setup fetches the
+sources."""
 
 import tomllib
 from pathlib import Path
@@ -14,6 +15,7 @@ from dev_lab.dev.unproduced import unproduced
 from lab_commons.hpc.needsets import BASE, read_vocabulary, selecting
 
 from tests.corpus import test_corpus, test_paper_structure
+from tests.formula import test_formula_model
 from tests.gpu import test_marker
 from tests.linux import test_capture_desktop as linux_capture
 from tests.macos import test_capture_desktop as macos_capture
@@ -26,8 +28,8 @@ from tests.windows import test_capture_desktop as windows_capture
 PYPROJECT = Path(__file__).resolve().parents[2] / 'pyproject.toml'
 
 
-RESOURCES = {'gpu', 'vendor', 'papers', 'reference', 'ocr', 'windows', 'macos', 'linux', 'corpus'}
-UNPRODUCED = {'gpu', 'vendor', 'papers', 'reference', 'ocr'}
+RESOURCES = {'gpu', 'vendor', 'papers', 'reference', 'ocr', 'formula', 'windows', 'macos', 'linux', 'corpus'}
+UNPRODUCED = {'gpu', 'vendor', 'papers', 'reference', 'ocr', 'formula'}
 
 
 def test_each_is_a_declared_resource_so_base_excludes_it():
@@ -86,5 +88,6 @@ def test_each_part_marks_its_whole_module():
     assert macos_capture.pytestmark.name == 'macos'
     assert linux_capture.pytestmark.name == 'linux'
     assert test_ocr.pytestmark.name == 'ocr'
+    assert test_formula_model.pytestmark.name == 'formula'
     assert test_corpus.pytestmark.name == 'corpus'
     assert test_paper_structure.pytestmark.name == 'corpus'

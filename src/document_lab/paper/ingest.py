@@ -15,7 +15,7 @@ import shutil
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from document_lab import png
+from document_lab import formula, png
 from document_lab.agreement import compare
 from document_lab.ir import BBox
 from document_lab.paper.convert import convert
@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from collections.abc import Collection
     from pathlib import Path
 
+    from document_lab.formula import Formulas, Model
     from document_lab.markdown import Headings
     from document_lab.paper.convert import Tool, ToolChoice
     from document_lab.pdf import Renderer
@@ -101,14 +102,19 @@ def ingest(
     renderer: Renderer = 'pymupdf',
     outline: bool = True,
     tagged: Collection[str] = DEFAULT_USES,
+    formulas: Formulas | None = None,
+    formula_model: Model = 'texteller',
 ) -> Ingested:
     """Convert ``pdf`` (with ``tool``, else the IR path) and write its paper layout into ``out_dir``.
 
     Its figures, equations and scanned pages are rendered by ``renderer`` (`document_lab.pdf.read_raster`).
     ``outline``: the PDF's stated outline names the sections when it matches the pages; False keeps to its tags and
     the rules. ``tagged``: what a tagged PDF's tags give its markdown, and so its sections
-    (`document_lab.paper.convert.convert`).
+    (`document_lab.paper.convert.convert`). ``formulas``: ``latex`` writes each equation crop's LaTeX under its image,
+    read by ``formula_model`` (`document_lab.formula`); refused by :class:`document_lab.formula.FormulaUnavailable`
+    before anything is written when that model cannot run.
     """
+    transcribe = None if formulas is None else formula.transcriber(formulas, model=formula_model)
     pdf = pdf.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     md_text, choice, structure = convert(pdf, out_dir, tool=tool, outline=outline, tagged=tagged)
@@ -126,7 +132,9 @@ def ingest(
             return Ingested(choice, scanned, scanned, 0, (), structure, disagreements)
         msg = f'{pdf.name}: the converted markdown has no section'
         raise NoSections(msg)
-    n_sec, n_fig, n_tbl = write_paper_output(main, out_dir, md_text, pdf_path=pdf, renderer=renderer)
+    n_sec, n_fig, n_tbl = write_paper_output(
+        main, out_dir, md_text, pdf_path=pdf, renderer=renderer, transcribe=transcribe
+    )
 
     appended_root = out_dir / 'appended'
     shutil.rmtree(appended_root, ignore_errors=True)
@@ -138,7 +146,15 @@ def ingest(
         for img in (out_dir / 'img' / 'flat').iterdir():
             if img.is_file():
                 shutil.copy2(img, flat / img.name)
-        write_paper_output(sections, target, sections[0][1], title_override=title, pdf_path=pdf, renderer=renderer)
+        write_paper_output(
+            sections,
+            target,
+            sections[0][1],
+            title_override=title,
+            pdf_path=pdf,
+            renderer=renderer,
+            transcribe=transcribe,
+        )
         shutil.rmtree(flat, ignore_errors=True)
         written.append(target)
 

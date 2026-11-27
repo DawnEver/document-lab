@@ -41,6 +41,8 @@ from collections import defaultdict
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Literal
 
+import numpy as np
+
 from document_lab import layout
 from document_lab.ir import BBox, union
 from document_lab.tables import SHORT_CELL, aligned, tables
@@ -758,29 +760,41 @@ def _figures(page: Page, drawings: Sequence[Drawing], body: float, *, clustered:
 
 
 def _clusters(boxes: list[BBox], reach: float) -> list[BBox]:
-    """``boxes`` joined where they come within ``reach`` of one another, each group its union."""
-    parent = list(range(len(boxes)))
+    """``boxes`` joined where they come within about ``reach`` of one another, each group its union.
 
-    def root(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    cells: dict[tuple[int, int], list[int]] = defaultdict(list)
-    size = max(reach, 1.0) * 4
-    for i, b in enumerate(boxes):
-        for cx in range(int((b.x0 - reach) // size), int((b.x1 + reach) // size) + 1):
-            for cy in range(int((b.y0 - reach) // size), int((b.y1 + reach) // size) + 1):
-                for j in cells[cx, cy]:
-                    o = boxes[j]
-                    if o.x0 - reach <= b.x1 and b.x0 - reach <= o.x1 and o.y0 - reach <= b.y1 and b.y0 - reach <= o.y1:
-                        parent[root(i)] = root(j)
-                cells[cx, cy].append(i)
-    groups: dict[int, list[BBox]] = defaultdict(list)
-    for i, b in enumerate(boxes):
-        groups[root(i)].append(b)
-    return [union(g) for g in groups.values()]
+    Each box marks the cells of a grid ``reach`` wide that it covers; cells touching (corners too) are one group, so
+    boxes within ``reach`` join -- a mesh of a hundred thousand paths in time linear in them.
+    """
+    if not boxes:
+        return []
+    cell = max(reach, 1.0)
+    edges = np.array([(b.x0, b.y0, b.x1, b.y1) for b in boxes])
+    left, top = edges[:, 0].min(), edges[:, 1].min()
+    cols = ((edges[:, [0, 2]] - left) // cell).astype(int)
+    rows = ((edges[:, [1, 3]] - top) // cell).astype(int)
+    grid = np.zeros((rows[:, 1].max() + 1, cols[:, 1].max() + 1), dtype=np.int64)
+    for (c0, c1), (r0, r1) in zip(cols, rows, strict=True):
+        grid[r0 : r1 + 1, c0 : c1 + 1] = -1
+    group = 0
+    for start in zip(*np.nonzero(grid == -1), strict=True):
+        if grid[start] != -1:
+            continue
+        group += 1
+        grid[start] = group
+        todo = [start]
+        while todo:
+            r, c = todo.pop()
+            for nr in (r - 1, r, r + 1):
+                for nc in (c - 1, c, c + 1):
+                    if 0 <= nr < grid.shape[0] and 0 <= nc < grid.shape[1] and grid[nr, nc] == -1:
+                        grid[nr, nc] = group
+                        todo.append((nr, nc))
+    labels = grid[rows[:, 0], cols[:, 0]]
+    out = []
+    for g in np.unique(labels):
+        mine = edges[labels == g]
+        out.append(BBox(mine[:, 0].min(), mine[:, 1].min(), mine[:, 2].max(), mine[:, 3].max()))
+    return out
 
 
 def _legends(page: Page, body: float) -> list[BBox]:

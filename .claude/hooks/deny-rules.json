@@ -261,5 +261,12 @@
     "pattern": "(?:ssh(?:\\s+(?:-[oplJiFLRDwWcmbeEQS]\\s*\\S+|-[46AaCfGgKkMNnqsTtVvXxYy]+))*\\s+\\S+\\s+[\\'\"]?(?:[^\\n\\'\"]*[;&|]\\s*)?(?:sudo|rm|mv|cp|tee|install|mkdir|rmdir|chmod|chown|ln|truncate|dd|kill|pkill|reboot|shutdown|crontab|systemctl\\s+(?:start|stop|restart|reload|enable|disable|daemon-reload|mask|edit)|apt(?:-get)?|dnf|yum|pip3?|uv|git\\s+(?:pull|push|checkout|switch|reset|merge|clone|fetch|clean|stash)|docker\\s+(?:run|rm|stop|start|restart|compose|pull|exec))\\b|ssh(?:\\s+(?:-[oplJiFLRDwWcmbeEQS]\\s*\\S+|-[46AaCfGgKkMNnqsTtVvXxYy]+))*\\s+\\S+\\s+[^\\n]*(?:\\$[\\w{(]|`|\\bdev_lab\\.ops\\b)|(?:scp|rsync)\\b[^\\n;&|]*\\s\\S*[\\w.-]:\\S*\\s*$)",
     "matches": "command",
     "reason": "REMOTE-WRITE-THROUGH-A-DOOR: a hand-written write to a remote host leaves no record of which door, host or reason changed it.\ndev_lab.ops (--subject too): {python} -m dev_lab.dev.planrun preflight --plan P --steps S asks hosts; sshhold open --hours H --plan P --digest D (user's code); planrun run. Else opsserver <server> <verb>, hpcaccount. Spell out $VAR; read-only ssh is open.\ndetails: docs-src/dev/refusals.md#remote-write-through-a-door (dev-lab)"
+  },
+  {
+    "name": "HOOKS-ARE-WIRED",
+    "pattern": "(?:\"?\\S*python[\\w.]*(?:\\.exe)?\"?\\s+-m\\s+dev_lab\\.dev\\.netverb(?:\\s+--)?\\s+)?(?:(?:\"[^\"]*[/\\\\])?\"?\\S*?\\bgit(?:\\.exe)?\"?(?:\\s+-[Cc]\\s*(?:\"[^\"\\n]*\"|'[^'\\n]*'|[^\\s\"';&|()]+))*)\\s+(?:commit|merge|push|cherry-pick|rebase)(?=\\s|$|[;&|)])",
+    "matches": "command",
+    "reason": "HOOKS-ARE-WIRED: its declared git hook stages are not live, so this verb would run none of the family checks.\n{python} -m dev_lab.dev.dep --bootstrap <tree>, then {python} -m dev_lab.dev.hook_install --repo <tree> --install.\ndetails: docs-src/dev/refusals.md#hooks-are-wired (dev-lab)",
+    "asks": "dev_lab.dev.hook_install"
   }
 ]

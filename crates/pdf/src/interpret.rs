@@ -3,9 +3,14 @@
 //! The graphics state is tracked across `q`/`Q`, `cm`, colors, line style and Form `XObject`s; each painted path,
 //! each image placed, each string shown and each shading painted (`sh`) is an event, its geometry already in page
 //! space (points, y down). A fill or stroke with a pattern is a path event whose color names the pattern
-//! ([`crate::color::Pattern`]); a pattern's own content (a tiling cell, a shading's colors) is not interpreted. A
-//! fill or stroke in the colorant `None` marks nothing ([`crate::color::Space::paints`]): it is no paint of the event,
-//! and a path painted in it alone is no event.
+//! ([`crate::color::Pattern`]); a pattern's own content (a tiling cell, a shading's colors) is not interpreted, but
+//! an uncolored tiling pattern's tint is the color's, in the pattern space's base.
+//!
+//! What is painted in the colorant `None` ([`crate::color::Space::paints`]) marks nothing (8.6.6.4) and is still an
+//! event, its [`Layer::inkless`] set, as hidden content is: a path filled or stroked in it -- a path whose fill marks
+//! and whose stroke does not (or the reverse) is two events, the marking paint's and the inkless one's --, a stencil
+//! mask painted in it, an image or a shading in a space of it alone. Text is not flagged: text shown in it is the
+//! page's text as an invisible text layer's is (render mode 3, an OCR layer), which the reader reports as text.
 //!
 //! The clip is tracked as the box it lies in -- the page's crop box, narrowed by each clipping path's bounds, each
 //! Form's `/BBox` and, at `ET`, the union of the boxes of the glyphs shown in a clipping text mode (4-7) -- and a
@@ -13,6 +18,9 @@
 //! event. A box holds the true clip, so a mark outside a curved clip (or between two clipping glyphs) but inside
 //! its box is kept: never one lost, at worst one kept that a viewer hides. A shading's event is the box it may
 //! paint: the clip's, within the shading's own `/BBox`, not the narrower area a non-extended gradient covers.
+//! Each event also carries the clip itself, for whoever draws it: the chain of clipping paths in force ([`Clip`]) --
+//! each `W`/`W*` path, each Form's `/BBox`, each text object's clipping glyphs (by their boxes) -- and how it is
+//! composited ([`Compositing`]: the constant alphas, blend mode and whether a soft mask is in force).
 //!
 //! Marked content (14.6) is tracked as a stack apart from the graphics state: `q`/`Q` neither saves nor ends it,
 //! and a Form's sequences end with the Form (one left open is closed there, with a warning). What optional
@@ -37,18 +45,22 @@
 //! appearance string (`/DA`) is not applied: it is the recipe for making an appearance, not part of drawing one.
 //!
 //! Not interpreted: a pattern's content and optional content usage ([`crate::optional`] says which). An operation
-//! that cannot be read is skipped and named in [`Content::warnings`], never silently; a color whose space or tint
-//! transform does not read is set by its components alone, with no RGB, and named there too -- never left in the
-//! space set before.
+//! that cannot be read is skipped and named in [`Content::warnings`], never silently; a color whose space, profile
+//! or tint transform does not read is set by its components alone, with no RGB, and named there too -- never left in
+//! the space set before.
+//!
+//! The rendering intent (`ri`, a graphics state's `/RI`; relative colorimetric until one is set) is part of the
+//! graphics state: a color in an `ICCBased` space converts at the intent in force when it is painted.
 
 use std::rc::Rc;
 
-use crate::color::{Color, Space};
+use crate::color::{Color, Pattern, Space};
 use crate::content::{Operation, operations};
 use crate::error::{Error, Result};
 use crate::file::File;
 use crate::font::{Font, FontInfo};
 use crate::geometry::{Matrix, Point, Rect};
+use crate::icc::Intent;
 use crate::object::{Dict, Object, Stream, text_string};
 use crate::optional::OptionalContent;
 use crate::page::Page;
@@ -78,7 +90,7 @@ pub enum Segment {
 pub struct Stroke {
     /// The stroking color.
     pub color: Color,
-    /// The line width in page space (points).
+    /// The line width in page space (points): the user space width scaled by [`Matrix::scale`] of `ctm`.
     pub width: f64,
     /// The dash array in page space (on, off, ...); empty for a solid line.
     pub dashes: Vec<f64>,
@@ -88,6 +100,129 @@ pub struct Stroke {
     pub cap: i64,
     /// The line join style (0 miter, 1 round, 2 bevel).
     pub join: i64,
+    /// The miter limit (`M`, `/ML`): the longest a miter join may be, in line widths, before it is beveled.
+    pub miter_limit: f64,
+    /// The matrix from user space to page space it was painted under (8.5.3.2: a line is stroked in user space,
+    /// so under a matrix that scales unevenly its width varies with direction).
+    pub ctm: Matrix,
+}
+
+/// A clipping path in force (8.5.4): what shows of a mark is what lies inside it and inside every clip it narrows.
+#[derive(Debug, PartialEq)]
+pub struct Clip {
+    /// Its outline.
+    pub outline: Outline,
+    /// The clip in force when it was set, which it narrows; None: the page's alone.
+    pub within: Option<Rc<Clip>>,
+}
+
+/// The outline of a clipping path.
+#[derive(Debug, PartialEq)]
+pub enum Outline {
+    /// A path in page space (a clipping path's, a Form's `/BBox`), filled by the even-odd rule or the nonzero.
+    Path {
+        /// Its segments, page space.
+        segments: Vec<Segment>,
+        /// Even-odd (`W*`) rather than nonzero winding (`W`).
+        even_odd: bool,
+    },
+    /// The glyphs shown in a clipping text mode (4-7) in one text object, by their boxes: their outlines are not
+    /// read here.
+    Glyphs(Vec<Rect>),
+}
+
+/// How a mark is composited onto what lies below it (11.3.5, 11.6.4): the graphics state's constant alphas, blend
+/// mode and soft mask.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Compositing {
+    /// The constant alpha (`/ca`) of filling: a fill, an image, a shading, text filled.
+    pub fill_alpha: f64,
+    /// The constant alpha (`/CA`) of stroking.
+    pub stroke_alpha: f64,
+    /// The blend mode (`/BM`).
+    pub blend: Blend,
+    /// A soft mask (`/SMask` a dictionary) is in force: what shows is further masked by it.
+    pub soft_mask: bool,
+    /// It is drawn inside a transparency group (a Form with a `/Group`, 11.6.6) entered with a constant alpha below
+    /// 1, a blend mode other than `Normal` or a soft mask: the group's result, not each mark, is composited so. The
+    /// group's own marks start from the initial alphas, blend mode and soft mask, as the standard has them.
+    pub grouped: bool,
+}
+
+impl Default for Compositing {
+    fn default() -> Self {
+        Self {
+            fill_alpha: 1.0,
+            stroke_alpha: 1.0,
+            blend: Blend::Normal,
+            soft_mask: false,
+            grouped: false,
+        }
+    }
+}
+
+/// A blend mode (11.3.5): how a mark's color mixes with the backdrop's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Blend {
+    /// `Normal` (and `Compatible`): the mark's color.
+    #[default]
+    Normal,
+    /// `Multiply`.
+    Multiply,
+    /// `Screen`.
+    Screen,
+    /// `Overlay`.
+    Overlay,
+    /// `Darken`.
+    Darken,
+    /// `Lighten`.
+    Lighten,
+    /// `ColorDodge`.
+    ColorDodge,
+    /// `ColorBurn`.
+    ColorBurn,
+    /// `HardLight`.
+    HardLight,
+    /// `SoftLight`.
+    SoftLight,
+    /// `Difference`.
+    Difference,
+    /// `Exclusion`.
+    Exclusion,
+    /// `Hue`.
+    Hue,
+    /// `Saturation`.
+    Saturation,
+    /// `Color`.
+    Color,
+    /// `Luminosity`.
+    Luminosity,
+}
+
+impl Blend {
+    /// The blend mode `name` names; None for a name the standard does not define.
+    #[must_use]
+    pub fn named(name: &[u8]) -> Option<Self> {
+        Some(match name {
+            b"Normal" | b"Compatible" => Self::Normal,
+            b"Multiply" => Self::Multiply,
+            b"Screen" => Self::Screen,
+            b"Overlay" => Self::Overlay,
+            b"Darken" => Self::Darken,
+            b"Lighten" => Self::Lighten,
+            b"ColorDodge" => Self::ColorDodge,
+            b"ColorBurn" => Self::ColorBurn,
+            b"HardLight" => Self::HardLight,
+            b"SoftLight" => Self::SoftLight,
+            b"Difference" => Self::Difference,
+            b"Exclusion" => Self::Exclusion,
+            b"Hue" => Self::Hue,
+            b"Saturation" => Self::Saturation,
+            b"Color" => Self::Color,
+            b"Luminosity" => Self::Luminosity,
+            _ => return None,
+        })
+    }
 }
 
 /// How a path is filled.
@@ -112,6 +247,10 @@ pub struct PathEvent {
     pub layer: Layer,
     /// The marked content it is drawn in.
     pub marked: Marked,
+    /// The clip in force; None: the page's alone.
+    pub clip: Option<Rc<Clip>>,
+    /// How it is composited.
+    pub compositing: Compositing,
 }
 
 /// The marked content an event is drawn in (14.6), as a tagged PDF's structure tree refers to it (14.7.5).
@@ -127,11 +266,13 @@ pub struct Marked {
 }
 
 /// Where an event is drawn beyond the page's own visible content: in optional content the default view hides, in
-/// an annotation's appearance. The default is the page's content, shown.
+/// the colorant `None`, in an annotation's appearance. The default is the page's content, shown.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Layer {
     /// Optional content the default view hides draws it (see [`crate::optional`]).
     pub hidden: bool,
+    /// It is painted in the colorant `None`: it marks nothing, in any view (see the module).
+    pub inkless: bool,
     /// The `/Subtype` of the annotation whose appearance draws it (`Widget`, `FreeText`, `Stamp`, ...); None for
     /// the page's content.
     pub annotation: Option<String>,
@@ -150,12 +291,29 @@ pub struct ImageEvent {
     pub height: i64,
     /// The image `XObject`'s object number; None for an inline image.
     pub object: Option<u32>,
-    /// An inline image's dictionary and data (still encoded); None for an image `XObject`.
-    pub inline: Option<(Dict, Vec<u8>)>,
+    /// An inline image; None for an image `XObject`.
+    pub inline: Option<Inline>,
+    /// The fill color in force: what a stencil mask (`/ImageMask true`) paints.
+    pub fill: Color,
     /// The layer it is drawn in.
     pub layer: Layer,
     /// The marked content it is drawn in.
     pub marked: Marked,
+    /// The clip in force; None: the page's alone.
+    pub clip: Option<Rc<Clip>>,
+    /// How it is composited.
+    pub compositing: Compositing,
+}
+
+/// An inline image (`BI` ... `ID` ... `EI`, 8.9.7).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Inline {
+    /// Its dictionary, its keys and names as written (abbreviated or not).
+    pub dict: Dict,
+    /// Its data, still encoded.
+    pub data: Vec<u8>,
+    /// The resources in force where it is placed: a color space it names is one of theirs.
+    pub resources: Dict,
 }
 
 /// One glyph of a text event.
@@ -200,6 +358,10 @@ pub struct TextEvent {
     pub layer: Layer,
     /// The marked content it is drawn in.
     pub marked: Marked,
+    /// The clip in force; None: the page's alone.
+    pub clip: Option<Rc<Clip>>,
+    /// How it is composited.
+    pub compositing: Compositing,
 }
 
 /// An event of a page, in drawing order.
@@ -224,6 +386,10 @@ pub struct ShadingEvent {
     pub layer: Layer,
     /// The marked content it is drawn in.
     pub marked: Marked,
+    /// The clip in force; None: the page's alone.
+    pub clip: Option<Rc<Clip>>,
+    /// How it is composited.
+    pub compositing: Compositing,
 }
 
 /// An open marked-content sequence (`BMC`/`BDC` ... `EMC`).
@@ -267,9 +433,15 @@ struct State {
     dash_phase: f64,
     cap: i64,
     join: i64,
+    miter_limit: f64,
     text: TextState,
     /// The box the clip lies in, page space.
     clip: Rect,
+    /// The clipping paths in force, innermost first; None: the page's alone.
+    clips: Option<Rc<Clip>>,
+    /// The rendering intent colors convert at.
+    intent: Intent,
+    compositing: Compositing,
 }
 
 /// The text state parameters (9.3), part of the graphics state.
@@ -299,6 +471,10 @@ impl State {
             dash_phase: 0.0,
             cap: 0,
             join: 0,
+            miter_limit: 10.0,
+            clips: None,
+            intent: Intent::default(),
+            compositing: Compositing::default(),
             text: TextState {
                 char_spacing: 0.0,
                 word_spacing: 0.0,
@@ -320,13 +496,14 @@ struct Interpreter<'a> {
     path: Vec<Segment>,
     current: Option<Point>,
     start: Option<Point>,
-    /// A clipping path is set (`W`, `W*`): the path ends by narrowing the clip, after it is painted.
-    clipping: bool,
+    /// A clipping path is set (`W`, `W*`: whether by the even-odd rule): the path ends by narrowing the clip, after
+    /// it is painted.
+    clipping: Option<bool>,
     /// The text matrix and the text line matrix (9.4.2), between `BT` and `ET`.
     text_matrix: Matrix,
     line_matrix: Matrix,
-    /// The union of the boxes of the glyphs shown in a clipping mode in this text object: the clip at `ET`.
-    text_clip: Option<Rect>,
+    /// The boxes of the glyphs shown in a clipping mode in this text object: the clip at `ET`.
+    text_clip: Vec<Rect>,
     /// The default view of the file's optional content.
     optional: OptionalContent,
     /// The open marked-content sequences, outermost first.
@@ -390,10 +567,10 @@ impl File {
             path: Vec::new(),
             current: None,
             start: None,
-            clipping: false,
+            clipping: None,
             text_matrix: Matrix::IDENTITY,
             line_matrix: Matrix::IDENTITY,
-            text_clip: None,
+            text_clip: Vec::new(),
             optional: self.optional_content()?,
             marked: Vec::new(),
             stream: None,
@@ -495,15 +672,22 @@ impl Interpreter<'_> {
                             .or_else(|| dict.get(short))
                             .and_then(Object::as_integer)
                     };
+                    let inkless = self.image_inkless(dict, true, resources);
+                    let inline = Inline {
+                        dict: dict.clone(),
+                        data: data.to_vec(),
+                        resources: resources.clone(),
+                    };
                     self.image(
                         int(b"Width", b"W").unwrap_or(0),
                         int(b"Height", b"H").unwrap_or(0),
-                        None,
-                        Some((dict.clone(), data.to_vec())),
+                        (None, Some(inline)),
+                        inkless,
                     );
                 }
             }
-            b"W" | b"W*" => self.clipping = true,
+            b"W" => self.clipping = Some(false),
+            b"W*" => self.clipping = Some(true),
             b"sh" => self.shading(operands, resources)?,
             b"BMC" => self.marked.push(Sequence {
                 artifact: operands.first().and_then(Object::as_name) == Some(b"Artifact"),
@@ -618,6 +802,7 @@ impl Interpreter<'_> {
     fn layer(&self) -> Layer {
         Layer {
             hidden: self.hiding_entries > 0 || self.marked.iter().any(|m| m.hides),
+            inkless: false,
             annotation: self.annotation.clone(),
         }
     }
@@ -664,11 +849,20 @@ impl Interpreter<'_> {
             bbox = bbox.intersect(own);
         }
         if bbox.x0 <= bbox.x1 && bbox.y0 <= bbox.y1 {
-            let (layer, marked) = (self.layer(), self.marked());
+            let inkless = dict
+                .get(b"ColorSpace")
+                .is_some_and(|space| self.file.colorant_none(space, resources));
+            let layer = Layer {
+                inkless,
+                ..self.layer()
+            };
+            let marked = self.marked();
             self.out.events.push(Event::Shading(ShadingEvent {
                 bbox,
                 layer,
                 marked,
+                clip: self.state.clips.clone(),
+                compositing: self.state.compositing,
             }));
         }
         Ok(())
@@ -705,6 +899,7 @@ impl Interpreter<'_> {
             b"w" => self.state.line_width = last::<1>(operands)?[0],
             b"J" => self.state.cap = integer(operands)?,
             b"j" => self.state.join = integer(operands)?,
+            b"M" => self.state.miter_limit = last::<1>(operands)?[0],
             b"d" => {
                 let array = operands
                     .first()
@@ -714,6 +909,13 @@ impl Interpreter<'_> {
                 self.state.dash_phase = operands.get(1).and_then(Object::as_number).unwrap_or(0.0);
             }
             b"gs" => self.ext_state(operands, resources)?,
+            b"ri" => {
+                let name = operands
+                    .last()
+                    .and_then(Object::as_name)
+                    .ok_or_else(|| Error::malformed("needs a name"))?;
+                self.set_intent(name);
+            }
             _ => return Ok(false),
         }
         Ok(true)
@@ -815,11 +1017,13 @@ impl Interpreter<'_> {
         match operator {
             b"BT" => {
                 (self.text_matrix, self.line_matrix) = (Matrix::IDENTITY, Matrix::IDENTITY);
-                self.text_clip = None;
+                self.text_clip.clear();
             }
             b"ET" => {
-                if let Some(glyphs) = self.text_clip.take() {
+                let boxes = std::mem::take(&mut self.text_clip);
+                if let Some(glyphs) = boxes.iter().copied().reduce(Rect::union) {
                     self.state.clip = self.state.clip.intersect(glyphs);
+                    self.narrow(Outline::Glyphs(boxes));
                 }
             }
             b"Tc" => text.char_spacing = last::<1>(operands)?[0],
@@ -1017,11 +1221,7 @@ impl Interpreter<'_> {
 
     fn text_event(&mut self, mut glyphs: Vec<Glyph>) {
         if (4..=7).contains(&self.state.text.render_mode) {
-            self.text_clip = glyphs
-                .iter()
-                .map(|g| g.bbox)
-                .chain(self.text_clip)
-                .reduce(Rect::union);
+            self.text_clip.extend(glyphs.iter().map(|g| g.bbox));
         }
         let Some(font) = &self.state.text.font else {
             return;
@@ -1053,6 +1253,8 @@ impl Interpreter<'_> {
             glyphs,
             layer: self.layer(),
             marked: self.marked(),
+            clip: self.state.clips.clone(),
+            compositing: self.state.compositing,
         };
         self.out.events.push(Event::Text(event));
     }
@@ -1081,6 +1283,9 @@ impl Interpreter<'_> {
                         Space::Other(named.unwrap_or(b"Unknown").to_vec(), 1)
                     }
                 };
+                if let Some(why) = space.unread() {
+                    self.warn(operator, &format!("its colors have no RGB: {why}"));
+                }
                 let color = self.converted(operator, &space, space.initial_components());
                 (space, color)
             }
@@ -1121,18 +1326,20 @@ impl Interpreter<'_> {
         ));
     }
 
-    /// The color of `components` in `space`; when the space gives them no RGB for a cause (a tint transform's
-    /// error), the components alone, the cause named in a warning.
+    /// The color of `components` in `space`, at the intent in force; when the space gives them no RGB for a cause (a
+    /// tint transform's error), the components alone, the cause named in a warning.
     fn converted(&mut self, operator: &[u8], space: &Space, components: Vec<f64>) -> Color {
-        space.color(components.clone()).unwrap_or_else(|e| {
-            self.warn(operator, &format!("its color has no RGB: {e}"));
-            Color {
-                space: space.family(),
-                components,
-                rgb: None,
-                pattern: None,
-            }
-        })
+        space
+            .color(components.clone(), self.state.intent)
+            .unwrap_or_else(|e| {
+                self.warn(operator, &format!("its color has no RGB: {e}"));
+                Color {
+                    space: space.family(),
+                    components,
+                    rgb: None,
+                    pattern: None,
+                }
+            })
     }
 
     /// The color `operands` set in `space`: in `Pattern`, the pattern the last operand names (after an uncolored
@@ -1144,15 +1351,65 @@ impl Interpreter<'_> {
         operands: &[Object],
         resources: &Dict,
     ) -> Result<Color> {
-        let mut color = self.converted(operator, space, numbers_in(operands));
-        if *space == Space::Pattern {
+        let pattern = if let Space::Pattern(_) = space {
             let name = operands
                 .last()
                 .and_then(Object::as_name)
                 .ok_or_else(|| Error::malformed("needs a pattern name"))?;
-            color.pattern = Some(self.file.pattern(name, resources)?);
+            Some(self.file.pattern(name, resources)?)
+        } else {
+            None
+        };
+        Ok(self.painted(operator, space, numbers_in(operands), pattern))
+    }
+
+    /// The color of `components` in `space` painting `pattern`: a pattern's has an RGB only when it is an uncolored
+    /// tiling pattern's tint; another's components are the operands it was set by, if any.
+    fn painted(
+        &mut self,
+        operator: &[u8],
+        space: &Space,
+        components: Vec<f64>,
+        pattern: Option<Pattern>,
+    ) -> Color {
+        let tinted = matches!(pattern, None | Some(Pattern::Tiling { uncolored: true }));
+        let mut color = if tinted {
+            self.converted(operator, space, components)
+        } else {
+            Color {
+                space: space.family(),
+                components,
+                rgb: None,
+                pattern: None,
+            }
+        };
+        color.pattern = pattern;
+        color
+    }
+
+    /// `ri`, a graphics state's `/RI`: the intent `name` names is in force, the colors set converted at it; a name the
+    /// standard does not define leaves the default, relative colorimetric (8.6.5.8).
+    fn set_intent(&mut self, name: &[u8]) {
+        let intent = Intent::named(name).unwrap_or_default();
+        if intent == self.state.intent {
+            return;
         }
-        Ok(color)
+        self.state.intent = intent;
+        for stroking in [true, false] {
+            let (space, color) = if stroking {
+                (&self.state.stroke_space, &self.state.stroke_color)
+            } else {
+                (&self.state.fill_space, &self.state.fill_color)
+            };
+            let (space, components, pattern) =
+                (space.clone(), color.components.clone(), color.pattern);
+            let color = self.painted(b"ri", &space, components, pattern);
+            if stroking {
+                self.state.stroke_color = color;
+            } else {
+                self.state.fill_color = color;
+            }
+        }
     }
 
     fn extend(&mut self, segment: Segment, end: Point) {
@@ -1171,46 +1428,73 @@ impl Interpreter<'_> {
         self.ended(bounds);
     }
 
-    /// The path, in `bounds`, has ended: when it clips, the clip narrows to them.
+    /// The path, in `bounds`, has ended: when it clips, the clip narrows to it (its box to `bounds`).
     fn ended(&mut self, bounds: Option<Rect>) {
-        if std::mem::take(&mut self.clipping)
+        let segments = std::mem::take(&mut self.path);
+        if let Some(even_odd) = self.clipping.take()
             && let Some(bounds) = bounds
         {
             self.state.clip = self.state.clip.intersect(bounds);
+            self.narrow(Outline::Path { segments, even_odd });
         }
-        self.path.clear();
         (self.current, self.start) = (None, None);
+    }
+
+    /// The clip narrows to `outline`.
+    fn narrow(&mut self, outline: Outline) {
+        let within = self.state.clips.take();
+        self.state.clips = Some(Rc::new(Clip { outline, within }));
     }
 
     fn paint(&mut self, stroke: bool, fill: Option<bool>) {
         let bounds = bounds(&self.path);
-        // A paint in the colorant `None` marks nothing: the path ends as `n` ends it.
-        let stroke = stroke && self.state.stroke_space.paints();
-        let fill = fill.filter(|_| self.state.fill_space.paints());
-        if (stroke || fill.is_some()) && bounds.is_some_and(|b| b.meets(self.state.clip)) {
-            let (layer, marked) = (self.layer(), self.marked());
-            let state = &self.state;
-            let scale = state.ctm.scale();
-            let event = PathEvent {
-                segments: std::mem::take(&mut self.path),
-                stroke: stroke.then(|| Stroke {
-                    color: state.stroke_color.clone(),
-                    width: state.line_width * scale,
-                    dashes: state.dashes.iter().map(|d| d * scale).collect(),
-                    dash_phase: state.dash_phase * scale,
-                    cap: state.cap,
-                    join: state.join,
-                }),
-                fill: fill.map(|even_odd| Fill {
-                    color: state.fill_color.clone(),
-                    even_odd,
-                }),
-                layer,
-                marked,
-            };
-            self.out.events.push(Event::Path(event));
+        if bounds.is_some_and(|b| b.meets(self.state.clip)) {
+            // The paints that mark, then those in the colorant `None`, which mark nothing: an event each.
+            let (strokes, fills) = (
+                self.state.stroke_space.paints(),
+                self.state.fill_space.paints(),
+            );
+            for inkless in [false, true] {
+                let stroke = stroke && strokes != inkless;
+                let fill = fill.filter(|_| fills != inkless);
+                if stroke || fill.is_some() {
+                    self.push_path(stroke, fill, inkless);
+                }
+            }
         }
         self.ended(bounds);
+    }
+
+    /// The path painted: stroked when `stroke`, filled by the even-odd rule or not when `fill` says, `inkless` when
+    /// the paints are in the colorant `None`.
+    fn push_path(&mut self, stroke: bool, fill: Option<bool>, inkless: bool) {
+        let state = &self.state;
+        let scale = state.ctm.scale();
+        let event = PathEvent {
+            segments: self.path.clone(),
+            stroke: stroke.then(|| Stroke {
+                color: state.stroke_color.clone(),
+                width: state.line_width * scale,
+                dashes: state.dashes.iter().map(|d| d * scale).collect(),
+                dash_phase: state.dash_phase * scale,
+                cap: state.cap,
+                join: state.join,
+                miter_limit: state.miter_limit,
+                ctm: state.ctm,
+            }),
+            fill: fill.map(|even_odd| Fill {
+                color: state.fill_color.clone(),
+                even_odd,
+            }),
+            layer: Layer {
+                inkless,
+                ..self.layer()
+            },
+            marked: self.marked(),
+            clip: state.clips.clone(),
+            compositing: state.compositing,
+        };
+        self.out.events.push(Event::Path(event));
     }
 
     fn ext_state(&mut self, operands: &[Object], resources: &Dict) -> Result<()> {
@@ -1236,6 +1520,35 @@ impl Interpreter<'_> {
         }
         if let Some(j) = self.file.get(&gs, b"LJ")?.and_then(|o| o.as_integer()) {
             self.state.join = j;
+        }
+        if let Some(m) = self.file.get(&gs, b"ML")?.and_then(|o| o.as_number()) {
+            self.state.miter_limit = m;
+        }
+        let compositing = &mut self.state.compositing;
+        if let Some(a) = self.file.get(&gs, b"CA")?.and_then(|o| o.as_number()) {
+            compositing.stroke_alpha = a.clamp(0.0, 1.0);
+        }
+        if let Some(a) = self.file.get(&gs, b"ca")?.and_then(|o| o.as_number()) {
+            compositing.fill_alpha = a.clamp(0.0, 1.0);
+        }
+        match self.file.get(&gs, b"BM")? {
+            // An array names modes in order of preference: the first one known (11.6.3).
+            Some(Object::Name(n)) => compositing.blend = Blend::named(&n).unwrap_or_default(),
+            Some(Object::Array(names)) => {
+                compositing.blend = names
+                    .iter()
+                    .find_map(|n| n.as_name().and_then(Blend::named))
+                    .unwrap_or_default();
+            }
+            _ => {}
+        }
+        match self.file.get(&gs, b"SMask")? {
+            Some(Object::Dict(_)) => compositing.soft_mask = true,
+            Some(Object::Name(n)) if n == b"None" => compositing.soft_mask = false,
+            _ => {}
+        }
+        if let Some(Object::Name(intent)) = self.file.get(&gs, b"RI")? {
+            self.set_intent(&intent);
         }
         if let Some(Object::Array(d)) = self.file.get(&gs, b"D")? {
             self.state.dashes = d
@@ -1277,11 +1590,12 @@ impl Interpreter<'_> {
         let drawn = match subtype {
             b"Image" => {
                 let int = |k: &[u8]| stream.dict.get(k).and_then(Object::as_integer).unwrap_or(0);
+                let inkless = self.image_inkless(&stream.dict, false, resources);
                 self.image(
                     int(b"Width"),
                     int(b"Height"),
-                    reference.as_reference().map(|r| r.num),
-                    None,
+                    (reference.as_reference().map(|r| r.num), None),
+                    inkless,
                 );
                 Ok(())
             }
@@ -1324,8 +1638,29 @@ impl Interpreter<'_> {
             self.start,
         );
         self.state.ctm = matrix.then(self.state.ctm);
-        if let Some(shown) = self.user_box(&stream.dict)? {
+        if self.file.get(&stream.dict, b"Group")?.is_some() {
+            let entered = self.state.compositing;
+            let composited = entered.fill_alpha < 1.0
+                || entered.stroke_alpha < 1.0
+                || entered.blend != Blend::Normal
+                || entered.soft_mask
+                || entered.grouped;
+            self.state.compositing = Compositing {
+                grouped: composited,
+                ..Compositing::default()
+            };
+        }
+        if let Some([x0, y0, x1, y1]) = four(self.file.get(&stream.dict, b"BBox")?) {
+            let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| self.point(x, y));
+            let shown = Rect::around(&corners).expect("four corners");
             self.state.clip = self.state.clip.intersect(shown);
+            let mut segments = vec![Segment::MoveTo(corners[0])];
+            segments.extend(corners[1..].iter().map(|&c| Segment::LineTo(c)));
+            segments.push(Segment::Close);
+            self.narrow(Outline::Path {
+                segments,
+                even_odd: false,
+            });
         }
         let floor = std::mem::replace(&mut self.marked_floor, self.marked.len());
         let caller = std::mem::replace(&mut self.stream, number);
@@ -1470,12 +1805,29 @@ impl Interpreter<'_> {
         drawn
     }
 
+    /// Whether the image whose dictionary is `dict` (an inline image's when `inline`, its keys and names
+    /// abbreviated) marks nothing: a stencil mask in a fill color of the colorant `None`, or samples in a space of it
+    /// alone.
+    fn image_inkless(&self, dict: &Dict, inline: bool, resources: &Dict) -> bool {
+        let key = |long: &'static [u8], short: &'static [u8]| {
+            dict.get(long)
+                .or_else(|| if inline { dict.get(short) } else { None })
+        };
+        let mask = key(b"ImageMask", b"IM").and_then(|m| self.file.resolve(m).ok());
+        if matches!(mask, Some(Object::Bool(true))) {
+            return !self.state.fill_space.paints();
+        }
+        key(b"ColorSpace", b"CS").is_some_and(|space| self.file.colorant_none(space, resources))
+    }
+
+    /// An image placed: `width` x `height` samples, the image `XObject`'s number or the inline image's dictionary and
+    /// data, `inkless` when it marks nothing.
     fn image(
         &mut self,
         width: i64,
         height: i64,
-        object: Option<u32>,
-        inline: Option<(Dict, Vec<u8>)>,
+        (object, inline): (Option<u32>, Option<Inline>),
+        inkless: bool,
     ) {
         let m = self.state.ctm;
         let corners = [
@@ -1495,8 +1847,14 @@ impl Interpreter<'_> {
             height,
             object,
             inline,
-            layer: self.layer(),
+            fill: self.state.fill_color.clone(),
+            layer: Layer {
+                inkless,
+                ..self.layer()
+            },
             marked: self.marked(),
+            clip: self.state.clips.clone(),
+            compositing: self.state.compositing,
         }));
     }
 }

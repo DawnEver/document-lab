@@ -24,6 +24,13 @@ __all__ = ['main']
 
 _NO_OUTLINE = "infer the section headings even where the PDF's outline names them on its pages"
 
+#: `--renderer`: what draws a page or region's pixels (`document_lab.pdf.read_raster`).
+_RENDERER = {
+    'choices': ('pymupdf', 'own'),
+    'default': 'pymupdf',
+    'help': "what draws the pictures: pymupdf (default) or own (document-lab's renderer: no text until its stage 2)",
+}
+
 
 _DEFAULT = 'order,headings,paragraphs,tables'
 _TAGS_HELP = (
@@ -75,12 +82,18 @@ def _parser() -> argparse.ArgumentParser:
     )
     pages.add_argument('pdf', type=Path)
     pages.add_argument('out', type=Path, help='the directory to write the pages into, or a .zip archive')
+    pages.add_argument('--renderer', **_RENDERER)
     pages.add_argument('--tags', type=_uses, default=_DEFAULT, help=_TAGS_HELP)
     pages.add_argument('--no-outline', action='store_true', help=_NO_OUTLINE)
     paper = sub.add_parser('paper', help='a paper PDF to per-section markdown and cropped figures')
     paper.add_argument('pdf', type=Path)
     paper.add_argument('out', type=Path, help='the directory to write the paper layout into')
-    paper.add_argument('--tool', choices=('marker', 'ir'), help='force a converter (default: best available)')
+    paper.add_argument(
+        '--tool',
+        choices=('marker', 'ir'),
+        help="the converter (default: ir; marker needs the gpu extra and surya's model server, and refuses without)",
+    )
+    paper.add_argument('--renderer', **_RENDERER)
     paper.add_argument('--tags', type=_uses, default=_DEFAULT, help=_TAGS_HELP)
     paper.add_argument('--no-outline', action='store_true', help=_NO_OUTLINE)
     return parser
@@ -106,7 +119,7 @@ def _ocr(args: argparse.Namespace) -> int:
 def _pages(args: argparse.Namespace) -> int:
     from document_lab.per_page import write_pages  # noqa: PLC0415
 
-    done = write_pages(args.pdf, args.out, outline=not args.no_outline, tagged=args.tags)
+    done = write_pages(args.pdf, args.out, renderer=args.renderer, outline=not args.no_outline, tagged=args.tags)
     emit(f'{done.out}: {done.pages} page(s)')
     _structure(done.structure)
     _disagreements(done.disagreements)
@@ -121,12 +134,24 @@ def _pages(args: argparse.Namespace) -> int:
 
 
 def _paper(args: argparse.Namespace) -> int:
+    from document_lab.paper.convert import MarkerUnavailable  # noqa: PLC0415
     from document_lab.paper.ingest import ingest  # noqa: PLC0415
 
-    done = ingest(args.pdf, args.out, tool=args.tool, outline=not args.no_outline, tagged=args.tags)
+    try:
+        done = ingest(
+            args.pdf,
+            args.out,
+            tool=args.tool,
+            renderer=args.renderer,
+            outline=not args.no_outline,
+            tagged=args.tags,
+        )
+    except MarkerUnavailable as refused:
+        emit(f'refused: {refused}')
+        return 2
     emit(
         f'{args.out}: {done.sections} sections, {done.figures} figures, {done.tables} tables '
-        f'({done.tool}); {len(done.appended)} appended paper(s)'
+        f'({done.choice.tool}: {done.choice.why}); {len(done.appended)} appended paper(s)'
     )
     if done.structure is not None:
         _structure(done.structure)

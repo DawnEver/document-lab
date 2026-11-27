@@ -107,14 +107,14 @@ def compare(doc: Document, drawings: Sequence[Sequence[Drawing]] | None = None) 
         return None
     notes: list[str] = []
     heads = _headings(doc, notes)
-    body = layout.body_size(doc)
+    face = layout.body_face(doc)
     counts = {'table': [0, 0, 0], 'figure': [0, 0, 0]}
     for i, page in enumerate(doc.pages):
         if not tags.covers(doc.structure, page.number):
             continue
         drawn = drawings[i] if drawings is not None else ()
-        inferred = regions(page, body, drawn)
-        stated = regions(page, body, drawn, structure=doc.structure)
+        inferred = regions(page, face, drawn)
+        stated = regions(page, face, drawn, structure=doc.structure)
         for kind, count in counts.items():
             mine = [r for r in stated if r.kind == kind]
             theirs = [r for r in inferred if r.kind == kind]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from document_lab import tags
+from document_lab import layout, tags
 from document_lab.agreement import compare
 from document_lab.markdown import headings, page_markdowns, to_markdown
 from document_lab.pdf import read_pdf
@@ -179,7 +179,7 @@ def test_a_tagged_table_reads_as_rows_of_cells_spanning_the_slots_they_state(tmp
 def test_regions_take_a_tagged_table_and_figure_in_place_of_the_inferred(tmp_path):
     doc = _table_doc(tmp_path)
     page = doc.page(1)
-    (table,) = [r for r in regions(page, 10.0, structure=doc.structure) if r.kind == 'table']
+    (table,) = [r for r in regions(page, layout.body_face(doc), structure=doc.structure) if r.kind == 'table']
     assert table.label == 'Table 4'
     assert table.bbox.y0 < 30 - 10 < 110 < table.bbox.y1
 
@@ -196,13 +196,13 @@ def test_a_tagged_figure_keeps_its_alt_and_an_uncovered_page_is_inferred(tmp_pat
         },
     )
     # Figures from tags are off by default (D53): asked for, the tagged figure stands in for the inferred.
-    assert all(r.alt is None for r in regions(doc.page(1), 10.0, structure=doc.structure))
-    (stated,) = regions(doc.page(1), 10.0, structure=doc.structure, tagged=tags.USES)
+    assert all(r.alt is None for r in regions(doc.page(1), layout.body_face(doc), structure=doc.structure))
+    (stated,) = regions(doc.page(1), layout.body_face(doc), structure=doc.structure, tagged=tags.USES)
     assert (stated.kind, stated.label, stated.alt) == ('figure', 'Figure 7', 'a filled box')
     # The box drawn from y 100 up to 180 on a 300-point page stands from 120 down to 200, padded.
     assert stated.bbox.y0 < 120
     assert stated.bbox.y1 > 200
-    (inferred,) = regions(doc.page(2), 10.0, structure=doc.structure, tagged=tags.USES)
+    (inferred,) = regions(doc.page(2), layout.body_face(doc), structure=doc.structure, tagged=tags.USES)
     assert (inferred.label, inferred.alt) == ('Figure 2', None)
 
 
@@ -294,8 +294,9 @@ def test_tags_stating_headings_but_no_title_leave_the_title_to_inference(tmp_pat
 
 def test_regions_take_from_the_tags_only_the_kinds_asked_and_stated(tmp_path):
     doc = _table_doc(tmp_path)
-    assert [r.label for r in regions(doc.page(1), 10.0, structure=doc.structure, tagged={'figures'})] != ['Table 4']
-    assert [r.label for r in regions(doc.page(1), 10.0, structure=doc.structure, tagged={'tables'})] == ['Table 4']
+    face = layout.body_face(doc)
+    assert [r.label for r in regions(doc.page(1), face, structure=doc.structure, tagged={'figures'})] != ['Table 4']
+    assert [r.label for r in regions(doc.page(1), face, structure=doc.structure, tagged={'tables'})] == ['Table 4']
 
 
 def test_a_tagged_heading_the_rules_find_too_takes_their_level_and_no_level_is_skipped(tmp_path):

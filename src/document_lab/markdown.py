@@ -43,8 +43,10 @@ part -- is read as an untagged one is.
   however garbled) or a contents entry (a leader then a page number) never heads, nor does any line of a
   table-of-contents page (:data:`TOC_LINES` such entries): it names the sections, it does not open them. An
   upper-case line right under a section heading the rules find is its wrapped line.
-- Paragraphs: lines of one column closer than :data:`PARAGRAPH_GAP` line heights join with a space (a hyphen at a
-  line end joins the word); a larger gap, a heading or a column change starts a new paragraph.
+- Paragraphs: lines of one column and one way closer than :data:`PARAGRAPH_GAP` line heights -- measured down their
+  own frame (`document_lab.layout.Line.frame`), so a caption turned sideways joins its next line beside it -- join
+  with a space (a hyphen at a line end joins the word); a larger gap, a heading or a column change starts a new
+  paragraph.
 - Placed blocks: a caller that knows a page's regions (`document_lab.per_page`) hands boxes with their own markdown
   (:data:`Placed`: a table read from its cells, a figure's link); the lines inside a box leave the paragraphs, and the
   block stands where the box does in reading order. :func:`table` writes rows as a markdown table.
@@ -673,7 +675,8 @@ def _page_blocks(
             and before is None
             and previous is not None
             and previous.column == line.column
-            and -OVERLAP * line.size <= line.y0 - previous.y1 <= PARAGRAPH_GAP * line.size
+            and previous.way == line.way  # measured down their own frame: a turned line's next line stands beside it
+            and -OVERLAP * line.size <= line.frame.y0 - previous.frame.y1 <= PARAGRAPH_GAP * line.size
         )
         if not joined:
             end_paragraph()

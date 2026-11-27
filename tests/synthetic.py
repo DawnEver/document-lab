@@ -7,6 +7,7 @@ is a known function sampled at known points, so a digitizer that is wrong cannot
 from __future__ import annotations
 
 import functools
+import itertools
 import math
 import re
 from dataclasses import dataclass, field, replace
@@ -85,6 +86,8 @@ class PlotSpec:
     #: A rectangle drawn around the whole figure (a border box), or None.
     border: pymupdf.Rect | None = None
     grid_reach: float = 1.0  # the fraction of the frame width a horizontal grid line spans (a legend cuts it)
+    #: Spans (fractions of the frame height from its top) where a label set over the grid cuts each vertical grid line.
+    grid_gaps: Sequence[tuple[float, float]] = ()
     stray: Sequence[tuple[str, float, float, float]] = ()  # extra text: (text, x, y, size)
     #: A y-axis title set ROTATED 90 degrees (reading upward) with its baseline at x, starting at y: (text, x, y, size).
     y_title: tuple[str, float, float, float] | None = None
@@ -342,11 +345,15 @@ def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
         if spec.tick_marks:
             page.draw_line((px, f.y1), (px, f.y1 - 4), color=(0, 0, 0), width=0.5)
         if spec.grid and not (spec.filled_frame and i in (0, len(spec.x.ticks) - 1)):
-            page.draw_line((px, f.y0), (px, f.y1), color=(spec.grid_grey,) * 3, width=0.3)
+            cuts = [f.y0, *(f.y0 + k * f.height for gap in spec.grid_gaps for k in gap), f.y1]
+            for top, bottom in itertools.batched(cuts, 2):
+                page.draw_line((px, top), (px, bottom), color=(spec.grid_grey,) * 3, width=0.3)
         _x_label(page, spec, spec.x.labels[i] if spec.x.labels else _label(v), px)
     _y_axis(page, spec)
-    for text, x, y, size in spec.stray:
-        page.insert_text((x, y), text, fontname='helv', fontsize=size)
+    for text, x, y, size in spec.stray:  # a font object sets every character Helvetica has (``Ω``), not only Latin-1
+        writer = pymupdf.TextWriter(page.rect)
+        writer.append((x, y), text, font=pymupdf.Font('helv'), fontsize=size)
+        writer.write_text(page)
     if spec.y_title is not None:
         text, x, y, size = spec.y_title
         page.insert_text((x, y), text, fontname='helv', fontsize=size, rotate=90)
@@ -458,6 +465,7 @@ def image_pdf(
     deflate: bool = True,
     rotate: int = 0,
     soft_mask: bytes | None = None,
+    profile: tuple[bytes, int] | None = None,
     over: Callable[[pymupdf.Page], object] | None = None,
 ) -> Path:
     """A one-page PDF of ``size`` points placing one image XObject, saved to ``path``.
@@ -465,7 +473,8 @@ def image_pdf(
     ``image`` is the image dictionary's own entries (``/Width 4 /Height 2 /ColorSpace /DeviceGray ...``), ``stored``
     its stream: deflated when ``deflate``, else stored as given (a codec's ``/Filter`` stated in ``image``).
     ``matrix`` is the ``cm`` placing it (PDF space, y up; default the whole page, upright); ``rotate`` the page's
-    ``/Rotate``; ``soft_mask`` the 8-bit gray samples of an ``/SMask`` its size; ``over`` draws on the page after.
+    ``/Rotate``; ``soft_mask`` the 8-bit gray samples of an ``/SMask`` its size; ``profile`` an ICC profile and its
+    component count, the image's ``/ColorSpace`` an ``ICCBased`` space of it; ``over`` draws on the page after.
     """
     doc = pymupdf.open()
     page = doc.new_page(width=size[0], height=size[1])
@@ -476,6 +485,11 @@ def image_pdf(
         doc.update_object(mask, f'<< /Type /XObject /Subtype /Image {entries} >>')
         doc.update_stream(mask, soft_mask)
         image += f' /SMask {mask} 0 R'
+    if profile is not None:
+        icc = doc.get_new_xref()
+        doc.update_object(icc, f'<< /N {profile[1]} >>')
+        doc.update_stream(icc, profile[0])
+        image += f' /ColorSpace [/ICCBased {icc} 0 R]'
     xobject = doc.get_new_xref()
     doc.update_object(xobject, f'<< /Type /XObject /Subtype /Image {image} >>')
     doc.update_stream(xobject, stored, compress=deflate)
@@ -494,6 +508,89 @@ def image_pdf(
     doc.save(path)
     doc.close()
     return path
+
+
+#: CIE XYZ (D65) to linear sRGB (IEC 61966-2-1).
+XYZ_TO_SRGB = np.array(
+    [
+        [3.2404542, -1.5371385, -0.4985314],
+        [-0.9692660, 1.8760108, 0.0415560],
+        [0.0556434, -0.2040259, 1.0572252],
+    ]
+)
+#: The Bradford cone response matrix.
+BRADFORD = np.array([[0.8951, 0.2664, -0.1614], [-0.7502, 1.7135, 0.0367], [0.0389, -0.0685, 1.0296]])
+#: The ICC profile connection space's white, D50 (ICC.1 7.2.16).
+D50 = np.array([0.9642, 1.0, 0.8249])
+
+
+def _to_xyz(primaries: Sequence[tuple[float, float]], white: tuple[float, float]) -> np.ndarray:
+    """The matrix from linear RGB to CIE XYZ (its white's) of RGB ``primaries`` and ``white`` given as CIE xy."""
+    xyz = lambda x, y: np.array([x / y, 1.0, (1 - x - y) / y])  # noqa: E731 -- a formula
+    columns = np.column_stack([xyz(*p) for p in primaries])
+    return columns * np.linalg.solve(columns, xyz(*white))
+
+
+def rgb_in_srgb(
+    samples: np.ndarray, *, primaries: Sequence[tuple[float, float]], white: tuple[float, float], gamma: float
+) -> np.ndarray:
+    """8-bit samples of the RGB space of ``primaries``, ``white`` and a pure ``gamma`` as 8-bit sRGB, by the formulas.
+
+    The white must be D65's (sRGB's): no adaptation is made. The truth a color-managed reading is held to.
+    """
+    linear = (samples / 255.0) ** gamma @ (XYZ_TO_SRGB @ _to_xyz(primaries, white)).T
+    linear = np.clip(linear, 0.0, 1.0)
+    encoded = np.where(linear <= 0.0031308, 12.92 * linear, 1.055 * linear ** (1 / 2.4) - 0.055)
+    return np.round(encoded * 255).astype(np.uint8)
+
+
+def icc_profile(*, primaries: Sequence[tuple[float, float]], white: tuple[float, float], gamma: float) -> bytes:
+    """An ICC v2 RGB display profile, matrix and TRC (ICC.1:2001-04), of ``primaries`` and ``white`` (CIE xy) and a
+    pure ``gamma`` for each channel: its colorants Bradford-adapted to D50, its white point D50 as v2 states it.
+    """
+    to_xyz = _to_xyz(primaries, white)
+    source = BRADFORD @ np.array([white[0] / white[1], 1.0, (1 - white[0] - white[1]) / white[1]])
+    adapt = np.linalg.inv(BRADFORD) @ np.diag(BRADFORD @ D50 / source) @ BRADFORD
+    colorants = adapt @ to_xyz
+
+    def s15(values: Sequence[float]) -> bytes:
+        return b''.join(round(v * 65536).to_bytes(4, 'big', signed=True) for v in values)
+
+    def xyz(values: Sequence[float]) -> bytes:
+        return b'XYZ ' + bytes(4) + s15(values)
+
+    curve = b'curv' + bytes(4) + (1).to_bytes(4, 'big') + round(gamma * 256).to_bytes(2, 'big') + bytes(2)
+    text = b'Synthetic RGB'
+    description = b'desc' + bytes(4) + (len(text) + 1).to_bytes(4, 'big') + text + bytes(1) + bytes(8) + bytes(3 + 67)
+    tags = [
+        (b'desc', description),
+        (b'cprt', b'text' + bytes(4) + b'No copyright\0'),
+        (b'wtpt', xyz(D50)),
+        (b'rXYZ', xyz(colorants[:, 0])),
+        (b'gXYZ', xyz(colorants[:, 1])),
+        (b'bXYZ', xyz(colorants[:, 2])),
+        (b'rTRC', curve),
+        (b'gTRC', curve),
+        (b'bTRC', curve),
+    ]
+    table, data, offset = b'', b'', 128 + 4 + 12 * len(tags)
+    for signature, body in tags:
+        table += signature + (offset + len(data)).to_bytes(4, 'big') + len(body).to_bytes(4, 'big')
+        data += body + bytes(-len(body) % 4)
+    size = offset + len(data)
+    header = (
+        size.to_bytes(4, 'big')
+        + bytes(4)
+        + bytes([2, 0x10, 0, 0])
+        + b'mntrRGB XYZ '
+        + bytes(12)
+        + b'acsp'
+        + bytes(24)
+        + bytes(4)  # perceptual
+        + s15(D50)
+        + bytes(4 + 16 + 28)
+    )
+    return header + len(tags).to_bytes(4, 'big') + table + data
 
 
 def fax_g4(white: np.ndarray) -> bytes:
@@ -581,6 +678,47 @@ def draw_ruled_table(
                 page.insert_text((rect.x0 + 4, rect.y1 - 6), text, fontname='helv', fontsize=9)
 
 
+#: Booktabs' rules: the top and bottom rules heavier than the one under the header (0.08 em and 0.05 em at 10 pt).
+TOP_RULE, MID_RULE = 0.8, 0.5
+
+
+def draw_booktabs(
+    page: pymupdf.Page,
+    rows: Sequence[Sequence[str]] = TABLE_ROWS,
+    *,
+    at: tuple[float, float] = TABLE_ORIGIN,
+    filled: bool = True,
+    rules: Sequence[int] | None = None,
+) -> pymupdf.Rect:
+    """``rows`` as booktabs sets them: no rule down, a top rule, one under the header row, a bottom rule.
+
+    Rules are thin filled bars, as pdfLaTeX draws them (or ``filled`` False, stroked lines), across every column;
+    columns are parted by white space alone, each cell's text set :data:`TABLE_CELL` apart from ``at``. ``rules``:
+    the row boundaries ruled (0 the top, ``len(rows)`` the bottom), by default top, under the header and bottom.
+    Returns the box from the top rule to the bottom one.
+    """
+    x0, y0 = at
+    w, h = TABLE_CELL
+    right = x0 + len(rows[0]) * w
+    for r in (0, 1, len(rows)) if rules is None else rules:
+        thick = MID_RULE if 0 < r < len(rows) else TOP_RULE
+        _rule(page, pymupdf.Point(x0, y0 + r * h), pymupdf.Point(right, y0 + r * h), filled=filled, width=thick)
+    for r, row in enumerate(rows):
+        for c, text in enumerate(row):
+            if text:
+                page.insert_text((x0 + c * w + 4, y0 + (r + 1) * h - 6), text, fontname='helv', fontsize=9)
+    return pymupdf.Rect(x0, y0, right, y0 + len(rows) * h)
+
+
+#: A list set between rules, as booktabs rules a table: a heading, then each item after its enumerator.
+LIST_ROWS = (
+    ('Steps', ''),
+    ('1.', 'Mount the stator on the bench'),
+    ('2.', 'Couple the load machine'),
+    ('3.', 'Record the winding temperature'),
+)
+
+
 def mixed_pdf(path: Path) -> Path:
     """Page 1: a heading, a table and a raster image with a caption; page 2: one red polyline."""
     doc = pymupdf.open()
@@ -616,6 +754,30 @@ def text_pdf(path: Path, pages: Sequence[Sequence[Run]], bars: Sequence[Sequence
     return path
 
 
+#: A word of a text layer: its text, its box as the page shows it (points), the degrees its baseline is turned clockwise
+#: as seen (-90: read bottom to top) and whether it is written vertically (read down a column).
+type LayerWord = tuple[str, tuple[float, float, float, float], float, bool]
+
+
+def layer_pdf(path: Path, words: Sequence[LayerWord], width: float = 612, height: float = 792) -> Path:
+    """A blank page with a text layer laid by our own writer, as `document_lab.ocr` lays Tesseract's words: each word
+    invisible over its box, along its turn -- boxes as loose or as tight as an OCR's, every one known."""
+    from document_lab import _pdf  # noqa: PLC0415 -- the writer `document_lab.ocr` lays its layers with
+
+    with pymupdf.open() as doc:
+        doc.new_page(width=width, height=height)
+        reader = _pdf.open(doc.tobytes(), b'')
+    laid = []
+    for text, (x0, y0, x1, y1), turn, vertical in words:
+        across, down = (y1 - y0, x1 - x0) if turn % 180 else (x1 - x0, y1 - y0)  # the writer turns its box about
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2  # the center, from the word's own frame
+        laid.append((text, (cx - across / 2, cy - down / 2, cx + across / 2, cy + down / 2), float(turn), vertical))
+    writer = _pdf.create(path)
+    writer.copy_page_with_text(reader, 1, laid)
+    writer.close()
+    return path
+
+
 #: Lines top to bottom, each ``(before, drawn, actual, after)``: ``drawn`` is shown, marked with ``/ActualText``
 #: ``actual``. A drawn space stated a zero-width space, a no-break space, a word joiner; the control: ``XY`` stated
 #: the letters ``fi`` of its ligature, a replacement that is no space.
@@ -642,6 +804,27 @@ def actual_text_pdf(path: Path) -> Path:
     stream = doc.get_new_xref()
     doc.update_object(stream, '<< >>')
     doc.update_stream(stream, content.encode('ascii'))
+    doc.xref_set_key(page.xref, 'Contents', f'{stream} 0 R')
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def hatch_pdf(path: Path) -> Path:
+    """A 200 x 100 page: a blue 5 x 5 solid fill, then a 50 x 50 hatch -- an uncolored tiling pattern (a diagonal
+    stroke, as TikZ's ``north east lines``) tinted red through ``[/Pattern /DeviceRGB]``: a pattern, not a solid fill.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=200, height=100)
+    pattern = doc.get_new_xref()
+    doc.update_object(pattern, '<< /PatternType 1 /PaintType 2 /TilingType 1 /BBox [0 0 4 4] /XStep 4 /YStep 4 >>')
+    doc.update_stream(pattern, b'0 0 m 4 4 l S')
+    doc.xref_set_key(
+        page.xref, 'Resources', f'<< /ColorSpace << /C [/Pattern /DeviceRGB] >> /Pattern << /H {pattern} 0 R >> >>'
+    )
+    stream = doc.get_new_xref()
+    doc.update_object(stream, '<< >>')
+    doc.update_stream(stream, b'0 0 1 rg 0 0 5 5 re f /C cs 1 0 0 /H scn 10 10 50 50 re f')
     doc.xref_set_key(page.xref, 'Contents', f'{stream} 0 R')
     doc.save(path)
     doc.close()

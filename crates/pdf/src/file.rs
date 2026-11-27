@@ -1,5 +1,6 @@
 //! A PDF opened: its objects resolved by reference, object streams included, a broken table repaired.
 
+use std::any::Any;
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -30,6 +31,8 @@ pub struct File {
     streams: RefCell<HashMap<u32, Rc<Members>>>,
     /// What was repaired to read this file, in words (empty for a sound file).
     repairs: RefCell<Vec<String>>,
+    /// Values read from objects once, by object number ([`File::read_once`]): an ICC profile, ...
+    read: RefCell<HashMap<u32, Rc<dyn Any>>>,
     /// The decryption of an encrypted file, and its encryption dictionary's object number (never decrypted).
     decryptor: Option<(Decryptor, Option<u32>)>,
     /// Fonts read, by their dictionary's object number: read once for every page showing them.
@@ -69,6 +72,7 @@ impl File {
             scanned: OnceCell::new(),
             streams: RefCell::new(HashMap::new()),
             repairs: RefCell::new(repair.into_iter().collect()),
+            read: RefCell::new(HashMap::new()),
             decryptor: None,
             fonts: RefCell::new(HashMap::new()),
         };
@@ -111,6 +115,31 @@ impl File {
     /// What was repaired to read this file, in words; empty for a sound file.
     pub fn repairs(&self) -> Vec<String> {
         self.repairs.borrow().clone()
+    }
+
+    /// The value `read` makes of object `num`, made the first time it is asked for and kept: what is costly to
+    /// make from an object and is made of it alone (an ICC profile and its transforms). A value of another type
+    /// kept for `num` is not replaced; this one is then made afresh.
+    ///
+    /// # Errors
+    ///
+    /// Refuses what `read` refuses (and keeps nothing).
+    pub fn read_once<T: 'static>(
+        &self,
+        num: u32,
+        read: impl FnOnce() -> Result<T>,
+    ) -> Result<Rc<T>> {
+        if let Some(kept) = self.read.borrow().get(&num).cloned()
+            && let Ok(kept) = kept.downcast::<T>()
+        {
+            return Ok(kept);
+        }
+        let made = Rc::new(read()?);
+        self.read
+            .borrow_mut()
+            .entry(num)
+            .or_insert_with(|| Rc::clone(&made) as Rc<dyn Any>);
+        Ok(made)
     }
 
     /// The SHA-256 digest of the file's bytes, as read: what a reading cites as its source.

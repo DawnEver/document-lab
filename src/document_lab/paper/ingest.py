@@ -15,14 +15,14 @@ import shutil
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import pymupdf
-
+from document_lab import png
 from document_lab.agreement import compare
+from document_lab.ir import BBox
 from document_lab.paper.convert import convert
 from document_lab.paper.output import write_paper_output
 from document_lab.paper.sections import clean_sections, split_sections
 from document_lab.paper.text import slug
-from document_lab.pdf import read_pdf
+from document_lab.pdf import read_pdf, read_raster
 from document_lab.tags import DEFAULT_USES
 
 if TYPE_CHECKING:
@@ -30,7 +30,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from document_lab.markdown import Headings
-    from document_lab.paper.convert import Tool
+    from document_lab.paper.convert import Tool, ToolChoice
+    from document_lab.pdf import Renderer
 
 __all__ = ['Ingested', 'NoSections', 'ingest']
 
@@ -41,13 +42,13 @@ class NoSections(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class Ingested:
-    """What one ingest wrote: the tool, the counts of the main paper, and one directory per appended paper.
+    """What one ingest wrote: the converter's choice, the main paper's counts, one directory per appended paper.
 
     ``structure``: how the sections were headed -- by the PDF's outline or inferred, and where the two disagree
     (`document_lab.markdown.Headings`); None when marker headed them.
     """
 
-    tool: Tool
+    choice: ToolChoice
     sections: int
     figures: int
     tables: int
@@ -58,17 +59,18 @@ class Ingested:
     disagreements: tuple[str, ...] = ()
 
 
-#: Render scale of a scanned page: 3x (216 dpi) keeps a catalogue's 6 pt table digits legible.
-_SCAN_ZOOM = 3.0
+#: Render resolution of a scanned page: 3x (216 dpi) keeps a catalogue's 6 pt table digits legible.
+_SCAN_DPI = 216.0
 
 
-def _scanned_pages(pdf: Path, out_dir: Path) -> int:
+def _scanned_pages(pdf: Path, out_dir: Path, renderer: Renderer) -> int:
     """Write a document with ink but no text layer as page images; the count written (0: nothing inked).
 
     Raster scans and outlined glyphs: each inked page becomes ``img/pages/page-NNN.png`` with one section
     ``md/NN-page-N.md`` linking it.
     """
-    inked = [i for i, page in enumerate(read_pdf(pdf).pages) if page.figures or page.paths]
+    pages = read_pdf(pdf).pages
+    inked = [i for i, page in enumerate(pages) if page.figures or page.paths]
     if not inked:
         return 0
     img_dir, md_dir = out_dir / 'img' / 'pages', out_dir / 'md'
@@ -77,8 +79,9 @@ def _scanned_pages(pdf: Path, out_dir: Path) -> int:
     links = []
     for k, i in enumerate(inked, 1):
         name = f'page-{i + 1:03d}.png'
-        with pymupdf.open(pdf) as rendered:
-            rendered[i].get_pixmap(matrix=pymupdf.Matrix(_SCAN_ZOOM, _SCAN_ZOOM)).save(str(img_dir / name))
+        whole = BBox(0.0, 0.0, pages[i].width, pages[i].height)
+        pixels = read_raster(pdf, i + 1, whole, dpi=_SCAN_DPI, renderer=renderer).pixels
+        (img_dir / name).write_bytes(png.encode(pixels))
         section = f'{k:02d}-page-{i + 1}.md'
         (md_dir / section).write_text(
             f'# {pdf.stem} page {i + 1}\n\nno text layer: the page is the image\n\n'
@@ -95,19 +98,21 @@ def ingest(
     out_dir: Path,
     *,
     tool: Tool | None = None,
+    renderer: Renderer = 'pymupdf',
     outline: bool = True,
     tagged: Collection[str] = DEFAULT_USES,
 ) -> Ingested:
-    """Convert ``pdf`` (with ``tool``, else the best available) and write its paper layout into ``out_dir``.
+    """Convert ``pdf`` (with ``tool``, else the IR path) and write its paper layout into ``out_dir``.
 
+    Its figures, equations and scanned pages are rendered by ``renderer`` (`document_lab.pdf.read_raster`).
     ``outline``: the PDF's stated outline names the sections when it matches the pages; False keeps to its tags and
     the rules. ``tagged``: what a tagged PDF's tags give its markdown, and so its sections
     (`document_lab.paper.convert.convert`).
     """
     pdf = pdf.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    md_text, used, structure = convert(pdf, out_dir, tool=tool, outline=outline, tagged=tagged)
-    compared = compare(read_pdf(pdf)) if used == 'ir' else None
+    md_text, choice, structure = convert(pdf, out_dir, tool=tool, outline=outline, tagged=tagged)
+    compared = compare(read_pdf(pdf)) if choice.tool == 'ir' else None
     disagreements = compared.disagreements if compared is not None else ()
     stated = frozenset(structure.named) if structure is not None else frozenset()
     main, appended = clean_sections(split_sections(md_text), stated=stated)
@@ -116,12 +121,12 @@ def ingest(
         # whole text is its one section rather than nothing.
         main, appended = [(f'# {pdf.stem}', md_text)], []
     if not main:
-        scanned = _scanned_pages(pdf, out_dir)
+        scanned = _scanned_pages(pdf, out_dir, renderer)
         if scanned:
-            return Ingested(used, scanned, scanned, 0, (), structure, disagreements)
+            return Ingested(choice, scanned, scanned, 0, (), structure, disagreements)
         msg = f'{pdf.name}: the converted markdown has no section'
         raise NoSections(msg)
-    n_sec, n_fig, n_tbl = write_paper_output(main, out_dir, md_text, pdf_path=pdf)
+    n_sec, n_fig, n_tbl = write_paper_output(main, out_dir, md_text, pdf_path=pdf, renderer=renderer)
 
     appended_root = out_dir / 'appended'
     shutil.rmtree(appended_root, ignore_errors=True)
@@ -133,9 +138,9 @@ def ingest(
         for img in (out_dir / 'img' / 'flat').iterdir():
             if img.is_file():
                 shutil.copy2(img, flat / img.name)
-        write_paper_output(sections, target, sections[0][1], title_override=title, pdf_path=pdf)
+        write_paper_output(sections, target, sections[0][1], title_override=title, pdf_path=pdf, renderer=renderer)
         shutil.rmtree(flat, ignore_errors=True)
         written.append(target)
 
     shutil.rmtree(out_dir / 'img' / 'flat', ignore_errors=True)
-    return Ingested(used, n_sec, n_fig, n_tbl, tuple(written), structure, disagreements)
+    return Ingested(choice, n_sec, n_fig, n_tbl, tuple(written), structure, disagreements)

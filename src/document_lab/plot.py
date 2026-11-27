@@ -339,13 +339,19 @@ class _Edge:
 
 
 def plots(
-    page: Page, *, x_scale: Scale | None = None, y_scale: Scale | None = None, include_hidden: bool = False
+    page: Page,
+    *,
+    x_scale: Scale | None = None,
+    y_scale: Scale | None = None,
+    include_hidden: bool = False,
+    include_inkless: bool = False,
 ) -> list[Plot]:
     """Every vector plot on ``page``; ``x_scale``/``y_scale`` force an axis scale instead of inferring it.
 
-    ``include_hidden``: what hidden layers draw is read too (see `document_lab.ir`).
+    ``include_hidden``: what hidden layers draw is read too; ``include_inkless``: what the colorant ``None`` paints
+    (see `document_lab.ir`).
     """
-    page = page.shown(include_hidden=include_hidden)
+    page = page.shown(include_hidden=include_hidden, include_inkless=include_inkless)
     edges = _edges(page.paths)
     dashes = _dashes(page.paths)
     labels = _labels(page.spans, dashes)
@@ -713,15 +719,15 @@ def _outline_labels(outlined: Sequence[tuple[float | None, str | None, BBox]], d
     return out
 
 
-def outline_text(page: Page, *, include_hidden: bool = False) -> list[TextSpan]:
+def outline_text(page: Page, *, include_hidden: bool = False, include_inkless: bool = False) -> list[TextSpan]:
     """Each word ``page`` sets as filled glyph OUTLINES that reads as text (a unit, a grade), as a span.
 
     A word that spells a number is a tick label (read by :func:`plots`), not text -- unless a ``min.`` or ``max.``
     word follows it, when the two are one span (``12.5 min.``, read by :func:`document_lab.numbers.bound`); a word
     the reader refuses is absent. The span's size is the word's ink height and its font ``outline``.
-    ``include_hidden``: as for :func:`plots`.
+    ``include_hidden``, ``include_inkless``: as for :func:`plots`.
     """
-    page = page.shown(include_hidden=include_hidden)
+    page = page.shown(include_hidden=include_hidden, include_inkless=include_inkless)
     return _text_spans(page, _outline_words(page.paths))
 
 
@@ -1316,16 +1322,39 @@ def _misfit(pos: np.ndarray, target: np.ndarray) -> float:
 
 
 def _curve_paths(frame: BBox, paths: Sequence[VectorPath]) -> list[VectorPath]:
-    """Stroked open paths inside the frame (clipped to it) that are not a single tick mark, grid line or frame edge."""
-    out = []
-    for path in paths:
-        if path.stroke is None or path.closed or len(path.points) < 2:  # noqa: PLR2004
-            continue
-        for piece in _clipped(path, frame):
-            rules = _edges([piece])
-            if len(piece.points) == 2 and rules and _is_rule(rules[0], frame):  # noqa: PLR2004
-                continue
-            out.append(piece)
+    """Stroked open paths inside the frame (clipped to it) that are no tick mark, grid line or frame edge.
+
+    A grid line is whole (:func:`_is_rule`) or cut into pieces by the labels set over it (:func:`_cut_grid`).
+    """
+    pieces = [
+        piece
+        for path in paths
+        if path.stroke is not None and not path.closed and len(path.points) >= 2  # noqa: PLR2004
+        for piece in _clipped(path, frame)
+    ]
+    straight = [(piece, rules[0]) for piece in pieces if len(piece.points) == 2 and (rules := _edges([piece]))]  # noqa: PLR2004
+    rules = {id(piece) for piece, edge in straight if _is_rule(edge, frame)} | _cut_grid(frame, straight)
+    return [piece for piece in pieces if id(piece) not in rules]
+
+
+def _cut_grid(frame: BBox, straight: Sequence[tuple[VectorPath, _Edge]]) -> set[int]:
+    """The ids of the straight pieces that draw a grid line cut by the labels set over it.
+
+    TDK ACT1210 p5 stops every grid line at each label inside the frame: a grid line is then two or more pieces in one
+    pen on one line (within ``AXIS_TOL``) that together reach both frame edges (within ``EDGE_TOL``).
+    """
+    out = set()
+    for path, edge in straight:
+        line = [
+            e
+            for p, e in straight
+            if e.vertical == edge.vertical
+            and abs(e.at - edge.at) <= AXIS_TOL
+            and (p.stroke, p.width) == (path.stroke, path.width)
+        ]
+        first, last = (frame.y0, frame.y1) if edge.vertical else (frame.x0, frame.x1)
+        if len(line) > 1 and min(e.lo for e in line) <= first + EDGE_TOL and max(e.hi for e in line) >= last - EDGE_TOL:
+            out.add(id(path))
     return out
 
 

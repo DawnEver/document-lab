@@ -116,37 +116,60 @@ def _best_shift(got: np.ndarray, want: np.ndarray) -> str:
     return f'best shift (rows, columns) {best}: mean |d| {scores[best]:.2f} there, {scores[0, 0]:.2f} unshifted'
 
 
-HANG: Final = 45  # seconds a child may run before it dumps where it is and exits
+HANG: Final = 45  # seconds a child may run, by default, before it dumps where it is and exits
 
 
-def child(script: str, *args: str) -> subprocess.CompletedProcess:
+def child(script: str, *args: str, hang: int = HANG) -> subprocess.CompletedProcess:
     """Run ``script`` in a child Python: a hang dumps every thread's stack and ends it, so it fails saying where."""
-    guarded = f'import faulthandler\nfaulthandler.dump_traceback_later({HANG}, exit=True)\n{script}'
+    guarded = f'import faulthandler\nfaulthandler.dump_traceback_later({hang}, exit=True)\n{script}'
     return subprocess.run(
-        [sys.executable, '-c', guarded, *args], capture_output=True, text=True, timeout=HANG + 30, check=False
+        [sys.executable, '-c', guarded, *args], capture_output=True, text=True, timeout=hang + 30, check=False
     )
 
 
-def shown(title: str, process: subprocess.Popen) -> Window:
-    """The viewer's window once it shows its whole view: the one its process owns, else the one titled ``title``.
+_NOISE: Final = 40  # the spread (standard deviation) of grey levels above which a grab shows the noise picture
 
-    By owner first: macOS names another program's windows only to a process granted Screen Recording.
+
+def shown(title: str, process: subprocess.Popen) -> Window:
+    """The viewer's window once it shows its whole view and its picture: the one its process owns, else the one titled
+    ``title``.
+
+    By owner first: macOS names another program's windows only to a process granted Screen Recording. Its picture is
+    noise: a window still blank, all one color, is waited for (and named when it stays so).
     """
     pid = int(process.stdout.readline() or 0)
     system = desktop.system()
     deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
+    whole: list[Window] = []
+    while time.monotonic() < deadline and len(whole) != 1:
         with contextlib.suppress(OSError):  # a window closing while it is read
             found = system.owned(pid) or [w for w in system.windows() if w.title == title]
             whole = [w for w in found if desktop.area(w).height == VIEW]
-            if len(whole) == 1:
-                time.sleep(0.5)
-                return whole[0]
         time.sleep(0.1)
-    code = process.poll()
-    state = 'running' if code is None else f'exited with {code}'
-    why = system.problem(sends_input=True) or 'the desktop names no missing permission'
-    pytest.fail(f'the viewer window {title!r} (pid {pid}, {state}) never appeared: {why}{_census()}')
+    if len(whole) != 1:
+        code = process.poll()
+        state = 'running' if code is None else f'exited with {code}'
+        why = system.problem(sends_input=True) or 'the desktop names no missing permission'
+        pytest.fail(f'the viewer window {title!r} (pid {pid}, {state}) never appeared: {why}{_census()}')
+    while time.monotonic() < deadline:
+        grabbed = system.grab(whole[0])
+        if grabbed.std() > _NOISE:
+            time.sleep(0.5)  # past the viewer's own redraw (``capture_viewer._redrawn``)
+            return whole[0]
+        time.sleep(0.2)
+    pytest.fail(
+        f'the viewer window {title!r} appeared but never showed its picture: {_looks(grabbed)}; the screen there: '
+        f'{_looks(system.grab(desktop.area(whole[0])))}{_census()}'
+    )
+
+
+def _looks(image: np.ndarray) -> str:
+    """What a picture is like, at a glance: its shape, how many colors, the commonest, its spread."""
+    colors, counts = np.unique(image.reshape(-1, 3), axis=0, return_counts=True)
+    return (
+        f'{image.shape}, {len(colors)} colors, the commonest {colors[counts.argmax()].tolist()} '
+        f'({counts.max() / counts.sum():.0%}), spread {image.std():.1f}'
+    )
 
 
 def test_the_desktop_lets_a_capture_run():
@@ -240,12 +263,20 @@ def test_a_region_is_the_screen_under_it(viewer):
     assert np.array_equal(got, image[20:70, 10:110]), differences(got, image[20:70, 10:110], inner)
 
 
+_MAIN = """
+import runpy, sys
+sys.argv = sys.argv[1:]
+runpy.run_module('document_lab', run_name='__main__', alter_sys=True)
+"""  # ``python -m document_lab <argv>``, as a `child`: argv[0] the module
+
+
 def test_the_cli_writes_the_pdf(viewer, tmp_path):
-    """Run as a script runs it: ``--now`` starts without the panel's Start, in a child with a timeout, so a wait for a
-    click nobody gives is a failure, never a hang."""
+    """Run as a script runs it: ``--now`` starts without the panel's Start, in a `child`, so a wait for a click nobody
+    gives is a failure saying where it waits, never a hang."""
     window, image = viewer
     out = tmp_path / 'capture.pdf'
     argv = [
+        'document_lab',
         'capture',
         str(out),
         '--handle',
@@ -259,9 +290,7 @@ def test_the_cli_writes_the_pdf(viewer, tmp_path):
         '--page-height',
         '0',
     ]
-    done = subprocess.run(
-        [sys.executable, '-m', 'document_lab', *argv], capture_output=True, text=True, timeout=120, check=False
-    )
+    done = child(_MAIN, *argv, hang=90)
     assert done.returncode == 0, done.stdout + done.stderr
     with pymupdf.open(out) as doc:
         assert doc.page_count == 1

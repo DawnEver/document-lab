@@ -16,6 +16,7 @@ import numpy as np
 WIDTH, HEIGHT, VIEW = 360, 1900, 300
 NOTCH, ARROW = 40, 37
 _WHEEL_DELTA = 120
+_SHOWN_MS = 300  # after this the window is up, and its view is drawn again
 
 
 def picture(seed: int) -> np.ndarray:
@@ -53,7 +54,15 @@ def main(title: str, seed: int) -> None:
     root.bind_all('<Down>', lambda _: canvas.yview_scroll(ARROW, 'units'))
     root.geometry('+200+200')
     root.focus_force()
+    root.after(_SHOWN_MS, _redrawn, root, canvas)
     root.mainloop()
+
+
+def _redrawn(root: object, canvas: object) -> None:
+    """Draw the view again once the window is up: Tk 9 on macOS may leave a window blank until it is next drawn."""
+    root.focus_force()
+    canvas.yview_scroll(1, 'units')
+    canvas.yview_scroll(-1, 'units')
 
 
 if __name__ == '__main__':

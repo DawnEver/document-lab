@@ -12,14 +12,13 @@ is `document_lab.ocr`'s, laid over the finished PDF.
 
 from __future__ import annotations
 
-import struct
 import zlib
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, Final, Literal, Self
+from typing import TYPE_CHECKING, Final, Literal, Self
 
 import numpy as np
 
-from document_lab import _pdf
+from document_lab import _pdf, png
 from document_lab.capture.pages import Rhythm, page_rhythm
 
 if TYPE_CHECKING:
@@ -214,9 +213,6 @@ class PdfWriter:
         return self._pages.close()
 
 
-_PNG: Final = b'\x89PNG\r\n\x1a\n'
-
-
 class PageWriter:
     """A PDF written one image a page, as the pages arrive: each page as wide as its image.
 
@@ -257,21 +253,17 @@ class PageWriter:
         return self._pages.close()
 
 
-def _chunk(out: BinaryIO, kind: bytes, data: bytes) -> None:
-    out.write(struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data)))
-
-
 class PngWriter:
-    """A PNG at ``path`` of the rows written to it, ``width`` pixels wide, compressed as they come."""
+    """A PNG (`document_lab.png`) at ``path`` of the rows written, ``width`` pixels wide, deflated as they come."""
 
     def __init__(self, path: Path, width: int) -> None:
         """Open ``<path>.part`` and write the header; its height is filled in on closing."""
         self.path, self.width, self.height = path, width, 0
         self._out = _part(path).open('wb')
-        self._out.write(_PNG)
+        self._out.write(png.SIGNATURE)
         self._header = self._out.tell()
-        _chunk(self._out, b'IHDR', struct.pack('>IIBBBBB', width, 0, 8, 2, 0, 0, 0))
-        self._zip = zlib.compressobj(6)
+        self._out.write(png.header(width, 0, 3))
+        self._zip = zlib.compressobj(png.LEVEL)
 
     def __enter__(self) -> Self:
         """The writer, closed on leaving."""
@@ -287,20 +279,17 @@ class PngWriter:
         """Add ``rows`` (``(n, width, 3)`` uint8) below what was written."""
         if not len(rows):
             return
-        filtered = np.zeros((len(rows), 1 + self.width * 3), dtype=np.uint8)  # filter byte 0: the row as it is
-        filtered[:, 1:] = np.ascontiguousarray(rows[..., :3], dtype=np.uint8).reshape(len(rows), -1)
         self.height += len(rows)
-        if data := self._zip.compress(filtered.tobytes()):
-            _chunk(self._out, b'IDAT', data)
+        if data := self._zip.compress(png.scanlines(rows[..., :3])):
+            self._out.write(png.chunk(b'IDAT', data))
 
     def close(self) -> Path | None:
         """Finish the PNG, fill in its height and move it into place; the path, or None if nothing was written."""
         if self._out.closed:
             return self.path if self.path.exists() else None
-        _chunk(self._out, b'IDAT', self._zip.flush())
-        _chunk(self._out, b'IEND', b'')
+        self._out.write(png.chunk(b'IDAT', self._zip.flush()) + png.chunk(b'IEND', b''))
         self._out.seek(self._header)
-        _chunk(self._out, b'IHDR', struct.pack('>IIBBBBB', self.width, self.height, 8, 2, 0, 0, 0))
+        self._out.write(png.header(self.width, self.height, 3))
         self._out.close()
         if not self.height:
             _part(self.path).unlink()

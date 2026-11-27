@@ -30,7 +30,7 @@ fn main() {
         };
         for page in file.pages().unwrap_or_default() {
             for event in file
-                .interpret(&page)
+                .interpret(&page, false)
                 .map_or_else(|_| Vec::new(), |c| c.events)
             {
                 if let pdf::Event::Text(text) = event {

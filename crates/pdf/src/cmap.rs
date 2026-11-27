@@ -1,8 +1,11 @@
-//! `CMap`s (ISO 32000-2 sections 9.7.5 and 9.10.3): how a string splits into character codes, which `CID` a code
-//! selects, and which Unicode text a code stands for.
+//! `CMap`s (ISO 32000-2 sections 9.7.5 and 9.10.3), embedded or predefined: how a string splits into character
+//! codes, which `CID` a code selects, which Unicode text a code stands for, and which text a `CID` of an Adobe
+//! character collection stands for.
 
 use std::collections::HashMap;
 
+use crate::cid2unicode::{COLLECTIONS, Collection};
+use crate::cmaps::{CIDS, PREDEFINED, Predefined, SEGMENTS};
 use crate::content::operations;
 use crate::object::Object;
 
@@ -19,6 +22,10 @@ pub struct CMap {
     text: HashMap<u32, String>,
     /// The `CMap` is Identity: every 2-byte code is its own `CID`.
     identity: bool,
+    /// The predefined `CMap` this is, whose tables give the `CID`s.
+    predefined: Option<&'static Predefined>,
+    /// The writing mode an embedded `CMap`'s program defines (`/WMode 1 def`: vertical), if it defines one.
+    wmode: Option<i64>,
 }
 
 impl CMap {
@@ -32,41 +39,23 @@ impl CMap {
         }
     }
 
-    /// A predefined `CMap` of a legacy CJK encoding (`GBK-EUC-H`, `B5pc-H`, `90ms-RKSJ-H`, `KSC-EUC-H`, ...): its
-    /// code space, the CIDs of its one-byte ASCII codes (1-95 in every Adobe CJK collection), and the encoding its
-    /// codes are bytes of. None for a name that is not one.
+    /// A predefined `CMap` (ISO 32000-2 Table 116: `GBK-EUC-H`, `90ms-RKSJ-V`, `UniJIS-UTF16-H`, ...), as Adobe
+    /// defines it: the `CMap`, whether its writing mode is vertical, and the text table of its collection. None for a
+    /// name that is not one (`Identity-H` and `-V` are [`CMap::identity`]).
     #[must_use]
-    pub fn legacy(name: &str) -> Option<(Self, &'static encoding_rs::Encoding)> {
-        let base = name.trim_end_matches("-H").trim_end_matches("-V");
-        let (encoding, doubles): (&'static encoding_rs::Encoding, &[(u8, u8)]) = match base {
-            "GB-EUC" | "GBpc-EUC" | "GBK-EUC" | "GBKp-EUC" | "GBK2K" => {
-                (encoding_rs::GBK, &[(0x81, 0xFE)])
-            }
-            "B5pc" | "ETen-B5" | "HKscs-B5" | "B5" | "ETenms-B5" => {
-                (encoding_rs::BIG5, &[(0xA1, 0xFE)])
-            }
-            "90ms-RKSJ" | "90msp-RKSJ" | "83pv-RKSJ" | "90pv-RKSJ" | "Add-RKSJ" | "Ext-RKSJ" => {
-                (encoding_rs::SHIFT_JIS, &[(0x81, 0x9F), (0xE0, 0xFC)])
-            }
-            "EUC" => (encoding_rs::EUC_JP, &[(0x8E, 0x8E), (0xA1, 0xFE)]),
-            "KSC-EUC" | "KSCms-UHC" | "KSCpc-EUC" | "KSCms-UHC-HW" => {
-                (encoding_rs::EUC_KR, &[(0x81, 0xFE)])
-            }
-            _ => return None,
-        };
-        let mut ranges = vec![(vec![0x00], vec![0x80])];
-        for &(lo, hi) in doubles {
-            ranges.push((vec![lo, 0x40], vec![hi, 0xFE]));
-        }
-        if encoding == encoding_rs::SHIFT_JIS {
-            ranges.push((vec![0xA0], vec![0xDF])); // half-width katakana
-        }
+    pub fn predefined(name: &str) -> Option<(Self, bool, Option<&'static Collection>)> {
+        let table = PREDEFINED.iter().find(|p| p.name == name)?;
         let cmap = Self {
-            ranges,
-            cid_ranges: vec![(0x20, 0x7E, 1)],
+            ranges: table
+                .space
+                .iter()
+                .map(|(lo, hi)| (lo.to_vec(), hi.to_vec()))
+                .collect(),
+            predefined: Some(table),
             ..Self::default()
         };
-        Some((cmap, encoding))
+        let collection = Collection::named(b"Adobe", table.ordering.as_bytes());
+        Some((cmap, table.vertical, collection))
     }
 
     /// The `CMap` a stream's data defines (`usecmap` is not followed: a parent `CMap` is named, not embedded).
@@ -107,6 +96,13 @@ impl CMap {
                         }
                     }
                 }
+                b"def" => {
+                    if let [.., Object::Name(key), Object::Integer(mode)] = items
+                        && key == b"WMode"
+                    {
+                        cmap.wmode = Some(*mode);
+                    }
+                }
                 b"endcidrange" => {
                     for triple in items.as_chunks::<3>().0 {
                         if let (Object::String(lo), Object::String(hi), Some(cid)) =
@@ -124,6 +120,12 @@ impl CMap {
             }
         });
         cmap
+    }
+
+    /// The writing mode the `CMap`'s program defines (0 horizontal, 1 vertical), if it defines one.
+    #[must_use]
+    pub fn wmode(&self) -> Option<i64> {
+        self.wmode
     }
 
     fn bf_range(&mut self, triple: &[Object]) {
@@ -200,6 +202,9 @@ impl CMap {
         if self.identity {
             return code;
         }
+        if let Some(table) = self.predefined {
+            return predefined_cid(table, code);
+        }
         if let Some(&cid) = self.cids.get(&code) {
             return cid;
         }
@@ -220,6 +225,99 @@ impl CMap {
     pub fn single_byte(&self) -> bool {
         self.ranges.iter().all(|(lo, _)| lo.len() == 1)
     }
+}
+
+impl Collection {
+    /// Adobe's table of the character collection a `/CIDSystemInfo` names -- `/Registry (Adobe)` and an `/Ordering`
+    /// it covers (`Japan1`, `GB1`, `CNS1`, `Korea1`, `KR`): the CID-to-Unicode `CMap` `Adobe-<Ordering>-UCS2` that
+    /// ISO 32000-2 section 9.10.2 names. None for any other collection.
+    #[must_use]
+    pub fn named(registry: &[u8], ordering: &[u8]) -> Option<&'static Self> {
+        if registry != b"Adobe" {
+            return None;
+        }
+        COLLECTIONS
+            .iter()
+            .find(|c| c.ordering.as_bytes() == ordering)
+    }
+
+    /// The text of `cid`, when the table gives it one.
+    #[must_use]
+    pub fn text(&self, cid: u32) -> Option<String> {
+        let at = usize::try_from(cid).ok()?.checked_mul(2)?;
+        let unit = self
+            .single
+            .get(at..at + 2)
+            .map_or(0, |b| u16::from_le_bytes([b[0], b[1]]));
+        if unit != 0 {
+            return char::from_u32(u32::from(unit)).map(String::from);
+        }
+        let cid = u16::try_from(cid).ok()?;
+        self.long
+            .binary_search_by_key(&cid, |&(c, _)| c)
+            .ok()
+            .map(|i| self.long[i].1.to_string())
+    }
+}
+
+/// The `CID` a predefined `CMap` selects for `code`: its own segment's, else its base's (0 when none maps it).
+fn predefined_cid(mut table: &'static Predefined, code: u32) -> u32 {
+    let word = |segment: usize, field: usize| {
+        let at = segment * 12 + field * 4;
+        u32::from_le_bytes([
+            SEGMENTS[at],
+            SEGMENTS[at + 1],
+            SEGMENTS[at + 2],
+            SEGMENTS[at + 3],
+        ])
+    };
+    loop {
+        // The segments are sorted and disjoint: the last one starting at or below `code` is the only candidate.
+        let (mut low, mut high) = (table.first, table.first + table.count);
+        while low < high {
+            let middle = usize::midpoint(low, high);
+            if word(middle, 0) <= code {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        if low > table.first && code <= word(low - 1, 1) {
+            let (first, value) = (word(low - 1, 0), word(low - 1, 2));
+            let offset = code - first;
+            return if value & DENSE == 0 {
+                if value == 0 { 0 } else { value + offset }
+            } else {
+                let at = 2 * usize::try_from((value & !DENSE) + offset).unwrap_or(usize::MAX);
+                CIDS.get(at..at + 2)
+                    .map_or(0, |b| u32::from(u16::from_le_bytes([b[0], b[1]])))
+            };
+        }
+        match table.base {
+            Some(base) => table = &PREDEFINED[base],
+            None => return 0,
+        }
+    }
+}
+
+/// The flag of a dense segment's value in [`SEGMENTS`]: the rest is the index of its first `CID` in [`CIDS`].
+const DENSE: u32 = 1 << 31;
+
+/// The encoding whose bytes a predefined `CMap`'s codes are, for the legacy CJK ones (`GBK-EUC-H`, `B5pc-H`,
+/// `90ms-RKSJ-H`, `KSC-EUC-H`, ...): their text where no collection table gives it. None for any other.
+#[must_use]
+pub fn legacy_encoding(name: &str) -> Option<&'static encoding_rs::Encoding> {
+    let base = name.trim_end_matches("-H").trim_end_matches("-V");
+    Some(match base {
+        "GB-EUC" | "GBpc-EUC" | "GBK-EUC" | "GBKp-EUC" | "GBK2K" => encoding_rs::GBK,
+        "B5pc" | "ETen-B5" | "HKscs-B5" | "ETenms-B5" => encoding_rs::BIG5,
+        "90ms-RKSJ" | "90msp-RKSJ" | "83pv-RKSJ" | "90pv-RKSJ" | "Add-RKSJ" | "Ext-RKSJ" => {
+            encoding_rs::SHIFT_JIS
+        }
+        "EUC" => encoding_rs::EUC_JP,
+        "KSC-EUC" | "KSCms-UHC" | "KSCpc-EUC" | "KSCms-UHC-HW" => encoding_rs::EUC_KR,
+        _ => return None,
+    })
 }
 
 /// A code's bytes as a big-endian number.
@@ -295,15 +393,68 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
         assert_eq!((cmap.cid(0x0105), cmap.cid(0x0001)), (505, 0));
         assert_eq!(CMap::identity().cid(0x1234), 0x1234);
     }
+    /// A predefined `CMap`'s `CID`s of `codes`.
+    fn predefined_cids(name: &str, codes: &[u32]) -> Vec<u32> {
+        let (cmap, ..) = CMap::predefined(name).unwrap();
+        codes.iter().map(|&c| cmap.cid(c)).collect()
+    }
+
     #[test]
-    fn a_legacy_cjk_cmap_splits_its_encoding_and_numbers_its_ascii() {
-        let (cmap, encoding) = CMap::legacy("GBK-EUC-H").unwrap();
-        assert_eq!(encoding, encoding_rs::GBK);
+    fn predefined_cmaps_select_the_cids_adobe_states() {
+        // Each code's CID as Adobe's cid2code.txt states it (cmap-resources 20231115): one-byte codes are not 1-95.
+        for (name, codes, cids) in [
+            (
+                "GBK-EUC-H",
+                &[0x20, 0x21, 0xC4E3][..],
+                &[7716, 814, 2886][..],
+            ),
+            ("GB-EUC-H", &[0x41, 0xD6D0], &[846, 4559]),
+            ("B5pc-H", &[0x41, 0xA440], &[34, 595]),
+            ("90ms-RKSJ-H", &[0x41, 0x82A0, 0x8141], &[264, 843, 634]),
+            ("EUC-H", &[0xA4A2], &[843]),
+            ("H", &[0x2422, 0x2122], &[843, 634]),
+            ("KSC-EUC-H", &[0x41, 0xB0A1], &[8127, 1086]),
+            ("UniJIS-UTF16-H", &[0x3042, 0xD840_DC0B], &[843, 13839]),
+            ("UniGB-UCS2-H", &[0x4E2D], &[4559]),
+        ] {
+            assert_eq!(predefined_cids(name, codes), cids, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_vertical_cmap_overrides_its_horizontal_base() {
+        // The ideographic comma's vertical form; every other code as the horizontal `CMap` has it.
+        assert_eq!(
+            predefined_cids("90ms-RKSJ-V", &[0x8141, 0x82A0]),
+            [7887, 843]
+        );
+        assert_eq!(predefined_cids("V", &[0x2122]), [7887]);
+        let (_, vertical, collection) = CMap::predefined("90ms-RKSJ-V").unwrap();
+        assert!(vertical);
+        assert_eq!(collection.map(|c| c.ordering), Some("Japan1"));
+        assert!(!CMap::predefined("GBK-EUC-H").unwrap().1);
+    }
+
+    #[test]
+    fn a_predefined_cmap_splits_by_its_code_space() {
+        let (cmap, ..) = CMap::predefined("GBK-EUC-H").unwrap();
         assert_eq!(
             cmap.codes(&[0x41, 0xC4, 0xE3]),
             vec![(0x41, 1), (0xC4E3, 2)]
         );
-        assert_eq!(cmap.cid(0x41), 0x22);
-        assert!(CMap::legacy("Adobe-Japan1-6").is_none());
+        let (cmap, ..) = CMap::predefined("UniJIS-UTF16-H").unwrap();
+        assert_eq!(
+            cmap.codes(&[0x30, 0x42, 0xD8, 0x40, 0xDC, 0x0B]),
+            vec![(0x3042, 2), (0xD840_DC0B, 4)]
+        );
+        assert!(CMap::predefined("Identity-H").is_none());
+        assert!(CMap::predefined("Adobe-Japan1-6").is_none());
+    }
+
+    #[test]
+    fn a_legacy_cmap_names_the_encoding_of_its_bytes() {
+        assert_eq!(legacy_encoding("GBK-EUC-V"), Some(encoding_rs::GBK));
+        assert_eq!(legacy_encoding("90ms-RKSJ-H"), Some(encoding_rs::SHIFT_JIS));
+        assert_eq!(legacy_encoding("H"), None);
     }
 }

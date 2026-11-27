@@ -6,10 +6,10 @@ import pytest
 
 from tests.paper.e2e.test_papers import IEEE
 from tests.paper.structure import problems
-from tests.paper.support import DATA, ingested
+from tests.paper.support import ingested, paper
 
 pytestmark = pytest.mark.gpu
 
 
 def test_marker_ingests_a_paper_with_its_structure(tmp_path_factory):
-    assert problems(ingested(DATA / IEEE.pdf, 'marker', tmp_path_factory), IEEE) == []
+    assert problems(ingested(paper(IEEE.pdf), 'marker', tmp_path_factory), IEEE) == []

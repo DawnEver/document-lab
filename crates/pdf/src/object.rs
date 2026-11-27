@@ -169,3 +169,62 @@ impl Object {
         }
     }
 }
+
+/// A text string's text (7.9.2.2): UTF-16BE after its byte order mark, UTF-8 after its mark, else
+/// `PDFDocEncoding` (D.2). A byte or a code unit no character stands for reads as U+FFFD.
+#[must_use]
+pub fn text_string(bytes: &[u8]) -> String {
+    if let Some(utf16) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        let units = utf16
+            .chunks(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair.get(1).copied().unwrap_or(0)]));
+        return char::decode_utf16(units)
+            .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+            .collect();
+    }
+    if let Some(utf8) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        return String::from_utf8_lossy(utf8).into_owned();
+    }
+    bytes.iter().map(|&b| pdf_doc_char(b)).collect()
+}
+
+/// The character `PDFDocEncoding` gives `byte`.
+fn pdf_doc_char(byte: u8) -> char {
+    /// 0x18..=0x1F: accents.
+    const ACCENTS: [char; 8] = [
+        '\u{2D8}', '\u{2C7}', '\u{2C6}', '\u{2D9}', '\u{2DD}', '\u{2DB}', '\u{2DA}', '\u{2DC}',
+    ];
+    /// 0x80..=0x9E: punctuation, ligatures and letters Latin-1 has not.
+    const HIGH: [char; 31] = [
+        '\u{2022}', '\u{2020}', '\u{2021}', '\u{2026}', '\u{2014}', '\u{2013}', '\u{192}',
+        '\u{2044}', '\u{2039}', '\u{203A}', '\u{2212}', '\u{2030}', '\u{201E}', '\u{201C}',
+        '\u{201D}', '\u{2018}', '\u{2019}', '\u{201A}', '\u{2122}', '\u{FB01}', '\u{FB02}',
+        '\u{141}', '\u{152}', '\u{160}', '\u{178}', '\u{17D}', '\u{131}', '\u{142}', '\u{153}',
+        '\u{161}', '\u{17E}',
+    ];
+    match byte {
+        0x18..=0x1F => ACCENTS[usize::from(byte - 0x18)],
+        0x80..=0x9E => HIGH[usize::from(byte - 0x80)],
+        0xA0 => '\u{20AC}',
+        0x7F | 0x9F | 0xAD => char::REPLACEMENT_CHARACTER,
+        _ => char::from(byte),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_text_string_reads_by_its_byte_order_mark() {
+        assert_eq!(
+            text_string(b"\xFE\xFF\x00\xE9\xD8\x3D\xDE\x00"),
+            "\u{e9}\u{1F600}"
+        );
+        assert_eq!(text_string(b"\xEF\xBB\xBF\xC3\xA9"), "\u{e9}");
+        assert_eq!(
+            text_string(b"a\x93\xA0\xE9\x18"),
+            "a\u{FB01}\u{20AC}\u{e9}\u{2D8}"
+        );
+    }
+}

@@ -1,12 +1,33 @@
 //! The content-stream interpreter (ISO 32000-2 sections 8-9): what a page draws, as events in page space.
 //!
-//! The graphics state is tracked across `q`/`Q`, `cm`, colors, line style and Form `XObject`s; each painted path
-//! and each image placed is an event, its geometry already in page space (points, y down). The clip is tracked as
-//! the box it lies in -- the page's crop box, narrowed by each clipping path's bounds and each Form's `/BBox` --
-//! and a mark wholly outside it is not seen: a path or image gives no event, a glyph is left out of its text event.
-//! A box is the clip's bounds, so a mark outside a curved clip but inside its bounds is kept, never one lost.
-//! Shadings are not painted marks and give no event. An operation that cannot be read is skipped and named in
-//! [`Content::warnings`], never silently.
+//! The graphics state is tracked across `q`/`Q`, `cm`, colors, line style and Form `XObject`s; each painted path,
+//! each image placed, each string shown and each shading painted (`sh`) is an event, its geometry already in page
+//! space (points, y down). A fill or stroke with a pattern is a path event whose color names the pattern
+//! ([`crate::color::Pattern`]); a pattern's own content (a tiling cell, a shading's colors) is not interpreted.
+//!
+//! The clip is tracked as the box it lies in -- the page's crop box, narrowed by each clipping path's bounds, each
+//! Form's `/BBox` and, at `ET`, the union of the boxes of the glyphs shown in a clipping text mode (4-7) -- and a
+//! mark wholly outside it is not seen: a path, image or shading gives no event, a glyph is left out of its text
+//! event. A box holds the true clip, so a mark outside a curved clip (or between two clipping glyphs) but inside
+//! its box is kept: never one lost, at worst one kept that a viewer hides. A shading's event is the box it may
+//! paint: the clip's, within the shading's own `/BBox`, not the narrower area a non-extended gradient covers.
+//!
+//! Marked content (14.6) is tracked as a stack apart from the graphics state: `q`/`Q` neither saves nor ends it,
+//! and a Form's sequences end with the Form (one left open is closed there, with a warning). What optional
+//! content the default view hides ([`crate::optional`]) draws -- in a sequence marked `/OC`, or in a Form, image
+//! or annotation whose own `/OC` is hidden -- is still an event, its [`Layer::hidden`] set: the reader reports
+//! what the page holds and its caller chooses what to keep. An `/ActualText` (14.9.4) replaces the text of the
+//! glyphs its sequence shows: the first glyph seen in it carries the replacement, every later one the empty text,
+//! each keeping its own box; the outermost replacement governs a nested one, and one whose glyphs are all unseen is
+//! lost with them.
+//!
+//! Annotations are drawn when asked, after the page's content: each one's normal appearance (`/AP /N`, its `/AS`
+//! state's when it has states) mapped onto its `/Rect` (12.5.5), from the page's initial state, its events in the
+//! annotation's [`Layer::annotation`]. A popup, an annotation flagged Hidden or `NoView`, and one with no
+//! appearance draw nothing: no appearance is made up from an annotation's other entries.
+//!
+//! Not interpreted: a pattern's content and optional content usage ([`crate::optional`] says which). An operation
+//! that cannot be read is skipped and named in [`Content::warnings`], never silently.
 
 use std::rc::Rc;
 
@@ -16,11 +37,16 @@ use crate::error::{Error, Result};
 use crate::file::File;
 use crate::font::{Font, FontInfo};
 use crate::geometry::{Matrix, Point, Rect};
-use crate::object::{Dict, Object};
+use crate::object::{Dict, Object, Stream, text_string};
+use crate::optional::OptionalContent;
 use crate::page::Page;
 
 /// How deep Form `XObject`s may nest before one is refused as a loop.
 const MAX_FORM_DEPTH: usize = 32;
+
+/// Half an em in text space units of one font size (500 units of a composite font's 1000-unit glyph space): half a
+/// vertical column's width across.
+const HALF_EM: f64 = 0.5;
 
 /// One piece of a path, in page space.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -70,6 +96,19 @@ pub struct PathEvent {
     pub stroke: Option<Stroke>,
     /// The fill, when filled.
     pub fill: Option<Fill>,
+    /// The layer it is drawn in.
+    pub layer: Layer,
+}
+
+/// Where an event is drawn beyond the page's own visible content: in optional content the default view hides, in
+/// an annotation's appearance. The default is the page's content, shown.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Layer {
+    /// Optional content the default view hides draws it (see [`crate::optional`]).
+    pub hidden: bool,
+    /// The `/Subtype` of the annotation whose appearance draws it (`Widget`, `FreeText`, `Stamp`, ...); None for
+    /// the page's content.
+    pub annotation: Option<String>,
 }
 
 /// An image placed on the page.
@@ -87,6 +126,8 @@ pub struct ImageEvent {
     pub object: Option<u32>,
     /// An inline image's dictionary and data (still encoded); None for an image `XObject`.
     pub inline: Option<(Dict, Vec<u8>)>,
+    /// The layer it is drawn in.
+    pub layer: Layer,
 }
 
 /// One glyph of a text event.
@@ -94,13 +135,16 @@ pub struct ImageEvent {
 pub struct Glyph {
     /// Its character code in the font.
     pub code: u32,
-    /// Its text, when the font says what it is.
+    /// Its text: the font's for it, when the font says; inside an `/ActualText` sequence, the replacement on the
+    /// sequence's first glyph seen and the empty text on every later one.
     pub text: Option<String>,
-    /// Where its baseline starts, in page space.
+    /// Where it starts along its line, in page space: its origin on the baseline, or its vertical origin (the top
+    /// of its place in a column) when its font writes vertically.
     pub origin: Point,
-    /// Where its baseline ends (its origin plus its width, before spacing), in page space.
+    /// Where it ends along its line (its origin plus its advance, before spacing), in page space.
     pub end: Point,
-    /// The box from the font's descent to its ascent across the glyph's advance, in page space.
+    /// Its box in page space: across its advance from the font's descent to its ascent, or when its font writes
+    /// vertically, down its advance and an em across, centered on its origin.
     pub bbox: Rect,
 }
 
@@ -111,16 +155,19 @@ pub struct TextEvent {
     pub font: Rc<FontInfo>,
     /// The font size in page space (the text matrix and the CTM applied).
     pub size: f64,
-    /// The text rendering mode (`Tr`): 0 fill, 1 stroke, 3 invisible (an OCR text layer), 7 clip, ...
+    /// The text rendering mode (`Tr`): 0 fill, 1 stroke, 3 invisible (an OCR text layer), 4-6 painted and added
+    /// to the clip, 7 only added to the clip (invisible).
     pub render_mode: i64,
     /// The fill color.
     pub fill: Color,
     /// The stroke color.
     pub stroke: Color,
-    /// Whether the font writes vertically (its glyphs are still placed along the baseline).
+    /// Whether the font writes vertically: its glyphs step down a column, each from its vertical origin.
     pub vertical: bool,
     /// The glyphs, in showing order.
     pub glyphs: Vec<Glyph>,
+    /// The layer it is drawn in.
+    pub layer: Layer,
 }
 
 /// An event of a page, in drawing order.
@@ -132,6 +179,33 @@ pub enum Event {
     Image(ImageEvent),
     /// Text shown.
     Text(TextEvent),
+    /// A shading painted over the clip (`sh`).
+    Shading(ShadingEvent),
+}
+
+/// A shading painted with `sh`: a gradient across the clip.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShadingEvent {
+    /// The box it may paint, in page space: the clip's, within the shading's `/BBox` when it has one.
+    pub bbox: Rect,
+    /// The layer it is drawn in.
+    pub layer: Layer,
+}
+
+/// An open marked-content sequence (`BMC`/`BDC` ... `EMC`).
+#[derive(Debug, Clone, Copy)]
+struct Marked {
+    /// Its optional content is hidden.
+    hides: bool,
+}
+
+/// The `/ActualText` replacing the text of the glyphs shown in the sequence at `depth` of the marked stack.
+#[derive(Debug, Clone)]
+struct ActualText {
+    depth: usize,
+    text: String,
+    /// Whether a glyph carries it yet.
+    given: bool,
 }
 
 /// What a page draws.
@@ -213,16 +287,31 @@ struct Interpreter<'a> {
     /// The text matrix and the text line matrix (9.4.2), between `BT` and `ET`.
     text_matrix: Matrix,
     line_matrix: Matrix,
+    /// The union of the boxes of the glyphs shown in a clipping mode in this text object: the clip at `ET`.
+    text_clip: Option<Rect>,
+    /// The default view of the file's optional content.
+    optional: OptionalContent,
+    /// The open marked-content sequences, outermost first.
+    marked: Vec<Marked>,
+    /// How many of them the running Form found open: its `EMC`s may not end those.
+    marked_floor: usize,
+    /// The outermost open `/ActualText`.
+    actual: Option<ActualText>,
+    /// How many of the `XObject`s and the annotation being drawn have an `/OC` entry that hides them.
+    hiding_entries: usize,
+    /// The `/Subtype` of the annotation whose appearance is being drawn.
+    annotation: Option<String>,
     out: Content,
 }
 
 impl File {
-    /// What `page` draws.
+    /// What `page` draws: its content and, when `annotations` is asked, then its annotations' appearances.
     ///
     /// # Errors
     ///
-    /// Refuses page contents that are not streams; an operation that cannot be read is a warning instead.
-    pub fn interpret(&self, page: &Page) -> Result<Content> {
+    /// Refuses page contents that are not streams; an operation that cannot be read, or an annotation, is a warning
+    /// instead.
+    pub fn interpret(&self, page: &Page, annotations: bool) -> Result<Content> {
         let mut data = Vec::new();
         match self.get(&page.dict, b"Contents")? {
             None => {}
@@ -250,9 +339,10 @@ impl File {
             x1: width,
             y1: height,
         };
+        let initial = State::new(page.to_page_space(), shown);
         let mut interpreter = Interpreter {
             file: self,
-            state: State::new(page.to_page_space(), shown),
+            state: initial.clone(),
             stack: Vec::new(),
             path: Vec::new(),
             current: None,
@@ -260,9 +350,20 @@ impl File {
             clipping: false,
             text_matrix: Matrix::IDENTITY,
             line_matrix: Matrix::IDENTITY,
+            text_clip: None,
+            optional: self.optional_content()?,
+            marked: Vec::new(),
+            marked_floor: 0,
+            actual: None,
+            hiding_entries: 0,
+            annotation: None,
             out: Content::default(),
         };
         interpreter.run(&data, &page.resources, 0);
+        interpreter.close_marked("the page");
+        if annotations {
+            interpreter.annotations(page, &initial);
+        }
         Ok(interpreter.out)
     }
 }
@@ -358,9 +459,154 @@ impl Interpreter<'_> {
                 }
             }
             b"W" | b"W*" => self.clipping = true,
-            _ => {} // shading, marked content and compatibility operators draw no path or image
+            b"sh" => self.shading(operands, resources)?,
+            b"BMC" => self.marked.push(Marked { hides: false }),
+            b"BDC" => self.begin_marked(operands, resources),
+            b"EMC" => self.end_marked()?,
+            _ => {} // marked-content points and compatibility operators draw nothing
         }
         Ok(())
+    }
+
+    /// `BDC`: a sequence opens, hiding its content when its optional content is hidden, replacing its text when it
+    /// has an `/ActualText`. Properties that cannot be read are a warning; the sequence opens all the same.
+    fn begin_marked(&mut self, operands: &[Object], resources: &Dict) {
+        let properties = match operands.get(1) {
+            Some(Object::Name(name)) => match self.file.get(resources, b"Properties") {
+                Ok(Some(Object::Dict(named))) => named.get(name).cloned().ok_or_else(|| {
+                    Error::malformed(format!("no properties /{}", String::from_utf8_lossy(name)))
+                }),
+                Ok(_) => Err(Error::malformed("no /Properties resources")),
+                Err(e) => Err(e),
+            },
+            Some(inline @ Object::Dict(_)) => Ok(inline.clone()),
+            _ => Err(Error::malformed("needs a tag and properties")),
+        };
+        let tag = operands.first().and_then(Object::as_name);
+        let mut hides = false;
+        let read = properties.and_then(|properties| {
+            if tag == Some(b"OC") {
+                hides = !self.optional.shows(self.file, &properties)?;
+            }
+            if self.actual.is_none()
+                && let Object::Dict(dict) = self.file.resolve(&properties)?
+                && let Some(Object::String(text)) = self.file.get(&dict, b"ActualText")?
+            {
+                self.actual = Some(ActualText {
+                    depth: self.marked.len(),
+                    text: text_string(&text),
+                    given: false,
+                });
+            }
+            Ok(())
+        });
+        if let Err(e) = read {
+            self.out
+                .warnings
+                .push(format!("`BDC` read as plain marked content: {e}"));
+        }
+        self.marked.push(Marked { hides });
+    }
+
+    /// `EMC`: the innermost open sequence ends.
+    fn end_marked(&mut self) -> Result<()> {
+        if self.marked.len() <= self.marked_floor {
+            return Err(Error::malformed("no marked content is open"));
+        }
+        self.marked.pop();
+        if self
+            .actual
+            .as_ref()
+            .is_some_and(|a| a.depth >= self.marked.len())
+        {
+            self.actual = None;
+        }
+        Ok(())
+    }
+
+    /// The sequences `what` (the page, a Form) leaves open end with it, with a warning.
+    fn close_marked(&mut self, what: &str) {
+        let open = self.marked.len() - self.marked_floor;
+        if open > 0 {
+            self.out.warnings.push(format!(
+                "{what} leaves {open} marked content sequence(s) open; they end with it"
+            ));
+            self.marked.truncate(self.marked_floor);
+            if self
+                .actual
+                .as_ref()
+                .is_some_and(|a| a.depth >= self.marked_floor)
+            {
+                self.actual = None;
+            }
+        }
+    }
+
+    /// The layer what is painted now is drawn in.
+    fn layer(&self) -> Layer {
+        Layer {
+            hidden: self.hiding_entries > 0 || self.marked.iter().any(|m| m.hides),
+            annotation: self.annotation.clone(),
+        }
+    }
+
+    /// Whether an `XObject` whose dictionary is `dict` shows by its `/OC`; one that cannot be read shows, with a
+    /// warning.
+    fn x_object_shows(&mut self, dict: &Dict) -> bool {
+        let Some(oc) = dict.get(b"OC") else {
+            return true;
+        };
+        self.optional.shows(self.file, oc).unwrap_or_else(|e| {
+            self.out
+                .warnings
+                .push(format!("an XObject's /OC read as showing: {e}"));
+            true
+        })
+    }
+
+    /// `sh`: the shading `/name` paints the clip, within its `/BBox`.
+    fn shading(&mut self, operands: &[Object], resources: &Dict) -> Result<()> {
+        let name = operands
+            .last()
+            .and_then(Object::as_name)
+            .ok_or_else(|| Error::malformed("needs a name"))?;
+        let Some(Object::Dict(shadings)) = self.file.get(resources, b"Shading")? else {
+            return Err(Error::malformed("no /Shading resources"));
+        };
+        let shading = shadings
+            .get(name)
+            .map(|s| self.file.resolve(s))
+            .transpose()?
+            .ok_or_else(|| {
+                Error::malformed(format!("no shading /{}", String::from_utf8_lossy(name)))
+            })?;
+        let dict = shading.as_dict().ok_or_else(|| {
+            Error::malformed(format!(
+                "shading /{} is a {}",
+                String::from_utf8_lossy(name),
+                shading.kind()
+            ))
+        })?;
+        let mut bbox = self.state.clip;
+        if let Some(own) = self.user_box(dict)? {
+            bbox = bbox.intersect(own);
+        }
+        if bbox.x0 <= bbox.x1 && bbox.y0 <= bbox.y1 {
+            let layer = self.layer();
+            self.out
+                .events
+                .push(Event::Shading(ShadingEvent { bbox, layer }));
+        }
+        Ok(())
+    }
+
+    /// The box in page space of `dict`'s `/BBox` (a rectangle in user space), when it has one.
+    fn user_box(&self, dict: &Dict) -> Result<Option<Rect>> {
+        let Some([x0, y0, x1, y1]) = four(self.file.get(dict, b"BBox")?) else {
+            return Ok(None);
+        };
+        let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| self.point(x, y));
+        Ok(Rect::around(&corners))
     }
 
     /// `q`, `Q`, `cm` and the line style; whether `operator` is one.
@@ -493,8 +739,15 @@ impl Interpreter<'_> {
     ) -> Result<bool> {
         let text = &mut self.state.text;
         match operator {
-            b"BT" => (self.text_matrix, self.line_matrix) = (Matrix::IDENTITY, Matrix::IDENTITY),
-            b"ET" => {}
+            b"BT" => {
+                (self.text_matrix, self.line_matrix) = (Matrix::IDENTITY, Matrix::IDENTITY);
+                self.text_clip = None;
+            }
+            b"ET" => {
+                if let Some(glyphs) = self.text_clip.take() {
+                    self.state.clip = self.state.clip.intersect(glyphs);
+                }
+            }
             b"Tc" => text.char_spacing = last::<1>(operands)?[0],
             b"Tw" => text.word_spacing = last::<1>(operands)?[0],
             b"Tz" => text.scale = last::<1>(operands)?[0] / 100.0,
@@ -551,9 +804,15 @@ impl Interpreter<'_> {
                     match item {
                         Object::String(s) => glyphs.extend(self.glyphs(s)),
                         other => {
-                            let adjust = other.as_number().unwrap_or(0.0);
+                            // A number is taken off the coordinate along the writing mode (9.4.3): a
+                            // positive one moves the next glyph left, or down a column.
+                            let adjust = other.as_number().unwrap_or(0.0) / 1000.0;
                             let text = &self.state.text;
-                            self.advance(-adjust / 1000.0 * text.size * text.scale);
+                            if text.font.as_ref().is_some_and(|f| f.vertical()) {
+                                self.advance(0.0, -adjust * text.size);
+                            } else {
+                                self.advance(-adjust * text.size * text.scale, 0.0);
+                            }
                         }
                     }
                 }
@@ -569,8 +828,8 @@ impl Interpreter<'_> {
         self.text_matrix = self.line_matrix;
     }
 
-    fn advance(&mut self, tx: f64) {
-        self.text_matrix = Matrix([1.0, 0.0, 0.0, 1.0, tx, 0.0]).then(self.text_matrix);
+    fn advance(&mut self, tx: f64, ty: f64) {
+        self.text_matrix = Matrix([1.0, 0.0, 0.0, 1.0, tx, ty]).then(self.text_matrix);
     }
 
     fn load_font(&mut self, name: &[u8], resources: &Dict) -> Result<Rc<Font>> {
@@ -616,44 +875,61 @@ impl Interpreter<'_> {
             let render = Matrix([text.size * text.scale, 0.0, 0.0, text.size, 0.0, text.rise])
                 .then(self.text_matrix)
                 .then(self.state.ctm);
-            let (ascent, descent) = (
-                font.ascent * font.matrix.0[3],
-                font.descent * font.matrix.0[3],
-            );
-            let corners = [
-                render.apply(Point { x: 0.0, y: descent }),
-                render.apply(Point {
-                    x: code.width,
-                    y: descent,
-                }),
-                render.apply(Point {
-                    x: code.width,
-                    y: ascent,
-                }),
-                render.apply(Point { x: 0.0, y: ascent }),
-            ];
             let space = if code.bytes == 1 && code.code == 32 {
                 text.word_spacing
             } else {
                 0.0
             };
-            let advance = (code.width * text.size + text.char_spacing + space) * text.scale;
+            // Horizontally: the box spans the advance w0 along the baseline, from the font's descent to its ascent
+            // across it. Vertically (9.7.4.3, 9.4.4): the origin is the vertical one; the box spans the advance w1y
+            // down the column and an em across it, centered on the origin; Tc and Tw step down unscaled by Tz.
+            let (end, corners, step) = match code.vertical_advance {
+                None => {
+                    let (ascent, descent) = (
+                        font.ascent * font.matrix.0[3],
+                        font.descent * font.matrix.0[3],
+                    );
+                    let corners = [
+                        (0.0, descent),
+                        (code.width, descent),
+                        (code.width, ascent),
+                        (0.0, ascent),
+                    ];
+                    let advance = (code.width * text.size + text.char_spacing + space) * text.scale;
+                    ((code.width, 0.0), corners, (advance, 0.0))
+                }
+                Some(down) => {
+                    let corners = [
+                        (-HALF_EM, 0.0),
+                        (HALF_EM, 0.0),
+                        (HALF_EM, down),
+                        (-HALF_EM, down),
+                    ];
+                    let advance = down * text.size + text.char_spacing + space;
+                    ((0.0, down), corners, (0.0, advance))
+                }
+            };
+            let at = |(x, y): (f64, f64)| render.apply(Point { x, y });
             out.push(Glyph {
                 code: code.code,
                 text: code.text,
-                origin: render.apply(Point { x: 0.0, y: 0.0 }),
-                end: render.apply(Point {
-                    x: code.width,
-                    y: 0.0,
-                }),
-                bbox: Rect::around(&corners).expect("four corners"),
+                origin: at((0.0, 0.0)),
+                end: at(end),
+                bbox: Rect::around(&corners.map(at)).expect("four corners"),
             });
-            self.advance(advance);
+            self.advance(step.0, step.1);
         }
         out
     }
 
     fn text_event(&mut self, mut glyphs: Vec<Glyph>) {
+        if (4..=7).contains(&self.state.text.render_mode) {
+            self.text_clip = glyphs
+                .iter()
+                .map(|g| g.bbox)
+                .chain(self.text_clip)
+                .reduce(Rect::union);
+        }
         let Some(font) = &self.state.text.font else {
             return;
         };
@@ -661,6 +937,16 @@ impl Interpreter<'_> {
         glyphs.retain(|g| g.bbox.meets(clip));
         if glyphs.is_empty() {
             return;
+        }
+        if let Some(actual) = &mut self.actual {
+            for glyph in &mut glyphs {
+                glyph.text = Some(if actual.given {
+                    String::new()
+                } else {
+                    actual.given = true;
+                    actual.text.clone()
+                });
+            }
         }
         let text = &self.state.text;
         let m = self.text_matrix.then(self.state.ctm).0;
@@ -670,8 +956,9 @@ impl Interpreter<'_> {
             render_mode: text.render_mode,
             fill: self.state.fill_color.clone(),
             stroke: self.state.stroke_color.clone(),
-            vertical: font.vertical,
+            vertical: font.vertical(),
             glyphs,
+            layer: self.layer(),
         };
         self.out.events.push(Event::Text(event));
     }
@@ -691,14 +978,16 @@ impl Interpreter<'_> {
                 let color = space.initial();
                 (space, color)
             }
-            b"SC" | b"SCN" => (
-                self.state.stroke_space.clone(),
-                self.state.stroke_space.color(numbers_in(operands)),
-            ),
-            b"sc" | b"scn" => (
-                self.state.fill_space.clone(),
-                self.state.fill_space.color(numbers_in(operands)),
-            ),
+            b"SC" | b"SCN" => {
+                let space = self.state.stroke_space.clone();
+                let color = self.color(&space, operands, resources)?;
+                (space, color)
+            }
+            b"sc" | b"scn" => {
+                let space = self.state.fill_space.clone();
+                let color = self.color(&space, operands, resources)?;
+                (space, color)
+            }
             b"G" | b"g" | b"RG" | b"rg" | b"K" | b"k" => {
                 let space = match operator {
                     b"G" | b"g" => Space::Gray,
@@ -716,6 +1005,20 @@ impl Interpreter<'_> {
             (self.state.fill_space, self.state.fill_color) = (space, color);
         }
         Ok(true)
+    }
+
+    /// The color `operands` set in `space`: in `Pattern`, the pattern the last operand names (after an uncolored
+    /// pattern's tint).
+    fn color(&self, space: &Space, operands: &[Object], resources: &Dict) -> Result<Color> {
+        let mut color = space.color(numbers_in(operands));
+        if *space == Space::Pattern {
+            let name = operands
+                .last()
+                .and_then(Object::as_name)
+                .ok_or_else(|| Error::malformed("needs a pattern name"))?;
+            color.pattern = Some(self.file.pattern(name, resources)?);
+        }
+        Ok(color)
     }
 
     fn extend(&mut self, segment: Segment, end: Point) {
@@ -748,6 +1051,7 @@ impl Interpreter<'_> {
     fn paint(&mut self, stroke: bool, fill: Option<bool>) {
         let bounds = bounds(&self.path);
         if bounds.is_some_and(|b| b.meets(self.state.clip)) {
+            let layer = self.layer();
             let state = &self.state;
             let scale = state.ctm.scale();
             let event = PathEvent {
@@ -764,6 +1068,7 @@ impl Interpreter<'_> {
                     color: state.fill_color.clone(),
                     even_odd,
                 }),
+                layer,
             };
             self.out.events.push(Event::Path(event));
         }
@@ -829,7 +1134,9 @@ impl Interpreter<'_> {
             .get(b"Subtype")
             .and_then(Object::as_name)
             .unwrap_or(b"");
-        match subtype {
+        let hides = usize::from(!self.x_object_shows(&stream.dict));
+        self.hiding_entries += hides;
+        let drawn = match subtype {
             b"Image" => {
                 let int = |k: &[u8]| stream.dict.get(k).and_then(Object::as_integer).unwrap_or(0);
                 self.image(
@@ -838,48 +1145,160 @@ impl Interpreter<'_> {
                     reference.as_reference().map(|r| r.num),
                     None,
                 );
+                Ok(())
             }
-            b"Form" => {
-                if depth >= MAX_FORM_DEPTH {
-                    return Err(Error::malformed("Form XObjects nest too deep"));
-                }
-                let matrix = match self.file.get(&stream.dict, b"Matrix")? {
-                    Some(Object::Array(m)) => Matrix::from_numbers(
-                        &m.iter().filter_map(Object::as_number).collect::<Vec<_>>(),
-                    )
-                    .unwrap_or(Matrix::IDENTITY),
-                    _ => Matrix::IDENTITY,
-                };
-                let own = match self.file.get(&stream.dict, b"Resources")? {
-                    Some(Object::Dict(r)) => r,
-                    _ => resources.clone(),
-                };
-                let data = self.file.decode(&stream)?.into_bytes()?;
-                let saved = (
-                    self.state.clone(),
-                    self.stack.len(),
-                    std::mem::take(&mut self.path),
-                    self.current,
-                    self.start,
-                );
-                self.state.ctm = matrix.then(self.state.ctm);
-                if let Some(Object::Array(b)) = self.file.get(&stream.dict, b"BBox")?
-                    && let [x0, y0, x1, y1] =
-                        b.iter().filter_map(Object::as_number).collect::<Vec<_>>()[..]
-                {
-                    let corners =
-                        [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| self.point(x, y));
-                    let shown = Rect::around(&corners).expect("four corners");
-                    self.state.clip = self.state.clip.intersect(shown);
-                }
-                self.run(&data, &own, depth + 1);
-                self.state = saved.0;
-                self.stack.truncate(saved.1);
-                (self.path, self.current, self.start) = (saved.2, saved.3, saved.4);
-            }
-            _ => {} // PostScript XObjects draw nothing a reader sees
+            b"Form" => self.form(&stream, resources, depth),
+            _ => Ok(()), // PostScript XObjects draw nothing a reader sees
+        };
+        self.hiding_entries -= hides;
+        drawn
+    }
+
+    /// The Form `stream` drawn in the current state (8.10): through its `/Matrix`, clipped to its `/BBox`, with its
+    /// own resources (else `resources`, its caller's); the state, the path and its marked content end with it.
+    fn form(&mut self, stream: &Stream, resources: &Dict, depth: usize) -> Result<()> {
+        if depth >= MAX_FORM_DEPTH {
+            return Err(Error::malformed("Form XObjects nest too deep"));
         }
+        let matrix = self.form_matrix(&stream.dict)?;
+        let own = match self.file.get(&stream.dict, b"Resources")? {
+            Some(Object::Dict(r)) => r,
+            _ => resources.clone(),
+        };
+        let data = self.file.decode(stream)?.into_bytes()?;
+        let saved = (
+            self.state.clone(),
+            self.stack.len(),
+            std::mem::take(&mut self.path),
+            self.current,
+            self.start,
+        );
+        self.state.ctm = matrix.then(self.state.ctm);
+        if let Some(shown) = self.user_box(&stream.dict)? {
+            self.state.clip = self.state.clip.intersect(shown);
+        }
+        let floor = std::mem::replace(&mut self.marked_floor, self.marked.len());
+        self.run(&data, &own, depth + 1);
+        self.close_marked("a Form XObject");
+        self.marked_floor = floor;
+        self.state = saved.0;
+        self.stack.truncate(saved.1);
+        (self.path, self.current, self.start) = (saved.2, saved.3, saved.4);
         Ok(())
+    }
+
+    /// A Form's `/Matrix` (the identity when it has none).
+    fn form_matrix(&self, dict: &Dict) -> Result<Matrix> {
+        Ok(match self.file.get(dict, b"Matrix")? {
+            Some(Object::Array(m)) => {
+                Matrix::from_numbers(&m.iter().filter_map(Object::as_number).collect::<Vec<_>>())
+                    .unwrap_or(Matrix::IDENTITY)
+            }
+            _ => Matrix::IDENTITY,
+        })
+    }
+
+    /// Each annotation's appearance on `page`, drawn from the page's `initial` state; one that cannot be drawn is a
+    /// warning.
+    fn annotations(&mut self, page: &Page, initial: &State) {
+        let annotations = match self.file.get(&page.dict, b"Annots") {
+            Ok(Some(Object::Array(a))) => a,
+            Ok(_) => return,
+            Err(e) => {
+                self.out.warnings.push(format!("/Annots unreadable: {e}"));
+                return;
+            }
+        };
+        for (i, annotation) in annotations.iter().enumerate() {
+            if let Err(e) = self.annotation(annotation, initial) {
+                self.out
+                    .warnings
+                    .push(format!("annotation {i} not drawn: {e}"));
+            }
+        }
+        self.annotation = None;
+    }
+
+    /// The annotation `value`'s normal appearance (12.5.5), unless it is a popup or flagged hidden or not to view:
+    /// its `/AP /N` -- the `/AS` state's, when it has states -- mapped from its `/BBox` (through its `/Matrix`) onto
+    /// the annotation's `/Rect`, from the page's `initial` state.
+    fn annotation(&mut self, value: &Object, initial: &State) -> Result<()> {
+        /// `/F` bits: Hidden (2) and `NoView` (6).
+        const NOT_SHOWN: i64 = 1 << 1 | 1 << 5;
+        let Object::Dict(annotation) = self.file.resolve(value)? else {
+            return Err(Error::malformed("not a dictionary"));
+        };
+        let subtype = self.file.get(&annotation, b"Subtype")?;
+        let subtype = subtype.as_ref().and_then(Object::as_name).unwrap_or(b"");
+        let flags = self
+            .file
+            .get(&annotation, b"F")?
+            .and_then(|f| f.as_integer())
+            .unwrap_or(0);
+        if subtype == b"Popup" || flags & NOT_SHOWN != 0 {
+            return Ok(());
+        }
+        let Some(Object::Dict(appearances)) = self.file.get(&annotation, b"AP")? else {
+            return Ok(()); // no appearance: nothing drawn
+        };
+        let stream = match self.file.get(&appearances, b"N")? {
+            Some(Object::Stream(s)) => s,
+            Some(Object::Dict(states)) => {
+                let state = self.file.get(&annotation, b"AS")?;
+                let state = state.as_ref().and_then(Object::as_name);
+                match state
+                    .and_then(|s| states.get(s))
+                    .map(|s| self.file.resolve(s))
+                {
+                    Some(Ok(Object::Stream(s))) => s,
+                    Some(Err(e)) => return Err(e),
+                    _ => return Ok(()), // no appearance for its state
+                }
+            }
+            _ => return Ok(()),
+        };
+        let rect = four(self.file.get(&annotation, b"Rect")?)
+            .ok_or_else(|| Error::malformed("its /Rect is not four numbers"))?;
+        let rect = Rect::spanning(
+            Point {
+                x: rect[0],
+                y: rect[1],
+            },
+            Point {
+                x: rect[2],
+                y: rect[3],
+            },
+        );
+        let matrix = self.form_matrix(&stream.dict)?;
+        let [b0, b1, b2, b3] = four(self.file.get(&stream.dict, b"BBox")?)
+            .ok_or_else(|| Error::malformed("its appearance's /BBox is not four numbers"))?;
+        let corners =
+            [(b0, b1), (b2, b1), (b2, b3), (b0, b3)].map(|(x, y)| matrix.apply(Point { x, y }));
+        let shown = Rect::around(&corners).expect("four corners");
+        if shown.width() <= 0.0 || shown.height() <= 0.0 {
+            return Err(Error::malformed("its appearance's /BBox is empty"));
+        }
+        let (sx, sy) = (rect.width() / shown.width(), rect.height() / shown.height());
+        let onto = Matrix([
+            sx,
+            0.0,
+            0.0,
+            sy,
+            rect.x0 - shown.x0 * sx,
+            rect.y0 - shown.y0 * sy,
+        ]);
+        let hides = match annotation.get(b"OC") {
+            Some(oc) => usize::from(!self.optional.shows(self.file, oc)?),
+            None => 0,
+        } + usize::from(!self.x_object_shows(&stream.dict));
+        self.state = initial.clone();
+        self.state.ctm = onto.then(initial.ctm);
+        self.stack.clear();
+        self.annotation = Some(String::from_utf8_lossy(subtype).into_owned());
+        self.hiding_entries += hides;
+        let drawn = self.form(&stream, &Dict::new(), 0);
+        self.hiding_entries -= hides;
+        drawn
     }
 
     fn image(
@@ -907,6 +1326,7 @@ impl Interpreter<'_> {
             height,
             object,
             inline,
+            layer: self.layer(),
         }));
     }
 }
@@ -926,4 +1346,14 @@ fn bounds(path: &[Segment]) -> Option<Rect> {
 
 fn numbers_in(operands: &[Object]) -> Vec<f64> {
     operands.iter().filter_map(Object::as_number).collect()
+}
+
+/// The four numbers `value` is an array of (a rectangle), if it is one.
+fn four(value: Option<Object>) -> Option<[f64; 4]> {
+    let numbers: Vec<f64> = value?
+        .as_array()?
+        .iter()
+        .filter_map(Object::as_number)
+        .collect();
+    numbers.try_into().ok()
 }

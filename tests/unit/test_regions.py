@@ -8,6 +8,7 @@ from document_lab.ink import Drawing
 from document_lab.ir import BBox
 from document_lab.pdf import read_pdf
 from document_lab.regions import regions
+from tests.synthetic import hidden_layer
 
 PROSE = 'The rated output is the mechanical power available at the shaft and shall be expressed in watts.'
 
@@ -21,8 +22,8 @@ def _page(tmp_path, draw):
     return read.pages[0], layout.body_size(read)
 
 
-def _text(page, y, text, *, x=50, size=10):
-    page.insert_text((x, y), text, fontsize=size)
+def _text(page, y, text, *, x=50, size=10, ocr=False):
+    page.insert_text((x, y), text, fontsize=size, render_mode=3 if ocr else 0)
 
 
 def test_a_figure_runs_from_the_prose_above_down_to_its_caption(tmp_path):
@@ -86,9 +87,9 @@ def test_a_mention_in_prose_or_a_contents_entry_is_no_caption(tmp_path):
     assert regions(*_page(tmp_path, draw)) == []
 
 
-def _row(page, y, cells, size=10):
+def _row(page, y, cells, size=10, *, ocr=False):
     for x, text in cells:
-        _text(page, y, text, x=x, size=size)
+        _text(page, y, text, x=x, size=size, ocr=ocr)
 
 
 def test_a_table_without_a_caption_is_found_by_its_columns(tmp_path):
@@ -160,9 +161,10 @@ def test_two_columns_of_prose_split_into_three_pieces_are_no_table(tmp_path):
 
 
 def test_rows_with_specks_read_as_cells_are_no_table(tmp_path):
-    def draw(page):  # columns of prose with OCR specks beside them: a speck is no cell
+    def draw(page):  # columns of prose with OCR specks beside them, an OCR layer: a speck is no cell
         for y in (100, 120, 140):
-            _row(page, y, ((50, 'All documentation'), (200, 'is current in BSI'), (380, 'oo'), (420, '.'), (460, 'i')))
+            cells = ((50, 'All documentation'), (200, 'is current in BSI'), (380, 'oo'), (420, '.'), (460, 'i'))
+            _row(page, y, cells, ocr=True)
 
     assert regions(*_page(tmp_path, draw)) == []
 
@@ -237,3 +239,121 @@ def test_a_short_drawing_with_no_word_in_it_is_an_equation_without_a_number(tmp_
     page, body = _page(tmp_path, draw)
     found = regions(page, body, [_drawn((180, 145, 420, 175), stroke=60)])  # three lines high, under four
     assert [(r.kind, r.label) for r in found] == [('equation', 'Untitled equation 1')]
+
+
+def test_what_a_hidden_layer_draws_is_no_region_unless_asked(tmp_path):
+    def draw(page):
+        _text(page, 100, PROSE)
+        for y, size in ((180, 22), (230, 6), (260, 31)):
+            _text(page, y, 'i)|\\', x=250, size=size)
+        _text(page, 360, 'Figure 2 - Short-time duty', x=200)
+        _text(page, 420, PROSE)
+
+    page, body = _page(tmp_path, draw)
+    hidden = hidden_layer(page)
+    assert regions(hidden, body) == []
+    assert regions(hidden, body, include_hidden=True) == regions(page, body) != []
+
+
+def test_a_region_the_page_edge_leaves_no_room_for_is_none(tmp_path):
+    """A caption across the page's foot, prose right above it: clamped to the page, its figure's top falls below its
+    bottom -- once a crop of negative height. A region is never a box without area."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=600, height=300)
+    _text(page, 296, PROSE)
+    _text(page, 307, 'Figure 3 - At the foot')
+    doc.save(tmp_path / 'r.pdf')
+    read = read_pdf(tmp_path / 'r.pdf')
+    assert regions(read.pages[0], layout.body_size(read)) == []
+
+
+def test_a_short_drawing_without_math_in_it_is_a_figure_not_an_equation(tmp_path):
+    """A cover's logo: drawn, a few body sizes high, no text in it (or only its brand's): nothing says formula."""
+
+    def draw(page):
+        _text(page, 100, PROSE)
+        _text(page, 300, PROSE)
+        _text(page, 470, 'TDK', x=330, size=14)  # brand text set inside the second logo
+        _text(page, 600, PROSE)
+
+    page, body = _page(tmp_path, draw)
+    logo, branded = _drawn((300, 150, 420, 176), stroke=30), _drawn((300, 450, 420, 480), stroke=30)
+    found = regions(page, body, [logo, branded])
+    assert [(r.kind, r.label) for r in found] == [('figure', 'Untitled figure 1'), ('figure', 'Untitled figure 2')]
+
+
+def _data_sheet_drawings(page):
+    """A data sheet's drawings page: each drawing under its own title, two of them in two parts."""
+    _text(page, 60, 'Data and Signal Line Chokes', x=42, size=11)
+    _text(page, 60, 'ACT1210', x=499, size=11)
+    _text(page, 110, 'Dimensional drawing and pin configuration', x=37, size=11)
+    _text(page, 110, 'Layout recommendation', x=313, size=11)
+    _text(page, 278, 'Dimensions in mm', x=37, size=11)
+    _text(page, 306, 'Circuit diagram', x=37, size=11)
+    _text(page, 410, 'Taping and packing', x=37, size=11)
+    _text(page, 436, 'Blister tape', x=37, size=11)
+    _text(page, 436, 'Reel', x=356, size=11)
+    _text(page, 624, 'Dimensions in mm', x=37, size=11)
+
+
+def test_drawings_under_their_own_titles_and_apart_are_separate_figures(tmp_path):
+    """ACT1210 page 3: a dimensional drawing (two views touching), a layout beside it under its own title, a circuit
+    below, a blister tape (two parts close together) and a reel (two views) under theirs -- once one figure."""
+    page, body = _page(tmp_path, _data_sheet_drawings)
+    views = [_drawn((36.9, 119.0, 159.8, 263.4)), _drawn((139.6, 119.0, 229.8, 213.0))]
+    layout_ = _drawn((313.3, 119.0, 419.9, 212.6))
+    circuit = _drawn((42.7, 315.3, 122.4, 382.4), stroke=19.7)  # its longest line: a pin to its coil
+    tape = [_drawn((124.3, 442.4, 293.7, 610.8)), _drawn((45.6, 490.4, 105.1, 571.5))]
+    reel = [_drawn((434.3, 442.9, 514.9, 586.4)), _drawn((359.9, 447.2, 416.0, 573.4))]
+    found = regions(page, body, [*views, layout_, circuit, *tape, *reel])
+    assert [r.kind for r in found] == ['figure'] * 5
+
+    def holding(*parts):
+        return [
+            r.label
+            for r in found
+            if all(r.bbox.x0 <= p.box.x0 and p.box.x1 <= r.bbox.x1 for p in parts)
+            and all(r.bbox.y0 <= p.box.y0 and p.box.y1 <= r.bbox.y1 for p in parts)
+        ]
+
+    assert len({*holding(*views), *holding(layout_), *holding(circuit), *holding(*tape), *holding(*reel)}) == 5
+
+
+def test_a_unit_row_of_lone_signs_the_document_sets_is_a_row_of_its_table(tmp_path):
+    """ACT1210's ordering codes: a units row (uH, mA, an ohm sign alone) under the header; set, not OCR'd."""
+
+    def draw(page):
+        _text(page, 100, PROSE)
+        _row(page, 150, ((50, 'L'), (150, 'I'), (250, 'R'), (350, 'Ordering code')))
+        _row(page, 165, ((50, 'uH'), (150, 'mA'), (250, 'W')))
+        for y, (value, code) in zip((185, 200, 215), (('11', 'B110'), ('22', 'B220'), ('51', 'B510')), strict=True):
+            _row(page, y, ((50, value), (150, '300'), (250, '0.4'), (350, code)))
+        _text(page, 300, PROSE)
+
+    found = regions(*_page(tmp_path, draw))
+    assert [(r.kind, r.label) for r in found] == [('table', 'Untitled table 1')]
+    assert found[0].bbox.y0 < 140  # its header and units rows inside it
+    assert found[0].table.rows == (
+        ('L', 'I', 'R', 'Ordering code'),
+        ('uH', 'mA', 'W', ''),
+        ('11', '300', '0.4', 'B110'),
+        ('22', '300', '0.4', 'B220'),
+        ('51', '300', '0.4', 'B510'),
+    )
+
+
+def test_rows_ruled_apart_with_text_are_a_table_a_striped_icon_without_text_is_not(tmp_path):
+    """ACT1210's names and values: long value lines cross the rules; a manual's striped fan icon has stripes alone."""
+
+    def draw(page):
+        _text(page, 100, PROSE)
+        for y in (160, 180, 200):
+            _text(page, y, 'Rated voltage', x=50)
+            _text(page, y, 'Measured with a meter of the class stated at the rated frequency, 20 C.', x=160)
+        _text(page, 400, PROSE)
+
+    page, body = _page(tmp_path, draw)
+    ruled = _drawn((48, 148, 470, 206), rules=(4, 1), loose=1)
+    icon = _drawn((200, 260, 260, 320), rules=(5, 0), loose=8)
+    found = regions(page, body, [ruled, icon])
+    assert [(r.kind, r.label) for r in found] == [('table', 'Untitled table 1'), ('figure', 'Untitled figure 1')]

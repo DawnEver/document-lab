@@ -481,7 +481,7 @@ class _Asked:
 
 def _image(reader: _pdf.Reader, number: int) -> tuple | None:
     """Page ``number``'s one image row (``Reader.page``) or None: text, or not one image."""
-    spans, _, images, _ = reader.page(number, _CURVE_SAMPLES)
+    spans, _, images, _ = reader.page(number, curve_samples=_CURVE_SAMPLES)
     if len(images) != 1 or images[0][3] is None or any(span[0].strip() for span in spans):
         return None
     return images[0]

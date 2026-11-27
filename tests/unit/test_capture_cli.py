@@ -10,6 +10,7 @@ import pytest
 from document_lab.__main__ import main
 from document_lab.capture import desktop
 from document_lab.capture.export import to_pdf
+from document_lab.capture.screen import Region
 from tests.unit.test_capture_session import Hand, Viewport
 from tests.unit.test_capture_stitch import sideways, tall, text_page
 
@@ -69,8 +70,23 @@ class FakeHud:
         FakeHud.shown.append('closed')
 
 
+class FakeSystem:
+    """``screen.System`` without a desktop: no refusal, and the files it was asked to open."""
+
+    opened: ClassVar[list] = []
+    refusal: ClassVar[str | None] = None
+
+    def problem(self, *, sends_input):
+        return FakeSystem.refusal
+
+    def open_file(self, path):
+        FakeSystem.opened.append(path)
+
+
 @pytest.fixture
 def fake(monkeypatch):
+    FakeSystem.opened, FakeSystem.refusal = [], None
+    monkeypatch.setattr(desktop, 'system', FakeSystem)
     monkeypatch.setattr(desktop, 'Source', FakeSource)
     monkeypatch.setattr(desktop, 'Hud', FakeHud)
     monkeypatch.setattr(FakeHud, 'done', staticmethod(lambda: False))
@@ -179,7 +195,7 @@ def test_adjust_on_the_panel_reopens_the_selection_on_the_area_set_then_waits_ag
     monkeypatch.setattr(FakeHud, 'ready', lambda self: waited.append(1) or answer(self))
     monkeypatch.setattr(FakeHud, 'answers', ['adjust'])
     assert run(tmp_path, '--no-scroll') == 0
-    assert asked == [desktop.Region(0, 0, WIDTH, 300)]  # the area set, shown marked to adjust
+    assert asked == [Region(0, 0, WIDTH, 300)]  # the area set, shown marked to adjust
     assert len(waited) == 2  # the new area waits for Start too
 
 
@@ -211,17 +227,16 @@ def test_a_scroll_windows_refuses_ends_the_capture_with_what_it_has_and_why(tmp_
 
     def refused(self, notches=1):
         if len(scrolled) == 3:
-            msg = 'SendInput was blocked (error 5): is a higher-integrity window in front?'
-            raise OSError(msg)  # what desktop._send raises
+            msg = 'SendInput was blocked (error 5): a UAC prompt -- clear it'
+            raise OSError(msg)  # what win32._send raises
         scrolled.append(notches)
         self.view.scroll(notches)
 
     monkeypatch.setattr(fake, 'scroll', refused)
     assert auto(tmp_path, '--stop-when-lost', '--page-height', '0') == 1  # no traceback: an exit status
     out = capsys.readouterr().out
-    assert 'SendInput was blocked' in out
-    assert 'UAC' in out
-    assert 'lock screen' in out
+    assert 'SendInput was blocked (error 5): a UAC prompt' in out  # the desktop's own reason, and its remedy
+    assert 'capture the rest' in out
     assert '1 page(s)' in out
     image, _ = pdf_pixels(tmp_path / 'c.pdf')
     assert np.array_equal(image, fake.IMAGE[: 300 + 3 * fake.STEP])  # every frame placed before it is written
@@ -276,6 +291,16 @@ def test_a_tkinter_that_cannot_start_ends_the_run_with_the_remedy(tmp_path, fake
     monkeypatch.setattr(FakeHud, 'ready', lambda self: shown.append(1) or 'start')
     assert run(tmp_path) == 1
     assert 'Use Python 3.13.1' in capsys.readouterr().out
+    assert not shown
+    assert not list(tmp_path.iterdir())
+
+
+def test_a_desktop_that_refuses_the_capture_ends_the_run_with_its_remedy(tmp_path, fake, monkeypatch, capsys):
+    monkeypatch.setattr(FakeSystem, 'refusal', 'macOS has not let this program record the screen: allow it')
+    shown = []
+    monkeypatch.setattr(FakeHud, 'ready', lambda self: shown.append(1) or 'start')
+    assert run(tmp_path) == 1
+    assert 'record the screen' in capsys.readouterr().out
     assert not shown
     assert not list(tmp_path.iterdir())
 
@@ -375,9 +400,8 @@ def test_a_fixed_stride_is_the_stride_max_at_the_stride(tmp_path, fake, monkeypa
     assert counts['grown'] < counts['fixed']
 
 
-def test_open_shows_the_pdf_once_written_and_only_then(tmp_path, fake, monkeypatch):
-    opened = []
-    monkeypatch.setattr(desktop, 'open_file', opened.append)
+def test_open_shows_the_pdf_once_written_and_only_then(tmp_path, fake):
+    opened = FakeSystem.opened
     assert auto(tmp_path, '--open') == 0
     assert opened == [tmp_path / 'c.pdf']
     assert (tmp_path / 'c.pdf').exists()
@@ -386,9 +410,8 @@ def test_open_shows_the_pdf_once_written_and_only_then(tmp_path, fake, monkeypat
     assert not opened
 
 
-def test_open_after_resume_shows_the_joined_pdf(tmp_path, fake, monkeypatch):
-    opened = []
-    monkeypatch.setattr(desktop, 'open_file', opened.append)
+def test_open_after_resume_shows_the_joined_pdf(tmp_path, fake):
+    opened = FakeSystem.opened
     earlier = to_pdf(fake.IMAGE[:500], tmp_path / 'earlier.pdf')
     assert auto(tmp_path, '--resume', str(earlier), '--open') == 0
     assert opened == [tmp_path / 'c.pdf']
@@ -455,3 +478,15 @@ def test_resume_with_an_area_a_few_pixels_narrower_makes_it_as_wide_and_goes_on(
     assert main([*argv, '--auto', '--delay', '0', '--settle', '0', '--end-wait', '0', '--page-height', '0']) == 0
     assert f'it is made {WIDTH} px wide' in capsys.readouterr().out
     assert np.array_equal(pdf_pixels(tmp_path / 'c.pdf')[0], fake.IMAGE)
+
+
+def test_now_starts_on_the_named_area_without_waiting_for_the_panel(tmp_path, fake):
+    FakeHud.answers = ['cancel']  # what the panel would answer, were it asked
+    assert auto(tmp_path, '--now') == 0
+    assert 'ready' not in FakeHud.shown
+    assert (tmp_path / 'c.pdf').exists()
+
+
+def test_now_without_a_named_area_is_refused(tmp_path, fake):
+    with pytest.raises(ValueError, match='--window, --handle or --rect'):
+        main(['capture', str(tmp_path / 'c.pdf'), '--now'])

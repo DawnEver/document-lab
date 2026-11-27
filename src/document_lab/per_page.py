@@ -55,7 +55,7 @@ from document_lab.ink import Drawing, drawings, rulings
 from document_lab.ir import BBox
 from document_lab.markdown import Headings, headings, page_markdowns
 from document_lab.markdown import table as markdown_table
-from document_lab.pdf import Renderer, read_pdf, read_raster
+from document_lab.pdf import read_pdf, read_raster
 from document_lab.regions import Region, Unnumbered, regions
 from document_lab.tables import tables
 
@@ -107,13 +107,13 @@ def _scanned(page: Page) -> bool:
     return len(page.figures) == 1 and _covers(page.figures[0].provenance.bbox, BBox(0, 0, page.width, page.height))
 
 
-def _picture(pdf: Path, page: Page, renderer: Renderer) -> tuple[np.ndarray, float]:
+def _picture(pdf: Path, page: Page) -> tuple[np.ndarray, float]:
     """The page as seen, RGB rows, and its pixels per point.
 
-    A page one image covers is read at that image's resolution, any other drawn by ``renderer``.
+    A page one image covers is read at that image's resolution, any other drawn by the own renderer.
     """
     whole = BBox(0, 0, page.width, page.height)
-    pixels = read_raster(pdf, page.number, whole, dpi=None if _scanned(page) else RENDER_DPI, renderer=renderer).pixels
+    pixels = read_raster(pdf, page.number, whole, dpi=None if _scanned(page) else RENDER_DPI).pixels
     return pixels, pixels.shape[1] / page.width
 
 
@@ -235,17 +235,15 @@ def _link(name: str, page: Page, region: Region, latex: dict[int, str]) -> str:
     return f'![{region.alt or region.label}]({_file(name, region)}){more}{beside}'
 
 
-def _latex(
-    pdf: Path, read: Document, found: list[list[Region]], transcribe: formula.Transcribe, renderer: Renderer
-) -> dict[int, str]:
+def _latex(pdf: Path, read: Document, found: list[list[Region]], transcribe: formula.Transcribe) -> dict[int, str]:
     """What stands beside each equation's link (`document_lab.formula.beside`), by the region's id.
 
-    Each is read from the crop written (:func:`_cut` of the page's picture drawn by ``renderer``).
+    Each is read from the crop written (:func:`_cut` of the page's picture, :func:`_picture`).
     """
     latex = {}
     for page, held in zip(read.pages, found, strict=True):
         if equations := [r for r in held if r.kind == 'equation']:
-            pixels, scale = _picture(pdf, page, renderer)
+            pixels, scale = _picture(pdf, page)
             for region in equations:
                 latex[id(region)] = formula.beside(transcribe(_cut(pixels, scale, region)), _number(region.label))
     return latex
@@ -329,7 +327,6 @@ def write_pages(
     pdf: Path,
     out: Path,
     *,
-    renderer: Renderer = 'pymupdf',
     outline: bool = True,
     tagged: Collection[str] = tags.DEFAULT_USES,
     formulas: formula.Formulas | None = None,
@@ -340,7 +337,7 @@ def write_pages(
 ) -> Paged:
     """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive.
 
-    Each page's picture is drawn by ``renderer`` (`document_lab.pdf.read_raster`). ``outline``: the PDF's stated
+    Each page's picture is `document_lab.pdf.read_raster`'s. ``outline``: the PDF's stated
     outline names the clause headings when it matches the pages; False keeps to its tags and the rules
     (`document_lab.markdown.headings`). ``tagged``: what a tagged PDF's tags give (`document_lab.tags.USES`; by default
     ``DEFAULT_USES``, all but figures); none infers it all from layout. ``formulas``: ``latex`` writes each equation's
@@ -360,7 +357,7 @@ def write_pages(
     names = [f'page-{number:0{width}d}' for number in range(1, len(read.pages) + 1)]
     drawn, ruled = [], []
     for page in read.pages:
-        pixels, scale = _picture(pdf, page, renderer)
+        pixels, scale = _picture(pdf, page)
         drawn.append(_drawings(pixels, scale, page, body))
         ruled.append(_tables(page, pixels, scale))
     drawn = _without_furniture(drawn, body)
@@ -374,7 +371,7 @@ def write_pages(
     ]
     furniture = layout.running(read)
     text = layout.without_running(read, furniture)
-    latex = {} if transcribe is None else _latex(pdf, read, found, transcribe, renderer)
+    latex = {} if transcribe is None else _latex(pdf, read, found, transcribe)
     placed = [_placed(*part, latex) for part in zip(names, text.pages, found, ruled, strict=True)]
     structure = headings(text, outline=outline, tagged=tagged, **shown)
     texts = page_markdowns(text, placed, sections=structure, tagged=tagged, **shown)
@@ -384,7 +381,7 @@ def write_pages(
         if out / pdf.name != pdf:  # the layout stands alone; a PDF already where it goes is not copied onto itself
             put(pdf.name, pdf.read_bytes())
         for number, (name, md, page, held) in enumerate(zip(names, texts, read.pages, found, strict=True), start=1):
-            pixels, scale = _picture(pdf, page, renderer)
+            pixels, scale = _picture(pdf, page)
             put(f'{name}.png', png.encode(pixels))
             for region in held:
                 put(_file(name, region), png.encode(_cut(pixels, scale, region)))

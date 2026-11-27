@@ -430,7 +430,8 @@ def test_a_fax_image_placed_turned_is_handed_with_its_placement_as_the_tiff_s_or
 def test_a_group_3_fax_image_s_coding_is_stated_in_its_tiff(tmp_path, tesseract, params, compression, t4):
     pdf = fax_pdf(tmp_path / 'fax.pdf', b'coded rows', f'{params} /Columns 64 /BlackIs1 true')
     fake = tesseract(page())
-    text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES)
+    # The bytes are no fax coding: only their TIFF is judged, never decoded to be measured (the renderer refuses them).
+    text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES, deskew_above=None)
     ((_, handed),) = fake.images
     tags = tiff_tags(handed)
     assert (tags[259], tags.get(292), tags[262]) == (compression, t4, 1)  # BlackIs1: BlackIsZero
@@ -448,8 +449,8 @@ def test_a_group_3_fax_image_s_coding_is_stated_in_its_tiff(tmp_path, tesseract,
 def test_a_fax_coding_no_tiff_holds_is_refused_by_name(tmp_path, tesseract, params, refusal):
     pdf = fax_pdf(tmp_path / 'fax.pdf', b'coded rows', params)
     tesseract()
-    with pytest.raises(ValueError, match=refusal):
-        text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES)
+    with pytest.raises(ValueError, match=refusal):  # the bytes are no fax coding: never decoded to be measured
+        text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES, deskew_above=None)
 
 
 @pytest.mark.parametrize(

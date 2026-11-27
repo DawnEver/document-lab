@@ -642,7 +642,6 @@ source = { editable = "." }
 dependencies = [
     { name = "lab-commons", extra = ["paths"] },
     { name = "numpy" },
-    { name = "pymupdf" },
 ]
 
 [package.optional-dependencies]
@@ -657,6 +656,7 @@ dev = [
     { name = "dev-lab", extra = ["test"] },
     { name = "maturin" },
     { name = "pillow" },
+    { name = "pymupdf" },
     { name = "pytest" },
     { name = "python-xlib", marker = "sys_platform == 'linux'" },
     { name = "ruff" },
@@ -687,7 +687,7 @@ requires-dist = [
     { name = "numpy" },
     { name = "pillow", marker = "extra == 'dev'" },
     { name = "pillow", marker = "extra == 'formula'" },
-    { name = "pymupdf", specifier = "<2" },
+    { name = "pymupdf", marker = "extra == 'dev'", specifier = "<2" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "python-xlib", marker = "sys_platform == 'linux' and extra == 'capture'" },
     { name = "ruff", marker = "extra == 'dev'" },

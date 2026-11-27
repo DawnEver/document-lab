@@ -33,12 +33,6 @@ _IN_BACKGROUND_COLOR = (
 #: `--include-hidden`: what a layer turned off in the default view draws is read too (`document_lab.ir`).
 _HIDDEN = "read what the PDF's layers turned off in its default view draw too; left out by default"
 
-#: `--renderer`: what draws a page or region's pixels (`document_lab.pdf.read_raster`).
-_RENDERER = {
-    'choices': ('pymupdf', 'own'),
-    'default': 'pymupdf',
-    'help': "what draws the pictures: pymupdf (default) or own (document-lab's renderer; refuses what it cannot draw)",
-}
 #: `--unnumbered-equations`: how displays without a number are found (`document_lab.regions.Unnumbered`).
 _UNNUMBERED = {
     'choices': UNNUMBERED,
@@ -99,7 +93,6 @@ def _parser() -> argparse.ArgumentParser:
     )
     pages.add_argument('pdf', type=Path)
     pages.add_argument('out', type=Path, help='the directory to write the pages into, or a .zip archive')
-    pages.add_argument('--renderer', **_RENDERER)
     pages.add_argument('--tags', type=_uses, default=_DEFAULT, help=_TAGS_HELP)
     pages.add_argument('--no-outline', action='store_true', help=_NO_OUTLINE)
     _formulas_option(pages)
@@ -114,7 +107,6 @@ def _parser() -> argparse.ArgumentParser:
         choices=('marker', 'ir'),
         help="the converter (default: ir; marker needs the gpu extra and surya's model server, and refuses without)",
     )
-    paper.add_argument('--renderer', **_RENDERER)
     paper.add_argument('--tags', type=_uses, default=_DEFAULT, help=_TAGS_HELP)
     paper.add_argument('--no-outline', action='store_true', help=_NO_OUTLINE)
     _formulas_option(paper)
@@ -179,13 +171,13 @@ def _ocr(args: argparse.Namespace) -> int:
 
 def _pages(args: argparse.Namespace) -> int:
     from document_lab.formula import FormulaUnavailable  # noqa: PLC0415
+    from document_lab.pdf import Refused  # noqa: PLC0415
     from document_lab.per_page import write_pages  # noqa: PLC0415
 
     try:
         done = write_pages(
             args.pdf,
             args.out,
-            renderer=args.renderer,
             outline=not args.no_outline,
             unnumbered=args.unnumbered_equations,
             tagged=args.tags,
@@ -193,7 +185,7 @@ def _pages(args: argparse.Namespace) -> int:
             include_in_background_color=args.include_in_background_color,
             **_formulas(args),
         )
-    except FormulaUnavailable as refused:
+    except (FormulaUnavailable, Refused) as refused:
         return _refused(refused)
     emit(f'{done.out}: {done.pages} page(s)')
     _structure(done.structure)
@@ -212,13 +204,13 @@ def _paper(args: argparse.Namespace) -> int:
     from document_lab.formula import FormulaUnavailable  # noqa: PLC0415
     from document_lab.paper.convert import MarkerUnavailable  # noqa: PLC0415
     from document_lab.paper.ingest import ingest  # noqa: PLC0415
+    from document_lab.pdf import Refused  # noqa: PLC0415
 
     try:
         done = ingest(
             args.pdf,
             args.out,
             tool=args.tool,
-            renderer=args.renderer,
             outline=not args.no_outline,
             unnumbered=args.unnumbered_equations,
             tagged=args.tags,
@@ -226,7 +218,7 @@ def _paper(args: argparse.Namespace) -> int:
             include_in_background_color=args.include_in_background_color,
             **_formulas(args),
         )
-    except (MarkerUnavailable, FormulaUnavailable) as refused:
+    except (MarkerUnavailable, FormulaUnavailable, Refused) as refused:
         return _refused(refused)
     emit(
         f'{args.out}: {done.sections} sections, {done.figures} figures, {done.tables} tables '

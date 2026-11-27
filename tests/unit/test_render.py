@@ -410,7 +410,7 @@ def test_a_planted_wrong_render_is_reported(name):
 def test_a_region_drawn_by_the_own_renderer_is_the_reader_s_render_of_it(tmp_path):
     path = tmp_path / 'p.pdf'
     path.write_bytes(page_pdf(CASES['clips'][0]))
-    raster = read_raster(path, 1, BBox(20, 20, 120, 100), dpi=DPI, renderer='own')
+    raster = read_raster(path, 1, BBox(20, 20, 120, 100), dpi=DPI)
     whole, _ = own(path.read_bytes(), DPI)
     # The region's pixels: columns 41.67.. rounded out to 41..250, rows 41..209.
     assert raster.pixels.shape == (209 - 41, 250 - 41, 3)
@@ -423,12 +423,12 @@ def test_the_own_renderer_draws_a_region_holding_text(tmp_path):
     page.insert_text((20, 40), 'Hello', fontsize=12)
     path = tmp_path / 't.pdf'
     doc.save(path)
-    drawn = read_raster(path, 1, BBox(0, 0, 200, 150), dpi=DPI, renderer='own').pixels
+    drawn = read_raster(path, 1, BBox(0, 0, 200, 150), dpi=DPI).pixels
     whole, undrawn = own(path.read_bytes(), DPI)
     assert undrawn == {}
     assert (whole.min(axis=2) < 128).any()
     assert np.array_equal(drawn, whole)
-    assert read_raster(path, 1, BBox(100, 100, 200, 150), dpi=DPI, renderer='own').pixels.min() == 255
+    assert read_raster(path, 1, BBox(100, 100, 200, 150), dpi=DPI).pixels.min() == 255
 
 
 def test_the_own_renderer_refuses_a_region_holding_a_glyph_it_has_no_program_for_by_name(tmp_path):
@@ -443,7 +443,7 @@ def test_the_own_renderer_refuses_a_region_holding_a_glyph_it_has_no_program_for
         page_pdf('BT /F1 20 Tf 20 100 Td <00010002> Tj ET', {'F1': (font, None)}, resources='/Font << /F1 {F1} >>')
     )
     with pytest.raises(Unsupported, match=r'font MSMincho is not embedded and has no substitute x2'):
-        read_raster(path, 1, BBox(0, 0, 200, 150), dpi=DPI, renderer='own')
+        read_raster(path, 1, BBox(0, 0, 200, 150), dpi=DPI)
 
 
 def test_the_own_renderer_draws_a_region_whose_only_text_shows_nothing(tmp_path):
@@ -455,12 +455,12 @@ def test_the_own_renderer_draws_a_region_whose_only_text_shows_nothing(tmp_path)
     page.insert_text((20, 100), 'white on white', fontsize=12, color=(1, 1, 1))
     doc.save(tmp_path / 'unseen.pdf')
     assert all(s.in_background_color for s in read_pdf(tmp_path / 'unseen.pdf').spans())  # the premise
-    drawn = read_raster(tmp_path / 'unseen.pdf', 1, whole, dpi=DPI, renderer='own').pixels
+    drawn = read_raster(tmp_path / 'unseen.pdf', 1, whole, dpi=DPI).pixels
     assert agrees(*disagreement(drawn, read_raster(tmp_path / 'unseen.pdf', 1, whole, dpi=DPI).pixels))
     # The planted control: one span the page shows beside them is drawn, and the region is not the same.
     page.insert_text((20, 130), 'shown', fontsize=12)
     doc.save(tmp_path / 'shown.pdf')
-    shown = read_raster(tmp_path / 'shown.pdf', 1, whole, dpi=DPI, renderer='own').pixels
+    shown = read_raster(tmp_path / 'shown.pdf', 1, whole, dpi=DPI).pixels
     assert not agrees(*disagreement(shown[240:, :], drawn[240:, :]))
 
 
@@ -469,13 +469,6 @@ def test_the_own_renderer_refuses_a_region_holding_what_it_cannot_draw_by_name(t
     unread = SHADING.replace('/ShadingType 2', '/ShadingType 9')
     path.write_bytes(page_pdf('q 0 0 100 150 re W n /Sh1 sh Q', resources=f'/Shading << /Sh1 {unread} >>'))
     with pytest.raises(Unsupported, match=r'shading not drawn: .*no known /ShadingType.* x1'):
-        read_raster(path, 1, BBox(0, 0, 200, 150), dpi=DPI, renderer='own')
+        read_raster(path, 1, BBox(0, 0, 200, 150), dpi=DPI)
     # Off the region, it is not counted.
-    read_raster(path, 1, BBox(120, 0, 200, 150), dpi=DPI, renderer='own')
-
-
-def test_an_unknown_renderer_is_refused(tmp_path):
-    path = tmp_path / 'p.pdf'
-    path.write_bytes(page_pdf(''))
-    with pytest.raises(ValueError, match='one of pymupdf, own'):
-        read_raster(path, 1, BBox(0, 0, 10, 10), renderer='cairo')  # type: ignore[arg-type]
+    read_raster(path, 1, BBox(120, 0, 200, 150), dpi=DPI)

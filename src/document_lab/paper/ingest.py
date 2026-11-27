@@ -32,7 +32,6 @@ if TYPE_CHECKING:
     from document_lab.formula import Formulas, Model
     from document_lab.markdown import Headings
     from document_lab.paper.convert import Tool, ToolChoice
-    from document_lab.pdf import Renderer
     from document_lab.regions import Unnumbered
 
 __all__ = ['Ingested', 'NoSections', 'ingest']
@@ -65,7 +64,7 @@ class Ingested:
 _SCAN_DPI = 216.0
 
 
-def _scanned_pages(pdf: Path, out_dir: Path, renderer: Renderer) -> int:
+def _scanned_pages(pdf: Path, out_dir: Path) -> int:
     """Write a document with ink but no text layer as page images; the count written (0: nothing inked).
 
     Raster scans and outlined glyphs: each inked page becomes ``img/pages/page-NNN.png`` with one section
@@ -82,7 +81,7 @@ def _scanned_pages(pdf: Path, out_dir: Path, renderer: Renderer) -> int:
     for k, i in enumerate(inked, 1):
         name = f'page-{i + 1:03d}.png'
         whole = BBox(0.0, 0.0, pages[i].width, pages[i].height)
-        pixels = read_raster(pdf, i + 1, whole, dpi=_SCAN_DPI, renderer=renderer).pixels
+        pixels = read_raster(pdf, i + 1, whole, dpi=_SCAN_DPI).pixels
         (img_dir / name).write_bytes(png.encode(pixels))
         section = f'{k:02d}-page-{i + 1}.md'
         (md_dir / section).write_text(
@@ -100,7 +99,6 @@ def ingest(
     out_dir: Path,
     *,
     tool: Tool | None = None,
-    renderer: Renderer = 'pymupdf',
     outline: bool = True,
     tagged: Collection[str] = DEFAULT_USES,
     formulas: Formulas | None = None,
@@ -111,7 +109,7 @@ def ingest(
 ) -> Ingested:
     """Convert ``pdf`` (with ``tool``, else the IR path) and write its paper layout into ``out_dir``.
 
-    Its figures, equations and scanned pages are rendered by ``renderer`` (`document_lab.pdf.read_raster`).
+    Its figures, equations and scanned pages are `document_lab.pdf.read_raster`'s.
     ``outline``: the PDF's stated outline names the sections when it matches the pages; False keeps to its tags and
     the rules. ``tagged``: what a tagged PDF's tags give its markdown, and so its sections
     (`document_lab.paper.convert.convert`). ``formulas``: ``latex`` writes each equation crop's LaTeX under its image,
@@ -147,7 +145,7 @@ def ingest(
         # whole text is its one section rather than nothing.
         main, appended = [(f'# {pdf.stem}', md_text)], []
     if not main:
-        scanned = _scanned_pages(pdf, out_dir, renderer)
+        scanned = _scanned_pages(pdf, out_dir)
         if scanned:
             return Ingested(choice, scanned, scanned, 0, (), structure, disagreements)
         msg = f'{pdf.name}: the converted markdown has no section'
@@ -157,7 +155,6 @@ def ingest(
         out_dir,
         md_text,
         pdf_path=pdf,
-        renderer=renderer,
         transcribe=transcribe,
         unnumbered=unnumbered,
         include_hidden=include_hidden,
@@ -180,7 +177,6 @@ def ingest(
             sections[0][1],
             title_override=title,
             pdf_path=pdf,
-            renderer=renderer,
             transcribe=transcribe,
             unnumbered=unnumbered,
             include_hidden=include_hidden,

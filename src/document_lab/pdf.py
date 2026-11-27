@@ -9,7 +9,6 @@ opens no access), :class:`Unsupported`, :class:`Malformed` -- each a ``ValueErro
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Callable, Sequence
 from functools import partial
 from pathlib import Path
@@ -50,8 +49,9 @@ def read_pdf(
 ) -> Document:
     """The PDF at ``path``, opened with ``password`` when it is encrypted; each page read when first asked for.
 
-    The file is read whole here, hashed, and kept in memory for the document's life: no file handle stays open,
-    and the pages read later are those of the bytes hashed, whatever becomes of the file.
+    The reader reads the file whole, hashes it, and keeps it in its memory for the document's life (Python holds no
+    copy): no file handle stays open, and the pages read later are those of the bytes hashed, whatever becomes of
+    the file.
 
     Each curve of a vector path is flattened into a polyline: into as few segments as keep it within ``flatness``
     points of the curve, or into ``curve_samples`` segments each, whatever its size; neither given, into
@@ -77,10 +77,8 @@ def read_pdf(
         msg = f'a curve is flattened within a flatness above 0, or into curve_samples of 1 or more: {flattening}'
         raise ValueError(msg)
     path = Path(path)
-    data = path.read_bytes()
-    sha = hashlib.sha256(data).hexdigest()
-    uri = file_uri(path.resolve())
-    reader = _pdf.open(data, password.encode())
+    reader = _pdf.open(path, password.encode())
+    sha, uri = reader.sha256, file_uri(path.resolve())
     return Document(sha256=sha, uri=uri, pages=_Pages(reader, sha, uri, flattening), repairs=_Repairs(reader))
 
 
@@ -219,9 +217,10 @@ def read_raster(path: Path | str, page: int, bbox: BBox, *, dpi: float | None = 
     pixel and none is invented; a region holding no image renders at ``VECTOR_DPI``.
     """
     path = Path(path)
-    data = path.read_bytes()
+    data = path.read_bytes()  # rendered and cited alike: the pixels are those of the bytes hashed
+    reader = _pdf.open(data, password.encode())
     if dpi is None:
-        _, _, images, _ = _pdf.open(data, password.encode()).page(page, curve_samples=1)  # its images alone
+        _, _, images, _ = reader.page(page, curve_samples=1)  # its images alone
         native = [
             72 * w / (box[2] - box[0])
             for box, w, _, _ in images
@@ -234,5 +233,5 @@ def read_raster(path: Path | str, page: int, bbox: BBox, *, dpi: float | None = 
         zoom = pymupdf.Matrix(dpi / 72, dpi / 72)
         pix = pdf[page - 1].get_pixmap(matrix=zoom, clip=pymupdf.Rect(*bbox), colorspace=pymupdf.csRGB, alpha=False)
         pixels = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3).copy()
-    here = Provenance(hashlib.sha256(data).hexdigest(), file_uri(path.resolve()), page=page, bbox=bbox)
+    here = Provenance(reader.sha256, file_uri(path.resolve()), page=page, bbox=bbox)
     return Raster(pixels, here)

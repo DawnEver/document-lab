@@ -1,14 +1,16 @@
 //! `document_lab._pdf`: the `pdf` crate, exposed to Python as plain values -- no PDF logic of its own.
 //!
-//! `open(data, password)` reads a file; its `page(number, curve_samples=, flatness=)` returns what the page draws
+//! `open(source, password)` reads a PDF -- a file by its path, read here, or one already in memory as bytes -- and
+//! gives its `sha256`; its `page(number, curve_samples=, flatness=)` returns what the page draws
 //! as tuples and columns, which `document_lab.pdf` turns into the IR, and its `image(object)` an image's samples. `create(path)` writes a
 //! PDF of image pages, or of pages copied from a `Reader` (`document_lab.capture`).
 //!
 //! A refusal raises by its kind: [`Refused`] and its kinds when the reader refuses the input, `ValueError` for a
 //! request it cannot honor, `OSError` when writing fails.
 
+use std::fmt::Write;
 use std::fs;
-use std::io::BufWriter;
+use std::io::{self, BufWriter};
 use std::path::PathBuf;
 
 use pdf::error::Kind;
@@ -99,9 +101,16 @@ struct Reader {
     pages: Vec<pdf::Page>,
 }
 
-/// Open the PDF `data` with `password` (empty: none).
+/// Open the PDF `source` with `password` (empty: none): the file at a path (`str` or `os.PathLike`), read whole
+/// here, or the bytes of one already in memory (`bytes`), copied. Python holds no copy of a file read here.
 #[pyfunction]
-fn open(data: Vec<u8>, password: &[u8]) -> PyResult<Reader> {
+fn open(source: &Bound<'_, PyAny>, password: &[u8]) -> PyResult<Reader> {
+    let data = if let Ok(bytes) = source.cast::<PyBytes>() {
+        bytes.as_bytes().to_vec()
+    } else {
+        let path: PathBuf = source.extract()?;
+        fs::read(&path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?
+    };
     let file = pdf::File::open(data, password).map_err(|e| refused(&e))?;
     let pages = file.pages().map_err(|e| refused(&e))?;
     Ok(Reader { file, pages })
@@ -113,6 +122,18 @@ impl Reader {
     #[getter]
     fn repairs(&self) -> Vec<String> {
         self.file.repairs()
+    }
+
+    /// The SHA-256 digest of the bytes read, in hexadecimal.
+    #[getter]
+    fn sha256(&self) -> String {
+        self.file
+            .sha256()
+            .iter()
+            .fold(String::with_capacity(64), |mut hex, b| {
+                write!(hex, "{b:02x}").expect("writing into a String cannot fail");
+                hex
+            })
     }
 
     /// Each page's number, width and height as displayed (points).

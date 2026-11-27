@@ -4,6 +4,7 @@ import numpy as np
 import pymupdf
 import pytest
 
+from document_lab import _pdf
 from document_lab.ir import BBox
 from document_lab.pdf import CURVE_SAMPLES, Locked, Malformed, NotPdf, Refused, Unsupported, read_pdf, read_raster
 from tests.synthetic import RED, mixed_pdf, table_cell_rect
@@ -166,11 +167,21 @@ def test_a_raster_renders_at_the_native_resolution_of_the_image_under_it(doc, tm
     raster = read_raster(path, 1, BBox(72, 600, 172, 700))
     rows, columns = raster.pixels.shape[:2]  # 8 samples across 100 points: 5.76 dpi, a pixel per sample
     assert abs(rows - 8) <= 1 and abs(columns - 8) <= 1  # the renderer rounds the clip's edges outward
+    assert raster.provenance.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def test_a_missing_file_raises(tmp_path):
-    with pytest.raises(FileNotFoundError):
+def test_a_missing_file_raises_naming_it(tmp_path):
+    with pytest.raises(FileNotFoundError, match=r'absent\.pdf'):
         read_pdf(tmp_path / 'absent.pdf')
+
+
+def test_a_file_opened_by_its_path_reads_as_its_bytes_in_memory(tmp_path):
+    path = mixed_pdf(tmp_path / 'mixed.pdf')
+    by_path, in_memory = _pdf.open(path, b''), _pdf.open(path.read_bytes(), b'')
+    assert by_path.sha256 == in_memory.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert _pdf.open(str(path), b'').sha256 == by_path.sha256
+    assert by_path.pages == in_memory.pages
+    assert repr(by_path.page(1, curve_samples=8)) == repr(in_memory.page(1, curve_samples=8))
 
 
 def test_a_page_is_read_when_first_asked_for_and_kept(tmp_path, monkeypatch):

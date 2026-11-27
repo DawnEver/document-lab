@@ -16,6 +16,7 @@ import numpy as np
 WIDTH, HEIGHT, VIEW = 360, 1900, 300
 NOTCH, ARROW = 40, 37
 _WHEEL_DELTA = 120
+_SHOWN_MS = 300  # after this the window is up, and its view is drawn again
 
 
 def picture(seed: int) -> np.ndarray:
@@ -47,13 +48,29 @@ def main(title: str, seed: int) -> None:
     photo = tk.PhotoImage(data=header + picture(seed).tobytes(), format='ppm')
     canvas.create_image(0, 0, image=photo, anchor='nw')
     canvas.configure(scrollregion=(0, 0, WIDTH, HEIGHT))
-    root.bind_all('<MouseWheel>', lambda e: canvas.yview_scroll(NOTCH * notches(e.delta), 'units'))
-    root.bind_all('<Button-4>', lambda _: canvas.yview_scroll(-NOTCH, 'units'))
-    root.bind_all('<Button-5>', lambda _: canvas.yview_scroll(NOTCH, 'units'))
-    root.bind_all('<Down>', lambda _: canvas.yview_scroll(ARROW, 'units'))
+
+    def scrolled(event: object, units: int) -> None:
+        """Scroll ``units`` pixels, and say on stderr what came and where the view now starts (shown on a failure)."""
+        canvas.yview_scroll(units, 'units')
+        top = round(canvas.canvasy(0))
+        sys.stderr.write(f'viewer: {event.type} {getattr(event, "delta", "")} {event.keysym}: {units:+d} -> {top}\n')
+        sys.stderr.flush()
+
+    root.bind_all('<MouseWheel>', lambda e: scrolled(e, NOTCH * notches(e.delta)))
+    root.bind_all('<Button-4>', lambda e: scrolled(e, -NOTCH))
+    root.bind_all('<Button-5>', lambda e: scrolled(e, NOTCH))
+    root.bind_all('<Down>', lambda e: scrolled(e, ARROW))
     root.geometry('+200+200')
     root.focus_force()
+    root.after(_SHOWN_MS, _redrawn, root, canvas)
     root.mainloop()
+
+
+def _redrawn(root: object, canvas: object) -> None:
+    """Draw the view again once the window is up: Tk 9 on macOS may leave a window blank until it is next drawn."""
+    root.focus_force()
+    canvas.yview_scroll(1, 'units')
+    canvas.yview_scroll(-1, 'units')
 
 
 if __name__ == '__main__':

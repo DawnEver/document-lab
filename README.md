@@ -5,8 +5,8 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 
 | module | does |
 |---|---|
-| `ir` | frozen IR: `Provenance`, `TextSpan`, `VectorPath`, `Table`/`Cell`, `Figure`, `Raster`, `Page`, `Document` |
-| `pdf` | `read_pdf(path, password=)`: spans, vector paths and image figures, each with its page and box, read by the package's own reader (`document_lab._pdf`, the Rust crate `crates/pdf`); `read_raster(path, page, bbox)`: a region's pixels at its images' native resolution -- one image whole is its own samples, read by the reader, any other region rendered by PyMuPDF |
+| `ir` | frozen IR: `Provenance`, `TextSpan`, `VectorPath`, `Table`/`Cell`, `Figure`, `Raster`, `Page`, `Document`; `spaced` (every stated space a plain one, for text joined, split or matched) |
+| `pdf` | `read_pdf(path, password=, annotations=)`: spans, vector paths and image figures, each with its page and box (a hidden layer's flagged `hidden`; annotations' when asked), read by the package's own reader (`document_lab._pdf`, the Rust crate `crates/pdf`); `read_raster(path, page, bbox)`: a region's pixels at its images' native resolution -- one image whole is its own samples, read by the reader, any other region rendered by PyMuPDF |
 | `html` | `read_html(path)`: every `<table>` as a `Table` (standard-library parser) |
 | `plot` | `plots(page)`: curves digitized from VECTOR plots (axes linear, log10, or piecewise between labeled ticks; labels as text, glyph outlines or stroke-font polylines; fragments joined; legend samples apart); a raster plot raises `RasterPlot`. `raster_plot(raster)`: one plot traced from pixels, each point with its pixel uncertainty; unreadable labels raise `UnreadableTickLabels` unless stated (`x_values=`, `y_values=`) |
 | `strokes` | thick strokes in a `Raster`: `fragments` (a morphological opening drops hairlines), `link` (dashes joined end to start along their own direction; crossing curves stay apart), `bands` (fragments to the nearest solid curve), `dots` + `split_by_dots` (a smaller opening keeps dash-dot dots; they trace the dash-dot curve, telling it from a dashed one two strokes away) |
@@ -68,7 +68,7 @@ document-lab capture out.pdf --open                # open the PDF once written
 Requires a tkinter that starts: Python 3.13.0 in a venv cannot (cpython #125235, `Can't find a usable init.tcl`);
 use Python >= 3.13.1, or copy the base install's `tcl` folder into `.venv\tcl`. And a desktop
 (`capture.screen.System`, one module per OS): Windows (`capture.win32`, ctypes); macOS (`capture.quartz`, ctypes over
-Quartz -- coordinates are points, a grab one pixel a point; the app running Python needs Screen Recording, and
+Quartz -- coordinates are points, a grab one pixel a point, color-matched to sRGB; the app running Python needs Screen Recording, and
 Accessibility to scroll for you, both in System Settings > Privacy & Security); Linux under X11 (`capture.x11`,
 python-xlib from the `capture` extra; an EWMH window manager; a covered window is refused, X11 keeping no picture of
 it). A Wayland session lets no program read other windows: log in to its X11 session. The capture checks all this

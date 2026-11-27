@@ -481,7 +481,7 @@ class _Asked:
 
 def _image(reader: _pdf.Reader, number: int) -> tuple | None:
     """Page ``number``'s one image row (``Reader.page``) or None: text, or not one image."""
-    spans, _, images, _ = reader.page(number, curve_samples=_CURVE_SAMPLES)
+    spans, _, images, _ = reader.page(number, annotations=False, curve_samples=_CURVE_SAMPLES)
     if len(images) != 1 or images[0][3] is None or any(span[0].strip() for span in spans):
         return None
     return images[0]
@@ -499,7 +499,7 @@ def _recognize(
     (`document_lab.pdf.read_raster`) only to be measured, or when in a codec to be turned or deskewed.
     """
     name = f'page {number} of {pdf.name}'
-    box, _width, _height, obj, matrix, placement = image
+    box, _width, _height, obj, matrix, placement, _ = image
     if placement is None:
         msg = f'{name} is placed at an angle no quarter turn makes ({matrix}): Tesseract reads it upright only'
         raise ValueError(msg)
@@ -565,7 +565,7 @@ def text_layer(
     page to recognize: a document already read needs none. ``out`` may be ``pdf`` itself: it is written beside as
     ``<out>.part`` and moved into place when whole; nothing is written when a page cannot be recognized.
     """
-    reader = _pdf.open(pdf.read_bytes(), b'')
+    reader = _pdf.open(pdf, b'')
     asked = _Asked(orientation_confidence, deskew_above)
     layers: dict[int, list[_Word]] = {}
     readings = []

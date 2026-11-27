@@ -10,7 +10,6 @@ opens no access), :class:`Unsupported`, :class:`Malformed` -- each a ``ValueErro
 
 from __future__ import annotations
 
-import hashlib
 import math
 from collections.abc import Callable, Sequence
 from functools import partial
@@ -58,16 +57,26 @@ _GRAY_OR_RGB: Final = frozenset({'DeviceGray', 'DeviceRGB', 'ICCBased'})
 
 
 def read_pdf(
-    path: Path | str, *, password: str = '', flatness: float | None = None, curve_samples: int | None = None
+    path: Path | str,
+    *,
+    password: str = '',
+    flatness: float | None = None,
+    curve_samples: int | None = None,
+    annotations: bool = False,
 ) -> Document:
     """The PDF at ``path``, opened with ``password`` when it is encrypted; each page read when first asked for.
 
-    The file is read whole here, hashed, and kept in memory for the document's life: no file handle stays open,
-    and the pages read later are those of the bytes hashed, whatever becomes of the file.
+    The reader reads the file whole, hashes it, and keeps it in its memory for the document's life (Python holds no
+    copy): no file handle stays open, and the pages read later are those of the bytes hashed, whatever becomes of
+    the file.
 
     Each curve of a vector path is flattened into a polyline: into as few segments as keep it within ``flatness``
     points of the curve, or into ``curve_samples`` segments each, whatever its size; neither given, into
     :data:`CURVE_SAMPLES` each.
+
+    ``annotations``: each page's annotations' appearances read too, after its content, each value citing its
+    annotation's subtype -- off by default, as a page's text is its content's (PyMuPDF's too). Optional content the
+    file's default view hides is read either way, each value flagged ``hidden`` for the caller to keep or drop.
 
     Raises:
         ValueError: both ``flatness`` and ``curve_samples`` are given, or one is not above 0.
@@ -89,11 +98,10 @@ def read_pdf(
         msg = f'a curve is flattened within a flatness above 0, or into curve_samples of 1 or more: {flattening}'
         raise ValueError(msg)
     path = Path(path)
-    data = path.read_bytes()
-    sha = hashlib.sha256(data).hexdigest()
-    uri = file_uri(path.resolve())
-    reader = _pdf.open(data, password.encode())
-    return Document(sha256=sha, uri=uri, pages=_Pages(reader, sha, uri, flattening), repairs=_Repairs(reader))
+    reader = _pdf.open(path, password.encode())
+    sha, uri = reader.sha256, file_uri(path.resolve())
+    reading = {**flattening, 'annotations': annotations}
+    return Document(sha256=sha, uri=uri, pages=_Pages(reader, sha, uri, reading), repairs=_Repairs(reader))
 
 
 class _Repairs(Sequence[str]):
@@ -127,10 +135,10 @@ class _Pages(Sequence[Page]):
     array, no Python object per point -- so every page kept costs no more than reading them all at once did.
     """
 
-    __slots__ = ('_flattening', '_kept', '_reader', '_sha', '_sizes', '_uri')
+    __slots__ = ('_kept', '_reader', '_reading', '_sha', '_sizes', '_uri')
 
-    def __init__(self, reader: _pdf.Reader, sha: str, uri: str, flattening: dict[str, float]) -> None:
-        self._reader, self._sha, self._uri, self._flattening = reader, sha, uri, flattening
+    def __init__(self, reader: _pdf.Reader, sha: str, uri: str, reading: dict[str, float | bool]) -> None:
+        self._reader, self._sha, self._uri, self._reading = reader, sha, uri, reading
         self._sizes: list[tuple[int, float, float]] = reader.pages
         self._kept: list[Page | None] = [None] * len(self._sizes)
 
@@ -149,7 +157,7 @@ class _Pages(Sequence[Page]):
         if page is None:
             number, width, height = self._sizes[i]
             here = Provenance(self._sha, self._uri, page=number)
-            page = self._kept[i] = _page(self._reader, number, (width, height), here, self._flattening)
+            page = self._kept[i] = _page(self._reader, number, (width, height), here, self._reading)
         return page
 
     def __repr__(self) -> str:
@@ -157,9 +165,10 @@ class _Pages(Sequence[Page]):
 
 
 def _page(
-    reader: _pdf.Reader, number: int, size: tuple[float, float], here: Provenance, flattening: dict[str, float]
+    reader: _pdf.Reader, number: int, size: tuple[float, float], here: Provenance, reading: dict[str, float | bool]
 ) -> Page:
-    spans, paths, images, warnings = reader.page(number, **flattening)
+    """Page ``number`` read as ``reading`` says: its curves' flattening, and whether its annotations are drawn."""
+    spans, paths, images, warnings = reader.page(number, **reading)
     cite = partial(Provenance, here.sha256, here.uri, number)  # a box on this page: a Provenance made directly
     return Page(
         number=number,
@@ -167,13 +176,16 @@ def _page(
         height=size[1],
         spans=tuple(_span(row, cite) for row in spans),
         paths=_paths(paths, cite),
-        figures=tuple(Figure(cite(bbox=box), w, h, image) for box, w, h, image, *_ in images),
+        figures=tuple(
+            Figure(cite(bbox=box), w, h, image, hidden=hidden, annotation=annotation)
+            for box, w, h, image, _, _, (hidden, annotation) in images
+        ),
         warnings=tuple(warnings),
     )
 
 
 def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
-    text, font, size, bold, box, mode, unspaced, vertical, direction = row
+    text, font, size, bold, box, mode, unspaced, vertical, direction, (hidden, annotation) = row
     return TextSpan(
         text,
         size,
@@ -184,6 +196,8 @@ def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
         render_mode=mode,
         vertical=vertical,
         direction=direction,
+        hidden=hidden,
+        annotation=annotation,
     )
 
 
@@ -204,8 +218,11 @@ def _paths(columns: tuple, cite: Callable[..., Provenance]) -> tuple[VectorPath,
             phase,
             None if fill is None else tuple(fill),
             rule,
+            pattern,
+            hidden,
+            annotation,
         )
-        for stroke, width, dashes, phase, fill, rule in styles
+        for stroke, width, dashes, phase, fill, rule, pattern, (hidden, annotation) in styles
     ]
     out = []
     for start, end, box, shut, group in zip(
@@ -216,7 +233,7 @@ def _paths(columns: tuple, cite: Callable[..., Provenance]) -> tuple[VectorPath,
         np.frombuffer(groups, dtype=np.int64).tolist(),
         strict=True,
     ):
-        stroke, width, dashes, phase, fill, even_odd = painted[group]
+        stroke, width, dashes, phase, fill, even_odd, pattern, hidden, annotation = painted[group]
         out.append(
             VectorPath(
                 points=xy[start:end],
@@ -228,7 +245,10 @@ def _paths(columns: tuple, cite: Callable[..., Provenance]) -> tuple[VectorPath,
                 dash_phase=phase,
                 fill=fill,
                 even_odd=even_odd,
+                pattern=pattern,
                 group=group,
+                hidden=hidden,
+                annotation=annotation,
             )
         )
     return tuple(out)
@@ -237,23 +257,30 @@ def _paths(columns: tuple, cite: Callable[..., Provenance]) -> tuple[VectorPath,
 def read_raster(path: Path | str, page: int, bbox: BBox, *, dpi: float | None = None, password: str = '') -> Raster:
     """The region ``bbox`` of 1-based ``page`` as pixels, everything drawn there composited.
 
-    ``dpi`` defaults to the finest native resolution among the images the region overlaps, so a pixel is a source
-    pixel and none is invented; a region holding no image renders at ``VECTOR_DPI``. A region that is one image whole
-    at its native resolution, nothing else visible on it, is that image's own samples where the reader holds them as
-    the page shows them (:func:`_samples`); any other region is rendered by PyMuPDF.
+    What is drawn there is what the page shows: its annotations' appearances too, nothing a hidden layer draws.
+    ``dpi`` defaults to the finest native resolution among the images shown the region overlaps, so a pixel is a
+    source pixel and none is invented; a region holding no image renders at ``VECTOR_DPI``. A region that is one image
+    whole at its native resolution, nothing else visible on it, is that image's own samples where the reader holds
+    them as the page shows them (:func:`_samples`); any other region is rendered by PyMuPDF.
     """
     path = Path(path)
-    data = path.read_bytes()
+    data = path.read_bytes()  # rendered and cited alike: the pixels are those of the bytes hashed
     reader = _pdf.open(data, password.encode())
-    spans, paths, images, _ = reader.page(page, curve_samples=1)
+    spans, paths, images, _ = reader.page(page, annotations=True, curve_samples=1)
+    spans, images = _shown(spans), _shown(images)
     under = [row for row in images if _meets(row[0], bbox)]
     if dpi is None:
         dpi = max(filter(None, map(_native, under)), default=VECTOR_DPI)
     pixels = _samples(reader, under, bbox, dpi) if _alone(spans, paths, bbox) else None
     if pixels is None:
         pixels = _rendered(data, page, bbox, dpi, password)
-    here = Provenance(hashlib.sha256(data).hexdigest(), file_uri(path.resolve()), page=page, bbox=bbox)
+    here = Provenance(reader.sha256, file_uri(path.resolve()), page=page, bbox=bbox)
     return Raster(pixels, here)
+
+
+def _shown(rows: list) -> list:
+    """The rows (spans or images, each ending in its layer) no hidden layer draws."""
+    return [row for row in rows if not row[-1][0]]
 
 
 def _meets(box: tuple[float, float, float, float], bbox: BBox) -> bool:
@@ -262,26 +289,27 @@ def _meets(box: tuple[float, float, float, float], bbox: BBox) -> bool:
 
 def _native(image: tuple) -> float:
     """An image row's finest resolution (dpi): its samples over its placed sides' lengths; 0 when it has no area."""
-    _, width, height, _, (a, b, c, d, _, _), _ = image
+    _, width, height, _, (a, b, c, d, _, _), *_ = image
     across, down = math.hypot(a, b), math.hypot(c, d)
     return 72 * max(width / across, height / down) if across and down else 0.0
 
 
 def _alone(spans: list, paths: tuple, bbox: BBox) -> bool:
-    """Whether no path and no visible text (an OCR layer is invisible) is drawn on ``bbox``.
+    """Whether no path shown and no visible text (an OCR layer is invisible) is drawn on ``bbox``.
 
     ``paths`` are the reader's columns (``PathColumns`` in ``crates/pybind``): each subpath's box, its stroke's
-    width its painted path's.
+    width and its layer its painted path's. A path a hidden layer draws is not shown: it is never in the way.
     """
     _, _, boxes, _, groups, styles = paths
     widths = [width for _, width, *_ in styles]
+    shown = [not hidden for *_, (hidden, _) in styles]
     for (x0, y0, x1, y1), group in zip(
         np.frombuffer(boxes, dtype=np.float64).reshape(-1, 4).tolist(),
         np.frombuffer(groups, dtype=np.int64).tolist(),
         strict=True,
     ):
         reach = widths[group] / 2
-        if _meets((x0 - reach, y0 - reach, x1 + reach, y1 + reach), bbox):
+        if shown[group] and _meets((x0 - reach, y0 - reach, x1 + reach, y1 + reach), bbox):
             return False
     return not any(mode != INVISIBLE_TEXT and _meets(box, bbox) for _, _, _, _, box, mode, *_ in spans)
 
@@ -295,7 +323,7 @@ def _samples(reader: _pdf.Reader, under: list, bbox: BBox, dpi: float) -> np.nda
     """
     if len(under) != 1:
         return None
-    box, width, height, number, _, placement = under[0]
+    box, width, height, number, _, placement, _ = under[0]
     if number is None or placement is None:  # inline, or skewed
         return None
     turned, rows_reversed, columns_reversed = placement  # as the reader places its samples

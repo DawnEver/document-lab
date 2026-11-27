@@ -12,7 +12,7 @@ const BOLD: &str = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>"
 fn page_spans(content: &str) -> Vec<Span> {
     let file = File::open(common::one_page(FONTS, content, &[HELVETICA, BOLD]), b"").unwrap();
     let page = file.pages().unwrap().remove(0);
-    spans(&file.interpret(&page).unwrap().events)
+    spans(&file.interpret(&page, false).unwrap().events)
 }
 
 fn texts(content: &str) -> Vec<String> {
@@ -99,7 +99,7 @@ fn a_vertical_run_is_its_own_span_read_top_to_bottom() {
     )
     .unwrap();
     let page = file.pages().unwrap().remove(0);
-    let found = spans(&file.interpret(&page).unwrap().events);
+    let found = spans(&file.interpret(&page, false).unwrap().events);
     let read: Vec<_> = found
         .iter()
         .map(|s| (s.text.as_str(), s.vertical))

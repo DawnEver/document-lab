@@ -83,7 +83,7 @@ fn time(path: &Path, flattening: Flattening) -> Option<Stages> {
     s.open = start.elapsed();
     for page in &pages {
         let start = Instant::now();
-        let Ok(content) = file.interpret(page) else {
+        let Ok(content) = file.interpret(page, false) else {
             continue;
         };
         s.interpret += start.elapsed();

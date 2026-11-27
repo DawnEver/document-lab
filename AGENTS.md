@@ -13,10 +13,12 @@ consumer's vocabulary here -- schemas live in consumers. Modules and usage: `REA
 - Dependency arrow: `paper`, `ai` -> `extract`; `paper` -> `markdown`, `regions`, `pdf`; `per_page` -> `markdown`, `regions`,
   `ink`, `pdf`, `png`; `markdown`, `regions`, `tables` -> `layout` -> `ir`; `ink` -> `ir` (`regions` takes its drawings as boxes, never pixels);
   `extract` -> `plot`, `pdf`, `html` -> `numbers`, `ir`; `plot` -> `glyphs` -> `strokefont`; `strokes` -> `plot`, `ir`; `ocr` imports
-  nothing of ours; `capture` is apart (`cli` -> `session` -> `stitch`; `cli` -> `desktop`, `export`, `ocr`, `files` ->
-  `desktop`, `export`; `join` -> `export`, `stitch`; `export` -> `png`), imported only by `__main__`; `png` imports nothing of
-  ours. PDF bytes are `_pdf`'s (the Rust crates): `pdf` reads through it, `capture` (`export`, `join`, `files`) reads
-  and writes through it; PyMuPDF only renders pixels (`pdf.read_raster`, `paper`, `glyphs`) and serves `ocr`. OCR is `ocr`'s alone: no other module calls Tesseract. The base imports
+  only `_pdf`; `capture` is apart (`cli` -> `session` -> `stitch`; `cli` -> `desktop`, `export`, `ocr`, `files` ->
+  `desktop`, `export`; `join` -> `export`, `stitch`; `export` -> `png`), imported only by `__main__`; `png` imports
+  nothing of ours. PDF bytes are `_pdf`'s (the Rust crates): `pdf` reads through it, `capture` (`export`, `join`,
+  `files`) and `ocr` read and write through it; PyMuPDF only renders pixels (`pdf.read_raster`, `paper`, `glyphs`).
+  OCR is `ocr`'s alone: no other module runs the `tesseract` executable, which is the user's to install, never
+  bundled. The base imports
   without `ai_lab` (`tests/unit/test_ai.py` proves it in a subprocess).
 - A test that needs expected values builds a SYNTHETIC PDF (`tests/synthetic.py`); no real PDF is ever committed
   (the repo is public). Three real papers, held locally (`DOCUMENT_LAB_PAPERS=<dir>`, the `papers` part), are checked
@@ -62,10 +64,10 @@ _Rendered by `dev_lab.dev.agentsection` from `dev_lab.dev.principles`; a hand ed
   retirement is classified (renamed, baggage, or capability-dropped) and only a user ruling drops a capability.
 - **Every wall teaches** (`every-wall-teaches`): Every refusal or failure an agent hits names its cause and its door;
   one that does not is a mechanism gap, and closing it (a hook row, a remedy, a test) comes before the task. Never route
-  around a wall or hand the user a command. The loop: docs-src/dev/feedback.md.
+  around a wall or hand the user a command. The loop: docs-src/dev/feedback.md (dev-lab).
 - **Fan out without a barrier** (`no-barrier-fan-out`): Parallel work is independent items, each landed the moment it is
   done; nothing waits for the slowest sibling -- no barrier-style orchestration (e.g. a dynamic workflow that joins all
-  agents) unless a step truly needs every result. How: docs-src/dev/fanout.md.
+  agents) unless a step truly needs every result. How: docs-src/dev/fanout.md (dev-lab).
 - **Deliver an image by its absolute path** (`images-by-absolute-path`): An image handed to the user is named by its
   ABSOLUTE path, never a relative one (IMAGES-BY-ABSOLUTE-PATH).
 - **A worktree is named for its task** (`worktree-names-its-task`): A worktree's name has a physical meaning tied to its

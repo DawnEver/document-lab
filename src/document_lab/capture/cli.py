@@ -341,9 +341,9 @@ def _attempt(
         shapes = files.page_shapes(pdf)
         taken = files.page_through(window, viewer, out, area=marked, shapes=shapes, dpi=args.dpi, gate=gate, park=park)
         if args.ocr is not None:
-            from document_lab.ocr import text_layer  # noqa: PLC0415
+            from document_lab.ocr import TesseractPlaces, text_layer  # noqa: PLC0415
 
-            emit(f'  text layer on {text_layer(out, out, args.ocr)} page(s)')
+            emit(f'  text layer on {text_layer(out, out, args.ocr, places=TesseractPlaces.of(os.environ))} page(s)')
         return taken, marked
     finally:
         with contextlib.suppress(OSError):
@@ -612,9 +612,10 @@ def _prepare(args: argparse.Namespace) -> str | None:
     from document_lab.capture.export import check_name  # noqa: PLC0415
 
     if args.ocr:
-        from document_lab.ocr import check  # noqa: PLC0415
+        from document_lab.ocr import TesseractPlaces, check  # noqa: PLC0415
 
-        check(args.ocr)  # before the capture: a missing Tesseract is said now, not after it
+        # before the capture: a missing Tesseract is said now, not after it
+        check(args.ocr, TesseractPlaces.of(os.environ))
     for path in (args.out, args.png):
         if path is not None:
             check_name(path)
@@ -805,9 +806,10 @@ def _finished(args: argparse.Namespace, result: Capture, pdf: PdfWriter, written
         if args.png:
             emit(f'{args.png.resolve()}: the same, as one image')
     if args.ocr and args.out.exists():
-        from document_lab.ocr import text_layer  # noqa: PLC0415
+        from document_lab.ocr import TesseractPlaces, text_layer  # noqa: PLC0415
 
-        emit(f'{args.out.name}: text layer on {text_layer(args.out, args.out, args.ocr)} page(s)')
+        laid = text_layer(args.out, args.out, args.ocr, places=TesseractPlaces.of(os.environ))
+        emit(f'{args.out.name}: text layer on {laid} page(s)')
     if args.open and args.out.exists():
         desktop.open_file(args.out)
     return status

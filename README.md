@@ -14,7 +14,7 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 | `numbers` | the one number grammar: `parse_number` (whole text) and `first_number` (a cell's leading value) |
 | `extract` | typed values against the caller's `Schema` from key-value (`from_rows`) or column (`from_columns`) tables |
 | `ai` | `ask(responder, schema, page_or_table)`: the same values read by a model through ai-lab (`[ai]` extra) |
-| `ocr` | `document-lab ocr <pdf> [-o out] [--lang eng]`: a Tesseract text layer over every page that is one image and has no text; the pixels kept exactly, a page never laid twice |
+| `ocr` | `document-lab ocr <pdf> [-o out] [--lang eng]`: a Tesseract text layer over every page that is one image and has no text -- each word invisible over where it is seen, laid by our own writer; the pixels kept exactly, a page never laid twice. Needs Tesseract (Install) |
 | `layout` | `lines(page)` / `ordered(lines)`: a page's spans as lines in reading order (columns, a clause number with its title, vertical columns right to left); `wordy(text)` tells words from OCR noise |
 | `markdown` | `to_markdown(doc)` / `page_markdowns(doc)`: the IR as markdown -- headings, paragraphs -- whole, or each page standing alone |
 | `regions` | `regions(page, body, drawings=())`: a page's figures, tables and equations from its text -- a caption and the prose around it, an equation number and the noise beside it, rows of cells -- so an OCR'd capture has them too; with the page's drawings (`ink`), a ruled table, a figure without a caption and an equation without a number as well |
@@ -153,6 +153,15 @@ Everything runs in one thread, in order -- grab, scroll, stitch, write -- so not
 
 `pip install "document_lab @ git+https://github.com/DawnEver/document-lab.git"`; extras: `gpu` (marker-pdf),
 `ai` (ai-lab), `capture` (no packages beyond the base). Domain schemas live in the consumers.
+
+`ocr` (and `capture --ocr`) runs the `tesseract` executable, which is yours to install -- it is never bundled.
+It is looked for on PATH, then beside `TESSDATA_PREFIX`, then in the Windows installer's folder (for every user
+or for one); a missing executable or language is refused, saying where it looked.
+
+- Windows: the UB Mannheim installer (https://github.com/UB-Mannheim/tesseract/wiki), choosing the languages you
+  read; then add its folder to PATH, or set `TESSDATA_PREFIX` to its `tessdata`.
+- macOS: `brew install tesseract tesseract-lang`.
+- Debian/Ubuntu: `apt install tesseract-ocr tesseract-ocr-<lang>` (e.g. `tesseract-ocr-chi-sim`).
 
 ## Tests
 

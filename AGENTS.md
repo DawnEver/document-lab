@@ -27,7 +27,8 @@ consumer's vocabulary here -- schemas live in consumers. Modules and usage: `REA
   (`DOCUMENT_LAB_PAPERS=<dir>`), `reference` (`DOCUMENT_LAB_REFERENCE_PDFS=<pdfs or dirs>`: the reader accepted
   against PyMuPDF, the previous implementation, within declared tolerances) and `ocr` (Tesseract) are declared
   resource parts, unproduced on hosted runners: base never selects them, and they FAIL where their resource is
-  missing, never skip.
+  missing, never skip. `corpus` (`tests/corpus`) is produced on hosted runners: only CC BY 4.0 or US public-domain
+  PDFs, fetched from their immutable public URLs, pinned by sha256, never committed (`tests/corpus/sources.py`).
 - A value the document does not state is absent, a raster plot raises, an ambiguous match refuses: never a
   silent default.
 - No pymupdf4llm: markdown is written from the IR (`markdown.py`). `pymupdf<2` because 2.x requires

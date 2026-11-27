@@ -20,7 +20,8 @@
 - Words: :func:`wordy` tells text that reads as words from OCR noise (a figure's labels, a garbled leader);
   :func:`body_size` is the size most of a document's text is set in, :func:`body_face` the font and size.
 - Running heads and feet: :func:`running` finds the lines at a page's top and foot that recur at the same place
-  on :data:`RUNNING_PAGES` pages (a page number its digits aside): a document's furniture, not its body.
+  on :data:`RUNNING_PAGES` pages (a page number its digits aside): a document's furniture, not its body;
+  :func:`without_running` is the document without them, the text its body is written from.
 """
 
 from __future__ import annotations
@@ -28,14 +29,14 @@ from __future__ import annotations
 import itertools
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from statistics import median
 from typing import TYPE_CHECKING, Final
 
 from document_lab.ir import BBox, spaced
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
 
     from document_lab.ir import Document, Page, TextSpan
 
@@ -59,6 +60,7 @@ __all__ = [
     'ordered',
     'running',
     'upright',
+    'without_running',
     'wordy',
 ]
 
@@ -82,6 +84,7 @@ LETTER_SHARE: Final = 0.6
 RUNNING_PAGES: Final = 3
 _CLAUSE: Final = re.compile(r'^(?:\d+(?:\.\d+)*\.?|[-\N{EN DASH}\N{EM DASH}\N{BULLET}])$')  # a clause number, a bullet
 _NUMBER: Final = re.compile(r'^(?:\d+|[A-Z])(?:\.\d+)*\.?$')  # a heading's number: 2, 2.1, an appendix's A, A.1
+_EQUATION_NUMBER: Final = re.compile(r'^\( ?\d+ ?\)$')  # an equation's number: never a running line
 
 
 @dataclass
@@ -395,11 +398,24 @@ def running(doc: Document) -> list[Running]:
     return out
 
 
+def without_running(doc: Document, found: Sequence[Running] | None = None) -> Document:
+    """``doc`` without its pages' running heads and feet: :func:`running`'s, or ``found`` when the caller holds them."""
+    found = running(doc) if found is None else found
+    pages = []
+    for page, run in zip(doc.pages, found, strict=True):
+        out = {id(span) for line in (*run.head, *run.foot) for span in line.spans}
+        pages.append(replace(page, spans=tuple(s for s in page.spans if id(s) not in out)))
+    return replace(doc, pages=tuple(pages))
+
+
 def _furniture_key(text: str) -> str:
     """``text`` as running lines are compared: case and spacing aside.
 
     In a line without a letter (a page number, ``- 3 -``) each run of digits is one ``#``; a line of words
-    (``Section 2``) must repeat as it is.
+    (``Section 2``) must repeat as it is, and so must an equation's number (``(12)``): pages ending in a numbered
+    equation set its number at the text's last baseline, each its own.
     """
     text = ' '.join(text.casefold().split())
-    return text if any(c.isalpha() for c in text) else re.sub(r'\d+', '#', text)
+    if any(c.isalpha() for c in text) or _EQUATION_NUMBER.match(text):
+        return text
+    return re.sub(r'\d+', '#', text)

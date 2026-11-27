@@ -5,13 +5,13 @@ from __future__ import annotations
 import re
 import warnings
 from collections import defaultdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from document_lab import layout
 from document_lab.ir import BBox, union
 
 if TYPE_CHECKING:
-    from document_lab.ir import Page
+    from document_lab.ir import Page, TextSpan
 
 
 def crop_figure(page: Page, label: str, content_below: bool = False) -> BBox | None:
@@ -82,40 +82,206 @@ def crop_figure(page: Page, label: str, content_below: bool = False) -> BBox | N
     )
 
 
-def crop_equation(page: Page, eq_num: str) -> BBox | None:
-    """Find and crop the equation region for equation number *eq_num*.
+def crop_equation(page: Page, eq_num: str, face: tuple[str, float]) -> BBox | None:
+    """The box of display equation ``(eq_num)`` on ``page``: the formula and its number, nothing else.
 
-    Locates "(N)" on the page, collects image/graphic blocks above it in the
-    same column within a reasonable distance, then merges nearby candidates.
-    Falls back to any equation-shaped image block when the number isn't found.
+    ``face``: the font and size the document's prose is set in (`document_lab.layout.body_face`); ``page`` is best
+    handed without its running heads and feet (`document_lab.layout.without_running`), which no equation holds.
+
+    - The number: the line ending ``(eq_num)`` that is the number alone, or a formula then its number (a line that
+      reads as words, ending in a reference, is neither); of several, the one line that is the number alone. None
+      when no line is it, or several are and not one of them stands alone.
+    - The column: where lines of words (:data:`TEXT_WORDS` words or more) within :data:`COLUMN_WINDOW` body sizes of
+      the number are set mostly in two columns, a number in the left column takes the left column's lines, one in the
+      right column the right column's -- and every column's when what it takes crosses the page middle, or the left
+      column holds level with it a formula's pieces alone, no prose and no number (an equation set across both
+      columns); else the page is set in one column there and the equation may span it all. Never past the page's
+      lines of words by more than a body size (a line number in the margin).
+    - The pieces: from the number, every piece -- a line that is not prose, an image no taller than
+      :data:`EQUATION_IMAGE` body sizes -- within :data:`EQUATION_REACH` body sizes of what is taken, until none is
+      left; never past the prose above or below the number, and never a piece nearer another equation's number
+      between them. A piece's box is its spans' whole boxes (a sum's limits, a big bracket), not a line's median.
+    - Prose: a line that reads as words -- a word of four letters set in ``face``'s font, or two in any font (an
+      italic heading; :func:`_words`) -- and spans :data:`PROSE_WIDTH` of its column or starts within
+      :data:`PROSE_INDENT` body sizes of the column's left edge, as a paragraph's last line does (``values [13].``
+      above a formula). A formula's letters (``cos hweTs`` flush left, ``Lvsd =``, ``Ie5jwet``) and its short words
+      set inside it (``with``, ``otherwise``) are no prose.
+    - The drawings whose middle lies in what is taken (a fraction's bar, a root's) are taken too; the box stands
+      :data:`EQUATION_PAD` body sizes clear of it all, inside the page -- but never into text it leaves out
+      (:func:`_padded`: the next equation set a point below).
     """
-    page_rect = BBox(0.0, 0.0, page.width, page.height)
-    page_mid = page_rect.width / 2
-    blocks = layout.blocks(page)
-
-    eq_num_y, eq_num_x = _find_eq_number_pos(blocks, eq_num)
-    candidates = _collect_eq_candidates(page, eq_num_y, eq_num_x, page_mid, page_rect)
-
-    if candidates:
-        candidates.sort(key=lambda r: r.y0)
-        merged = _merge_nearby(candidates, gap=15)
-        if merged:
-            margin = 8
-            r = merged[0]
-            return BBox(
-                max(0.0, r.x0 - margin),
-                max(0.0, r.y0 - margin),
-                min(page_rect.width, r.x1 + margin),
-                min(page_rect.height, r.y1 + margin),
-            )
-
-    # Fallback: text-rendered equation — crop the PDF text region around (N)
-    if eq_num_y is None:
+    body = face[1]
+    lines = layout.lines(page, weighted=True)
+    found = _number(lines, eq_num, face) if body > 0 else None
+    if found is None:
         return None
-    return _crop_eq_text_region(blocks, eq_num, eq_num_x, page_mid, page_rect)
+    seed = _spans_box(found)
+    middle = (seed.y0 + seed.y1) / 2
+    columns = _Columns(page, lines, middle, body)
+
+    def prose(line: layout.Line) -> bool:
+        left, width = columns.edge(line)
+        return _reads(line.spans, line.text, face) and (
+            line.x1 - line.x0 >= PROSE_WIDTH * width or line.x0 - left <= PROSE_INDENT * body
+        )
+
+    def take(*, across: bool) -> BBox:
+        here = [ln for ln in lines if ln is not found and columns.holds(_spans_box(ln), ln.column, seed, across=across)]
+        bounds = [_spans_box(ln) for ln in here if prose(ln)]
+        top = max((b.y1 for b in bounds if (b.y0 + b.y1) / 2 < middle), default=0.0)
+        bottom = min((b.y0 for b in bounds if (b.y0 + b.y1) / 2 > middle), default=page.height)
+        # the other equations' numbers between the prose that bounds it
+        numbers = [m for ln in here if _numbered(ln, face) and top <= (m := _middle(ln)) <= bottom]
+        pieces = [_spans_box(ln) for ln in here if not prose(ln)]
+        pieces += [
+            b
+            for b in _images(page)
+            if b.height <= EQUATION_IMAGE * body
+            and columns.holds(b, layout.column(b.x0, b.x1, columns.mid), seed, across=across)
+        ]
+        pieces = [
+            b
+            for b in pieces
+            if top <= (b.y0 + b.y1) / 2 <= bottom
+            and all(abs((b.y0 + b.y1) / 2 - middle) <= abs((b.y0 + b.y1) / 2 - other) for other in numbers)
+        ]
+        box, reach = seed, EQUATION_REACH * body
+        while near := [p for p in pieces if p.y0 <= box.y1 + reach and p.y1 >= box.y0 - reach]:
+            pieces = [p for p in pieces if p not in near]
+            box = union([box, *near])
+        return box
+
+    def open_left(box: BBox) -> bool:
+        """Does the left column hold, level with ``box``, a formula's pieces alone -- no prose, no number of its own?"""
+        level = [ln for ln in lines if ln.column == 'L' and _spans_box(ln).y0 < box.y1 and box.y0 < _spans_box(ln).y1]
+        return bool(level) and not any(prose(ln) or _numbered(ln, face) for ln in level)
+
+    box = take(across=False)
+    if columns.two and not columns.left_of(seed) and (box.x0 < columns.mid - layout.GUTTER or open_left(box)):
+        box = take(across=True)  # an equation set across both columns
+    drawn = [
+        d
+        for d in _drawings(page)
+        if box.x0 <= (d.x0 + d.x1) / 2 <= box.x1
+        and box.y0 <= (d.y0 + d.y1) / 2 <= box.y1
+        and d.width <= box.width + body
+    ]
+    return _padded(page, union([box, *drawn]), EQUATION_PAD * body)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+#: An equation takes a piece within this many body sizes of what it has taken, above or below.
+EQUATION_REACH: Final = 1.0
+#: An equation's crop stands this many body sizes clear of what it holds, so no glyph's edge is cut.
+EQUATION_PAD: Final = 0.3
+#: An image taller than this many body sizes is a figure, not an equation set as a picture.
+EQUATION_IMAGE: Final = 10.0
+#: Prose spans at least this share of its column's width, or starts within PROSE_INDENT body sizes of its left edge.
+PROSE_WIDTH: Final = 0.5
+PROSE_INDENT: Final = 1.5
+#: A line of at least this many words that reads as words is the page's text: its columns and its extent.
+TEXT_WORDS: Final = 5
+#: Lines of text within this many body sizes of an equation's number tell whether the page is set in two columns there.
+COLUMN_WINDOW: Final = 20.0
+_WORD: Final = re.compile(r'[^\W\d_]{4,}')  # a word of four letters
+_LETTERS: Final = re.compile(r'[^\W\d_]+(?:-[^\W\d_]+)*')  # letters alone, hyphened or not: Context-Based
+_PUNCTUATION: Final = '.,:;!?()[]{}"\''
+_NUMBERED: Final = re.compile(r'\(\s*(\d+[a-z]?)\s*\)$')  # an equation number ending a line: (3), (12b)
+
+
+def _spans_box(line: layout.Line) -> BBox:
+    """The whole box of a line's spans: a tall glyph's top and bottom, which the line's median leaves out."""
+    return union([s.provenance.bbox for s in line.spans])
+
+
+def _middle(line: layout.Line) -> float:
+    box = _spans_box(line)
+    return (box.y0 + box.y1) / 2
+
+
+def _words(text: str) -> int:
+    """How many of ``text``'s words (spaced apart, punctuation aside, of letters alone) have four letters or more.
+
+    Letters run into a formula's digits (``Ie5jwet``) make no word.
+    """
+    words = (token.strip(_PUNCTUATION) for token in text.split())
+    return sum(bool(_LETTERS.fullmatch(w)) and sum(c.isalpha() for c in w) >= 4 for w in words)
+
+
+def _reads(spans: list[TextSpan], text: str, face: tuple[str, float]) -> bool:
+    """Does ``text`` (of ``spans``) read as words: a word of four letters set in ``face``'s font, or two in any font?"""
+    return _words(text) >= 2 or any(s.font == face[0] and _WORD.search(s.text) for s in spans)
+
+
+def _numbered(line: layout.Line, face: tuple[str, float], number: str | None = None) -> bool:
+    """Does ``line`` end in an equation number (``number``, or any) -- alone, or after a formula, not after words?"""
+    found = _NUMBERED.search(line.text)
+    if found is None or (number is not None and found.group(1) != number):
+        return False
+    return not _reads(line.spans, line.text[: found.start()], face)
+
+
+def _number(lines: list[layout.Line], number: str, face: tuple[str, float]) -> layout.Line | None:
+    """The line that ends in equation number ``(number)`` (:func:`_numbered`), of several the one that is it alone."""
+    found = [ln for ln in lines if _numbered(ln, face, number)]
+    alone = [ln for ln in found if _NUMBERED.fullmatch(ln.text.strip())]
+    return found[0] if len(found) == 1 else alone[0] if len(alone) == 1 else None
+
+
+def _padded(page: Page, box: BBox, pad: float) -> BBox:
+    """``box`` grown by ``pad`` on each side, inside the page, but never into a span beside it that it leaves out.
+
+    A span whose middle lies beyond an edge of ``box`` is left out: the edge stops halfway to it, or at its own edge
+    where the two overlap (a big bracket's glyph box reaching into the prose line above).
+    """
+    x0, y0 = max(box.x0 - pad, 0.0), max(box.y0 - pad, 0.0)
+    x1, y1 = min(box.x1 + pad, page.width), min(box.y1 + pad, page.height)
+    for span in page.spans:
+        b = span.provenance.bbox
+        (cx, cy), across, level = span.center, b.x0 < x1 and x0 < b.x1, b.y0 < y1 and y0 < b.y1
+        if across and cy < box.y0:
+            y0 = max(y0, (b.y1 + box.y0) / 2, b.y1)
+        elif across and cy > box.y1:
+            y1 = min(y1, (b.y0 + box.y1) / 2, b.y0)
+        elif level and cx < box.x0:
+            x0 = max(x0, (b.x1 + box.x0) / 2, b.x1)
+        elif level and cx > box.x1:
+            x1 = min(x1, (b.x0 + box.x1) / 2, b.x0)
+    return BBox(x0, y0, x1, y1)
+
+
+class _Columns:
+    """How a page is set in columns around one equation's number, and the edges its lines are judged by."""
+
+    def __init__(self, page: Page, lines: list[layout.Line], middle: float, body: float) -> None:
+        self.mid, self.body = page.width / 2, body
+        text = [ln for ln in lines if len(ln.text.split()) >= TEXT_WORDS and layout.wordy(ln.text)]
+        near = [ln for ln in text if abs(_middle(ln) - middle) <= COLUMN_WINDOW * body] or text
+        self.two = sum(ln.column != 'F' for ln in near) > sum(ln.column == 'F' for ln in near)
+        self.left = min((ln.x0 for ln in text), default=0.0)
+        self.right = max((ln.x1 for ln in text), default=page.width)
+        self.right_column = min((ln.x0 for ln in text if ln.column == 'R'), default=self.mid)
+
+    def left_of(self, box: BBox) -> bool:
+        """Is ``box`` (a number) in the left column?"""
+        return box.x1 <= self.mid + layout.GUTTER
+
+    def edge(self, line: layout.Line) -> tuple[float, float]:
+        """The left edge and the width of the column ``line`` stands in."""
+        if self.two and line.column == 'L':
+            return self.left, self.mid - self.left
+        if self.two and line.column == 'R':
+            return self.right_column, self.right - self.right_column
+        return self.left, self.right - self.left
+
+    def holds(self, box: BBox, side: str, number: BBox, *, across: bool) -> bool:
+        """May the equation of ``number`` take ``box``, standing in column ``side``: its column's, inside the text?"""
+        inside = box.x0 >= self.left - self.body and box.x1 <= self.right + self.body
+        if not self.two or across:
+            return inside
+        return inside and (side == 'L' if self.left_of(number) else side != 'L')
 
 
 def _line_box(line: layout.Line) -> BBox:
@@ -377,10 +543,6 @@ def _find_eq_number_pos(blocks: list[layout.Block], eq_num: str) -> tuple[float 
     return None, None
 
 
-_MAX_EQ_IMG_DIST = 80  # points — image must be within this distance above eq number
-_MAX_EQ_TEXT_ABOVE = 80  # points — how far above (N) we look for multi-line formula text
-
-
 _BODY_END_RE = re.compile(r'(?:is|are|as|by|of|for|with|from|follows):\s*$', re.IGNORECASE)
 
 
@@ -402,110 +564,6 @@ def _is_body_text_line(text: str) -> bool:
     total = sum(1 for c in stripped if not c.isspace())
     alpha = sum(1 for c in stripped if c.isalpha())
     return total > 0 and alpha / total > 0.60
-
-
-def _crop_eq_text_region(
-    blocks: list[layout.Block],
-    eq_num: str,
-    eq_num_x: float | None,
-    page_mid: float,
-    page_rect: BBox,
-    margin_top: int = 2,
-    margin_bottom: int = 6,
-    margin_side: int = 8,
-) -> BBox | None:
-    """Crop the PDF page region that contains a text-rendered equation.
-
-    Finds the BLOCK containing "(N)", uses its full bbox (all formula lines), then
-    adds any short non-paragraph blocks immediately above (for spanning equations).
-    Full-width equations (N near right page margin > 92%) relax the column filter.
-    """
-    pattern = re.compile(rf'\({re.escape(eq_num)}\)\s*$')
-    eq_col_left = (eq_num_x < page_mid) if eq_num_x is not None else True
-    is_full_width = eq_num_x is not None and eq_num_x > page_rect.width * 0.92
-
-    # Step 1: find the block containing (N) and extract only the equation lines from it.
-    # Walk backwards from the (N) line, stopping at body-text lines.
-    eq_line_rects: list[BBox] = []
-
-    for blk in blocks:
-        blk_col_left = (blk.bbox.x0 + blk.bbox.x1) / 2 < page_mid
-        if not is_full_width and blk_col_left != eq_col_left:
-            continue
-        lines = blk.lines
-        # Find the index of the line ending with (N)
-        eq_line_idx = None
-        for i, line in enumerate(lines):
-            lt = line.text.strip()
-            if pattern.search(lt):
-                eq_line_idx = i
-                break
-        if eq_line_idx is None:
-            continue
-
-        # Collect backward from eq_line_idx until body-text line or block start
-        collected = []
-        for i in range(eq_line_idx, -1, -1):
-            line = lines[i]
-            lt = line.text.strip()
-            if i < eq_line_idx and _is_body_text_line(lt):
-                break  # stop before body paragraph text
-            lb = _line_box(line)
-            if lb[2] > lb[0] and lb[3] > lb[1]:  # skip degenerate lines
-                collected.append(lb)
-        eq_line_rects = collected
-        break
-
-    if not eq_line_rects:
-        return None
-
-    eq_block_rect = BBox(
-        min(r.x0 for r in eq_line_rects),
-        min(r.y0 for r in eq_line_rects),
-        max(r.x1 for r in eq_line_rects),
-        max(r.y1 for r in eq_line_rects),
-    )
-
-    # Step 2: sibling/above blocks — same column, not body text.
-    # Only needed when (N) is in its own narrow block (len==1).
-    # Includes same-level blocks (formula beside (N)) and blocks within _MAX_EQ_TEXT_ABOVE above.
-    body_threshold = max(eq_block_rect.width * 1.1, 200)
-    above: list[BBox] = []
-    # Run sibling search when the collected region is narrow (equation-number only, formula elsewhere)
-    needs_sibling_search = len(eq_line_rects) <= 3 and eq_block_rect.width < 100
-    if not is_full_width and needs_sibling_search:
-        for blk in blocks:
-            r = blk.bbox
-            blk_col_left = (r.x0 + r.x1) / 2 < page_mid
-            if blk_col_left != eq_col_left:
-                continue
-            # Accept blocks that overlap in y with the (N) block or are above within threshold
-            y_overlaps = r.y0 < eq_block_rect.y1 + 10 and r.y1 > eq_block_rect.y0 - 5
-            y_above = r.y1 < eq_block_rect.y0 and eq_block_rect.y0 - r.y0 <= _MAX_EQ_TEXT_ABOVE
-            if not (y_overlaps or y_above):
-                continue
-            # Skip the (N) block itself
-            if abs(r.x0 - eq_block_rect.x0) < 2 and abs(r.y0 - eq_block_rect.y0) < 2:
-                continue
-            if r.width > body_threshold:
-                continue
-            blk_lines = blk.lines
-            if any(_is_body_text_line(ln.text) for ln in blk_lines):
-                continue
-            above.append(r)
-
-    all_rects = [eq_block_rect, *above]
-    x0 = min(r.x0 for r in all_rects)
-    y0 = min(r.y0 for r in all_rects)
-    x1 = max(r.x1 for r in all_rects)
-    y1 = max(r.y1 for r in all_rects)
-
-    return BBox(
-        max(0.0, x0 - margin_side),
-        max(0.0, y0 - margin_top),
-        min(page_rect.width, x1 + margin_side),
-        min(page_rect.height, y1 + margin_bottom),
-    )
 
 
 def get_equation_context(page: Page, eq_num: str) -> tuple[str | None, str | None]:
@@ -592,39 +650,3 @@ def get_equation_context(page: Page, eq_num: str) -> tuple[str | None, str | Non
 
     formula_text = ' '.join(formula_parts).strip() or None
     return lead_in_text, formula_text
-
-
-def _collect_eq_candidates(
-    page: Page,
-    eq_num_y: float | None,
-    eq_num_x: float | None,
-    page_mid: float,
-    page_rect: BBox,
-) -> list[BBox]:
-    candidates: list[BBox] = []
-    for r in _images(page):
-        if r.width < 30 or r.height < 8:
-            continue
-        if eq_num_y is not None:
-            same_col = (eq_num_x < page_mid) == ((r.x0 + r.x1) / 2 < page_mid)  # type: ignore[operator]
-            if same_col and r.y1 <= eq_num_y + 10 and eq_num_y - r.y0 < _MAX_EQ_IMG_DIST:
-                candidates.append(r)
-        elif (
-            r.width > 50
-            and r.height > 10
-            and r.width / max(r.height, 1) > 1.5
-            and r.y0 > 60
-            and r.y1 < page_rect.height - 60
-        ):
-            candidates.append(r)
-    return candidates
-
-
-def _merge_nearby(rects: list[BBox], gap: float) -> list[BBox]:
-    merged: list[BBox] = []
-    for r in rects:
-        if merged and r.y0 - merged[-1].y1 < gap:
-            merged[-1] = BBox(min(merged[-1].x0, r.x0), merged[-1].y0, max(merged[-1].x1, r.x1), r.y1)
-        else:
-            merged.append(r)
-    return merged

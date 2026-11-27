@@ -75,15 +75,22 @@ def _render(pdf: pymupdf.Document, page_num: int, img_path: Path, crop: BBox | N
 
 
 def _render_one_equation(
-    pdf: pymupdf.Document, read: Document, page_num: int, eq_num: str, img_path: Path, located: _Located | None
+    pdf: pymupdf.Document,
+    paper: Document,
+    face: tuple[str, float],
+    page_num: int,
+    eq_num: str,
+    img_path: Path,
+    located: _Located | None,
 ) -> None:
+    """Equation ``(eq_num)`` of page ``page_num`` of ``paper`` (read without its running lines) to ``img_path``."""
     if img_path.exists():
         return
-    page = read.pages[page_num]
+    page = paper.pages[page_num]
     if is_full_page_image(page):  # a picture page: where its text locates the number, if it does
         crop = located.crop(page_num, f'({eq_num})') if located is not None else None
     else:
-        crop = crop_equation(page, eq_num)
+        crop = crop_equation(page, eq_num, face)
     if crop is None:
         return  # equation position not found on page; skip
     _render(pdf, page_num, img_path, crop)
@@ -315,12 +322,16 @@ def render_figure_pages(
     caption and the prose around it), and else links the whole page, rendered once as ``page-NN.png`` however many
     such labels the page holds.
 
+    Captions are found, and figures cropped, on the paper without its running heads and feet
+    (`document_lab.layout.without_running`).
+
     Returns (figure_images, page_section_map) where figure_images maps normalized
     figure label → relative image path (for INDEX.md).
     """
     read = read_pdf(pdf_path)
-    figure_page_map = build_figure_page_map(read)
-    page_section_map = build_page_section_map(figure_page_map, body_sections, read)
+    paper = layout.without_running(read)
+    figure_page_map = build_figure_page_map(paper)
+    page_section_map = build_page_section_map(figure_page_map, body_sections, paper)
     figure_images: dict[str, str] = {}
 
     pdf = pymupdf.open(str(pdf_path))
@@ -346,7 +357,7 @@ def render_figure_pages(
 
     located = _Located(read) if any(is_full_page_image(read.pages[e[2]]) for e in unique_entries) else None
     for label, normalized, page_num, owning in unique_entries:
-        page = read.pages[page_num]
+        page = paper.pages[page_num]
         own = f'page-{page_num + 1:02d}-{normalized.lower().replace(" ", "-")}.png'
         if not is_full_page_image(page):
             crop, img_name = crop_figure(page, label, content_below=label.upper().startswith('TABLE')), own
@@ -380,10 +391,12 @@ def render_equation_images(
 ) -> dict[str, str]:
     """Render equation images and insert them at equation number positions.
 
+    The equations are read off the paper without its running heads and feet (`document_lab.layout.without_running`).
     Returns updated figure_images dict with equation entries added.
     """
     read = read_pdf(pdf_path)
-    eq_page_map = build_equation_page_map(read)
+    paper, face = layout.without_running(read), layout.body_face(read)
+    eq_page_map = build_equation_page_map(paper)
     if not eq_page_map:
         return figure_images
 
@@ -408,14 +421,14 @@ def render_equation_images(
 
         img_name = f'page-{page_num + 1:02d}-{eq_label.lower().replace(" ", "-")}.png'
         img_path = out_dir / 'img' / f'sec{owning:02d}' / img_name
-        _render_one_equation(pdf, read, page_num, eq_num, img_path, located)
+        _render_one_equation(pdf, paper, face, page_num, eq_num, img_path, located)
         figure_images[eq_label] = f'img/sec{owning:02d}/{img_name}'
 
     # Build context (lead-in + formula text) for equations that may lack (N) in markdown
     eq_context: dict[str, tuple[str | None, str | None]] = {}
     for eq_label, page_num in eq_page_map.items():
         eq_num = eq_label.split()[-1]
-        lead_in, formula_text = get_equation_context(read.pages[page_num], eq_num)
+        lead_in, formula_text = get_equation_context(paper.pages[page_num], eq_num)
         eq_context[eq_label] = (lead_in, formula_text)
 
     pdf.close()

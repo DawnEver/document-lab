@@ -1,7 +1,8 @@
 //! `document_lab._pdf`: the `pdf` crate, exposed to Python as plain values -- no PDF logic of its own.
 //!
 //! `open(data, password)` reads a file; its `page(number, curve_samples, annotations)` returns what the page draws
-//! as tuples, which `document_lab.pdf` turns into the IR, and its `image(object)` an image's samples. `create(path)`
+//! as tuples, which `document_lab.pdf` turns into the IR, its `structure()` a tagged file's structure tree, and its
+//! `image(object)` an image's samples. `create(path)`
 //! writes a PDF of image pages, or of pages copied from a `Reader` (`document_lab.capture`).
 //!
 //! A refusal raises by its kind: [`Refused`] and its kinds when the reader refuses the input, `ValueError` for a
@@ -14,7 +15,8 @@ use std::path::PathBuf;
 use pdf::color::Pattern;
 use pdf::error::Kind;
 use pdf::geometry::Rect;
-use pdf::interpret::{Event, Layer, PathEvent};
+use pdf::interpret::{Event, Layer, Marked, PathEvent};
+use pdf::structure::{Element, Kid, Value};
 use pdf::writer::Image;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyOSError, PyValueError};
@@ -55,8 +57,12 @@ create_exception!(
 type Box4 = (f64, f64, f64, f64);
 /// The layer an event is drawn in: hidden by optional content, and the subtype of the annotation drawing it.
 type LayerRow = (bool, Option<String>);
+/// The marked content an event is drawn in: its `/MCID` (None: none), the Form `XObject` holding it (None: the
+/// page's content), and whether an `/Artifact` holds it.
+type MarkedRow = (Option<i64>, Option<u32>, bool);
 /// A span: text, font name (no subset tag), size, bold, box, render mode, the number it shares with the spans its
-/// words run on into with no space between (None: none), and its layer.
+/// words run on into with no space between (None: none), its layer, the text its glyphs draw when an `/ActualText`
+/// replaced it (None: the text is that), and its marked content.
 type SpanRow = (
     String,
     String,
@@ -66,10 +72,13 @@ type SpanRow = (
     i64,
     Option<usize>,
     LayerRow,
+    Option<String>,
+    MarkedRow,
 );
 /// A path (one subpath): points, closed, stroke color, line width, dashes, dash phase, fill color, even-odd, the
 /// fill's pattern (`tiling`, `shading`; None: one color), the index of the painted path it belongs to on its
-/// page, and its layer. A shading painted with `sh` is the closed rectangle of its box, filled with a `shading`.
+/// page, its layer and its marked content. A shading painted with `sh` is the closed rectangle of its box, filled
+/// with a `shading`.
 type PathRow = (
     Vec<(f64, f64)>,
     bool,
@@ -82,9 +91,46 @@ type PathRow = (
     Option<&'static str>,
     usize,
     LayerRow,
+    MarkedRow,
 );
-/// An image: box, sample width and height, object number (None inline), layer.
-type ImageRow = (Box4, i64, i64, Option<u32>, LayerRow);
+/// An image: box, sample width and height, object number (None inline), layer, marked content.
+type ImageRow = (Box4, i64, i64, Option<u32>, LayerRow, MarkedRow);
+/// A structure tree: its elements in tree order, the indexes of those under the root, its warnings.
+type StructureRow = (Vec<ElementRow>, Vec<usize>, Vec<String>);
+/// A structure element: role as stated, standard role, title, language, alternate description, actual text,
+/// expansion, attributes (owner, name, value), page (1-based) and kids.
+type ElementRow = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Vec<(String, String, AttributeValue)>,
+    Option<usize>,
+    Vec<KidRow>,
+);
+/// A kid: `("element", index, None, None, None)`, `("marked", page, mcid, stream, None)` or `("object", page,
+/// None, object, rect)`.
+type KidRow = (
+    &'static str,
+    Option<usize>,
+    Option<i64>,
+    Option<u32>,
+    Option<Box4>,
+);
+
+/// An attribute's value as Python's: a bool, int, float, str (a name or a text string), list, or list of pairs.
+#[derive(IntoPyObject)]
+enum AttributeValue {
+    Bool(bool),
+    Integer(i64),
+    Real(f64),
+    Text(String),
+    Array(Vec<AttributeValue>),
+    Pairs(Vec<(String, AttributeValue)>),
+}
 /// What a page draws: spans, paths, images, warnings.
 type PageRows = (Vec<SpanRow>, Vec<PathRow>, Vec<ImageRow>, Vec<String>);
 /// An image's samples: width, height, color space family (None: a stencil mask), components, bits per component,
@@ -152,6 +198,8 @@ impl Reader {
                     s.render_mode,
                     s.unspaced,
                     layer(&s.layer),
+                    s.drawn,
+                    marked(s.marked),
                 )
             })
             .collect();
@@ -171,6 +219,7 @@ impl Reader {
                         image.height,
                         image.object,
                         layer(&image.layer),
+                        marked(image.marked),
                     ));
                 }
                 Event::Shading(shading) => {
@@ -188,6 +237,7 @@ impl Reader {
                         Some(pattern(Pattern::Shading)),
                         painted,
                         layer(&shading.layer),
+                        marked(shading.marked),
                     ));
                     painted += 1;
                 }
@@ -195,6 +245,18 @@ impl Reader {
             }
         }
         Ok((spans, paths, images, content.warnings))
+    }
+
+    /// The structure tree, when the file is tagged: (elements, roots, warnings); None when it is not.
+    fn structure(&self) -> PyResult<Option<StructureRow>> {
+        let structure = self.file.structure(&self.pages).map_err(|e| refused(&e))?;
+        Ok(structure.map(|s| {
+            (
+                s.elements.iter().map(element).collect(),
+                s.roots,
+                s.warnings,
+            )
+        }))
     }
 
     /// The samples of the image `XObject` `object`.
@@ -336,6 +398,55 @@ fn layer(l: &Layer) -> LayerRow {
     (l.hidden, l.annotation.clone())
 }
 
+/// Marked content as its row.
+fn marked(m: Marked) -> MarkedRow {
+    (m.mcid, m.stream, m.artifact)
+}
+
+/// A structure element as its row.
+fn element(e: &Element) -> ElementRow {
+    (
+        e.role.clone(),
+        e.standard.clone(),
+        e.title.clone(),
+        e.lang.clone(),
+        e.alt.clone(),
+        e.actual_text.clone(),
+        e.expansion.clone(),
+        e.attributes
+            .iter()
+            .map(|a| (a.owner.clone(), a.name.clone(), value(&a.value)))
+            .collect(),
+        e.page,
+        e.kids
+            .iter()
+            .map(|k| match *k {
+                Kid::Element(i) => ("element", Some(i), None, None, None),
+                Kid::Marked { page, mcid, stream } => {
+                    ("marked", Some(page), Some(mcid), stream, None)
+                }
+                Kid::Object { page, object, rect } => {
+                    ("object", page, None, Some(object), rect.map(box4))
+                }
+            })
+            .collect(),
+    )
+}
+
+/// An attribute's value as Python's.
+fn value(v: &Value) -> AttributeValue {
+    match v {
+        Value::Bool(b) => AttributeValue::Bool(*b),
+        Value::Integer(i) => AttributeValue::Integer(*i),
+        Value::Real(r) => AttributeValue::Real(*r),
+        Value::Name(t) | Value::Text(t) => AttributeValue::Text(t.clone()),
+        Value::Array(items) => AttributeValue::Array(items.iter().map(value).collect()),
+        Value::Dict(entries) => {
+            AttributeValue::Pairs(entries.iter().map(|(k, v)| (k.clone(), value(v))).collect())
+        }
+    }
+}
+
 /// A pattern's kind, by name.
 fn pattern(p: Pattern) -> &'static str {
     match p {
@@ -365,6 +476,7 @@ fn subpaths(path: &PathEvent, samples: usize, group: usize) -> Vec<PathRow> {
                     .map(pattern),
                 group,
                 layer(&path.layer),
+                marked(path.marked),
             )
         })
         .collect()

@@ -139,8 +139,10 @@ pub struct Attribute {
 pub enum Value {
     /// A boolean.
     Bool(bool),
-    /// A number.
-    Number(f64),
+    /// An integer.
+    Integer(i64),
+    /// A real number.
+    Real(f64),
     /// A name, without its `/`.
     Name(String),
     /// A text string.
@@ -550,12 +552,10 @@ impl<'a> Reader<'a> {
         if depth > MAX_NESTING {
             return None;
         }
-        let resolved = self.file.resolve(value).ok()?;
-        if let Some(number) = resolved.as_number() {
-            return Some(Value::Number(number));
-        }
-        Some(match resolved {
+        Some(match self.file.resolve(value).ok()? {
             Object::Bool(b) => Value::Bool(b),
+            Object::Integer(i) => Value::Integer(i),
+            Object::Real(r) => Value::Real(r),
             Object::Name(n) => Value::Name(String::from_utf8_lossy(&n).into_owned()),
             Object::String(s) => Value::Text(text_string(&s)),
             Object::Array(items) => Value::Array(
@@ -574,11 +574,7 @@ impl<'a> Reader<'a> {
                     })
                     .collect(),
             ),
-            Object::Null
-            | Object::Integer(_)
-            | Object::Real(_)
-            | Object::Stream(_)
-            | Object::Reference(_) => return None,
+            Object::Null | Object::Stream(_) | Object::Reference(_) => return None,
         })
     }
 

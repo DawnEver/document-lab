@@ -160,7 +160,7 @@ fn attributes_come_from_the_element_then_its_classes_the_elements_own_first() {
          /Both [<< /O /Layout /Placement /Block >> 7 0 R] >> >>",
         &[
             "<< /S /TH /A [<< /O /Table /ColSpan 2 /Headers [(h1) (h2)] >> 1] /C [/Wide /Both 0] >>",
-            "<< /O /Layout /BBox [0 0 10 5] /Color [1 0 0] /Summary (the cell) /Shown true >>",
+            "<< /O /Layout /BBox [0 0 10 5] /Color [0.5 0 0] /Summary (the cell) /Shown true >>",
         ],
     )
     .unwrap();
@@ -169,11 +169,11 @@ fn attributes_come_from_the_element_then_its_classes_the_elements_own_first() {
         name: name.into(),
         value,
     };
-    let numbers = |v: &[f64]| Value::Array(v.iter().copied().map(Value::Number).collect());
+    let integers = |v: &[i64]| Value::Array(v.iter().copied().map(Value::Integer).collect());
     assert_eq!(
         structure.elements[0].attributes,
         [
-            attribute("Table", "ColSpan", Value::Number(2.0)),
+            attribute("Table", "ColSpan", Value::Integer(2)),
             attribute(
                 "Table",
                 "Headers",
@@ -181,8 +181,12 @@ fn attributes_come_from_the_element_then_its_classes_the_elements_own_first() {
             ),
             attribute("Table", "Scope", Value::Name("Column".into())),
             attribute("Layout", "Placement", Value::Name("Block".into())),
-            attribute("Layout", "BBox", numbers(&[0.0, 0.0, 10.0, 5.0])),
-            attribute("Layout", "Color", numbers(&[1.0, 0.0, 0.0])),
+            attribute("Layout", "BBox", integers(&[0, 0, 10, 5])),
+            attribute(
+                "Layout",
+                "Color",
+                Value::Array(vec![Value::Real(0.5), Value::Integer(0), Value::Integer(0)])
+            ),
             attribute("Layout", "Summary", Value::Text("the cell".into())),
             attribute("Layout", "Shown", Value::Bool(true)),
         ]

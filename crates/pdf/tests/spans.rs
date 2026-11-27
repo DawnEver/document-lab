@@ -1,4 +1,4 @@
-//! Glyphs join into spans along a baseline; a gap reads as a space; a new font, size, fill or line starts a span.
+//! Glyphs join into spans along a baseline; a gap reads as a space; a new font, size or line starts a span.
 
 mod common;
 
@@ -65,30 +65,53 @@ fn a_span_box_covers_its_glyphs_and_blank_text_is_no_span() {
 }
 
 #[test]
-fn a_fill_change_starts_a_span_and_each_carries_its_fill() {
-    let found = page_spans("BT /F1 10 Tf 10 50 Td 1 0 0 rg (red) Tj 0 g (black) Tj ET");
-    let fills: Vec<_> = found
-        .iter()
-        .map(|s| (s.text.as_str(), s.fill.as_ref().and_then(|c| c.rgb)))
+fn a_span_carries_the_direction_its_baseline_runs_in_page_space() {
+    let found = page_spans("BT /F1 10 Tf 10 50 Td (across) Tj 0 1 -1 0 100 20 Tm (up) Tj ET");
+    let directions: Vec<(String, (f64, f64))> = found
+        .into_iter()
+        .map(|s| (s.text, (s.direction.0.round(), s.direction.1.round())))
         .collect();
+    // y grows down in page space: text set bottom to top runs along -y.
     assert_eq!(
-        fills,
+        directions,
         [
-            ("red", Some([1.0, 0.0, 0.0])),
-            ("black", Some([0.0, 0.0, 0.0]))
+            ("across".to_string(), (1.0, 0.0)),
+            ("up".to_string(), (0.0, -1.0))
         ]
     );
 }
 
 #[test]
-fn text_its_rendering_mode_does_not_fill_has_no_fill() {
-    let found = page_spans("BT /F1 10 Tf 10 50 Td 3 Tr (hidden) Tj 1 Tr 0 -12 Td (outlined) Tj ET");
-    assert_eq!(
-        found
-            .iter()
-            .map(|s| (s.text.as_str(), s.fill.is_none()))
-            .collect::<Vec<_>>(),
-        [("hidden", true), ("outlined", true)]
+fn a_vertical_run_is_its_own_span_read_top_to_bottom() {
+    // F1 Helvetica, F3 an Identity-V font (CIDs 1, 2 read U+4E00, U+4E8C).
+    let fonts = "/Resources << /Font << /F1 5 0 R /F3 6 0 R >> >>";
+    let vertical = "<< /Type /Font /Subtype /Type0 /BaseFont /Song-Identity-V /Encoding /Identity-V
+        /DescendantFonts [7 0 R] /ToUnicode 8 0 R >>";
+    let cid = "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /Song >>";
+    let to_unicode = common::stream(
+        "",
+        "1 begincodespacerange <0000> <FFFF> endcodespacerange 2 beginbfchar <0001> <4E00> <0002> <4E8C> endbfchar",
+    );
+    let content = "BT /F1 10 Tf 10 50 Td (side) Tj /F3 10 Tf 1 0 0 1 100 90 Tm <0001> Tj <0002> Tj <0001> Tj ET";
+    let file = File::open(
+        common::one_page(fonts, content, &[HELVETICA, vertical, cid, &to_unicode]),
+        b"",
+    )
+    .unwrap();
+    let page = file.pages().unwrap().remove(0);
+    let found = spans(&file.interpret(&page, false).unwrap().events);
+    let read: Vec<_> = found
+        .iter()
+        .map(|s| (s.text.as_str(), s.vertical))
+        .collect();
+    assert_eq!(read, [("side", false), ("\u{4E00}\u{4E8C}\u{4E00}", true)]);
+    let bbox = found[1].bbox;
+    assert!(
+        (bbox.x0 - 95.0).abs() < 1e-9
+            && (bbox.y0 - 10.0).abs() < 1e-9
+            && (bbox.x1 - 105.0).abs() < 1e-9
+            && (bbox.y1 - 40.0).abs() < 1e-9,
+        "{bbox:?}"
     );
 }
 
@@ -133,5 +156,33 @@ fn spans_continuing_one_word_share_a_number() {
     assert_eq!(
         joined("BT /F1 10 Tf 10 50 Td (up) Tj /F2 10 Tf 0 -12 Td (down) Tj ET"),
         pair("up", "down", false)
+    );
+}
+
+#[test]
+fn a_fill_change_starts_a_span_and_each_carries_its_fill() {
+    let found = page_spans("BT /F1 10 Tf 10 50 Td 1 0 0 rg (red) Tj 0 g (black) Tj ET");
+    let fills: Vec<_> = found
+        .iter()
+        .map(|s| (s.text.as_str(), s.fill.as_ref().and_then(|c| c.rgb)))
+        .collect();
+    assert_eq!(
+        fills,
+        [
+            ("red", Some([1.0, 0.0, 0.0])),
+            ("black", Some([0.0, 0.0, 0.0]))
+        ]
+    );
+}
+
+#[test]
+fn text_its_rendering_mode_does_not_fill_has_no_fill() {
+    let found = page_spans("BT /F1 10 Tf 10 50 Td 3 Tr (hidden) Tj 1 Tr 0 -12 Td (outlined) Tj ET");
+    assert_eq!(
+        found
+            .iter()
+            .map(|s| (s.text.as_str(), s.fill.is_none()))
+            .collect::<Vec<_>>(),
+        [("hidden", true), ("outlined", true)]
     );
 }

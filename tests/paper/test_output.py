@@ -157,6 +157,19 @@ class TestWritePaperOutput:
         written = ''.join(f.read_text(encoding='utf-8') for f in sorted((out_dir / 'md').iterdir()))
         assert front.strip() in written
 
+    def test_an_abstract_line_of_its_own_states_the_abstract(self, tmp_path: Path):
+        # arXiv 2204.08094 and 2608.20674 set 'ABSTRACT' / 'Abstract' as a line over it, no heading: the abstract is
+        # paper.md's, and the front matter before the first section is no section.
+        abstract = 'This study analyzes the extent of the matter at hand. ' * 20
+        for word in ('ABSTRACT', 'Abstract'):
+            front = f'# A Paper\n\nAn Author\n\n{word}\n\n{abstract}'
+            sections = [('', front), ('## 1 Introduction', LONG_BODY), ('## 2 Method', LONG_BODY)]
+            out_dir = tmp_path / word
+            md_text = f'{front}\n\n## 1 Introduction\n{LONG_BODY}\n\n## 2 Method\n{LONG_BODY}'
+            n_sec, _n_fig, _n_tbl = write_paper_output(sections, out_dir, md_text)
+            assert n_sec == 2
+            assert abstract.strip() in (out_dir / 'paper.md').read_text(encoding='utf-8')
+
     def test_title_override(self, tmp_path: Path):
         sections = [('## Intro', LONG_BODY)]
         md_text = f'## Intro\n{LONG_BODY}'

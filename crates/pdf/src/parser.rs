@@ -446,15 +446,41 @@ fn parse_unsigned(word: &[u8]) -> Option<u64> {
 /// The number `word` spells, integer or real.
 #[must_use]
 pub fn number(word: &[u8]) -> Option<Object> {
-    let text = std::str::from_utf8(word).ok()?;
-    let digits = text.trim_start_matches(['+', '-']);
-    if digits.is_empty()
-        || !digits.bytes().all(|b| b.is_ascii_digit() || b == b'.')
-        || digits.matches('.').count() > 1
-    {
-        return None;
+    /// Powers of ten a float holds exactly.
+    const EXACT: [f64; 23] = [
+        1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+        1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+    ];
+    let negative = word.first() == Some(&b'-');
+    let start = word.iter().position(|b| !matches!(b, b'+' | b'-'))?;
+    let digits = &word[start..];
+    // One pass: the digits as an integer, and how many follow the point.
+    let (mut mantissa, mut significant, mut point) = (0_u64, 0_usize, None);
+    for (i, &b) in digits.iter().enumerate() {
+        match b {
+            b'0'..=b'9' => {
+                if mantissa > 0 || b != b'0' {
+                    significant += 1;
+                }
+                mantissa = mantissa.wrapping_mul(10).wrapping_add(u64::from(b - b'0'));
+            }
+            b'.' if point.is_none() => point = Some(i),
+            _ => return None,
+        }
     }
-    let negative = text.starts_with('-');
+    // Exact when the digits make an integer below 2^53 and the point moves it by an exact power of ten: the
+    // quotient of two exact floats is rounded once, as parsing the text is.
+    let fraction = point.map_or(0, |p| digits.len() - p - 1);
+    if significant <= 15 && fraction < EXACT.len() {
+        if point.is_none() {
+            let v = i64::try_from(mantissa).ok()?;
+            return Some(Object::Integer(if negative { -v } else { v }));
+        }
+        #[expect(clippy::cast_precision_loss, reason = "below 2^53, exact")]
+        let v = mantissa as f64 / EXACT[fraction];
+        return Some(Object::Real(if negative { -v } else { v }));
+    }
+    let digits = std::str::from_utf8(digits).ok()?;
     if !digits.contains('.') {
         // An integer past i64 is read as a real, as a reader must not fail on it.
         return Some(match digits.parse::<i64>() {
@@ -492,6 +518,73 @@ pub fn show(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_number_reads_as_its_text_parses_bit_for_bit() {
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut words: Vec<String> = [
+            "0",
+            "-0",
+            "+7",
+            "--3",
+            ".",
+            "-.",
+            "5.",
+            ".5",
+            "-.002",
+            "0.1",
+            "0.3",
+            "612",
+            "841.89",
+            "123456789012345",
+            "1234567890123456",
+            "99999999999999999999",
+            "0.000000000000000000000001",
+            "1.00000000000000000000001",
+            "0000000000000000000000012.5",
+        ]
+        .map(String::from)
+        .to_vec();
+        for _ in 0..20_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let whole = state % 100_000;
+            let places = (state >> 20) % 9;
+            let fraction = (state >> 30) % 10_u64.pow(u32::try_from(places).unwrap());
+            words.push(format!(
+                "{whole}.{fraction:0width$}",
+                width = usize::try_from(places).unwrap()
+            ));
+        }
+        for word in &words {
+            let digits = word.trim_start_matches(['+', '-']);
+            let sign = if word.starts_with('-') { -1.0 } else { 1.0 };
+            let want = if digits.contains('.') {
+                Object::Real(
+                    sign * if digits == "." {
+                        0.0
+                    } else {
+                        digits.parse::<f64>().unwrap()
+                    },
+                )
+            } else {
+                digits.parse::<i64>().map_or_else(
+                    |_| Object::Real(sign * digits.parse::<f64>().unwrap()),
+                    |v| Object::Integer(if sign < 0.0 { -v } else { v }),
+                )
+            };
+            match (number(word.as_bytes()), &want) {
+                (Some(Object::Real(got)), Object::Real(want)) => {
+                    assert_eq!(got.to_bits(), want.to_bits(), "{word}");
+                }
+                (got, want) => assert_eq!(got.as_ref(), Some(want), "{word}"),
+            }
+        }
+        for not in ["", "-", "1.2.3", "1e5", "0x10", "1-2"] {
+            assert_eq!(number(not.as_bytes()), None, "{not}");
+        }
+    }
 
     fn parse(text: &[u8]) -> Object {
         Parser::new(text, 0).object().unwrap()

@@ -394,3 +394,26 @@ def test_text_drawn_inside_an_untitled_figure_goes_with_it_not_into_the_body(tmp
     figure = blocks.index('![Untitled figure 1](page-001-figure-untitled-1.png)')
     assert blocks[figure + 1] == '*Text in the figure:* N'
     assert blocks[figure - 1].endswith(prose) and blocks[figure + 2].startswith(prose)
+
+
+def test_the_unnumbered_equations_option_reaches_the_pages_written(tmp_path):
+    """``document-lab pages --unnumbered-equations``: a display without a number is cut out at strict (the default)
+    and left in the text at off, numbered ones either way."""
+    from document_lab.__main__ import main  # noqa: PLC0415 -- the command line under test
+
+    pdf = tmp_path / 'sheet.pdf'
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    prose = 'The rated output is the mechanical power available at the shaft and shall be expressed in watts.'
+    for y in (100, 112, 124):
+        page.insert_text((60, y), prose, fontsize=10)
+    page.insert_text((230, 150), 'E = m c2 + k', fontsize=10, fontname='tiit')
+    page.insert_text((230, 180), 'P = T w', fontsize=10, fontname='tiit')
+    page.insert_text((520, 180), '(3)', fontsize=10)
+    for y in (210, 222):
+        page.insert_text((60, y), prose, fontsize=10)
+    doc.save(pdf)
+    for level, files in (('strict', ['equation-3', 'equation-untitled-1']), ('off', ['equation-3'])):
+        out = tmp_path / level
+        assert main(['pages', str(pdf), str(out), '--unnumbered-equations', level]) == 0
+        assert sorted(p.stem.removeprefix('page-001-') for p in out.glob('page-001-equation-*.png')) == files

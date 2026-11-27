@@ -81,7 +81,7 @@ def test_every_display_equation_is_written_and_linked_once_numbered_or_not(tmp_p
     lines = [
         (72, 100, f'{words} while'),
         (72, 112, 'the machine runs at its rated speed, and the stored energy is defined as follows:'),
-        (250, 134, 'W = L i2 / 2'),
+        (250, 134, 'W = L i2 / 2 + c'),
         (72, 156, f'{words} when'),
         (72, 168, 'where the power P = T w is the product of the torque and the speed at the shaft, as'),
         (250, 190, 'P = T w + k'),

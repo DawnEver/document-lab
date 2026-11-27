@@ -47,7 +47,7 @@ from document_lab.ir import BBox
 from document_lab.markdown import page_markdowns
 from document_lab.markdown import table as markdown_table
 from document_lab.pdf import Renderer, read_pdf, read_raster
-from document_lab.regions import Region, regions
+from document_lab.regions import Region, Unnumbered, regions
 from document_lab.tables import tables
 
 if TYPE_CHECKING:
@@ -266,10 +266,11 @@ def _placed(name: str, page: Page, found: list[Region], ruled: tuple[Table, ...]
     return out
 
 
-def write_pages(pdf: Path, out: Path, *, renderer: Renderer = 'pymupdf') -> Paged:
+def write_pages(pdf: Path, out: Path, *, renderer: Renderer = 'pymupdf', unnumbered: Unnumbered = 'strict') -> Paged:
     """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive.
 
-    Each page's picture is drawn by ``renderer`` (`document_lab.pdf.read_raster`).
+    Each page's picture is drawn by ``renderer`` (`document_lab.pdf.read_raster`); ``unnumbered``: how displays
+    without a number are found (`document_lab.regions.Unnumbered`).
     """
     read = read_pdf(pdf)
     face = layout.body_face(read)
@@ -282,7 +283,9 @@ def write_pages(pdf: Path, out: Path, *, renderer: Renderer = 'pymupdf') -> Page
         drawn.append(_drawings(pixels, scale, page, body))
         ruled.append(_tables(page, pixels, scale))
     drawn = _without_furniture(drawn, body)
-    found = [regions(page, face, drawings) for page, drawings in zip(read.pages, drawn, strict=True)]
+    found = [
+        regions(page, face, drawings, unnumbered=unnumbered) for page, drawings in zip(read.pages, drawn, strict=True)
+    ]
     furniture = layout.running(read)
     text = layout.without_running(read, furniture)
     placed = [_placed(*part) for part in zip(names, text.pages, found, ruled, strict=True)]

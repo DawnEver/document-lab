@@ -343,7 +343,7 @@ def test_inline_math_in_prose_is_no_display(tmp_path):
     apart = [
         *above,
         (72, 208, 'where the power is', 'helv', 10),
-        math(250, 226, 'P = T w'),
+        math(250, 226, 'P = T w + c'),
         *column(72, 468, range(250, 300, 12)),
     ]
     assert [label for label, _ in displays(read(tmp_path, apart))] == ['Untitled equation 1']  # planted: a display
@@ -422,7 +422,7 @@ def test_a_formula_set_in_a_paragraph_or_a_listing_is_no_display(tmp_path):
     listing = [(100, 214, 'x = 1;', 'cour', 10), (100, 226, 'y = x + 2;', 'cour', 10)]
     for inline in (subscript, tail, listing):
         assert displays(read(tmp_path, [*above, *inline, *below])) == []
-    apart = [prose(72, 208, 468), math(250, 230, 'e = 99 %'), *column(72, 468, range(256, 300, 12))]
+    apart = [prose(72, 208, 468), math(250, 230, 'e = a + 99 %'), *column(72, 468, range(256, 300, 12))]
     assert [label for label, _ in displays(read(tmp_path, [*above, *apart]))] == ['Untitled equation 1']  # planted
 
 
@@ -448,5 +448,76 @@ def test_a_relation_in_a_caption_a_list_item_or_a_table_row_is_no_display(tmp_pa
     heading = [(72, 220, '3.2. Case 2: W < Wm', 'tiit', 10)]
     for text in (caption, item, row, heading):
         assert displays(read(tmp_path, [*above, *text, *below])) == []
-    apart = [*above, math(250, 220, 'M = 10 [Nm]'), *below]
+    apart = [*above, math(250, 220, 'M = 10 + k [Nm]'), *below]
     assert [label for label, _ in displays(read(tmp_path, apart))] == ['Untitled equation 1']  # planted
+
+
+def kinds(doc: Document, unnumbered: str) -> list[str]:
+    """The labels `document_lab.regions.equations` finds on the first page at the ``unnumbered`` level."""
+    return [r.label for r in equations(doc.pages[0], layout.body_face(doc), unnumbered=unnumbered)]
+
+
+def test_strict_finds_a_display_loose_finds_and_off_none(tmp_path):
+    """A display set apart, its math beyond its relation (``+``): every level but ``off`` finds it; numbered ones are
+    found at every level."""
+    formula = [math(250, 222, 'E = m c2 + k'), math(250, 262, 'P = T w'), number(525, 262, 4)]
+    page = [*column(72, 468, range(100, 200, 12)), *formula, *column(72, 468, range(290, 330, 12))]
+    doc = read(tmp_path, page)
+    assert kinds(doc, 'strict') == kinds(doc, 'loose') == ['Untitled equation 1', '(4)']
+    assert kinds(doc, 'off') == ['(4)']  # planted: no display without a number at off
+
+
+def test_strict_leaves_out_what_loose_takes_for_a_display(tmp_path):
+    """Each strict rule against a false display loose takes: a sentence's relation with no math beyond it
+    (``where k = 2 R``, a listing's line under a roman line number), a list's item (``(ii) the vectors G = H``), a
+    nomenclature's rows set at the paragraph's leading, and a flowchart's box drawn among its arrows."""
+    above, below = column(72, 468, range(100, 200, 12)), column(72, 468, range(260, 330, 12))
+    sentence = [(160, 222, 'where k = 2 R', 'helv', 10)]
+    listing = [(100, 222, '28', 'helv', 8), (116, 222, 'k = setdiff(1, n);', 'helv', 10)]
+    item = [(110, 222, '(ii) the vectors G = H + K, all distinct;', 'tiit', 10)]
+    nomenclature = [prose(72, y, 468, start=y) for y in range(200, 250, 12)]
+    nomenclature[2] = (90, 224, 'T = 1 / f + t (s): switching period', 'tiit', 10)
+    for false in (sentence, listing, item):
+        doc = read(tmp_path, [*above, *false, *below])
+        assert kinds(doc, 'strict') == []
+        assert kinds(doc, 'loose') == ['Untitled equation 1']  # planted: what strict leaves out
+    doc = read(tmp_path, [*above, *nomenclature, *below])
+    assert kinds(doc, 'strict') == []
+    assert kinds(doc, 'loose') == ['Untitled equation 1']  # planted
+    chart = [(250, 226, 'P < Q + c', 'tiit', 10)]
+    shapes = [
+        pymupdf.Rect(230, 205, 330, 207),
+        pymupdf.Rect(230, 233, 330, 235),
+        pymupdf.Rect(229, 205, 231, 235),
+        pymupdf.Rect(329, 205, 331, 235),
+        pymupdf.Rect(279, 235, 281, 250),
+        pymupdf.Rect(230, 250, 330, 252),
+    ]
+    doc = read(tmp_path, [*above, *chart, *below], bars=(shapes,))
+    assert kinds(doc, 'strict') == []
+    assert kinds(doc, 'loose') == ['Untitled equation 1']  # planted
+
+
+def test_a_number_set_past_its_column_is_its_formulas(tmp_path):
+    """A two-column page set by a word processor: the left column's formula, its number ``(10)`` set past the left
+    column's edge in the right column's space, level with it, nothing of the right column before it."""
+    formula = [math(72, 410, 'f2 = C cos(k t - a1)'), math(104, 427, '+ f cos(k t - a2).'), number(345, 419, 10)]
+    left = [*column(50, 240, range(100, 390, 12)), *formula, *column(50, 240, range(450, 600, 12))]
+    right = [*column(314, 228, range(100, 390, 12)), *column(314, 228, range(450, 600, 12))]
+    doc = read(tmp_path, [*left, *right])
+    box = crop(doc, 10)
+    assert faults(doc.pages[0], box, formula) == []
+    assert faults(doc.pages[0], without(box, right=80), formula)  # planted: the number left out
+
+
+def test_a_number_beside_a_taller_display_of_the_other_column_takes_its_column_alone(tmp_path):
+    """The right column's ``(9)`` stands level with the top rows of a taller left-column display numbered ``(4)``
+    lower down: the left display is its own, so ``(9)`` is not taken across both columns."""
+    tall = [math(70, y, f'P{i} = a{i} + b{i} c{i}') for i, y in enumerate(range(300, 372, 12))]
+    left = [*column(50, 240, range(100, 290, 12)), *tall, number(278, 372, 4), *column(50, 240, range(400, 600, 12))]
+    short = [math(400, 312, 'd = r / (p f u) + e'), number(545, 312, 9)]
+    right = [*column(312, 250, range(100, 290, 12)), *short, *column(312, 250, range(340, 600, 12))]
+    doc = read(tmp_path, [*left, *right])
+    box = crop(doc, 9)
+    assert faults(doc.pages[0], box, short) == []
+    assert faults(doc.pages[0], without(box, left=-330), short)  # planted: taken across, over the left display

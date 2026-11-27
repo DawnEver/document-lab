@@ -15,6 +15,7 @@ from pathlib import Path
 from lab_commons.log import emit
 
 from document_lab.capture import cli as capture_cli
+from document_lab.regions import UNNUMBERED
 
 __all__ = ['main']
 
@@ -23,6 +24,13 @@ _RENDERER = {
     'choices': ('pymupdf', 'own'),
     'default': 'pymupdf',
     'help': "what draws the pictures: pymupdf (default) or own (document-lab's renderer: no text until its stage 2)",
+}
+#: `--unnumbered-equations`: how displays without a number are found (`document_lab.regions.Unnumbered`).
+_UNNUMBERED = {
+    'choices': UNNUMBERED,
+    'default': 'strict',
+    'help': 'displays without a number: strict (default: only those standing apart, showing math beyond a relation), '
+    'loose (every formula line that is no prose: more found, more taken in error) or off (numbered ones only)',
 }
 
 
@@ -59,6 +67,7 @@ def _parser() -> argparse.ArgumentParser:
     pages.add_argument('pdf', type=Path)
     pages.add_argument('out', type=Path, help='the directory to write the pages into, or a .zip archive')
     pages.add_argument('--renderer', **_RENDERER)
+    pages.add_argument('--unnumbered-equations', **_UNNUMBERED)
     paper = sub.add_parser('paper', help='a paper PDF to per-section markdown and cropped figures')
     paper.add_argument('pdf', type=Path)
     paper.add_argument('out', type=Path, help='the directory to write the paper layout into')
@@ -68,6 +77,7 @@ def _parser() -> argparse.ArgumentParser:
         help="the converter (default: ir; marker needs the gpu extra and surya's model server, and refuses without)",
     )
     paper.add_argument('--renderer', **_RENDERER)
+    paper.add_argument('--unnumbered-equations', **_UNNUMBERED)
     return parser
 
 
@@ -91,7 +101,7 @@ def _ocr(args: argparse.Namespace) -> int:
 def _pages(args: argparse.Namespace) -> int:
     from document_lab.per_page import write_pages  # noqa: PLC0415
 
-    done = write_pages(args.pdf, args.out, renderer=args.renderer)
+    done = write_pages(args.pdf, args.out, renderer=args.renderer, unnumbered=args.unnumbered_equations)
     emit(f'{done.out}: {done.pages} page(s)')
     if len(done.textless) == done.pages:
         emit('no page has text: a capture needs `document-lab ocr` first')
@@ -108,7 +118,7 @@ def _paper(args: argparse.Namespace) -> int:
     from document_lab.paper.ingest import ingest  # noqa: PLC0415
 
     try:
-        done = ingest(args.pdf, args.out, tool=args.tool, renderer=args.renderer)
+        done = ingest(args.pdf, args.out, tool=args.tool, renderer=args.renderer, unnumbered=args.unnumbered_equations)
     except MarkerUnavailable as refused:
         emit(f'refused: {refused}')
         return 2

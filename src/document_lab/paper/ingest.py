@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
     from document_lab.paper.convert import Tool, ToolChoice
     from document_lab.pdf import Renderer
+    from document_lab.regions import Unnumbered
 
 __all__ = ['Ingested', 'NoSections', 'ingest']
 
@@ -81,10 +82,18 @@ def _scanned_pages(pdf: Path, out_dir: Path, renderer: Renderer) -> int:
     return len(inked)
 
 
-def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None, renderer: Renderer = 'pymupdf') -> Ingested:
+def ingest(
+    pdf: Path,
+    out_dir: Path,
+    *,
+    tool: Tool | None = None,
+    renderer: Renderer = 'pymupdf',
+    unnumbered: Unnumbered = 'strict',
+) -> Ingested:
     """Convert ``pdf`` (with ``tool``, else the IR path) and write its paper layout into ``out_dir``.
 
-    Its figures, equations and scanned pages are rendered by ``renderer`` (`document_lab.pdf.read_raster`).
+    Its figures, equations and scanned pages are rendered by ``renderer`` (`document_lab.pdf.read_raster`);
+    ``unnumbered``: how displays without a number are found (`document_lab.regions.Unnumbered`).
     """
     pdf = pdf.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -100,7 +109,9 @@ def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None, renderer: Rend
             return Ingested(choice, scanned, scanned, 0, ())
         msg = f'{pdf.name}: the converted markdown has no section'
         raise NoSections(msg)
-    n_sec, n_fig, n_tbl = write_paper_output(main, out_dir, md_text, pdf_path=pdf, renderer=renderer)
+    n_sec, n_fig, n_tbl = write_paper_output(
+        main, out_dir, md_text, pdf_path=pdf, renderer=renderer, unnumbered=unnumbered
+    )
 
     appended_root = out_dir / 'appended'
     shutil.rmtree(appended_root, ignore_errors=True)
@@ -112,7 +123,15 @@ def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None, renderer: Rend
         for img in (out_dir / 'img' / 'flat').iterdir():
             if img.is_file():
                 shutil.copy2(img, flat / img.name)
-        write_paper_output(sections, target, sections[0][1], title_override=title, pdf_path=pdf, renderer=renderer)
+        write_paper_output(
+            sections,
+            target,
+            sections[0][1],
+            title_override=title,
+            pdf_path=pdf,
+            renderer=renderer,
+            unnumbered=unnumbered,
+        )
         shutil.rmtree(flat, ignore_errors=True)
         written.append(target)
 

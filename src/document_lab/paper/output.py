@@ -11,6 +11,7 @@ from document_lab.paper.text import extract_title_from_preamble, slug
 
 if TYPE_CHECKING:
     from document_lab.pdf import Renderer
+    from document_lab.regions import Unnumbered
 
 #: The head of a heading-less preamble paper.md keeps as the abstract when the paper states none.
 ABSTRACT_FALLBACK_CHARS = 800
@@ -298,8 +299,11 @@ def write_paper_output(
     title_override: str | None = None,
     pdf_path: Path | None = None,
     renderer: Renderer = 'pymupdf',
+    unnumbered: Unnumbered = 'strict',
 ) -> tuple[int, int, int]:
     """Write per-section files, paper.md, images (rendered by ``renderer``), INDEX.md for one paper.
+
+    ``unnumbered``: how displays without a number are found (`document_lab.regions.Unnumbered`).
 
     Returns (n_sections, n_figures, n_tables).
     """
@@ -328,7 +332,7 @@ def write_paper_output(
         figure_images, page_section_map = render_figure_pages(pdf_path, out_dir, body_sections, renderer=renderer)
 
         figure_images = render_equation_images(
-            pdf_path, out_dir, body_sections, figure_images, page_section_map, renderer=renderer
+            pdf_path, out_dir, body_sections, figure_images, page_section_map, renderer=renderer, unnumbered=unnumbered
         )
 
     # Clean up raw converter clutter (raw images, picture-text blocks)

@@ -14,7 +14,7 @@ from document_lab.paper.pagemap import FIG_TABLE_RE, build_figure_page_map, buil
 from document_lab.paper.text import RN_PATTERN as _RN
 from document_lab.paper.text import slug
 from document_lab.pdf import read_pdf, read_raster
-from document_lab.regions import Region, equations, regions
+from document_lab.regions import Region, Unnumbered, equations, regions
 
 if TYPE_CHECKING:
     from document_lab.ir import Document, Page
@@ -116,6 +116,7 @@ def _equations(
     face: tuple[str, float],
     body_sections: list[tuple[str, str]],
     page_section_map: dict[int, int],
+    unnumbered: Unnumbered,
 ) -> list[_Equation]:
     """Every display equation of the paper, numbered or not, in reading order, each with the section that owns it.
 
@@ -127,9 +128,9 @@ def _equations(
     out = []
     for number, page in enumerate(paper.pages):
         if is_full_page_image(read.pages[number]):
-            found = [r for r in regions(read.pages[number], face) if r.kind == 'equation']
+            found = [r for r in regions(read.pages[number], face, unnumbered=unnumbered) if r.kind == 'equation']
         else:
-            found = equations(page, face)
+            found = equations(page, face, unnumbered=unnumbered)
         for region in found:
             owning = page_section_map.get(number)
             printed = region.label if region.captioned else None
@@ -387,8 +388,11 @@ def render_equation_images(
     page_section_map: dict[int, int],
     *,
     renderer: Renderer = 'pymupdf',
+    unnumbered: Unnumbered = 'strict',
 ) -> dict[str, str]:
     """Render every display equation of the paper, numbered or not (by ``renderer``), and link each in its section.
+
+    ``unnumbered``: how displays without a number are found (`document_lab.regions.Unnumbered`).
 
     The equations are found on the paper without its running heads and feet (`document_lab.layout.without_running`,
     :func:`_equations`), each cut out with its number when one is printed, and linked once
@@ -398,7 +402,7 @@ def render_equation_images(
     """
     read = read_pdf(pdf_path)
     paper, face = layout.without_running(read), layout.body_face(read)
-    found = _equations(read, paper, face, body_sections, page_section_map)
+    found = _equations(read, paper, face, body_sections, page_section_map, unnumbered)
     for eq in found:
         _render(pdf_path, read, eq.page, out_dir / eq.image, eq.region.bbox, renderer)
         key = eq.alt if eq.number is not None else f'{eq.alt}, page {eq.page + 1}'

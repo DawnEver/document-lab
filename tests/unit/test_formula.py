@@ -131,6 +131,19 @@ def test_a_paper_s_equation_is_read_from_the_very_array_its_crop_was_encoded_fro
     assert np.array_equal(shown, _decoded(crop))  # and the file holds exactly it
 
 
+def test_a_rerun_into_the_same_directory_transcribes_every_equation_again(tmp_path, stand_in):
+    stand_in.latex = r'\[ U = R I \qquad (1) \]'
+    pdf, out = _paper(tmp_path / 'paper.pdf'), tmp_path / 'out'
+    ingest(pdf, out, tool='ir', formulas='latex')
+    first = list(stand_in.shown)
+    stand_in.shown.clear()
+    ingest(pdf, out, tool='ir', formulas='latex')  # its crop is on disk already: never silently left unread
+    assert len(stand_in.shown) == len(first) == 1
+    assert np.array_equal(stand_in.shown[0], first[0])
+    body = '\n'.join(p.read_text(encoding='utf-8') for p in (out / 'md').glob('*.md'))
+    assert '-equation-1.png)\n\n$$\nU = R I\n$$' in body
+
+
 def test_the_block_drops_the_display_delimiters_and_the_equation_s_own_number_only():
     assert formula.beside(r'\[ U = R I \qquad (3) \]', '3') == '$$\nU = R I\n$$'
     assert formula.beside(r'$$x = y \quad (2)$$', '3') == '$$\nx = y \\quad (2)\n$$'  # another number is content

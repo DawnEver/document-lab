@@ -8,7 +8,7 @@ import pytest
 
 from document_lab.capture.export import to_pdf
 from document_lab.per_page import RENDER_DPI, UNREAD, write_pages
-from tests.synthetic import draw_ruled_table
+from tests.synthetic import draw_booktabs, draw_ruled_table
 
 
 def test_each_page_gets_its_markdown_and_image_and_the_index_names_them(tmp_path):
@@ -156,6 +156,20 @@ def test_a_ruled_table_is_written_as_a_pipe_table_in_place_of_its_words(tmp_path
     assert '| Parameter | Value | Unit |\n| --- | --- | --- |\n| alpha | 1.25 | mm |' in page1
     assert page1.count('alpha') == 1  # its words are the table's, not the running text's
     assert page1.index('The limits are given below.') < page1.index('| Parameter')
+
+
+def test_a_table_ruled_by_its_rows_alone_is_written_as_a_pipe_table(tmp_path):
+    """Booktabs: no rule down, its columns parted by white space; once its rules were no table and two-cell bands
+    no rows, so its words ran on as text."""
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 300), 'The limits are given below.', fontsize=10)
+        draw_booktabs(page)
+        doc.save(tmp_path / 'paper.pdf')
+    write_pages(tmp_path / 'paper.pdf', tmp_path / 'out')
+    page1 = (tmp_path / 'out' / 'page-001.md').read_text(encoding='utf-8')
+    assert '| Parameter | Value | Unit |\n| --- | --- | --- |\n| alpha | 1.25 | mm |' in page1
+    assert page1.count('alpha') == 1  # its words are the table's, not the running text's
 
 
 def test_a_scanned_table_reads_from_its_rules_in_pixels_and_its_text_layer(tmp_path):

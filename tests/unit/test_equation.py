@@ -1,4 +1,5 @@
-"""Equation crops: one display equation and its number, nothing else -- read off synthetic pages whose boxes are known.
+"""Equation crops (`document_lab.regions.equation`): one display equation and its number, nothing else -- read off
+synthetic pages whose boxes are known.
 
 Each layout is one the real papers set (and the old crop got wrong): an equation across a one-column page, one across
 both columns of a two-column page, a paragraph's short last line just above a formula, one number for two rows, two
@@ -14,8 +15,8 @@ import pymupdf
 
 from document_lab import layout
 from document_lab.ir import BBox
-from document_lab.paper.crop import crop_equation
 from document_lab.pdf import read_pdf
+from document_lab.regions import equation, regions
 from tests.synthetic import Run, text_pdf
 
 if TYPE_CHECKING:
@@ -57,7 +58,7 @@ def read(tmp_path: Path, *pages: list[Run], bars: tuple[list[pymupdf.Rect], ...]
 
 
 def crop(doc: Document, n: int, page: int = 0) -> BBox | None:
-    return crop_equation(doc.pages[page], str(n), layout.body_face(doc))
+    return equation(doc.pages[page], str(n), layout.body_face(doc))
 
 
 def faults(page: Page, box: BBox | None, formula: list[Run]) -> list[str]:
@@ -160,7 +161,7 @@ def test_a_running_page_number_is_no_part_of_an_equation_at_the_head_of_a_page(t
         pages.append([(530, 48, str(70 + n), 'helv', 10), *formula, *column(72, 468, range(90 + y, 300 + y, 12))])
     doc = read(tmp_path, *pages)
     body = layout.without_running(doc)
-    box = crop_equation(body.pages[1], '2', layout.body_face(doc))
+    box = equation(body.pages[1], '2', layout.body_face(doc))
     formula = [math(200, 62, 'u = R i + L d2'), number(525, 62, 2)]
     assert faults(doc.pages[1], box, formula) == []
     assert faults(doc.pages[1], crop(doc, 2, page=1), formula)  # planted: the page with its running lines
@@ -239,3 +240,64 @@ def test_a_number_alone_on_its_line_is_chosen_over_a_short_line_ending_in_it(tmp
     box = crop(doc, 11)
     assert faults(doc.pages[0], box, formula) == []
     assert faults(doc.pages[0], without(box, left=60), formula)  # planted: the formula cut off
+
+
+def found(doc: Document, page: int = 0) -> list[tuple[str, BBox]]:
+    """The equations `document_lab.regions.regions` finds on the page -- as `document-lab pages` and a paper's picture
+    page cut them out -- each its label and box."""
+    return [(r.label, r.bbox) for r in regions(doc.pages[page], layout.body_face(doc)) if r.kind == 'equation']
+
+
+def noise(x: float, y: float, text: str, size: float = 10) -> Run:
+    """A formula as OCR reads it: noise, set in the prose's own font (an OCR layer has one font)."""
+    return (x, y, text, 'helv', size)
+
+
+def test_a_left_column_number_is_found_and_its_equation_takes_its_column_alone(tmp_path):
+    """A two-column page: the left column's number stands short of the page's middle, the right column's prose runs
+    level with the formula. Once no number left of 0.6 of the page counted, and every region spanned the text."""
+    formula = [noise(110, 300, 'U,=qW +a,'), noise(150, 312, '1/. +0U'), number(282, 306, 1)]
+    left = [*column(50, 250, range(100, 290, 12)), *formula, *column(50, 250, range(330, 500, 12))]
+    doc = read(tmp_path, [*left, *column(312, 250, range(100, 500, 12))])
+    ((label, box),) = found(doc)
+    assert label == '(1)'
+    assert faults(doc.pages[0], box, formula) == []
+    assert faults(doc.pages[0], without(box, right=-280), formula)  # planted: the text's width, the right column in
+
+
+def test_a_right_column_equation_takes_nothing_of_the_left_column(tmp_path):
+    formula = [noise(400, 300, 'a +b= g'), number(545, 300, 2)]
+    right = [*column(312, 250, range(100, 290, 12)), *formula, *column(312, 250, range(324, 500, 12))]
+    doc = read(tmp_path, [*column(50, 250, range(100, 500, 12)), *right])
+    ((label, box),) = found(doc)
+    assert label == '(2)'
+    assert faults(doc.pages[0], box, formula) == []
+    assert faults(doc.pages[0], without(box, left=-300), formula)  # planted: grown over the left column
+
+
+def test_an_equation_across_both_columns_is_found_whole(tmp_path):
+    formula = [math(110, 420, 'W = sum k a b'), math(330, 420, 'c d + e f g'), number(545, 420, 3)]
+    columns = [*column(50, 250, range(100, 400, 12)), *column(312, 250, range(100, 400, 12))]
+    below = [*column(50, 250, range(450, 600, 12)), *column(312, 250, range(450, 600, 12))]
+    doc = read(tmp_path, [*columns, *formula, *below])
+    ((label, box),) = found(doc)
+    assert label == '(3)'
+    assert faults(doc.pages[0], box, formula) == []
+    assert faults(doc.pages[0], without(box, left=230), formula)  # planted: the left column's half cut off
+
+
+def test_a_number_at_the_left_of_its_column_is_no_equation(tmp_path):
+    """A list's ``(1)`` set apart before its item: a number all the same, but at its column's left, no equation's."""
+    item = [(50, 300, '(1)', 'helv', 10), prose(90, 300, 210)]
+    doc = read(tmp_path, [*column(50, 250, range(100, 290, 12)), *item, *column(312, 250, range(100, 500, 12))])
+    assert found(doc) == []
+
+
+def test_a_value_in_parentheses_is_no_equation_number_a_chapter_s_number_is(tmp_path):
+    """A table's spread ``(0.167)`` set alone at a line's right reads like a number; none starts with 0."""
+    value = [noise(150, 300, 'x = 0.5'), (270, 300, '(0.167)', 'helv', 10)]
+    doc = read(tmp_path, [*column(50, 250, range(100, 290, 12)), *value, *column(50, 250, range(320, 400, 12))])
+    assert found(doc) == []
+    chapter = [noise(150, 300, 'x = 0.5'), (270, 300, '(2.8)', 'helv', 10)]
+    doc = read(tmp_path, [*column(50, 250, range(100, 290, 12)), *chapter, *column(50, 250, range(320, 400, 12))])
+    assert [label for label, _ in found(doc)] == ['(2.8)']  # planted: a number that is one

@@ -27,7 +27,21 @@ a grid whose text runs mostly (by characters) along one baseline direction other
 the page turned a quarter (or half) turn to set that direction level, so its rows read as its rows, and each box
 found is turned back to where the page shows it.
 
-A table set without rules -- columns parted by white space alone -- is no grid here, scanned or not.
+A table ruled by its rows alone -- booktabs' top rule, a rule under its header, a bottom rule, nothing down -- is a
+stack: :data:`STACK_RULES` level rules or more of one extent, :data:`STACK_LENGTH` text sizes long at least (each end
+within the tolerance), touching no rule down. Its text, the spans whose center stands between its first and last rule,
+makes its cells by white space, its columns those of its rows below its second rule (:func:`aligned`), each cell's box
+its text's. A stack is a table only when what lies in it can be nothing else: no rule runs down it and nothing else is
+drawn in it (a figure framed by rules: a curve, a frame, shading -- a ground under the whole stack aside), no image lies
+in it, no text crosses its rules, its text makes two rows of two columns, every row holds a short cell
+(:data:`SHORT_CELL` words at most: a code, a value -- prose set in two columns has none) and it is no list (two columns,
+every cell of the first below the header a bullet or an enumerator). Else :func:`grids` names it a :class:`NotATable`.
+Of a stack whose rules frame two tables or more (one under the other, a caption between), each is the longest run of its
+rules, from the top, that is one. A stack is read as the page stands, its rules level: one printed sideways is not
+found.
+
+A table set without rules -- columns parted by white space alone -- is no grid here, scanned or not; its cells are
+read by :func:`aligned` where a caller knows where it stands (`document_lab.regions`).
 """
 
 from __future__ import annotations
@@ -35,6 +49,8 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import math
+import re
+import statistics
 from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
@@ -43,7 +59,7 @@ from typing import TYPE_CHECKING, Final
 import numpy as np
 
 from document_lab.ir import BBox, Page, Table, spaced, union
-from document_lab.layout import lines
+from document_lab.layout import Line, lines, upright
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -51,7 +67,20 @@ if TYPE_CHECKING:
     from document_lab.ink import Rulings
     from document_lab.ir import Provenance, TextSpan, VectorPath
 
-__all__ = ['STROKES', 'THIN', 'TOLERANCE', 'WORD_INK', 'NotATable', 'grids', 'tables']
+__all__ = [
+    'COLUMN_GAP',
+    'SHORT_CELL',
+    'STACK_LENGTH',
+    'STACK_RULES',
+    'STROKES',
+    'THIN',
+    'TOLERANCE',
+    'WORD_INK',
+    'NotATable',
+    'aligned',
+    'grids',
+    'tables',
+]
 
 #: Points within which a grid's rules are one line, a gap along a rule is no gap, and a rule meets another (PyMuPDF's
 #: snap and join tolerance: a double rule is one line).
@@ -68,6 +97,21 @@ WORD_INK: Final = 1.0
 STROKES: Final = frozenset('|!Il1[]_-\N{EN DASH}\N{EM DASH}')
 #: Touch tests between level and upright rules are made this many level rules at a time (memory, not results).
 _CHUNK: Final = 512
+#: A table's columns set by white space stand at least this many of its text sizes apart: wider than a word space, as
+#: no cell's words are.
+COLUMN_GAP: Final = 0.5
+#: Level rules of one extent, at least this many stacked and none down, rule a table by its rows (booktabs)...
+STACK_RULES: Final = 3
+#: ...each at least this many of its text sizes long: a formula's fraction bars, stacked alike, are shorter.
+STACK_LENGTH: Final = 6.0
+#: A table's row holds a short cell -- at most this many words: a code, a value, a dash -- where prose holds none.
+SHORT_CELL: Final = 3
+#: A list's marker before each item: a bullet or a dash, or an enumerator closed by its stop (``1.``, ``a)``, ``(iv)``,
+#: ``2:``); a bare number is a table's index.
+_MARKER: Final = re.compile(
+    r'^(?:[\N{BULLET}\N{TRIANGULAR BULLET}\N{WHITE BULLET}\N{EN DASH}\N{EM DASH}*-]'
+    r'|\(?(?:\d+|[A-Za-z]|[ivxIVX]+)[.):])$'
+)
 
 _Segment = tuple[float, float, float]  # (position, low end, high end)
 
@@ -115,7 +159,12 @@ def grids(page: Page, *, rulings: Rulings | None = None, tolerance: float = TOLE
             upright.append(((box.x0 + box.x1) / 2, box.y0, box.y1))
     found: list[Table | NotATable] = []
     frames: dict[int, tuple[Page, list[VectorPath]]] = {0: (seen, drawings)}
-    for touching_h, touching_v in _connected(_merge(level, tolerance), _merge(upright, tolerance), tolerance):
+    downs = _merge(upright, tolerance)
+    free: list[_Segment] = []  # level rules touching no rule down: a stack's, if any
+    for touching_h, touching_v in _connected(_merge(level, tolerance), downs, tolerance):
+        if not touching_v:
+            free += touching_h
+            continue
         h, v = _snap(touching_h, tolerance), _snap(touching_v, tolerance)
         if len({s[0] for s in h}) > 1 and len({s[0] for s in v}) > 1:
             box = BBox(min(s[1] for s in h), min(s[1] for s in v), max(s[2] for s in h), max(s[2] for s in v))
@@ -127,6 +176,7 @@ def grids(page: Page, *, rulings: Rulings | None = None, tolerance: float = TOLE
             h, v = _quartered_rules(h, v, turn, seen)
             grid = _grid(framed, h, v, framed_drawings, tolerance)
             found.append(_quartered_grid(grid, -turn, seen) if turn else grid)
+    found += _stacks(seen, free, downs, tolerance)
     found.sort(key=lambda g: (_bbox(g).y0, _bbox(g).x0))
     numbered: list[Table | NotATable] = []
     for grid in found:
@@ -405,8 +455,9 @@ def _join(runs: list[tuple[float, float]], tolerance: float) -> list[tuple[float
 def _connected(
     level: list[_Segment], upright: list[_Segment], tolerance: float
 ) -> Iterator[tuple[list[_Segment], list[_Segment]]]:
-    """The groups of rules that touch, each as its level and its upright rules."""
-    if not level or not upright:
+    """The groups of rules that touch, each as its level and its upright rules (a level rule touching none: alone)."""
+    if not upright:
+        yield from (([segment], []) for segment in level)
         return
     h = np.array(level)
     v = np.array(upright)
@@ -433,7 +484,7 @@ def _connected(
         groups[root(i)][0].append(segment)
     for j, segment in enumerate(upright):
         groups[root(len(h) + j)][1].append(segment)
-    yield from (g for g in groups.values() if g[0] and g[1])
+    yield from (g for g in groups.values() if g[0])
 
 
 def _ruled(runs: list[tuple[float, float]], lo: float, hi: float, tolerance: float) -> bool | None:
@@ -658,3 +709,167 @@ def _texts(page: Page, slots: _Slots, cell_of: list[list[int]], boxes: list[BBox
 def _text(page: Page, spans: list[TextSpan]) -> str:
     found = lines(Page(page.number, page.width, page.height, spans=tuple(spans)), weighted=True)
     return ' '.join(line.text for line in sorted(found, key=lambda ln: (ln.y0, ln.x0)))
+
+
+def aligned(spans: Sequence[TextSpan], *, body: Sequence[TextSpan] | None = None) -> Table | None:
+    """The table ``spans`` set by white space alone: columns apart by white space, rows by baseline.
+
+    Its text size is the spans' median size. A column is a run across ``body`` -- the spans that part the columns: a
+    ruled table's rows below its header, whose cells may span columns; by default all ``spans`` -- that some span
+    covers, apart from the next by :data:`COLUMN_GAP` text sizes that no span of it crosses; a span stands in the column
+    it overlaps most (a header wider than its column, or over two), else the nearest. A row is spans whose middles lie
+    within half a text size. A row with nothing in the first column carries on the cells of the row above (a value
+    wrapped onto a second line). A cell's text is its spans as a line (`document_lab.layout`), its box theirs (None when
+    empty). Spans without text, or written vertically, take no part. None when the text does not make two rows of two
+    columns.
+    """
+    spans = [s for s in spans if spaced(s.text).strip() and not s.vertical]
+    if not spans:
+        return None
+    size = statistics.median(s.size for s in spans)
+    columns = _runs(
+        [s for s in body if spaced(s.text).strip() and not s.vertical] if body else spans, COLUMN_GAP * size
+    )
+    rows: list[list[list[list[TextSpan]]]] = []
+    for band in _baselines(spans, size / 2):
+        row: list[list[TextSpan]] = [[] for _ in columns]
+        for s in band:
+            row[_column(s.provenance.bbox, columns)].append(s)
+        if rows and not row[0]:  # no first cell: the row above, carried on
+            for cell, more in zip(rows[-1], row, strict=True):
+                cell.append(more)
+        else:
+            rows.append([[cell] for cell in row])
+    if len(rows) < 2 or len(columns) < 2:  # noqa: PLR2004 -- a label and its value
+        return None
+
+    def text(cell: list[list[TextSpan]]) -> str:
+        return ' '.join(Line(line, '').text for line in cell if line)
+
+    def bbox(cell: list[list[TextSpan]]) -> BBox | None:
+        boxes = [s.provenance.bbox for line in cell for s in line]
+        return union(boxes) if boxes else None
+
+    return Table(
+        tuple(tuple(text(cell) for cell in row) for row in rows),
+        tuple(tuple(bbox(cell) for cell in row) for row in rows),
+        spans[0].provenance.at(bbox=union([s.provenance.bbox for s in spans])),
+    )
+
+
+def _column(box: BBox, columns: list[tuple[float, float]]) -> int:
+    """The column ``box`` overlaps most across, else the nearest to it."""
+    overlap = [min(box.x1, x1) - max(box.x0, x0) for x0, x1 in columns]
+    return max(range(len(columns)), key=lambda i: overlap[i])
+
+
+def _runs(spans: list[TextSpan], gap: float) -> list[tuple[float, float]]:
+    """The runs across the page ``spans`` cover, left to right, each apart from the next by ``gap`` points or more."""
+    runs: list[list[float]] = []
+    for s in sorted(spans, key=lambda s: s.provenance.bbox.x0):
+        b = s.provenance.bbox
+        if runs and b.x0 - runs[-1][1] < gap:
+            runs[-1][1] = max(runs[-1][1], b.x1)
+        else:
+            runs.append([b.x0, b.x1])
+    return [(x0, x1) for x0, x1 in runs]
+
+
+def _baselines(spans: list[TextSpan], reach: float) -> list[list[TextSpan]]:
+    """``spans`` in bands top to bottom: each span within ``reach`` points down of its band's first middle."""
+    bands: list[list[TextSpan]] = []
+    for s in sorted(spans, key=lambda s: s.center[1]):
+        if bands and s.center[1] - bands[-1][0].center[1] <= reach:
+            bands[-1].append(s)
+        else:
+            bands.append([s])
+    return bands
+
+
+def _stacks(page: Page, free: list[_Segment], downs: list[_Segment], tolerance: float) -> list[Table | NotATable]:
+    """The tables ruled by their rows alone among ``free`` (level rules touching no rule down), or why a stack is none.
+
+    Rules of one extent are one stack; of its rules, from the top, the longest run that is a table (:func:`_stack`)
+    is one, and the search goes on below it. A stack no run of which is a table is named, with why the whole is none.
+    """
+    found: list[Table | NotATable] = []
+    for rules in _extents(free, tolerance):
+        here: list[Table] = []
+        why = ''
+        start = 0
+        while start <= len(rules) - STACK_RULES:
+            for end in range(len(rules), start + STACK_RULES - 1, -1):
+                try:
+                    here.append(_stack(page, rules[start:end], downs, tolerance))
+                except _Broken as broken:
+                    why = why or str(broken)  # the whole stack's reason: tried first
+                    continue
+                start = end
+                break
+            else:
+                start += 1
+        found += here or [NotATable(_stack_box(rules), why)]
+    return found
+
+
+def _extents(free: list[_Segment], tolerance: float) -> list[list[_Segment]]:
+    """``free`` level rules in stacks of one extent, top to bottom, those of :data:`STACK_RULES` rules or more.
+
+    One extent: each end within ``tolerance`` of the stack's first rule's. Rules of a stack within ``tolerance`` of one
+    another across are one (a double rule).
+    """
+    stacks: list[list[_Segment]] = []
+    for rule in sorted(free, key=lambda r: (r[1], r[2], r[0])):
+        same = next((k for k in stacks if max(abs(k[0][1] - rule[1]), abs(k[0][2] - rule[2])) <= tolerance), None)
+        if same is None:
+            stacks.append([rule])
+        else:
+            same.append(rule)
+    snapped = (sorted(_snap(k, tolerance)) for k in stacks)
+    return [k for k in snapped if len(k) >= STACK_RULES]
+
+
+def _stack_box(rules: list[_Segment]) -> BBox:
+    """The box from the first of stacked ``rules`` (top to bottom) to the last, across their extent."""
+    return BBox(min(r[1] for r in rules), rules[0][0], max(r[2] for r in rules), rules[-1][0])
+
+
+def _stack(page: Page, rules: list[_Segment], downs: list[_Segment], tolerance: float) -> Table:
+    """The table ruled by stacked level ``rules``, top to bottom; raises :class:`_Broken` naming what makes it none."""
+    box = _stack_box(rules)
+    inner = BBox(box.x0 + tolerance, box.y0 + tolerance, box.x1 - tolerance, box.y1 - tolerance)
+    if any(inner.x0 < x < inner.x1 and lo < inner.y1 and inner.y0 < hi for x, lo, hi in downs):
+        msg = 'a rule runs down it (a figure, a frame)'
+        raise _Broken(msg)
+    drawn = (p.provenance.bbox for p in page.paths if _shows(p.stroke) or _shows(p.fill))
+    # a shape holding the whole stack is its ground (a page's color, a panel behind it), nothing drawn in it
+    if any(b is not None and b.height > THIN and _overlap(b, inner) and not _within(box, b, 0.0) for b in drawn):
+        msg = 'something else is drawn in it (a figure, a frame, shading)'
+        raise _Broken(msg)
+    if any(f.provenance.bbox is not None and _within(f.provenance.bbox, box, tolerance) for f in page.figures):
+        msg = 'an image lies in it (a figure)'
+        raise _Broken(msg)
+    spans = [
+        s
+        for s in page.spans
+        if spaced(s.text).strip() and upright(s) and box.x0 <= s.center[0] <= box.x1 and box.y0 < s.center[1] < box.y1
+    ]
+    if spans and box.width < STACK_LENGTH * statistics.median(s.size for s in spans):
+        msg = 'its rules are short (fraction bars, stacked)'
+        raise _Broken(msg)
+    for s in spans:
+        own = s.provenance.bbox
+        if any(own.y0 + own.height / 4 < at < own.y1 - own.height / 4 for at, _, _ in rules):
+            msg = 'text crosses a rule'
+            raise _Broken(msg)
+    table = aligned(spans, body=[s for s in spans if s.center[1] > rules[1][0]])  # below the header's rule
+    if table is None:
+        msg = 'its text makes no two rows of two columns'
+        raise _Broken(msg)
+    if not all(any(t and len(t.split()) <= SHORT_CELL for t in row) for row in table.rows):
+        msg = 'a row holds no short cell (prose, not cells)'
+        raise _Broken(msg)
+    if len(table.rows[0]) == 2 and all(_MARKER.match(row[0]) for row in table.rows[1:]):  # noqa: PLR2004 -- marker, item
+        msg = 'a list (a marker before each item)'
+        raise _Broken(msg)
+    return Table(table.rows, table.cell_bboxes, table.provenance.at(bbox=box))

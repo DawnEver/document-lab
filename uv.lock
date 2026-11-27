@@ -20,8 +20,8 @@ overrides = [
 
 [[package]]
 name = "ai-lab"
-version = "0.0.1.dev456+g919a55130"
-source = { git = "https://github.com/DawnEver/ai-lab.git#919a5513044c00c8363fb4b5a955f6bdc369f254" }
+version = "0.0.1.dev458+g92c7a763f"
+source = { git = "https://github.com/DawnEver/ai-lab.git#92c7a763f7a415b9e8811f3c8e187d1d346fb96d" }
 dependencies = [
     { name = "lab-commons", extra = ["paths"] },
 ]
@@ -593,8 +593,8 @@ nvtx = [
 
 [[package]]
 name = "dev-lab"
-version = "0.0.1.dev5250+g242f78389"
-source = { git = "https://github.com/DawnEver/dev-lab.git#242f78389386921a1ccff699ecd784cdeccaaf33" }
+version = "0.0.1.dev5260+g7956b0968"
+source = { git = "https://github.com/DawnEver/dev-lab.git#7956b0968797b563400ef4da9892384100602f97" }
 dependencies = [
     { name = "cryptography" },
     { name = "lab-commons", extra = ["io", "paths", "structured", "units"] },
@@ -661,7 +661,6 @@ dev = [
     { name = "ruff" },
 ]
 formula = [
-    { name = "pillow" },
     { name = "torch", version = "2.15.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'win32'" },
     { name = "torch", version = "2.15.0+cu132", source = { registry = "https://download.pytorch.org/whl/cu132" }, marker = "sys_platform == 'win32'" },
     { name = "transformers" },
@@ -684,7 +683,6 @@ requires-dist = [
     { name = "marker-pdf", marker = "extra == 'gpu'", specifier = "<2.2" },
     { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.7" },
     { name = "numpy" },
-    { name = "pillow", marker = "extra == 'formula'" },
     { name = "pymupdf", specifier = "<2" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "python-xlib", marker = "sys_platform == 'linux' and extra == 'capture'" },

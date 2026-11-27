@@ -47,3 +47,21 @@ pub fn one_page(page_extra: &str, content: &str, extra: &[&str]) -> Vec<u8> {
     objects.extend(extra.iter().map(|s| (*s).to_string()));
     pdf(&objects.iter().map(String::as_str).collect::<Vec<_>>())
 }
+
+/// A stream object's source text holding `data` in hex (`/ASCIIHexDecode`), its dictionary also stating `dict`.
+#[allow(
+    dead_code,
+    reason = "only the test crates embedding binary data use it"
+)]
+#[must_use]
+pub fn hex_stream(dict: &str, data: &[u8]) -> String {
+    use std::fmt::Write;
+    let hex = data.iter().fold(String::new(), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
+    });
+    stream(
+        &format!("{dict} /Filter /ASCIIHexDecode"),
+        &format!("{hex}>"),
+    )
+}

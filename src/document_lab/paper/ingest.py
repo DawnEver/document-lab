@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 import pymupdf
 
+from document_lab.agreement import compare
 from document_lab.paper.convert import convert
 from document_lab.paper.output import write_paper_output
 from document_lab.paper.sections import clean_sections, split_sections
@@ -44,6 +45,9 @@ class Ingested:
     figures: int
     tables: int
     appended: tuple[Path, ...]
+    #: Where a tagged PDF's tags and layout's inference disagree, in words (`document_lab.agreement`); empty for an
+    #: untagged PDF or marker's conversion.
+    disagreements: tuple[str, ...] = ()
 
 
 #: Render scale of a scanned page: 3x (216 dpi) keeps a catalogue's 6 pt table digits legible.
@@ -78,11 +82,16 @@ def _scanned_pages(pdf: Path, out_dir: Path) -> int:
     return len(inked)
 
 
-def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> Ingested:
-    """Convert ``pdf`` (with ``tool``, else the best available) and write its paper layout into ``out_dir``."""
+def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None, tagged: bool = True) -> Ingested:
+    """Convert ``pdf`` (with ``tool``, else the best available) and write its paper layout into ``out_dir``.
+
+    ``tagged``: a tagged PDF's sections are its tagged headings (`document_lab.convert`); False infers them.
+    """
     pdf = pdf.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    md_text, used = convert(pdf, out_dir, tool=tool)
+    md_text, used = convert(pdf, out_dir, tool=tool, tagged=tagged)
+    compared = compare(read_pdf(pdf)) if used == 'ir' else None
+    disagreements = compared.disagreements if compared is not None else ()
     main, appended = clean_sections(split_sections(md_text))
     if not main and md_text.strip():
         # A drawing or data sheet, not a paper: every fragment is too short for the paper filters, so the
@@ -91,7 +100,7 @@ def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> Ingested:
     if not main:
         scanned = _scanned_pages(pdf, out_dir)
         if scanned:
-            return Ingested(used, scanned, scanned, 0, ())
+            return Ingested(used, scanned, scanned, 0, (), disagreements)
         msg = f'{pdf.name}: the converted markdown has no section'
         raise NoSections(msg)
     n_sec, n_fig, n_tbl = write_paper_output(main, out_dir, md_text, pdf_path=pdf)
@@ -111,4 +120,4 @@ def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> Ingested:
         written.append(target)
 
     shutil.rmtree(out_dir / 'img' / 'flat', ignore_errors=True)
-    return Ingested(used, n_sec, n_fig, n_tbl, tuple(written))
+    return Ingested(used, n_sec, n_fig, n_tbl, tuple(written), disagreements)

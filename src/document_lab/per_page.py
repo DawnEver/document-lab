@@ -14,6 +14,10 @@ reaching the page's foot is marked as continuing on the next page. ``INDEX.md`` 
 headings each opens and the regions it holds. A page without text is written all the same, its markdown empty, and
 named in :attr:`Paged.textless` -- never silently dropped.
 
+A tagged PDF's tags give its reading order, headings, paragraphs, tables and figures (`document_lab.tags`; the
+``tagged`` option, on by default -- False infers them all); where its tags and the inference disagree is reported
+(`document_lab.agreement`, :attr:`Paged.disagreements`).
+
 The PDF itself goes with them, so the layout stands alone. ``out`` is a directory, or -- ending ``.zip`` -- one
 archive holding the same files (written beside as ``<out>.part`` and moved into place when whole): a document is
 one file to keep, send or index.
@@ -31,6 +35,7 @@ import numpy as np
 import pymupdf
 
 from document_lab import layout
+from document_lab.agreement import compare
 from document_lab.ink import Drawing, drawings
 from document_lab.ir import BBox
 from document_lab.markdown import page_markdowns
@@ -60,6 +65,9 @@ class Paged:
     out: Path
     pages: int
     textless: tuple[int, ...]
+    #: Where a tagged PDF's tags and layout's inference disagree, in words (`document_lab.agreement`); empty for an
+    #: untagged PDF.
+    disagreements: tuple[str, ...] = ()
 
 
 def _picture(pdf: pymupdf.Document, page: Page) -> tuple[pymupdf.Pixmap, float]:
@@ -156,17 +164,22 @@ def _clauses(markdown: str) -> str:
     return '; '.join(line.lstrip('#').strip() for line in markdown.splitlines() if line.startswith('##'))
 
 
-def write_pages(pdf: Path, out: Path) -> Paged:
-    """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive."""
+def write_pages(pdf: Path, out: Path, *, tagged: bool = True) -> Paged:
+    """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive.
+
+    ``tagged``: a tagged PDF's tags give what they state (see the module); False infers it all from layout.
+    """
     read = read_pdf(pdf)
     body = layout.body_size(read)
-    texts = page_markdowns(read)
+    texts = page_markdowns(read, tagged=tagged)
+    structure = read.structure if tagged else None
     width = max(3, len(str(len(texts))))
     index = [f'# {pdf.stem}', '']
     textless = []
     with pymupdf.open(pdf) as doc:
         drawn = [_drawings(*_picture(doc, page), page, body) for page in read.pages]
     drawn = _without_furniture(drawn, body)
+    compared = compare(read, drawn)
     with pymupdf.open(pdf) as doc, _files(out) as put:
         if out / pdf.name != pdf:  # the layout stands alone; a PDF already where it goes is not copied onto itself
             put(pdf.name, pdf.read_bytes())
@@ -175,15 +188,15 @@ def write_pages(pdf: Path, out: Path) -> Paged:
             pix, scale = _picture(doc, page)
             put(f'{name}.png', pix.tobytes('png'))
             links = []
-            for region in (found := regions(page, body, drawn[number - 1])):
+            for region in (found := regions(page, body, drawn[number - 1], structure=structure)):
                 file = _file(name, region)
                 put(file, _cut(pix, scale, region).tobytes('png'))
                 more = ' (continues on the next page)' if region.bbox.y1 >= page.height - _FOOT else ''
-                links.append((region.label, f'![{region.label}]({file}){more}'))
+                links.append((region.label, f'![{region.alt or region.label}]({file}){more}'))
             put(f'{name}.md', f'[{pdf.name}, page {number}]({name}.png)\n\n{_linked(text, links)}'.encode())
             if not text.strip():
                 textless.append(number)
             notes = [part for part in (_clauses(text), ', '.join(r.label for r in found)) if part]
             index.append(f'- [page {number}]({name}.md)' + (f' -- {" | ".join(notes)}' if notes else ''))
         put('INDEX.md', ('\n'.join(index) + '\n').encode())
-    return Paged(out, len(texts), tuple(textless))
+    return Paged(out, len(texts), tuple(textless), compared.disagreements if compared is not None else ())

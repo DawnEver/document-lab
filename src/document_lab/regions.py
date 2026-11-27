@@ -21,6 +21,12 @@ The caller that holds the page's picture may also hand over its drawings (`docum
 number or row of cells told is a region too -- a ruled table of two columns, a figure without a caption
 (``Untitled figure N``), an equation without a number (``Untitled equation N``). Regions still read no pixels: a
 drawing is its box and what it is drawn with.
+
+A tagged PDF states its tables and figures (`document_lab.tags`): given its structure, a page the tags cover takes
+them from its ``Table`` and ``Figure`` elements in place of the inferred ones (equations are still inferred), each
+region the box of what its element covers there; a page they cover nothing on is inferred as an untagged one is.
+A tagged region's label is its caption's (``Fig. 3``, ``Table 2`` -- a ``Caption`` among its kids or next to it), else
+an inferred region's of its kind it overlaps, else ``Untitled ...``; a figure keeps its ``/Alt``.
 """
 
 from __future__ import annotations
@@ -29,14 +35,14 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal
 
-from document_lab import layout
+from document_lab import layout, tags
 from document_lab.ir import BBox
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from document_lab.ink import Drawing
-    from document_lab.ir import Page
+    from document_lab.ir import Page, Structure
 
 __all__ = ['Region', 'regions']
 
@@ -78,6 +84,10 @@ FRAME_FILL: Final = 0.8
 #: A drawing at most this many body sizes high whose text reads as no word is an equation without a number.
 EQUATION_HEIGHT: Final = 4.0
 _HEADING: Final = re.compile(r'^\d+(?:\.\d+)*\.?\s+[A-Z]')
+#: A tagged caption's label: ``Figure``, ``Fig.`` or ``Table``, then its number.
+_TAGGED_CAPTION: Final = re.compile(r'^(Figure|Fig|Table)\.?\s*([A-Z]?\.?\d+(?:\.\d+)*)', re.IGNORECASE)
+#: Two regions are one when they share this share of the smaller's area.
+SAME_REGION: Final = 0.5
 
 Kind = Literal['figure', 'table', 'equation']
 
@@ -89,6 +99,16 @@ class Region:
     kind: Kind
     label: str
     bbox: BBox
+    #: What a tagged figure shows, in the document's words (its ``/Alt``); None when it states none.
+    alt: str | None = None
+
+
+def overlap(a: BBox, b: BBox) -> float:
+    """The share of the smaller box's area the two boxes share (0 when either has none)."""
+    w = min(a.x1, b.x1) - max(a.x0, b.x0)
+    h = min(a.y1, b.y1) - max(a.y0, b.y0)
+    smaller = min(a.width * a.height, b.width * b.height)
+    return max(w, 0.0) * max(h, 0.0) / smaller if smaller > 0 else 0.0
 
 
 class _Page:
@@ -334,12 +354,45 @@ def _bands_of(page: _Page, lines: list[layout.Line]) -> list[list[layout.Line]]:
     return bands
 
 
-def regions(page: Page, body: float, drawings: Sequence[Drawing] = (), *, include_hidden: bool = False) -> list[Region]:
+def _tagged(page: _Page, structure: Structure, inferred: list[Region]) -> list[Region]:
+    """The page's tagged tables and figures, labeled (see the module), and its inferred equations."""
+    found = [r for r in inferred if r.kind == 'equation']
+    untitled = {'table': 0, 'figure': 0}
+    pad = PAD * page.body
+    for stated in tags.regions(structure, page.page.number):
+        box = BBox(
+            max(stated.bbox.x0 - pad, 0.0),
+            max(stated.bbox.y0 - pad, 0.0),
+            min(stated.bbox.x1 + pad, page.page.width),
+            min(stated.bbox.y1 + pad, page.page.height),
+        )
+        caption = _TAGGED_CAPTION.match(stated.caption or '')
+        near = [r for r in inferred if r.kind == stated.kind and overlap(r.bbox, box) >= SAME_REGION]
+        if caption:
+            label = f'{"Table" if caption.group(1).lower() == "table" else "Figure"} {caption.group(2)}'
+        elif near:
+            label = near[0].label
+        else:
+            untitled[stated.kind] += 1
+            label = f'Untitled {stated.kind} {untitled[stated.kind]}'
+        found.append(Region(stated.kind, label, box, stated.alt))
+    return found
+
+
+def regions(
+    page: Page,
+    body: float,
+    drawings: Sequence[Drawing] = (),
+    *,
+    include_hidden: bool = False,
+    structure: Structure | None = None,
+) -> list[Region]:
     """The figures, tables and equations of ``page`` (``body``: the document's body size), top to bottom.
 
     ``drawings``: the page's drawn ink (`document_lab.ink`), when the caller holds its picture;
     without them a region is told by its words alone. ``include_hidden``: what hidden layers draw counts too (see
-    `document_lab.ir`).
+    `document_lab.ir`). ``structure``: a tagged document's (:attr:`~document_lab.ir.Document.structure`), whose
+    tables and figures stand in for the inferred ones on a page it covers (see the module); None infers them all.
     """
     page = page.shown(include_hidden=include_hidden)
     if not page.spans or body <= 0:
@@ -354,4 +407,6 @@ def regions(page: Page, body: float, drawings: Sequence[Drawing] = (), *, includ
             found.append(_equation(judged, line, f'({number.group(1)})'))
     found += _untitled_tables(judged, found)
     found += _drawn(judged, drawings, found)
+    if structure is not None and tags.covers(structure, page.number):
+        found = _tagged(judged, structure, found)
     return sorted(found, key=lambda r: r.bbox.y0)

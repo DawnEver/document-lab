@@ -64,15 +64,16 @@ def choose_tool() -> Tool:
     return 'ir'
 
 
-def convert(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> tuple[str, Tool]:
+def convert(pdf: Path, out_dir: Path, *, tool: Tool | None = None, tagged: bool = True) -> tuple[str, Tool]:
     """The markdown of ``pdf`` and the tool used (``tool``, else :func:`choose_tool`).
 
-    marker's images land in ``out_dir/img/flat``; the IR path writes none (figures are cropped later).
+    marker's images land in ``out_dir/img/flat``; the IR path writes none (figures are cropped later). ``tagged``: on
+    the IR path, a tagged PDF's reading order, headings and paragraphs are its tags' (`document_lab.markdown`).
     """
     used = tool or choose_tool()
     flat = out_dir / 'img' / 'flat'
     flat.mkdir(parents=True, exist_ok=True)
-    return (_run_marker(pdf, out_dir) if used == 'marker' else to_markdown(read_pdf(pdf))), used
+    return (_run_marker(pdf, out_dir) if used == 'marker' else to_markdown(read_pdf(pdf), tagged=tagged)), used
 
 
 def _run_marker(pdf: Path, out_dir: Path) -> str:

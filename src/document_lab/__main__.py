@@ -34,10 +34,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     pages.add_argument('pdf', type=Path)
     pages.add_argument('out', type=Path, help='the directory to write the pages into, or a .zip archive')
+    pages.add_argument('--untagged', action='store_true', help="infer a tagged PDF's structure as an untagged one's")
     paper = sub.add_parser('paper', help='a paper PDF to per-section markdown and cropped figures')
     paper.add_argument('pdf', type=Path)
     paper.add_argument('out', type=Path, help='the directory to write the paper layout into')
     paper.add_argument('--tool', choices=('marker', 'ir'), help='force a converter (default: best available)')
+    paper.add_argument('--untagged', action='store_true', help="infer a tagged PDF's sections as an untagged one's")
     return parser
 
 
@@ -52,8 +54,9 @@ def _ocr(args: argparse.Namespace) -> int:
 def _pages(args: argparse.Namespace) -> int:
     from document_lab.per_page import write_pages  # noqa: PLC0415
 
-    done = write_pages(args.pdf, args.out)
+    done = write_pages(args.pdf, args.out, tagged=not args.untagged)
     emit(f'{done.out}: {done.pages} page(s)')
+    _disagreements(done.disagreements)
     if len(done.textless) == done.pages:
         emit('no page has text: a capture needs `document-lab ocr` first')
         return 1
@@ -65,12 +68,21 @@ def _pages(args: argparse.Namespace) -> int:
 def _paper(args: argparse.Namespace) -> int:
     from document_lab.paper.ingest import ingest  # noqa: PLC0415
 
-    done = ingest(args.pdf, args.out, tool=args.tool)
+    done = ingest(args.pdf, args.out, tool=args.tool, tagged=not args.untagged)
     emit(
         f'{args.out}: {done.sections} sections, {done.figures} figures, {done.tables} tables '
         f'({done.tool}); {len(done.appended)} appended paper(s)'
     )
+    _disagreements(done.disagreements)
     return 0
+
+
+def _disagreements(notes: tuple[str, ...]) -> None:
+    """Where a tagged PDF's tags and the inference disagree, each in a line: the tags were used (``--untagged`` not)."""
+    if notes:
+        emit(f'the tags and the inference disagree ({len(notes)}; --untagged infers instead):')
+        for note in notes:
+            emit(f'  {note}')
 
 
 _RUN = {

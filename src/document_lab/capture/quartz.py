@@ -148,6 +148,7 @@ def _lib(name: str) -> ctypes.CDLL:
             'AXUIElementSetAttributeValue': (i32, [p, p, p]),
             'AXUIElementPerformAction': (i32, [p, p]),
             'AXUIElementGetPid': (i32, [p, ctypes.POINTER(ctypes.c_int)]),
+            'AXUIElementCopyElementAtPosition': (i32, [p, ctypes.c_float, ctypes.c_float, ctypes.POINTER(p)]),
         },
     }
     for fn, (restype, argtypes) in table.get(name, {}).items():
@@ -286,9 +287,14 @@ def _hit(x: int, y: int) -> int:
 
     It is how the pointer's input is routed, so it passes through a window's transparent parts -- the Dock's window
     spans the whole screen above every program's and takes only what lands on the Dock -- where a window's bounds
-    cannot. AppKit's points run up from the main display's bottom edge, Quartz's down from its top.
+    cannot. AppKit's points run up from the main display's bottom edge, Quartz's down from its top. AppKit is asked
+    as an application (``NSApplication sharedApplication``; a process running Tk already is one).
     """
     objc = _objc()
+    shared = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(
+        ctypes.cast(objc.objc_msgSend, ctypes.c_void_p).value
+    )
+    shared(objc.objc_getClass(b'NSApplication'), objc.sel_registerName(b'sharedApplication'))
     at = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, _Point, ctypes.c_long)(
         ctypes.cast(objc.objc_msgSend, ctypes.c_void_p).value
     )
@@ -296,6 +302,22 @@ def _hit(x: int, y: int) -> int:
     point = _Point(x + 0.5, main.size.height - (y + 0.5))  # the middle of the pixel, in AppKit's points
     selector = objc.sel_registerName(b'windowNumberAtPoint:belowWindowWithWindowNumber:')
     return at(objc.objc_getClass(b'NSWindow'), selector, point, 0)
+
+
+def _nobody(x: int, y: int) -> str:
+    """Why no window was found under the point ``x, y``: what the window server and Accessibility each say is there."""
+    ax, cf = _ax(), _cf()
+    system, element = ax.AXUIElementCreateSystemWide(), ctypes.c_void_p()
+    try:
+        error = ax.AXUIElementCopyElementAtPosition(system, x, y, ctypes.byref(element))
+    finally:
+        cf.CFRelease(system)
+    pid = ctypes.c_int()
+    if not error and element.value:
+        ax.AXUIElementGetPid(element.value, ctypes.byref(pid))
+        cf.CFRelease(element.value)
+    found = f'pid {pid.value}' if pid.value else f'nothing (AXError {error})'
+    return f'the window server names window {_hit(x, y)} at {x},{y}; Accessibility finds {found} there'
 
 
 def _may_post() -> bool:
@@ -484,6 +506,8 @@ def _require_on_top(target: Window | Region, x: int, y: int) -> None:
         if under is None or under.number != target.handle:
             name = 'nothing' if under is None else f'{under.title or under.owner!r} (window {under.number})'
             msg = f'{name} covers the middle of {target.title!r}: bring it to the front (or method message)'
+            if under is None:
+                msg += f' ({_nobody(x, y)})'
             raise OSError(msg)
 
 
@@ -590,7 +614,7 @@ def scroll(target: Window | Region, notches: int, method: str) -> None:
     elif method == 'message':
         under = _under(x, y)
         if under is None:
-            msg = f'no window is under the middle of {target}'
+            msg = f'no window is under the middle of {target} ({_nobody(x, y)})'
             raise OSError(msg)
         event = _wheel(notches, x, y)
         cg.CGEventPostToPid(under.pid, event)

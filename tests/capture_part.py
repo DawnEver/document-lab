@@ -483,6 +483,23 @@ print('ok')
     assert done.stdout.strip() == 'ok', done.stdout
 
 
+def test_an_answer_given_before_the_overlay_waits_is_kept():
+    """Regression: a confirm (or Esc) handled by an ``update`` before ``run`` entered Tk's loop was undone when the
+    loop started, and the overlay waited for nothing (macos-latest, 2026-11-27). Run in a `child`, so a wait fails."""
+    script = """
+from document_lab.capture import desktop
+from document_lab.capture.screen import Region
+o = desktop._Overlay(desktop.system().windows(), desktop.virtual_screen())
+o.mark(Region(150, 120, 400, 250))
+o.confirm()
+print(repr(o.run()))
+"""
+    with the_desktop():
+        done = child(script)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == repr(Region(150, 120, 400, 250)), done.stdout
+
+
 def test_adjusting_opens_the_overlay_with_the_area_set_already_marked():
     """Adjust reopens the selection on the area set: confirmed untouched, it comes back as it was."""
     script = """
@@ -508,6 +525,7 @@ __all__ = [
     'test_a_scrolled_window_is_captured_whole',
     'test_a_wheel_onto_a_covered_window_refuses',
     'test_adjusting_opens_the_overlay_with_the_area_set_already_marked',
+    'test_an_answer_given_before_the_overlay_waits_is_kept',
     'test_confirming_by_the_confirm_button_does_not_free_the_canvas_under_its_own_event',
     'test_max_height_stops_early',
     'test_nothing_is_taken_before_it_is_confirmed',

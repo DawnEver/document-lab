@@ -110,19 +110,19 @@ pub fn type1_encoding(program: &[u8]) -> Option<Vec<Option<String>>> {
         .unwrap_or(rest.len());
     let mut names = vec![None; 256];
     let mut found = false;
-    for op in crate::content::operations(&rest[..end]).0 {
+    crate::content::operations(&rest[..end], |op| {
         if op.operator == b"put"
             && let [
                 ..,
                 crate::object::Object::Integer(code),
                 crate::object::Object::Name(name),
-            ] = op.operands.as_slice()
+            ] = op.operands
             && let Some(slot) = usize::try_from(*code).ok().and_then(|c| names.get_mut(c))
         {
             *slot = Some(String::from_utf8_lossy(name).into_owned());
             found = true;
         }
-    }
+    });
     found.then_some(names)
 }
 

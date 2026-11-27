@@ -47,6 +47,9 @@ pub struct Span {
     /// Whether it is written vertically (its font's writing mode): its glyphs stand upright and step down its
     /// column, its text reading top to bottom.
     pub vertical: bool,
+    /// The unit vector its baseline runs along, in page space (y down): `(1, 0)` for text set left to right,
+    /// `(0, -1)` for text set bottom to top.
+    pub direction: (f64, f64),
     /// The number it shares, on its page, with the spans it continues or that continue it, no word gap between:
     /// a change of font, size or baseline inside a word (`Head` set bold in `Headline`; the `2` of `H2O`). None
     /// when it continues no span and none continues it.
@@ -58,7 +61,6 @@ struct Open {
     /// Where its first glyph starts.
     origin: Point,
     end: Point,
-    direction: (f64, f64),
     /// Whether a glyph with ink (not white-space) is in it yet: only those make its box.
     inked: bool,
 }
@@ -83,7 +85,7 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
                 } else {
                     (1.0, 0.0)
                 };
-                open.as_ref().map_or(along, |o| o.direction)
+                open.as_ref().map_or(along, |o| o.span.direction)
             };
             let piece = glyph.text.as_deref().unwrap_or("\u{FFFD}");
             let joined = open
@@ -116,11 +118,11 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
                     render_mode: text.render_mode,
                     layer: text.layer.clone(),
                     vertical: text.vertical,
+                    direction,
                     unspaced: None,
                 },
                 origin: glyph.origin,
                 end: glyph.end,
-                direction,
                 inked: inks(piece),
             });
         }
@@ -175,7 +177,8 @@ fn join(open: &Open, text: &TextEvent, origin: Point, direction: (f64, f64)) -> 
         || open.span.render_mode != text.render_mode
         || open.span.layer != text.layer
         || open.span.vertical != text.vertical
-        || (open.direction.0 - direction.0).abs() + (open.direction.1 - direction.1).abs() > 0.01
+        || (open.span.direction.0 - direction.0).abs() + (open.span.direction.1 - direction.1).abs()
+            > 0.01
     {
         return None;
     }
@@ -206,10 +209,10 @@ fn continues_word(before: &Open, next: &Open) -> bool {
         return false;
     }
     let size = before.span.size.max(next.span.size).max(f64::MIN_POSITIVE);
-    let (dx, dy) = (before.direction.0, before.direction.1);
+    let (dx, dy) = before.span.direction;
     let along = |from: Point| (next.origin.x - from.x) * dx + (next.origin.y - from.y) * dy;
     let across = -(next.origin.x - before.end.x) * dy + (next.origin.y - before.end.y) * dx;
-    (dx - next.direction.0).abs() + (dy - next.direction.1).abs() <= 0.01
+    (dx - next.span.direction.0).abs() + (dy - next.span.direction.1).abs() <= 0.01
         && (-0.5 * size..=SPACE * size).contains(&along(before.end))
         && across.abs() <= RISE * size
 }

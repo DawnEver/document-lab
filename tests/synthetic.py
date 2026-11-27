@@ -419,6 +419,8 @@ def image_pdf(
     xobject = doc.get_new_xref()
     doc.update_object(xobject, f'<< /Type /XObject /Subtype /Image {image} >>')
     doc.update_stream(xobject, stored, compress=deflate)
+    if not deflate:  # storing it as given drops the dictionary's /Filter and its parameters: state them again
+        doc.update_object(xobject, f'<< /Type /XObject /Subtype /Image {image} /Length {len(stored)} >>')
     content = doc.get_new_xref()
     doc.update_object(content, '<< >>')
     cm = ' '.join(f'{v:g}' for v in (matrix or (size[0], 0, 0, size[1], 0, 0)))
@@ -432,6 +434,15 @@ def image_pdf(
     doc.save(path)
     doc.close()
     return path
+
+
+def fax_g4(white: np.ndarray) -> bytes:
+    """``white`` -- rows of 1 white, 0 black, as CCITT fax decodes by default -- coded Group 4 by MuPDF."""
+    rows, columns = white.shape
+    packed = np.packbits(white.astype(np.uint8), axis=1).tobytes()
+    stride = len(packed) // rows
+    coded = pymupdf.mupdf.fz_compress_ccitt_fax_g4(pymupdf.mupdf.python_buffer_data(packed), columns, rows, stride)
+    return bytes(coded.fz_buffer_extract())
 
 
 TABLE_ROWS = (('Parameter', 'Value', 'Unit'), ('alpha', '1.25', 'mm'), ('beta', '-3', 'kg'), ('gamma', '4.5e2', 's'))

@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, NamedTuple
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Iterable, Iterator, Sequence
 
     import numpy as np
 
@@ -139,6 +139,9 @@ class TextSpan:
     #: text reads top to bottom, its box is the column's. Text turned sideways is not this: it is written
     #: horizontally along a turned baseline.
     vertical: bool = False
+    #: The unit vector its baseline runs along, in page space (y down): ``(1, 0)`` for text set left to right,
+    #: ``(0, -1)`` for text set bottom to top (a margin stamp turned sideways).
+    direction: tuple[float, float] = (1.0, 0.0)
     #: Drawn by optional content the default view hides (see the module).
     hidden: bool = False
     #: The subtype of the annotation whose appearance draws it; None for the page's content.
@@ -154,16 +157,21 @@ class TextSpan:
         return ((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class VectorPath:
-    """One subpath of a page's vector drawing, curves flattened to points (``read_pdf``'s ``curve_samples`` each).
+    """One subpath of a page's vector drawing, curves flattened to points (as ``read_pdf`` says).
 
     A color is RGB in 0..1 when its color space defines one, else its own components (a separation's tint); a
     pattern's has none but an uncolored tiling's tint. A shading painted over the clip (``sh``) is the closed
     rectangle of the box it may cover, filled with a ``'shading'`` pattern.
+
+    A path is compared and hashed by identity (``eq=False``): it is one mark drawn on its page -- two drawn alike
+    are still two -- and its points, an array, have no single truth value to compare by.
     """
 
-    points: tuple[tuple[float, float], ...]
+    #: Its points in drawing order: an ``(n, 2)`` float64 array of ``(x, y)`` rows, n >= 2, read-only (the
+    #: reader's are views of one array per page).
+    points: np.ndarray
     #: The stroking color; None when the path is not stroked.
     stroke: tuple[float, ...] | None
     #: The stroke's line width (points); 0 when not stroked.
@@ -283,13 +291,17 @@ class Page:
 
 @dataclass(frozen=True, slots=True)
 class Document:
-    """A source document by content hash and URI, and its pages."""
+    """A source document by content hash and URI, and its pages.
+
+    ``pages`` is any sequence of pages: a tuple, or ``read_pdf``'s, which reads each page when it is first asked for.
+    """
 
     sha256: str
     uri: str
-    pages: tuple[Page, ...] = field(default=())
-    #: What the reader repaired to read the file (a rebuilt cross-reference table, ...), in words.
-    repairs: tuple[str, ...] = ()
+    pages: Sequence[Page] = field(default=())
+    #: What the reader repaired to read the file (a rebuilt cross-reference table, ...), in words: a reader reading
+    #: pages when asked for adds what it repairs to read one as it reads it.
+    repairs: Sequence[str] = ()
 
     def page(self, number: int) -> Page:
         """The page with 1-based ``number``."""

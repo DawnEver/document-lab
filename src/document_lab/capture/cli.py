@@ -15,6 +15,7 @@ from lab_commons.log import emit
 
 from document_lab.capture.export import SCREEN_DPI
 from document_lab.capture.join import JOIN_TOLERANCE
+from document_lab.capture.screen import Region, Window
 from document_lab.capture.session import Pace, Settling
 from document_lab.capture.stitch import Match
 
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
 
     import numpy as np
 
-    from document_lab.capture.desktop import Hud, Panel, Region, Window
+    from document_lab.capture.desktop import Hud, Panel
     from document_lab.capture.export import PdfWriter
     from document_lab.capture.pages import Rhythm
     from document_lab.capture.session import Capture, Lost
@@ -33,8 +34,18 @@ __all__ = ['add_files_parser', 'add_merge_parser', 'add_parser', 'run', 'run_fil
 
 
 def memory() -> Path:
-    """Where the last area confirmed is kept: this user's, on this machine (the environment is read here, the entry)."""
-    return Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'document-lab' / 'capture-area.json'
+    """Where the last area confirmed is kept: this user's, on this machine (the environment is read here, the entry).
+
+    Each OS's place for a program's own state: ``%LOCALAPPDATA%`` on Windows, ``~/Library/Application Support`` on
+    macOS, ``$XDG_STATE_HOME`` (``~/.local/state``) elsewhere.
+    """
+    if sys.platform == 'win32':
+        base = Path(os.environ['LOCALAPPDATA'])
+    elif sys.platform == 'darwin':
+        base = Path.home() / 'Library' / 'Application Support'
+    else:
+        base = Path(os.environ.get('XDG_STATE_HOME') or Path.home() / '.local' / 'state')
+    return base / 'document-lab' / 'capture-area.json'
 
 
 def _rect(text: str) -> tuple[int, int, int, int]:
@@ -50,7 +61,7 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     """Add the ``capture`` subcommand to ``sub`` and return its parser."""
     capture = sub.add_parser(
         'capture',
-        help='a window or screen region, scrolled to its end and stitched, to a PDF (Windows)',
+        help='a window or screen region, scrolled to its end and stitched, to a PDF (Windows, macOS, Linux X11)',
         description='With no target, mark one on the screen: click a window or drag a rectangle, then Enter or '
         'Confirm; the desktop stays usable until Start on the panel beside the area begins. '
         'Finish on the panel beside the area ends it and keeps what was captured.',
@@ -70,13 +81,15 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     )
     target = capture.add_mutually_exclusive_group()  # none: mark it on the screen (a click or a drag), then confirm
     target.add_argument('--window', metavar='TITLE', help='the one window whose title contains TITLE')
-    target.add_argument('--hwnd', type=lambda v: int(v, 0), help='the window with this handle (see --list)')
-    target.add_argument('--rect', type=_rect, metavar='L,T,W,H', help='a screen rectangle in physical pixels')
+    target.add_argument('--handle', type=lambda v: int(v, 0), help='the window with this handle (see --list)')
+    target.add_argument(
+        '--rect', type=_rect, metavar='L,T,W,H', help='a screen rectangle (physical pixels; points on macOS)'
+    )
     target.add_argument('--list', action='store_true', help='print the capturable windows and exit')
     capture.add_argument(
         '--now',
         action='store_true',
-        help='start at once on the area --window, --hwnd or --rect names, without waiting for Start on the panel '
+        help='start at once on the area --window, --handle or --rect names, without waiting for Start on the panel '
         '(a script, a test: nobody is there to click); a start --resume refuses ends the run with its reason',
     )
     scroll = capture.add_argument_group(
@@ -230,7 +243,7 @@ def add_files_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser
     """Add the ``capture-files`` subcommand to ``sub`` and return its parser."""
     files = sub.add_parser(
         'capture-files',
-        help='each PDF opened in its viewer (Acrobat) and captured whole, one PDF each (Windows)',
+        help='each PDF opened in its viewer (Acrobat) and captured whole, one PDF each (Windows alone)',
         description='Each PDF is opened in the viewer, its window maximized and shown full screen (one page at a '
         'time); each page is taken as it shows, paged on to the last, one PDF page each; the window is closed.',
     )
@@ -331,19 +344,21 @@ def _attempt(
     marked: object,
 ) -> tuple[int, object]:
     """Open ``pdf``, take its pages and shut it: (pages, the area marked), or the failure raised."""
+    from document_lab.capture import win32  # noqa: PLC0415 -- capture-files runs on Windows alone
+
     window = files.open_in(viewer, pdf, args.open_wait, monitor)
     try:
         if args.area == 'mark' and marked is None:
             emit('mark the page to capture (it opens on the area last confirmed), then Enter or Confirm')
-            shown = desktop.view(window, viewer.view)
+            shown = win32.view(window, viewer.view)
             chosen = desktop.select(memory(), desktop.recall(desktop.virtual_screen(), memory()) or shown)
-            marked = chosen.client() if isinstance(chosen, desktop.Window) else chosen
+            marked = desktop.area(chosen)
         shapes = files.page_shapes(pdf)
         taken = files.page_through(window, viewer, out, area=marked, shapes=shapes, dpi=args.dpi, gate=gate, park=park)
         if args.ocr is not None:
-            from document_lab.ocr import text_layer  # noqa: PLC0415
+            from document_lab.ocr import TesseractPlaces, text_layer  # noqa: PLC0415
 
-            emit(f'  text layer on {text_layer(out, out, args.ocr)} page(s)')
+            emit(f'  text layer on {text_layer(out, out, args.ocr, places=TesseractPlaces.of(os.environ))} page(s)')
         return taken, marked
     finally:
         with contextlib.suppress(OSError):
@@ -351,14 +366,23 @@ def _attempt(
 
 
 def run_files(args: argparse.Namespace) -> int:
-    """Run ``document-lab capture-files``; 0 when every PDF was captured whole."""
-    from document_lab.capture import desktop, files  # noqa: PLC0415 -- the run alone touches the desktop
+    """Run ``document-lab capture-files``; 0 when every PDF was captured whole.
+
+    Windows alone: the viewer's page view is found as the child window that shows the pages, which Windows alone
+    exposes; elsewhere the run is refused, naming that.
+    """
+    if sys.platform != 'win32':
+        emit(
+            f'capture-files drives Acrobat on Windows, finding its page view as a child window; this is {sys.platform}'
+        )
+        return 1
+    from document_lab.capture import desktop, files, win32  # noqa: PLC0415 -- the run alone touches the desktop
 
     pdfs = files.listed(args.sources)
     viewer = files.Viewer(args.viewer) if args.viewer else files.Viewer.acrobat()
     args.out.mkdir(parents=True, exist_ok=True)
-    marked = None if args.area in {'mark', 'view'} else desktop.Region(*_rect(args.area))
-    shown = desktop.monitors()
+    marked = None if args.area in {'mark', 'view'} else Region(*_rect(args.area))
+    shown = win32.monitors()
     if not 0 <= args.monitor < len(shown):
         emit(
             f'no monitor {args.monitor}: there are {len(shown)} -- '
@@ -382,7 +406,16 @@ def run_files(args: argparse.Namespace) -> int:
         for attempt in range(1, max(args.tries, 1) + 1):
             try:
                 taken, marked = _attempt(
-                    files, desktop, args, viewer, pdf, out=out, gate=gate, park=park, monitor=monitor, marked=marked
+                    files,
+                    desktop,
+                    args,
+                    viewer,
+                    pdf,
+                    out=out,
+                    gate=gate,
+                    park=park,
+                    monitor=monitor,
+                    marked=marked,
                 )
                 emit(f'  {taken} page(s) to {out}')
                 break
@@ -440,10 +473,10 @@ def _target(args: argparse.Namespace) -> Window | Region:
 
     if args.window:
         return desktop.find_window(args.window)
-    if args.hwnd is not None:
-        return desktop.window(args.hwnd)
+    if args.handle is not None:
+        return desktop.system().window(args.handle)
     if args.rect is not None:
-        return desktop.Region(*args.rect)
+        return Region(*args.rect)
     emit('click a window or drag a rectangle, then Enter or Confirm (Esc cancels); then Start on the panel')
     return desktop.select(memory())
 
@@ -509,8 +542,8 @@ def _report(result: Capture, tolerance: float = Match.tolerance) -> int:
     sys.stderr.write('\n')
     if result.stopped.startswith('blocked: '):
         emit(f'stopped after {result.frames} frames, short of the end: {result.stopped.removeprefix("blocked: ")}')
-        emit('what was stitched is written. Windows dropped the scroll: a UAC prompt, a program running as')
-        emit('administrator in front, or the lock screen / screen saver. Clear it, then capture the rest.')
+        emit('what was stitched is written. The desktop dropped the scroll, for the reason above: clear it, then')
+        emit('capture the rest (--resume).')
         return 1
     if result.stopped.startswith('unstitchable: '):
         reason = result.stopped.removeprefix('unstitchable: ')
@@ -562,7 +595,7 @@ def _started(
     from document_lab.capture import desktop  # noqa: PLC0415
 
     if now:
-        area = target.client() if isinstance(target, desktop.Window) else target
+        area = desktop.area(target)
         verdict = refuse(target, area)
         if isinstance(verdict, str):
             raise ValueError(verdict)
@@ -572,7 +605,7 @@ def _started(
         hud.begin(now)
         return target, area, hud, now == 'auto'
     while True:
-        area = target.client() if isinstance(target, desktop.Window) else target
+        area = desktop.area(target)
         hud = desktop.Hud(area)
         answer = hud.ready()
         while answer in {'start', 'auto'}:
@@ -594,10 +627,12 @@ def _started(
 
 
 def _prepare(args: argparse.Namespace) -> str | None:
-    """Name and check the output; why the capture's windows cannot open here, None when they can.
+    """Name and check the output; why the capture cannot run here, None when it can.
 
     An unnamed output is named for the time; a name Windows cannot hold (`export.check_name`)
-    and one that exists (:func:`_refuse_existing`) are refused.
+    and one that exists (:func:`_refuse_existing`) are refused. It cannot run where tkinter cannot start (the
+    selection and the panel are tkinter windows), nor where the desktop refuses it (`screen.System.problem`: a
+    permission not granted, a Wayland session).
     """
     if args.resume is not None:
         if args.png is not None:
@@ -612,20 +647,21 @@ def _prepare(args: argparse.Namespace) -> str | None:
     from document_lab.capture.export import check_name  # noqa: PLC0415
 
     if args.ocr:
-        from document_lab.ocr import check  # noqa: PLC0415
+        from document_lab.ocr import TesseractPlaces, check  # noqa: PLC0415
 
-        check(args.ocr)  # before the capture: a missing Tesseract is said now, not after it
+        # before the capture: a missing Tesseract is said now, not after it
+        check(args.ocr, TesseractPlaces.of(os.environ))
     for path in (args.out, args.png):
         if path is not None:
             check_name(path)
     _refuse_existing(args)
-    if args.now and args.window is None and args.hwnd is None and args.rect is None:
-        msg = '--now starts on a named area: give --window, --hwnd or --rect'
+    if args.now and args.window is None and args.handle is None and args.rect is None:
+        msg = '--now starts on a named area: give --window, --handle or --rect'
         raise ValueError(msg)
 
-    return desktop.tk_problem(
-        tuple(sys.version_info[:3]), sys.prefix, sys.base_prefix, os.environ
-    )  # the selection and the panel are tkinter windows
+    return desktop.tk_problem(tuple(sys.version_info[:3]), sys.prefix, sys.base_prefix, os.environ) or (
+        desktop.system().problem(sends_input=args.auto)
+    )
 
 
 def _refuse_existing(args: argparse.Namespace) -> None:
@@ -675,7 +711,7 @@ def _resumable(args: argparse.Namespace) -> Callable[[Window | Region, Region], 
             return f'The area is {area.width} px wide and {name} {wide} px: Adjust it to {wide} px, then Start.'
         if area.width != wide:  # near enough: the same area marked a few pixels off; its right edge moves
             emit(f'the area is {area.width} px wide and {name} {wide} px: it is made {wide} px wide')
-            target = area = desktop.Region(area.left, area.top, wide, area.height)
+            target = area = Region(area.left, area.top, wide, area.height)
         frame = desktop.Source(target, args.notches, args.method).grab()
         try:
             _, dx = drift(tail_rows(args.resume, 3 * len(frame)), frame, _seam_match(args))
@@ -695,7 +731,7 @@ def _resumable(args: argparse.Namespace) -> Callable[[Window | Region, Region], 
                 f'{name} was captured from {abs(dx)} px further {side} on the page than this area: the area moves '
                 f'{abs(dx)} px {side} to line up with it'
             )
-            area = desktop.Region(area.left + dx, area.top, area.width, area.height)
+            area = Region(area.left + dx, area.top, area.width, area.height)
         return area if area != given else None
 
     return refuse
@@ -726,8 +762,9 @@ def run(args: argparse.Namespace) -> int:
     from document_lab.capture.session import Limits, capture, follow  # noqa: PLC0415
 
     if args.list:
-        for window in desktop.windows():
-            emit(f'{window.hwnd:#010x}  {window.client().width}x{window.client().height}  {window.title}')
+        for window in desktop.system().windows():
+            shown = desktop.area(window)
+            emit(f'{window.handle:#010x}  {shown.width}x{shown.height}  {window.title}')
         return 0
     if problem := _prepare(args):
         emit(problem)
@@ -805,9 +842,10 @@ def _finished(args: argparse.Namespace, result: Capture, pdf: PdfWriter, written
         if args.png:
             emit(f'{args.png.resolve()}: the same, as one image')
     if args.ocr and args.out.exists():
-        from document_lab.ocr import text_layer  # noqa: PLC0415
+        from document_lab.ocr import TesseractPlaces, text_layer  # noqa: PLC0415
 
-        emit(f'{args.out.name}: text layer on {text_layer(args.out, args.out, args.ocr)} page(s)')
+        laid = text_layer(args.out, args.out, args.ocr, places=TesseractPlaces.of(os.environ))
+        emit(f'{args.out.name}: text layer on {laid} page(s)')
     if args.open and args.out.exists():
-        desktop.open_file(args.out)
+        desktop.system().open_file(args.out)
     return status

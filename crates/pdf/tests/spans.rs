@@ -65,6 +65,23 @@ fn a_span_box_covers_its_glyphs_and_blank_text_is_no_span() {
 }
 
 #[test]
+fn a_span_carries_the_direction_its_baseline_runs_in_page_space() {
+    let found = page_spans("BT /F1 10 Tf 10 50 Td (across) Tj 0 1 -1 0 100 20 Tm (up) Tj ET");
+    let directions: Vec<(String, (f64, f64))> = found
+        .into_iter()
+        .map(|s| (s.text, (s.direction.0.round(), s.direction.1.round())))
+        .collect();
+    // y grows down in page space: text set bottom to top runs along -y.
+    assert_eq!(
+        directions,
+        [
+            ("across".to_string(), (1.0, 0.0)),
+            ("up".to_string(), (0.0, -1.0))
+        ]
+    );
+}
+
+#[test]
 fn a_vertical_run_is_its_own_span_read_top_to_bottom() {
     // F1 Helvetica, F3 an Identity-V font (CIDs 1, 2 read U+4E00, U+4E8C).
     let fonts = "/Resources << /Font << /F1 5 0 R /F3 6 0 R >> >>";

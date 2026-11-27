@@ -130,13 +130,22 @@ def choose_tool(tool: Tool | None = None) -> ToolChoice:
 
 
 def convert(
-    pdf: Path, out_dir: Path, *, tool: Tool | None = None, outline: bool = True
+    pdf: Path,
+    out_dir: Path,
+    *,
+    tool: Tool | None = None,
+    outline: bool = True,
+    include_hidden: bool = False,
+    include_in_background_color: bool = False,
 ) -> tuple[str, ToolChoice, Headings | None]:
     """The markdown of ``pdf``, its :func:`choose_tool` choice of ``tool``, and how its sections were headed.
 
     On the IR path the PDF's stated outline names the sections when it matches the pages and ``outline`` asks for it,
     else the rules infer them (`document_lab.markdown.headings`, returned for the caller to report); marker heads
     its own (None). marker's images land in ``out_dir/img/flat``; the IR path writes none (figures are cropped later).
+    The IR path reads the PDF as its default view shows it (`document_lab.ir.Page.shown`), its running heads too;
+    ``include_hidden``: what hidden layers draw is read too, ``include_in_background_color``: the text filled in
+    the color under it.
 
     Raises:
         MarkerUnavailable: ``tool='marker'`` and something marker needs is missing.
@@ -147,9 +156,22 @@ def convert(
     flat.mkdir(parents=True, exist_ok=True)
     if choice.tool == 'marker':
         return _run_marker(pdf, out_dir), choice, None
-    doc = layout.without_running(read_pdf(pdf))
-    sections = headings(doc, outline=outline)
-    return to_markdown(doc, sections=sections), choice, sections
+    doc = layout.without_running(
+        read_pdf(pdf).shown(include_hidden=include_hidden, include_in_background_color=include_in_background_color)
+    )
+    sections = headings(
+        doc, outline=outline, include_hidden=include_hidden, include_in_background_color=include_in_background_color
+    )
+    return (
+        to_markdown(
+            doc,
+            sections=sections,
+            include_hidden=include_hidden,
+            include_in_background_color=include_in_background_color,
+        ),
+        choice,
+        sections,
+    )
 
 
 def _run_marker(pdf: Path, out_dir: Path) -> str:

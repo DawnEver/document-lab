@@ -163,6 +163,22 @@ def test_text_of_a_layer_turned_off_is_written_only_when_asked(tmp_path):
     assert 'Off too.' in page_markdowns(read, include_hidden=True)[0]
 
 
+def test_text_filled_in_the_color_under_it_is_written_and_heads_only_when_asked(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    _write(page, LEFT, 120, 'Shown in every view.')
+    page.insert_text((LEFT, 160), 'II. WHITE ON WHITE', fontname='tiro', fontsize=10, color=(1, 1, 1))
+    page.insert_text((LEFT, 200), 'White words too.', fontname='tiro', fontsize=10, color=(1, 1, 1))
+    doc.save(tmp_path / 'white.pdf')
+    read = read_pdf(tmp_path / 'white.pdf')
+    assert [s.in_background_color for s in read.spans()] == [False, True, True]  # the premise: the reader flags them
+    for asked in (False, True):
+        assert ('White words too.' in to_markdown(read, include_in_background_color=asked)) is asked
+        assert ('White words too.' in page_markdowns(read, include_in_background_color=asked)[0]) is asked
+        (marks,) = headings(read, include_in_background_color=asked).marks
+        assert [heading for _, heading, _ in marks] == (['## II. WHITE ON WHITE'] if asked else [])
+
+
 def _outlined(tmp_path, toc, lines_per_page):
     """A PDF whose pages set ``lines_per_page`` (each ``(y, text, size)``) and whose outline is ``toc``."""
     doc = pymupdf.open()

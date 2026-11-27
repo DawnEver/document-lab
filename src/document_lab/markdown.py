@@ -156,13 +156,15 @@ class Headings:
         )
 
 
-def headings(doc: Document, *, outline: bool = True, include_hidden: bool = False) -> Headings:
+def headings(
+    doc: Document, *, outline: bool = True, include_hidden: bool = False, include_in_background_color: bool = False
+) -> Headings:
     """Which lines of ``doc`` head its sections: its stated outline, else the rules (the module says how).
 
     ``outline``: the outline is used when the document states one that matches its pages (the module says when);
-    False keeps to the rules. ``include_hidden``: as for :func:`to_markdown`.
+    False keeps to the rules. ``include_hidden``, ``include_in_background_color``: as for :func:`to_markdown`.
     """
-    shown = doc.shown(include_hidden=include_hidden)
+    shown = doc.shown(include_hidden=include_hidden, include_in_background_color=include_in_background_color)
     weighted = any(span.bold for span in shown.spans())
     pages = [layout.ordered(layout.lines(page, weighted=weighted)) for page in shown.pages]
     inferred = _inferred(shown, pages, weighted=weighted)
@@ -195,13 +197,21 @@ def headings(doc: Document, *, outline: bool = True, include_hidden: bool = Fals
     return Headings('outline', tuple(marks), len(items), (), unstated, tuple(named), tuple(untitled), shared)
 
 
-def to_markdown(doc: Document, *, include_hidden: bool = False, sections: Headings | None = None) -> str:
+def to_markdown(
+    doc: Document,
+    *,
+    include_hidden: bool = False,
+    include_in_background_color: bool = False,
+    sections: Headings | None = None,
+) -> str:
     """The document as markdown, page after page: a paragraph a page break cut is joined again.
 
-    ``include_hidden``: the text hidden layers draw is written too (see `document_lab.ir`). ``sections``: which lines
-    head sections, as :func:`headings` judged them (None: judged here, a stated outline first).
+    ``include_hidden``: the text hidden layers draw is written too; ``include_in_background_color``: the text filled
+    in the color under it too (see `document_lab.ir`). ``sections``: which lines head sections, as :func:`headings`
+    judged them (None: judged here, a stated outline first).
     """
-    return '\n\n'.join(_rejoin([block for page in _blocks(doc, include_hidden, sections) for block in page])) + '\n'
+    blocks = _blocks(doc, include_hidden, include_in_background_color, sections)
+    return '\n\n'.join(_rejoin([block for page in blocks for block in page])) + '\n'
 
 
 def page_markdowns(
@@ -209,17 +219,17 @@ def page_markdowns(
     placed: Sequence[Sequence[Placed]] = (),
     *,
     include_hidden: bool = False,
+    include_in_background_color: bool = False,
     sections: Headings | None = None,
 ) -> list[str]:
     """Each page's own markdown, in order (empty for a page without text).
 
     Body size and title are judged over the whole document; nothing is joined across a page break: a page stands alone.
-    ``placed``: each page's placed blocks (none for a page past its end). ``include_hidden`` and ``sections``: as for
-    :func:`to_markdown`.
+    ``placed``: each page's placed blocks (none for a page past its end). ``include_hidden``,
+    ``include_in_background_color`` and ``sections``: as for :func:`to_markdown`.
     """
-    return [
-        '\n\n'.join(_rejoin(page)) + '\n' if page else '' for page in _blocks(doc, include_hidden, sections, placed)
-    ]
+    blocks = _blocks(doc, include_hidden, include_in_background_color, sections, placed)
+    return ['\n\n'.join(_rejoin(page)) + '\n' if page else '' for page in blocks]
 
 
 def table(rows: Sequence[Sequence[str]], boxes: Sequence[Sequence[BBox | None]] | None = None) -> str:
@@ -245,10 +255,16 @@ def table(rows: Sequence[Sequence[str]], boxes: Sequence[Sequence[BBox | None]] 
 
 
 def _blocks(
-    doc: Document, include_hidden: bool, sections: Headings | None, placed: Sequence[Sequence[Placed]] = ()
+    doc: Document,
+    include_hidden: bool,
+    include_in_background_color: bool,
+    sections: Headings | None,
+    placed: Sequence[Sequence[Placed]] = (),
 ) -> list[list[str]]:
-    shown = doc.shown(include_hidden=include_hidden)
-    sections = sections or headings(doc, include_hidden=include_hidden)
+    shown = doc.shown(include_hidden=include_hidden, include_in_background_color=include_in_background_color)
+    sections = sections or headings(
+        doc, include_hidden=include_hidden, include_in_background_color=include_in_background_color
+    )
     weighted = any(span.bold for span in shown.spans())
     inferred = sections.source == 'inferred'
     return [

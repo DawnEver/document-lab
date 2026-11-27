@@ -175,8 +175,18 @@ def _page(
 
 
 def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
-    text, font, size, bold, box, mode, unspaced, vertical = row
-    return TextSpan(text, size, font, cite(bbox=box), bold, unspaced, mode, vertical)
+    text, font, size, bold, box, mode, unspaced, vertical, direction = row
+    return TextSpan(
+        text,
+        size,
+        font,
+        cite(bbox=box),
+        bold,
+        unspaced=unspaced,
+        render_mode=mode,
+        vertical=vertical,
+        direction=direction,
+    )
 
 
 def _paths(columns: tuple, cite: Callable[..., Provenance]) -> tuple[VectorPath, ...]:

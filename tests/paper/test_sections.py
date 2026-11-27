@@ -93,6 +93,10 @@ class TestClassifySection:
     def test_discard_short_body(self):
         assert classify_section('## Short', 'tiny') == 'discard'
 
+    def test_back_matter_is_kept_however_short_in_capitals_or_title_case(self):
+        for heading in ('## REFERENCES', '## Acknowledgments', '## Appendix', 'Acknowledgements'):
+            assert classify_section(heading, 'Funded by a grant.') == 'keep', heading
+
     def test_merge_up_diagram_label(self):
         assert classify_section('## (a)', 'Some diagram caption text here that is long enough') == 'merge-up'
 

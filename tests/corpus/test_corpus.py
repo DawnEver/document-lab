@@ -72,7 +72,15 @@ def _read(pdf: Path) -> Document:
 
 
 def _text(pdf: Path, page: int) -> str:
-    return ' '.join(' '.join(span.text for span in _read(pdf).page(page).spans).split())
+    """The page's spans' text in drawing order, a space between two -- none within a word they continue (`unspaced`)."""
+    parts: list[str] = []
+    before = None
+    for span in _read(pdf).page(page).spans:
+        if parts and not (span.unspaced is not None and span.unspaced == before):
+            parts.append(' ')
+        parts.append(span.text)
+        before = span.unspaced
+    return ' '.join(''.join(parts).split())
 
 
 def phrases_stated(pdf: Path, page: int, phrases: tuple[str, ...]) -> list[str]:

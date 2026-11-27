@@ -19,7 +19,7 @@ import pymupdf
 from document_lab.strokefont import TEMPLATES
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
     from document_lab.ir import Page, Table
@@ -28,6 +28,10 @@ FRAME = pymupdf.Rect(100, 100, 400, 300)
 RED = (1, 0, 0)
 BLUE = (0, 0, 1)
 FONT_SIZE = 8
+#: A tagged PDF's page size (points).
+PAGE = (400.0, 300.0)
+
+
 #: The size (points) of a marker glyph, as small as the sheets' marks.
 MARK_SIZE = 5
 #: The PDF font name the marker glyphs are set in (PyMuPDF's CJK font, which holds the geometric shapes).
@@ -885,6 +889,41 @@ def hidden_layer(page: Page) -> Page:
     )
 
 
+def tagged_pdf(
+    path: Path, contents: Sequence[str], tree: Mapping[str, str], *, size: tuple[float, float] = PAGE
+) -> Path:
+    """A tagged PDF, written by PyMuPDF so the reader meets another writer's file.
+
+    One page per content stream of ``contents`` (``size`` points), with Helvetica as ``/F1`` and Helvetica-Bold as
+    ``/F2`` in its resources and ``/StructParents`` its 0-based index. ``tree`` holds the structure's objects by
+    name: each source text may refer to another as ``{name}`` and to page n as ``{page<n>}``; ``tree['root']`` is
+    the catalog's ``/StructTreeRoot``.
+    """
+    doc = pymupdf.open()
+    xrefs = {name: doc.get_new_xref() for name in tree}
+    fonts = []
+    for base in ('Helvetica', 'Helvetica-Bold'):
+        fonts.append(doc.get_new_xref())
+        doc.update_object(fonts[-1], f'<< /Type /Font /Subtype /Type1 /BaseFont /{base} /Encoding /WinAnsiEncoding >>')
+    refs = {name: f'{xref} 0 R' for name, xref in xrefs.items()}
+    for i, content in enumerate(contents):
+        page = doc.new_page(width=size[0], height=size[1])
+        stream = doc.get_new_xref()
+        doc.update_object(stream, '<< >>')
+        doc.update_stream(stream, content.encode('latin-1'))
+        doc.xref_set_key(page.xref, 'Contents', f'{stream} 0 R')
+        doc.xref_set_key(page.xref, 'Resources', f'<< /Font << /F1 {fonts[0]} 0 R /F2 {fonts[1]} 0 R >> >>')
+        doc.xref_set_key(page.xref, 'StructParents', str(i))
+        refs[f'page{i + 1}'] = f'{page.xref} 0 R'
+    for name, source in tree.items():
+        doc.update_object(xrefs[name], source.format(**refs))
+    doc.xref_set_key(doc.pdf_catalog(), 'StructTreeRoot', refs['root'])
+    doc.xref_set_key(doc.pdf_catalog(), 'MarkInfo', '<< /Marked true >>')
+    doc.save(path)
+    doc.close()
+    return path
+
+
 def in_background_color(page: Page) -> Page:
     """``page`` with every span filled in the color under it: what text drawn white on the white page reads as."""
     return replace(page, spans=tuple(replace(s, in_background_color=True) for s in page.spans))
@@ -963,6 +1002,18 @@ def document_data_pdf(path: Path) -> Path:
     doc.save(path)
     doc.close()
     return path
+
+
+def shown(x: float, y: float, text: str, *, size: float = 10, font: str = 'F1') -> str:
+    """A content-stream text object showing ``text`` with its baseline at ``(x, y)`` in page space (y down, on a
+    :data:`PAGE`-high page)."""
+    escaped = text.replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')
+    return f'BT /{font} {size} Tf {x} {PAGE[1] - y} Td ({escaped}) Tj ET'
+
+
+def marked(tag: str, mcid: int, body: str) -> str:
+    """``body`` as the marked-content sequence ``mcid`` tagged ``tag``."""
+    return f'/{tag} << /MCID {mcid} >> BDC {body} EMC'
 
 
 #: The page a synthetic scan is of (Letter, as the tables above draw on); it is turned about its center.

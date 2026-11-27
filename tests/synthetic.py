@@ -593,16 +593,32 @@ def icc_profile(*, primaries: Sequence[tuple[float, float]], white: tuple[float,
     return header + len(tags).to_bytes(4, 'big') + table + data
 
 
-def jpx(samples: np.ndarray, *, codestream: bool = False, profile: bytes | None = None) -> bytes:
+def jpx(
+    samples: np.ndarray, *, codestream: bool = False, profile: bytes | None = None, depth: int | None = None
+) -> bytes:
     """``samples`` -- rows x columns (gray, or 16-bit gray as ``uint16``), or rows x columns x 2, 3 or 4 (gray and
     alpha, RGB, RGB and alpha) -- coded JPEG 2000 losslessly (the reversible 5/3 wavelet) by OpenJPEG, through
     Pillow's plugin: a JP2 file (its color space enumerated, gray or sRGB), or the bare ``codestream``, or -- with
     ``profile`` -- that codestream in a JP2 whose ``colr`` box embeds the ICC profile (T.800 I.5.3.3, method 2).
+
+    ``depth`` (gray samples below ``2 ** depth``, fewer than 8 bits): a bare codestream of that depth, which Pillow
+    cannot write -- the samples coded at 8 bits moved by ``128 - 2 ** (depth - 1)``, then the depth its image and
+    tile size marker (FF51) states lowered, so a decoder's level shift for ``depth`` bits (T.800 G.1.2) gives the
+    samples back exactly (lossless: the coded values are the same either way).
     """
     from io import BytesIO  # noqa: PLC0415 -- only the JPEG 2000 cases need it
 
     from PIL import Image  # noqa: PLC0415 -- Pillow is the dev extra's, the truth of these cases alone
 
+    if depth is not None:
+        assert samples.ndim == 2 and 0 < depth < 8 and samples.max() < 2**depth
+        coded = bytearray(jpx((samples + 128 - 2 ** (depth - 1)).astype(np.uint8), codestream=True))
+        # The image and tile size marker (T.800 A.5.1): FF51, Lsiz, Rsiz, eight 4-byte sizes and offsets, Csiz,
+        # then each component's Ssiz (its depth less one), XRsiz, YRsiz.
+        ssiz = coded.index(b'\xff\x51') + 2 + 2 + 2 + 8 * 4 + 2
+        assert coded[ssiz] == 7
+        coded[ssiz] = depth - 1
+        return bytes(coded)
     image = Image.fromarray(samples)  # its mode by its shape and type: L, LA, RGB, RGBA or I;16
     out = BytesIO()
     image.save(out, 'JPEG2000', irreversible=False, no_jp2=codestream or profile is not None)

@@ -24,6 +24,7 @@ fn drawn(
         text: false,
         annotations: false,
         alpha: false,
+        jpx: render::image::Jpx::default(),
     };
     render(&file, &page, &options).unwrap()
 }
@@ -53,6 +54,7 @@ fn texted(page_extra: &str, content: &str, extra: &[&str]) -> Raster {
         text: true,
         annotations: false,
         alpha: false,
+        jpx: render::image::Jpx::default(),
     };
     render(&file, &page, &options).unwrap()
 }
@@ -532,6 +534,32 @@ fn a_knockout_group_shows_each_mark_over_the_backdrop_alone() {
         half.contains(&overlap[0]) && half.contains(&overlap[1]) && overlap[2] == 255,
         "{overlap:?}"
     );
+}
+
+#[test]
+fn a_glyph_with_no_program_in_a_knockout_group_is_counted() {
+    // Each element of a knockout group is drawn over its own box: a glyph whose shape is missing has its box there,
+    // so it is counted as it is anywhere else.
+    let font = "<< /Type /Font /Subtype /Type0 /BaseFont /MSMincho /Encoding /Identity-H /DescendantFonts [<< \
+                /Type /Font /Subtype /CIDFontType2 /BaseFont /MSMincho /CIDSystemInfo << /Registry (Adobe) \
+                /Ordering (Identity) /Supplement 0 >> /FontDescriptor << /Type /FontDescriptor /FontName /MSMincho \
+                /Flags 4 >> >>] >>";
+    for knockout in ["/K true", "/K false"] {
+        let group = common::stream(
+            &format!(
+                "/Type /XObject /Subtype /Form /BBox [0 0 200 100] /Group << /S /Transparency {knockout} >> \
+                 /Resources << /Font << /F2 6 0 R >> >>"
+            ),
+            "BT /F2 20 Tf 10 10 Td <00010002> Tj ET",
+        );
+        let r = texted(
+            "/Resources << /XObject << /Fm1 5 0 R >> >>",
+            "/Fm1 Do",
+            &[&group, font],
+        );
+        let why = "font MSMincho is not embedded and has no substitute";
+        assert_eq!(r.undrawn.get(why), Some(&2), "{knockout}: {:?}", r.undrawn);
+    }
 }
 
 #[test]

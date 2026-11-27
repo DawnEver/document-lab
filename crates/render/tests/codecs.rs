@@ -118,6 +118,7 @@ fn placed(objects: &[String], bits: &Bits) -> Raster {
         text: false,
         annotations: false,
         alpha: false,
+        jpx: render::image::Jpx::default(),
     };
     render(&file, &page, &options).unwrap()
 }

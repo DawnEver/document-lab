@@ -71,11 +71,19 @@ def reference(data: bytes, dpi: float, *, managed: bool = True) -> np.ndarray:
 
 
 def own(
-    data: bytes, dpi: float, page: int = 1, *, text: bool = True, fonts: Callable[[str], bytes] | None = None
+    data: bytes,
+    dpi: float,
+    page: int = 1,
+    *,
+    text: bool = True,
+    fonts: Callable[[str], bytes] | None = None,
+    fallback_widths: str = 'own',
 ) -> tuple[np.ndarray, dict[str, int]]:
     """Page ``page`` of ``data`` drawn by the own renderer at ``dpi`` (its text too unless not ``text``; fallback
-    fonts fetched through ``fonts``, ``_pdf.open``'s), and what it did not draw."""
-    width, height, channels, pixels, undrawn = _pdf.open(data, b'', fonts=fonts).render(
+    fonts fetched through ``fonts``, a CJK fallback's glyphs set across as ``fallback_widths`` says, ``_pdf.open``'s),
+    and what it did not draw."""
+    reader = _pdf.open(data, b'', fonts=fonts, fallback_widths=fallback_widths)
+    width, height, channels, pixels, undrawn = reader.render(
         page, None, dpi / 72, text=text, annotations=True, alpha=False
     )
     return np.frombuffer(pixels, dtype=np.uint8).reshape(height, width, channels).copy(), dict(undrawn)

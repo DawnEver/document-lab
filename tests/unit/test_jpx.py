@@ -7,9 +7,14 @@ space the dictionary or else the data states (an embedded ICC profile: by the fo
 opacity the data carries as ``/SMaskInData`` says. Each case is paired with a planted wrong decode -- what a decoder
 reading the case otherwise would draw -- that the comparison must report.
 
-Two readings follow ISO 32000-2 where ``MuPDF`` differs, measured 2026-11-27: an opacity channel under
-``/SMaskInData 0`` (its default) is ignored (Table 87), where ``MuPDF`` applies it; and 16-bit samples are rounded to 8
-bits, where it truncates them (a level apart at most). ``/Decode`` is applied, as ``MuPDF`` does.
+Where ISO 32000 and ``MuPDF`` read apart (measured 2026-11-27), the standard's reading is the default and
+``MuPDF``'s a selectable option, each held to ``PyMuPDF`` drawing the same image: an opacity channel under
+``/SMaskInData 0`` (its default) is ignored -- "If present, encoded soft-mask image information shall be ignored"
+(Table 87) -- where ``MuPDF`` applies it (``jpx_opacity='mupdf'``); ``/Decode`` on an image that is no stencil mask is
+ignored -- "If the image uses the JPXDecode filter and ImageMask is false, Decode shall be ignored" (Table 87, 7.4.9)
+-- where ``MuPDF`` applies it (``jpx_decode='mupdf'``), but to an image in an ``Indexed`` space, whose ``/Decode`` it
+ignores at every depth: an ``Indexed`` image's indices are its samples under either reading (2-bit indices
+included). 16-bit samples are rounded to 8 bits, where ``MuPDF`` truncates them (a level apart at most).
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ import pytest
 from document_lab import _pdf
 from document_lab.ir import BBox
 from document_lab.pdf import Unsupported, read_raster
-from tests.rendering import page_pdf
+from tests.rendering import page_pdf, reference
 from tests.synthetic import icc_profile, jpx, rgb_in_srgb
 
 _y, _x = np.mgrid[0:40, 0:60]
@@ -31,6 +36,7 @@ ALPHA = ((_x // 15) * 85).astype(np.uint8)
 GRAY16 = (_x * 1111 + _y * 7).astype(np.uint16)
 INDICES = ((_x // 15 + _y // 20) % 4).astype(np.uint8)
 PALETTE = np.array([[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]], dtype=np.uint8)
+INDEXED = f'/ColorSpace [/Indexed /DeviceRGB 3 <{PALETTE.tobytes().hex()}>]'
 PRIMARIES = [(0.64, 0.33), (0.30, 0.60), (0.15, 0.06)]
 D65 = (0.3127, 0.3290)
 PROFILE = icc_profile(primaries=PRIMARIES, white=D65, gamma=1.8)
@@ -65,7 +71,7 @@ CASES = {
         _gray(np.round(GRAY16 / 257).astype(np.uint8)),
         _gray((GRAY16 & 0xFF).astype(np.uint8)),  # the low byte
     ),
-    'decode': ('/ColorSpace /DeviceRGB /Decode [1 0 1 0 1 0]', jpx(RGB), 255 - RGB, RGB),  # /Decode ignored
+    'decode-ignored': ('/ColorSpace /DeviceRGB /Decode [1 0 1 0 1 0]', jpx(RGB), RGB, 255 - RGB),  # applied
     'opacity-as-soft-mask': (
         '/ColorSpace /DeviceRGB /SMaskInData 1',
         jpx(np.concatenate([RGB, ALPHA[..., None]], -1)),
@@ -97,21 +103,58 @@ CASES = {
         RGB,  # the profile ignored
     ),
     'indices': (
-        f'/ColorSpace [/Indexed /DeviceRGB 3 <{PALETTE.tobytes().hex()}>]',
+        INDEXED,
         jpx(INDICES),
         PALETTE[INDICES],
         _gray(INDICES),  # the indices read as gray levels
     ),
+    'two-bit-indices-decode-ignored': (
+        f'{INDEXED} /Decode [3 0]',
+        jpx(INDICES, depth=2),
+        PALETTE[INDICES],
+        PALETTE[3 - INDICES],  # /Decode applied over 0..3
+    ),
+}
+
+#: name: as :data:`CASES`, drawn with MuPDF's readings (``jpx_decode`` and ``jpx_opacity`` ``'mupdf'``): what PyMuPDF
+#: draws.
+MUPDF_CASES = {
+    'decode-applied': ('/ColorSpace /DeviceRGB /Decode [1 0 1 0 1 0]', jpx(RGB), 255 - RGB, RGB),  # ignored
+    'opacity-applied': (
+        '/ColorSpace /DeviceRGB',
+        jpx(np.concatenate([RGB, ALPHA[..., None]], -1)),
+        _over_white(RGB, ALPHA),
+        RGB,  # ignored, as /SMaskInData 0 says
+    ),
+    'two-bit-indices-decode-ignored': (
+        f'{INDEXED} /Decode [3 0]',
+        jpx(INDICES, depth=2),
+        PALETTE[INDICES],
+        PALETTE[np.full_like(INDICES, 3)],  # /Decode applied over 0..255, the samples taken as 8 bits (O48)
+    ),
+    'indices-decode-ignored': (
+        f'{INDEXED} /Decode [3 0]',
+        jpx(INDICES),
+        PALETTE[INDICES],
+        PALETTE[3 - INDICES],  # /Decode applied as stated
+    ),
 }
 
 
-def _drawn(tmp_path, entries: str, data: bytes, extra: dict[str, tuple[str, bytes | None]] | None = None) -> np.ndarray:
-    """The image (60 x 40 samples, ``entries``, ``data``) placed at the page's top left one sample a point, read at
-    72 dpi by the own renderer."""
+def _page(entries: str, data: bytes) -> bytes:
+    """A page placing the image (60 x 40 samples, ``entries``, ``data``) at its top left, one sample a point."""
     image = f'<< /Type /XObject /Subtype /Image /Width 60 /Height 40 {entries} /Filter /JPXDecode >>'
+    return page_pdf('q 60 0 0 40 0 110 cm /Im1 Do Q', {'Im1': (image, data)})
+
+
+def _drawn(tmp_path, entries: str, data: bytes, *, mupdf: bool = False) -> np.ndarray:
+    """The image of :func:`_page` read at 72 dpi by the own renderer -- with MuPDF's readings when ``mupdf``."""
     path = tmp_path / 'jpx.pdf'
-    path.write_bytes(page_pdf('q 60 0 0 40 0 110 cm /Im1 Do Q', {'Im1': (image, data), **(extra or {})}))
-    return read_raster(path, 1, BBox(0, 0, 60, 40), dpi=72).pixels
+    path.write_bytes(_page(entries, data))
+    reading = 'mupdf' if mupdf else 'standard'
+    return read_raster(
+        path, 1, BBox(0, 0, 60, 40), dpi=72, jpx_decode=reading, jpx_opacity=reading
+    ).pixels
 
 
 def _off(drawn: np.ndarray, truth: np.ndarray) -> int:
@@ -129,6 +172,24 @@ def test_a_jpx_image_draws_its_known_pixels(tmp_path, name):
 def test_a_planted_wrong_jpx_decode_is_reported(tmp_path, name):
     entries, data, _, wrong = CASES[name]
     assert _off(_drawn(tmp_path, entries, data), wrong) > 8 * LEVELS, name
+
+
+@pytest.mark.parametrize('name', MUPDF_CASES)
+def test_mupdf_s_jpx_readings_draw_what_pymupdf_draws(tmp_path, name):
+    entries, data, truth, wrong = MUPDF_CASES[name]
+    drawn = _drawn(tmp_path, entries, data, mupdf=True)
+    assert _off(drawn, truth) <= LEVELS
+    # The reading is MuPDF's: PyMuPDF draws the same truth (color management off: the samples as they stand).
+    assert _off(reference(_page(entries, data), 72, managed=False)[:40, :60], truth) <= LEVELS
+    # Planted wrong reading.
+    assert _off(drawn, wrong) > 8 * LEVELS, name
+
+
+def test_a_jpx_reading_other_than_the_standard_s_or_mupdf_s_is_refused(tmp_path):
+    path = tmp_path / 'jpx.pdf'
+    path.write_bytes(_page('/ColorSpace /DeviceGray', jpx(GRAY)))
+    with pytest.raises(ValueError, match=r"jpx_decode 'acrobat': one of standard, mupdf"):
+        read_raster(path, 1, BBox(0, 0, 60, 40), dpi=72, jpx_decode='acrobat')  # type: ignore[arg-type]
 
 
 def test_a_jpx_soft_mask_gives_its_samples_their_alpha(tmp_path):

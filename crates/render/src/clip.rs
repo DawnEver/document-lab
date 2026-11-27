@@ -188,6 +188,48 @@ fn narrowed(within: Left, outline: &Outline, grid: &Grid) -> Left {
     }
 }
 
+/// The device pixels (the page's) what is drawn under the chain `clip` ends may paint, as `MuPDF` bounds them -- its
+/// scissor, where its image painter starts stepping ([`crate::image::sampled`]): the whole pixels each of the chain's
+/// outlines' points lie within, and the canvas's scissor ([`Grid::scissor`]).
+pub(crate) fn scissor(clip: Option<&Rc<Clip>>, grid: &Grid) -> Rect {
+    let mut within = grid.scissor;
+    let mut next = clip;
+    while let Some(clip) = next {
+        let points: Vec<Point> = match &clip.outline {
+            Outline::Path { segments, .. } => crate::points(segments),
+            Outline::Glyphs { segments, unshaped } => {
+                let mut points = crate::points(segments);
+                points.extend(
+                    unshaped
+                        .iter()
+                        .flat_map(|b| [Point { x: b.x0, y: b.y0 }, Point { x: b.x1, y: b.y1 }]),
+                );
+                points
+            }
+        };
+        let device: Vec<Point> = points
+            .into_iter()
+            .map(|p| {
+                let q = grid.point(p);
+                Point {
+                    x: q.x + grid.left,
+                    y: q.y + grid.top,
+                }
+            })
+            .collect();
+        if let Some(r) = Rect::around(&device) {
+            within = within.intersect(Rect {
+                x0: r.x0.floor(),
+                y0: r.y0.floor(),
+                x1: r.x1.ceil(),
+                y1: r.y1.ceil(),
+            });
+        }
+        next = clip.within.as_ref();
+    }
+    within
+}
+
 /// The whole pixels the path `segments` (page space) covers when it is one rectangle square to the canvas -- widened
 /// to the whole pixels it touches, as such a clip is; None when it is not one, or covers no pixel.
 pub(crate) fn whole_pixels(segments: &[Segment], grid: &Grid) -> Option<Rect> {

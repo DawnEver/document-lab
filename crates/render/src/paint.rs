@@ -390,7 +390,7 @@ impl Canvas<'_> {
                             grid.glyph_placed(m)
                         });
                 match drawn {
-                    Ok(content) => canvas.draw(&content.events, None),
+                    Ok(content) => canvas.content(&content),
                     Err(e) => {
                         failed = Some(e.to_string());
                         break;

@@ -18,8 +18,10 @@
 //! is counted by kind in [`Raster::undrawn`] -- a glyph whose shape cannot be read (a font that embeds no program,
 //! with no substitute and no fallback to be had, by name), a text clip holding such a glyph (by its box), an image whose data does not
 //! decode, or decodes only past what a strict decoder refuses ([`codec`]), a shading, pattern or soft mask that does
-//! not read (by why), patterns and soft masks nested too deep -- for the caller to refuse or accept. Hidden optional
-//! content and what the colorant `None` paints mark nothing and are not drawn.
+//! not read (by why), patterns and soft masks nested too deep, an operation the interpreter skipped (its warning, by
+//! why: a mark not drawn, or a state the marks after it meeting the region are drawn in, `pdf::interpret::Reach`)
+//! -- for the caller to refuse or accept. Hidden optional content and what the colorant `None` paints mark nothing and
+//! are not drawn.
 //!
 //! Layers: [`codec`] (image codecs to samples) -> [`image`] (an image's samples to pixels), [`clip`] (clipping
 //! paths to masks) and [`shade`] (a shading's colors to pixels) -> this module (the page painted), [`paint`] (what a
@@ -39,8 +41,8 @@ use std::rc::Rc;
 
 use pdf::geometry::{Matrix, Point, Rect, Segment};
 use pdf::interpret::{
-    Blend, Clip, Event, Group, ImageEvent, Layer, PathEvent, ShadingEvent, SoftMask, Stroke,
-    TextEvent,
+    Blend, Clip, Content, Event, Group, ImageEvent, Layer, PathEvent, Reach, ShadingEvent,
+    SoftMask, Stroke, TextEvent,
 };
 use pdf::object::Object;
 use pdf::shape::Shape;
@@ -67,6 +69,8 @@ pub struct Options {
     pub annotations: bool,
     /// Whether what nothing covers stays transparent (RGBA out) rather than white (RGB out).
     pub alpha: bool,
+    /// How a JPEG 2000 image's dictionary is read where ISO 32000 and `MuPDF` part (the standard's by default).
+    pub jpx: image::Jpx,
 }
 
 /// A region of a page as pixels.
@@ -121,6 +125,7 @@ pub fn render(file: &File, page: &Page, options: &Options) -> Result<Raster> {
     }
     let mut canvas = Canvas {
         file,
+        jpx: options.jpx,
         pixmap,
         grid,
         clips: Clips::default(),
@@ -128,7 +133,7 @@ pub fn render(file: &File, page: &Page, options: &Options) -> Result<Raster> {
         knockout: None,
         kept: Kept::default(),
     };
-    canvas.draw(&content.events, None);
+    canvas.content(&content);
     Ok(canvas.finish(options.alpha))
 }
 
@@ -143,6 +148,10 @@ pub(crate) struct Grid {
     pub(crate) height: u32,
     /// The page's matrix from user space to page space.
     user: Matrix,
+    /// The device pixels (the page's) what is drawn here may paint, as `MuPDF` bounds them -- the page's, a group's
+    /// or a tile's canvas; a knockout element's window keeps its group's: where its image painter starts stepping
+    /// ([`image::sampled`]).
+    pub(crate) scissor: Rect,
 }
 
 impl Grid {
@@ -175,6 +184,12 @@ impl Grid {
             width: width as u32,
             height: height as u32,
             user,
+            scissor: Rect {
+                x0: left,
+                y0: top,
+                x1: right,
+                y1: bottom,
+            },
         })
     }
 
@@ -187,17 +202,44 @@ impl Grid {
             width,
             height,
             user: Matrix::IDENTITY,
+            scissor: Rect {
+                x0: 0.0,
+                y0: 0.0,
+                x1: f64::from(width),
+                y1: f64::from(height),
+            },
         }
     }
 
-    /// The grid of the pixels `area` of this canvas: the same page space, on fewer pixels.
+    /// The grid of the pixels `area` of this canvas, a canvas of its own (a group's, a tile's): the same page space,
+    /// on fewer pixels.
     fn sub(&self, area: IntRect) -> Self {
+        let window = self.window(area);
+        Self {
+            scissor: window.device_box(),
+            ..window
+        }
+    }
+
+    /// The grid of the pixels `area` of this canvas drawn apart and put back (a knockout element's): as [`Self::sub`],
+    /// but bounded as this canvas is.
+    pub(crate) fn window(&self, area: IntRect) -> Self {
         Self {
             left: self.left + f64::from(area.x()),
             top: self.top + f64::from(area.y()),
             width: area.width(),
             height: area.height(),
             ..*self
+        }
+    }
+
+    /// The device pixels (the page's) the canvas covers.
+    pub(crate) fn device_box(&self) -> Rect {
+        Rect {
+            x0: self.left,
+            y0: self.top,
+            x1: self.left + f64::from(self.width),
+            y1: self.top + f64::from(self.height),
         }
     }
 
@@ -298,6 +340,8 @@ impl Grid {
 /// of its own.
 struct Canvas<'a> {
     file: &'a File,
+    /// How a JPEG 2000 image's dictionary is read.
+    jpx: image::Jpx,
     pixmap: Pixmap,
     grid: Grid,
     clips: Clips,
@@ -323,6 +367,7 @@ impl<'a> Canvas<'a> {
     fn child(&mut self, grid: Grid, pixmap: Pixmap) -> Canvas<'a> {
         Canvas {
             file: self.file,
+            jpx: self.jpx,
             pixmap,
             grid,
             clips: Clips::default(),
@@ -338,6 +383,33 @@ impl<'a> Canvas<'a> {
         child.pixmap
     }
 
+    /// What `content` draws, drawn; each of its warnings that may change what is drawn here counted in undrawn, by
+    /// why: one whose mark is not drawn, unless its box is known and misses the canvas; one whose state the marks
+    /// after it are drawn in, when one of those may paint here.
+    fn content(&mut self, content: &Content) {
+        self.draw(&content.events, None);
+        // The last event that may paint here: sought once, when a warning reaches the events after it.
+        let mut last: Option<Option<usize>> = None;
+        for warning in &content.warnings {
+            let meets = match warning.reach {
+                Reach::Unseen => false,
+                Reach::Anywhere => true,
+                Reach::Within(r) => self.meets(r),
+                Reach::From(n) => last
+                    .get_or_insert_with(|| {
+                        content
+                            .events
+                            .iter()
+                            .rposition(|e| self.extent(e).is_some_and(|r| self.meets(r)))
+                    })
+                    .is_some_and(|last| n <= last),
+            };
+            if meets {
+                self.undrawn(&warning.why);
+            }
+        }
+    }
+
     /// `events` drawn in order; a run of them in a transparency group directly within `within` (None: the page)
     /// drawn as that group.
     fn draw(&mut self, events: &[Event], within: Option<&Rc<Group>>) {
@@ -347,7 +419,9 @@ impl<'a> Canvas<'a> {
             let Some(group) = transparency::child_of(event.compositing().group.as_ref(), within)
             else {
                 let alpha = transparency::alpha_of(event);
-                self.element(alpha, &|c: &mut Canvas<'a>| c.event(event));
+                // What it may paint bounds it in a knockout group alone.
+                let extent = self.knockout.as_ref().and_then(|_| self.extent(event));
+                self.element(alpha, extent, &|c: &mut Canvas<'a>| c.event(event));
                 i += 1;
                 continue;
             };
@@ -356,9 +430,11 @@ impl<'a> Canvas<'a> {
                 .take_while(|e| transparency::holds(e.compositing().group.as_ref(), &group))
                 .count();
             let marks = &events[i..i + run];
-            self.element(group.compositing.fill_alpha, &|c: &mut Canvas<'a>| {
-                c.group(&group, marks);
-            });
+            self.element(
+                group.compositing.fill_alpha,
+                Some(group.bbox),
+                &|c: &mut Canvas<'a>| c.group(&group, marks),
+            );
             i += run;
         }
     }
@@ -370,6 +446,57 @@ impl<'a> Canvas<'a> {
             Event::Shading(shading) if shows(&shading.layer) => self.shading(shading),
             Event::Text(text) if shows(&text.layer) => self.text(text),
             _ => {} // hidden or inkless
+        }
+    }
+
+    /// The box (page space) of what `event` may paint, as far as anti-aliasing reaches aside -- a glyph whose shape is
+    /// missing by its box, where it is counted; None when it paints nothing (hidden, inkless, a Type 3 glyph's text,
+    /// whose procedure paints).
+    fn extent(&self, event: &Event) -> Option<Rect> {
+        match event {
+            Event::Path(path) if shows(&path.layer) => {
+                let reach = path.stroke.as_ref().map_or(0.0, |s| self.reach(s));
+                bounds(&path.segments).map(|b| b.grown(reach))
+            }
+            Event::Image(image) if shows(&image.layer) => Some(image.bbox),
+            Event::Shading(shading) if shows(&shading.layer) => Some(shading.bbox),
+            Event::Text(text) if shows(&text.layer) => {
+                let points: Vec<Point> = text
+                    .glyphs
+                    .iter()
+                    .filter_map(|glyph| match text.font.shape(glyph.code) {
+                        Shape::Outline(outline) => {
+                            let matrix = self.grid.glyph_placed(glyph.matrix);
+                            Some(
+                                points(&outline)
+                                    .into_iter()
+                                    .map(|p| matrix.apply(p))
+                                    .collect(),
+                            )
+                        }
+                        Shape::Missing(_) => Some(vec![
+                            Point {
+                                x: glyph.bbox.x0,
+                                y: glyph.bbox.y0,
+                            },
+                            Point {
+                                x: glyph.bbox.x1,
+                                y: glyph.bbox.y1,
+                            },
+                        ]),
+                        Shape::Procedure => None,
+                    })
+                    .flatten()
+                    .collect();
+                let strokes = matches!(text.render_mode, 1 | 2 | 5 | 6);
+                let reach = if strokes {
+                    self.reach(&text.stroke)
+                } else {
+                    0.0
+                };
+                Rect::around(&points).map(|b| b.grown(reach))
+            }
+            _ => None,
         }
     }
 
@@ -540,7 +667,7 @@ impl<'a> Canvas<'a> {
         let decoded = if let Some(known) = event.object.and_then(|n| self.kept.images.get(&n)) {
             Rc::clone(known)
         } else {
-            let decoded = Rc::new(image::decode(self.file, event));
+            let decoded = Rc::new(image::decode(self.file, event, self.jpx));
             if let (Some(n), Ok(d)) = (event.object, decoded.as_ref())
                 && !d.stencil
             {
@@ -566,25 +693,45 @@ impl<'a> Canvas<'a> {
                 return;
             }
         };
+        self.placed(event, decoded, &pixels, mask.as_deref());
+    }
+
+    /// The image `event` places, `decoded`, drawn as `pixels` says through `mask` (its clip and soft mask): nearest,
+    /// sampled as `MuPDF` samples it ([`image::sampled`]), or interpolated by `tiny-skia`; a stencil mask painting a
+    /// pattern as its coverage, the pattern painted through it.
+    fn placed(
+        &mut self,
+        event: &ImageEvent,
+        decoded: &image::Decoded,
+        pixels: &image::Pixels,
+        mask: Option<&Mask>,
+    ) {
         let Some(pixmap) = pixels.pixmap(decoded) else {
             return;
         };
+        let compositing = &event.compositing;
         let blend = blend_mode(compositing.blend);
+        #[expect(clippy::cast_possible_truncation, reason = "an alpha")]
+        let opacity = compositing.fill_alpha as f32;
+        // Drawn nearest, its pixels sampled as MuPDF samples them; else interpolated by tiny-skia.
+        let nearest = if pixels.smooth {
+            None
+        } else {
+            let scissor = clip::scissor(event.clip.as_ref(), &self.grid);
+            let Some(nearest) = image::sampled(pixmap, pixels.unit, &self.grid, scissor) else {
+                return;
+            };
+            Some(nearest)
+        };
         let mut paint = Paint {
             blend_mode: blend,
             anti_alias: !pixels.grid_fitted,
             ..Paint::default()
         };
-        #[expect(clippy::cast_possible_truncation, reason = "an alpha")]
-        let opacity = compositing.fill_alpha as f32;
         paint.shader = tiny_skia::Pattern::new(
             pixmap,
             SpreadMode::Pad,
-            if pixels.smooth {
-                FilterQuality::Bilinear
-            } else {
-                FilterQuality::Nearest
-            },
+            FilterQuality::Bilinear,
             opacity,
             Transform::identity(),
         );
@@ -593,6 +740,22 @@ impl<'a> Canvas<'a> {
             tiny_skia::Rect::from_xywh(0.0, 0.0, pixmap.width() as f32, pixmap.height() as f32)
         else {
             return;
+        };
+        // What it covers drawn onto `target` with `paint`'s opacity and blend mode, through `mask`.
+        let onto = |target: &mut Pixmap, paint: &Paint, mask: Option<&Mask>| match &nearest {
+            Some((sampled, (x, y))) => target.draw_pixmap(
+                *x,
+                *y,
+                sampled.as_ref(),
+                &PixmapPaint {
+                    opacity,
+                    blend_mode: paint.blend_mode,
+                    quality: FilterQuality::Nearest,
+                },
+                Transform::identity(),
+                mask,
+            ),
+            None => target.fill_rect(rect, paint, transform(pixels.matrix), mask),
         };
         if decoded.stencil && event.fill.pattern.is_some() {
             // A stencil painting a pattern: its coverage, then the pattern through it.
@@ -603,9 +766,9 @@ impl<'a> Canvas<'a> {
                 blend_mode: BlendMode::SourceOver,
                 ..paint.clone()
             };
-            shape.fill_rect(rect, &shaping, transform(pixels.matrix), None);
+            onto(&mut shape, &shaping, None);
             let mut cover = Mask::from_pixmap(shape.as_ref(), tiny_skia::MaskType::Alpha);
-            if let Some(clip) = &mask {
+            if let Some(clip) = mask {
                 cover = transparency::product(&cover, clip);
             }
             let Some(source) = self.source(&event.fill, "stencil mask", event.bbox) else {
@@ -626,8 +789,7 @@ impl<'a> Canvas<'a> {
             }
             return;
         }
-        self.pixmap
-            .fill_rect(rect, &paint, transform(pixels.matrix), mask.as_deref());
+        onto(&mut self.pixmap, &paint, mask);
     }
 
     /// The glyphs `text` shows, as its render mode says (9.3.6): 0 and 4 filled, 1 and 5 stroked, 2 and 6 both
@@ -837,15 +999,19 @@ pub(crate) fn build(segments: &[Segment], map: &dyn Fn(Point) -> Point) -> Optio
 
 /// The box `segments`' points lie in, or None when there are none.
 fn bounds(segments: &[Segment]) -> Option<Rect> {
-    let points: Vec<Point> = segments
+    Rect::around(&points(segments))
+}
+
+/// `segments`' points, their curves' control points too.
+pub(crate) fn points(segments: &[Segment]) -> Vec<Point> {
+    segments
         .iter()
         .flat_map(|s| match *s {
             Segment::MoveTo(p) | Segment::LineTo(p) => vec![p],
             Segment::CurveTo(a, b, p) => vec![a, b, p],
             Segment::Close => vec![],
         })
-        .collect();
-    Rect::around(&points)
+        .collect()
 }
 
 /// A dash pattern (page space) scaled to the space it is stroked in; None for a solid line. An odd count of lengths

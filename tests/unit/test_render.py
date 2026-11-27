@@ -472,3 +472,90 @@ def test_the_own_renderer_refuses_a_region_holding_what_it_cannot_draw_by_name(t
         read_raster(path, 1, BBox(0, 0, 200, 150), dpi=DPI)
     # Off the region, it is not counted.
     read_raster(path, 1, BBox(120, 0, 200, 150), dpi=DPI)
+
+
+
+#: An 8 x 6 stencil mask's samples (rows top-down; 0 paints) and where it is placed (O45): its width, height and
+#: lower-left corner in pixels at :data:`DPI`. The page is 312.5 pixels tall there, so whole pixels up are half pixels
+#: down: every sample edge of the first lies half a pixel off the grid, the 2.3 % a stencil measured off before.
+STENCIL = (np.indices((6, 8)).sum(0) % 2).astype(np.uint8)
+STENCIL_PLACEMENTS = {
+    'half-pixel-page': (320, 240, 40, 30),
+    'edges-on-centers': (84, 63, 20, 20),
+    'fractional': (77.84, 67.86, 17.37, 23.81),
+    'shrunk': (24, 18, 10.5, 10.5),
+}
+
+
+def _stencil_page(placement: tuple[float, float, float, float], *, image: bool = False) -> bytes:
+    """The stencil placed as ``placement`` says, painting black -- or, when ``image``, its samples as a gray image."""
+    width, height, x, y = (v * 72 / DPI for v in placement)
+    if image:
+        entries = '/Width 8 /Height 6 /ColorSpace /DeviceGray /BitsPerComponent 8'
+        drawn = _image(entries, (STENCIL * 255).tobytes())
+    else:
+        drawn = _image('/Width 8 /Height 6 /ImageMask true', _bits(1, STENCIL))
+    return page_pdf(f'0 g q {width:.6f} 0 0 {height:.6f} {x:.6f} {y:.6f} cm /Im1 Do Q', {'Im1': drawn})
+
+
+def _exactly_sampled(placement: tuple[float, float, float, float], shape: tuple[int, ...]) -> np.ndarray:
+    """The planted wrong sampling: each pixel the sample under its center by exact arithmetic (a center on an edge
+    taking the lower sample), within the whole pixels the stencil's box touches -- where MuPDF's truncated fixed-point
+    steps fall a fraction of a pixel short."""
+    width, height, x, y = placement
+    top = shape[0] - (y + height)  # the page's height in pixels less its upper edge
+    x0, y0, x1, y1 = np.floor(x), np.floor(top), np.ceil(x + width), np.ceil(top + height)
+    out = np.full(shape, 255, dtype=np.uint8)
+    rows, columns = np.mgrid[int(y0) : int(y1), int(x0) : int(x1)]
+    v = np.ceil((rows + 0.5 - y0) * 6 / (y1 - y0)).astype(int) - 1
+    u = np.ceil((columns + 0.5 - x0) * 8 / (x1 - x0)).astype(int) - 1
+    out[int(y0) : int(y1), int(x0) : int(x1)] = (STENCIL[v.clip(0, 5), u.clip(0, 7)] * 255)[..., None]
+    return out
+
+
+@pytest.mark.parametrize('name', STENCIL_PLACEMENTS)
+def test_a_stencil_s_samples_fall_where_mupdf_s_do_and_an_image_s_do(name):
+    placement = STENCIL_PLACEMENTS[name]
+    data = _stencil_page(placement)
+    drawn, undrawn = own(data, DPI)
+    assert undrawn == {}
+    # MuPDF's pixels, each one: its fixed-point steps through the samples, mirrored (D58).
+    assert np.array_equal(drawn, reference(data, DPI))
+    # The same rule as an image's: the same samples as a gray image draw the same pixels.
+    assert np.array_equal(drawn, own(_stencil_page(placement, image=True), DPI)[0])
+
+
+def test_a_stencil_sampled_by_exact_arithmetic_is_reported():
+    placement = STENCIL_PLACEMENTS['half-pixel-page']
+    drawn, _ = own(_stencil_page(placement), DPI)
+    planted = _exactly_sampled(placement, drawn.shape)
+    # Rows of samples a pixel off: at least 8 x 40 pixels, the 2.3 % of inked pixels the comparison reported before.
+    assert int((planted != drawn).any(axis=2).sum()) >= 320
+    assert not agrees(*disagreement(drawn, planted))
+
+
+#: A soft mask that does not read (its /S neither Luminosity nor Alpha): the interpreter skips the `gs` setting it.
+UNREAD_MASK = '/ExtGState << /M << /SMask << /S /Opacity /G {G} >> >> >>'
+MASK_FORM = ('<< /Type /XObject /Subtype /Form /BBox [0 0 200 150] /Group << /S /Transparency >> >>', b'0 0 1 1 re f')
+
+
+def test_the_own_renderer_refuses_a_region_drawn_under_a_state_it_did_not_read(tmp_path):
+    # O47: the marks after the skipped `gs` are drawn without its soft mask -- not as the file states them.
+    path = tmp_path / 'm.pdf'
+    path.write_bytes(page_pdf('/M gs 0 0 1 rg 20 20 60 60 re f', {'G': MASK_FORM}, resources=UNREAD_MASK))
+    with pytest.raises(Unsupported, match=r'`gs` skipped: .* x1'):
+        read_raster(path, 1, BBox(0, 0, 200, 150), dpi=DPI)
+    # Where no mark drawn after it paints, nothing differs: the region is drawn.
+    read_raster(path, 1, BBox(120, 0, 200, 150), dpi=DPI)
+    # Planted control: the same page with a soft mask that reads draws whole.
+    readable = UNREAD_MASK.replace('/Opacity', '/Luminosity')
+    path.write_bytes(page_pdf('/M gs 0 0 1 rg 20 20 60 60 re f', {'G': MASK_FORM}, resources=readable))
+    read_raster(path, 1, BBox(0, 0, 200, 150), dpi=DPI)
+
+
+def test_the_own_renderer_refuses_a_region_whose_mark_did_not_read_wherever_it_lies(tmp_path):
+    # O47: an XObject that does not read is a mark whose place is not known: every region refuses it.
+    path = tmp_path / 'x.pdf'
+    path.write_bytes(page_pdf('q 50 0 0 50 10 10 cm /Im9 Do Q 0 g 150 100 20 20 re f'))
+    with pytest.raises(Unsupported, match=r'`Do` skipped: .* x1'):
+        read_raster(path, 1, BBox(120, 0, 200, 150), dpi=DPI)

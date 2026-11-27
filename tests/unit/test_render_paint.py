@@ -465,3 +465,42 @@ def test_a_planted_wrong_paint_is_reported(name):
     pixels, truth, _ = _case(name, wrong=True)
     mean, share = disagreement(pixels, truth)
     assert not agrees(mean, share), name
+
+
+def _knockout_page(marks: int, *, knockout: bool = True) -> bytes:
+    """A knockout group over the whole page holding ``marks`` small translucent rectangles, scattered (seeded), over
+    a backdrop -- or, not ``knockout``, the same group composited mark over mark."""
+    rng = np.random.default_rng(7)
+    shown = []
+    for _ in range(marks):
+        x, y = rng.uniform(5, 185), rng.uniform(5, 135)
+        r, g, b = rng.uniform(0, 1, 3)
+        shown.append(f'{r:.3f} {g:.3f} {b:.3f} rg {x:.2f} {y:.2f} 8 6 re f')
+    group = f'<< /S /Transparency /K {"true" if knockout else "false"} >>'
+    resources = '/Resources << /ExtGState << /A << /ca 0.6 >> >> >>'
+    form = (
+        f'<< /Type /XObject /Subtype /Form /BBox [0 0 200 150] /Group {group} {resources} >>',
+        ('/A gs ' + ' '.join(shown)).encode(),
+    )
+    return page_pdf('0.9 0.9 0.5 rg 0 0 200 150 re f /Fm1 Do', {'Fm1': form})
+
+
+#: Marks in the pathological knockout group: drawn over the group's whole box each, they cost 9.2 s at 300 dpi
+#: (measured 2026-11-27); over their own boxes, 0.11 s.
+KNOCKOUT_MARKS = 5000
+#: Seconds the group may take: a tenth of what it took drawn over the group's box.
+KNOCKOUT_SECONDS = 1.0
+
+
+def test_a_knockout_group_of_many_marks_costs_their_areas_and_paints_as_the_reference_does():
+    import time  # noqa: PLC0415 -- this case alone times
+
+    data = _knockout_page(KNOCKOUT_MARKS)
+    start = time.perf_counter()
+    drawn, undrawn = own(data, 300)
+    elapsed = time.perf_counter() - start
+    assert undrawn == {}
+    assert elapsed < KNOCKOUT_SECONDS, f'{elapsed:.2f} s'
+    assert agrees(*disagreement(drawn, reference(data, 300)))
+    # Planted wrong: the same marks composited over each other, not knocking out.
+    assert not agrees(*disagreement(drawn, reference(_knockout_page(KNOCKOUT_MARKS, knockout=False), 300)))

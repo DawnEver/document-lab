@@ -20,6 +20,7 @@
 use std::rc::Rc;
 
 use pdf::function::Function;
+use pdf::geometry::Rect;
 use pdf::icc::Intent;
 use pdf::interpret::{Blend, Event, Group, SoftMask};
 use tiny_skia::{
@@ -138,41 +139,55 @@ fn mul(a: u8, b: u8) -> u8 {
 
 impl<'a> Canvas<'a> {
     /// One element (a mark, or a group) drawn by `draw` at constant alpha `alpha`: as it comes, or in a knockout
-    /// group composited onto the group's backdrop and replacing what lies below by its shape.
-    pub(crate) fn element(&mut self, alpha: f64, draw: &dyn Fn(&mut Canvas<'a>)) {
+    /// group composited onto the group's backdrop and replacing what lies below by its shape -- both drawn over the
+    /// pixels of its `extent` alone (page space, [`Canvas::extent`]; None: it paints nothing), a pixel wider for
+    /// anti-aliasing, so a group of many small marks costs their areas, not their count times the group's.
+    pub(crate) fn element(
+        &mut self,
+        alpha: f64,
+        extent: Option<Rect>,
+        draw: &dyn Fn(&mut Canvas<'a>),
+    ) {
         let Some(backdrop) = self.knockout.clone() else {
             draw(self);
             return;
         };
-        let (w, h) = (self.pixmap.width(), self.pixmap.height());
-        let layer = std::mem::replace(&mut self.pixmap, (*backdrop).clone());
-        draw(self);
-        let onto = std::mem::replace(
-            &mut self.pixmap,
-            Pixmap::new(w, h).expect("the canvas's size"),
-        );
+        let Some(area) = extent.and_then(|e| self.grid.pixels(e.grown(1.0 / self.grid.scale)))
+        else {
+            return; // it paints nothing here
+        };
+        let window = self.grid.window(area);
+        let start = backdrop.clone_rect(area).expect("within the canvas");
+        let mut over = self.child(window, start);
+        draw(&mut over);
+        let onto = self.adopt(over);
         // Its shape: drawn alone, counted once.
         let undrawn = self.kept.undrawn.clone();
-        self.knockout = None;
-        draw(self);
-        self.knockout = Some(backdrop);
+        let blank = Pixmap::new(area.width(), area.height()).expect("the area's size");
+        let mut alone = self.child(window, blank);
+        draw(&mut alone);
+        let alone = self.adopt(alone);
         self.kept.undrawn = undrawn;
-        let alone = std::mem::replace(&mut self.pixmap, layer);
-        for ((out, over), shape) in self
-            .pixmap
-            .pixels_mut()
-            .iter_mut()
-            .zip(onto.pixels())
-            .zip(alone.pixels())
-        {
-            let a = f64::from(shape.alpha()) / 255.0;
-            let f = if alpha > 0.0 {
-                (a / alpha).min(1.0)
-            } else {
-                0.0
-            };
-            if f > 0.0 {
-                *out = mix(*out, *over, f);
+        let (stride, across) = (self.pixmap.width() as usize, area.width() as usize);
+        #[expect(clippy::cast_sign_loss, reason = "within the canvas")]
+        let (left, top) = (area.x() as usize, area.y() as usize);
+        let rows = onto
+            .pixels()
+            .chunks_exact(across)
+            .zip(alone.pixels().chunks_exact(across));
+        for (row, (overs, shapes)) in rows.enumerate() {
+            let at = (top + row) * stride + left;
+            let outs = &mut self.pixmap.pixels_mut()[at..at + across];
+            for ((out, over), shape) in outs.iter_mut().zip(overs).zip(shapes) {
+                let a = f64::from(shape.alpha()) / 255.0;
+                let f = if alpha > 0.0 {
+                    (a / alpha).min(1.0)
+                } else {
+                    0.0
+                };
+                if f > 0.0 {
+                    *out = mix(*out, *over, f);
+                }
             }
         }
     }
@@ -290,7 +305,7 @@ impl<'a> Canvas<'a> {
             .map_err(|e| e.to_string())?;
         self.kept.nesting += 1;
         let mut canvas = self.child(grid, pixmap);
-        canvas.draw(&content.events, None);
+        canvas.content(&content);
         let pixmap = self.adopt(canvas);
         self.kept.nesting -= 1;
         let data = pixmap

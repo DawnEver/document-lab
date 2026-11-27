@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pymupdf
 import pytest
 
@@ -344,8 +345,9 @@ def test_a_standard_font_not_embedded_is_drawn_as_its_substitute_embedded_is(sho
 CJK_TEXT = 'BT /F1 28 Tf 10 100 Td <4E2D658775284F8B> Tj ET BT /F1 11 Tf {x} 40 Td <78C1602796F64EF6002C0041> Tj ET'
 
 
-def _cjk_page(flags: int, *, shifted: bool = False) -> bytes:
-    """A page of GB1 text in a composite font that embeds no program, its descriptor's flags ``flags``."""
+def _cjk_page(flags: int, *, shifted: bool = False, text: str = CJK_TEXT, width: int = 1000) -> bytes:
+    """A page of GB1 ``text`` in a composite font that embeds no program, its descriptor's flags ``flags``, every
+    CID stated ``width`` units wide (``/DW``)."""
     objects = {
         'F1': (
             '<< /Type /Font /Subtype /Type0 /BaseFont /FZSSK--GBK1-0 /Encoding /UniGB-UCS2-H /DescendantFonts [{C}] >>',
@@ -354,13 +356,13 @@ def _cjk_page(flags: int, *, shifted: bool = False) -> bytes:
         'C': (
             (
                 '<< /Type /Font /Subtype /CIDFontType0 /BaseFont /FZSSK--GBK1-0 /CIDSystemInfo << /Registry (Adobe) '
-                '/Ordering (GB1) /Supplement 2 >> /FontDescriptor {D} /DW 1000 >>'
+                f'/Ordering (GB1) /Supplement 2 >> /FontDescriptor {{D}} /DW {width} >>'
             ),
             None,
         ),
         'D': (DESCRIPTOR.format(name='FZSSK--GBK1-0', flags=flags, file=''), None),
     }
-    return page_pdf(CJK_TEXT.format(x=10 + 2 * shifted), objects, resources=FONT)
+    return page_pdf(text.format(x=10 + 2 * shifted), objects, resources=FONT)
 
 
 @pytest.mark.parametrize(('flags', 'fallback'), [(4, 'noto-sans-sc'), (6, 'noto-serif-sc')])
@@ -393,3 +395,35 @@ def test_a_fallback_that_cannot_be_had_leaves_its_glyphs_undrawn_by_name():
 
     _, undrawn = own(_cjk_page(4), DPI, fonts=offline)
     assert undrawn == {'font FZSSK--GBK1-0 is not embedded and its fallback noto-sans-sc cannot be had: offline': 10}
+
+
+#: '(mm)' in the CJK font not embedded, every CID stated 300 units wide (/DW): narrower than the fallback's own 'm'.
+NARROW_LATIN = 'BT /F1 40 Tf 20 60 Td <0028006D006D0029> Tj ET'
+
+
+def _ink_columns(pixels: np.ndarray) -> np.ndarray:
+    """The columns any pixel of ``pixels`` inks."""
+    return np.nonzero((pixels.min(axis=2) < 128).any(axis=0))[0]
+
+
+def test_a_cjk_fallback_s_glyphs_are_stretched_to_the_stated_widths_when_asked():
+    """O49: a CJK font's fallback sets each glyph at its own advance by default, as MuPDF sets its own -- Latin
+    letters wider than the widths the file states then overlap; ``fallback_widths='stated'`` stretches each across
+    its stated width, as a simple font's substitute is. Measured on IEC 60205-2006's 10 such pages against PyMuPDF
+    (2026-11-27): with PyMuPDF's Droid as the fallback on both sides, 0.010 % of inked pixels off at their own
+    advance and 0.33 % stretched; with the Noto fallbacks, 13.11 % and 13.16 %: the default is their own advance."""
+    droid = bytes(pymupdf.Font('cjk').buffer)
+    page = _cjk_page(4, text=NARROW_LATIN, width=300)
+    stated, undrawn = own(page, DPI, fonts=lambda _: droid, fallback_widths='stated')
+    assert undrawn == {}
+    # Four glyphs, each within the 12 points its width states: the run inks no column past its 48 points.
+    start = 20 * DPI / 72
+    run = _ink_columns(stated)
+    assert run.min() >= start - 1
+    assert run.max() <= start + 48 * DPI / 72 + 1
+    # The default: each glyph at its own advance -- as MuPDF draws it -- the letters reaching past their widths.
+    default, _ = own(page, DPI, fonts=lambda _: droid)
+    assert agrees(*disagreement(default, reference(page, DPI)))
+    assert _ink_columns(default).max() > start + 48 * DPI / 72 + 1
+    # Planted wrong: stretched is not what MuPDF draws.
+    assert not agrees(*disagreement(stated, reference(page, DPI)))

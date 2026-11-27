@@ -331,3 +331,52 @@ def test_back_matter_set_as_large_as_the_chapters_takes_their_level(tmp_path):
             _write(page, 72, 140 + 14 * i, f'The body is set in the body size and runs on here, line {i}.', size=12)
     doc.save(tmp_path / 's.pdf')
     assert _heads(to_markdown(read_pdf(tmp_path / 's.pdf'))) == ['# ACKNOWLEDGMENTS', '# CHAPTER 1', '# REFERENCES']
+
+
+def test_a_numbered_line_in_its_own_face_heads_where_it_continues_the_numbering(tmp_path):
+    """W7153671269 sets its sections in bold and its subsections in italic (``2.1. Basics of magnetostatics``), arXiv
+    2204.08094 its ``3.1.1 GuitarSet`` in italic under a bold ``3.1``, a manual its subsections in a larger roman under
+    a title-size ``1.``: a numbered line set wholly in a face other than the body's heads at its depth when its parent
+    number already heads -- ``2.1`` after ``2``. A list item whose number is in the body's face stays text.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    _write(page, 72, 80, '2. Fundamentals', font='tibo')
+    _write(page, 72, 100, 'The body of the section is set in the body face, in roman, at the body size.')
+    _write(page, 72, 125, '2.1. Basics of magnetostatics', font='tiit')
+    _write(page, 72, 145, 'The body of the subsection is set in the body face, in roman, at the body size.')
+    _write(page, 72, 170, '2.1.1 GuitarSet', font='tiit')
+    _write(page, 72, 190, 'The body of the subsubsection is set in the body face, in roman, at the body size.')
+    _write(page, 72, 215, '1.')
+    _write(page, 86, 215, 'Fully immersed', font='tiit')  # a list item: its number is the body's face
+    _write(page, 72, 240, '4.1 An orphan subsection', font='tiit')  # no section 4 heads
+    manual = doc.new_page(width=612, height=792)
+    _write(manual, 72, 80, '3. Convection', size=20)
+    _write(manual, 72, 110, 'The body of the chapter is set in the body face, in roman, at the body size.')
+    _write(manual, 72, 135, '3.2 Natural convection', size=14)
+    _write(manual, 72, 160, 'The body of the subsection is set in the body face, in roman, at the body size.')
+    doc.save(tmp_path / 's.pdf')
+    assert _heads(to_markdown(read_pdf(tmp_path / 's.pdf'))) == [
+        '## 2. Fundamentals',
+        '### 2.1. Basics of magnetostatics',
+        '#### 2.1.1 GuitarSet',
+        '# 3. Convection',
+        '### 3.2 Natural convection',
+    ]
+
+
+def test_a_data_sheets_numbered_rows_in_another_face_head_nothing(tmp_path):
+    """Data sheets set short numbered rows in faces other than the body's (``09 August 2018``, ``0 A/m``,
+    ``13.56 MHz``, ``1. Chamfered holes and sides.``): none continues a numbering the document heads, so none heads --
+    a top-level number never heads by its face, nor a ``2.5`` whose ``2`` heads nothing (or heads only later).
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    _write(page, 57, 80, '1 Scope', font='tibo')
+    _write(page, 57, 100, 'The cores of this sheet are made of a ferrite material for power use.')
+    rows = ('09 August 2018', '13.56 MHz', '2.5 Height of the core', '1. Chamfered holes and sides.', '0 A/m')
+    for i, row in enumerate(rows):
+        _write(page, 57, 130 + 20 * i, row, size=8, font='helv')
+    _write(page, 57, 250, '2 Dimensions', font='tibo')
+    doc.save(tmp_path / 's.pdf')
+    assert _heads(to_markdown(read_pdf(tmp_path / 's.pdf'))) == ['## 1 Scope', '## 2 Dimensions']

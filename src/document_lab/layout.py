@@ -18,7 +18,7 @@
   :data:`LINE_GAP` font sizes below the last; a block is columns side by side, each next within :data:`BLOCK_GAP`
   font sizes to the left, its page column the whole block's; lines side by side read right to left.
 - Words: :func:`wordy` tells text that reads as words from OCR noise (a figure's labels, a garbled leader);
-  :func:`body_size` is the size most of a document's text is set in.
+  :func:`body_size` is the size most of a document's text is set in, :func:`body_face` the font and size.
 """
 
 from __future__ import annotations
@@ -46,6 +46,7 @@ __all__ = [
     'Block',
     'Line',
     'blocks',
+    'body_face',
     'body_size',
     'furniture',
     'lines',
@@ -319,6 +320,14 @@ def wordy(text: str) -> bool:
     """Does ``text`` read as words, not OCR noise: a word of :data:`WORD_LETTERS` letters, letters most of it?"""
     letters = sum(c.isalpha() or c.isspace() for c in text)
     return letters >= LETTER_SHARE * len(text) and any(len(w) >= WORD_LETTERS and w.isalpha() for w in text.split())
+
+
+def body_face(doc: Document) -> tuple[str, float]:
+    """The font and size (to a tenth of a point) most of ``doc``'s text is set in (``('', 0.0)`` when it has none)."""
+    faces: Counter[tuple[str, float]] = Counter()
+    for span in doc.spans():
+        faces[span.font, round(span.size, 1)] += len(span.text)
+    return faces.most_common(1)[0][0] if faces else ('', 0.0)
 
 
 def body_size(doc: Document) -> float:

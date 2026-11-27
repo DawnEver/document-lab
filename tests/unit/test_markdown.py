@@ -206,6 +206,32 @@ def test_a_stated_outline_names_the_sections_the_rules_miss(tmp_path):
     assert heads == ['# Overview']  # page 1's largest text is its title by the rules, which head no section
 
 
+def test_the_headings_judged_are_the_heading_lines_the_markdown_writes(tmp_path):
+    doc = _outlined(
+        tmp_path,
+        [(1, 'Overview', 1, 150), (1, 'Scope of work', 1, 210)],
+        [
+            [
+                (100, 'A Title Set Larger', 18),
+                (124, 'Than Its Body', 18),
+                (160, 'Overview', 12),
+                (180, BODY, 10),
+                (220, 'Scope of', 11),
+                (234, 'work', 11),
+                (250, BODY, 10),
+            ],
+        ],
+    )
+    for found in (headings(doc), headings(doc, outline=False)):
+        written = [(1, line) for line in page_markdowns(doc, sections=found)[0].splitlines() if line.startswith('#')]
+        assert list(found.written) == written
+    assert headings(doc).written == (
+        (1, '# A Title Set Larger Than Its Body'),
+        (1, '## Overview'),
+        (1, '## Scope of work'),
+    )
+
+
 def test_an_outline_not_found_on_its_pages_leaves_the_rules_to_head_and_says_why(tmp_path):
     doc = _outlined(
         tmp_path,

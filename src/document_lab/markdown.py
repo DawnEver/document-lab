@@ -127,6 +127,24 @@ class Headings:
     shared: int = 0
 
     @property
+    def written(self) -> tuple[tuple[int, str], ...]:
+        """Each heading as the markdown writes it, ``(page, heading line)`` in order.
+
+        A title (``#``) set over consecutive lines is one heading, its lines' text joined, as :func:`page_markdowns`
+        writes it.
+        """
+        out: list[tuple[int, str]] = []
+        for number, marks in enumerate(self.marks, start=1):
+            end = -1  # where the title being written ends, in line indexes
+            for i, heading, span in marks:
+                if heading.startswith('# ') and i == end and out[-1][1].startswith('# '):
+                    out[-1] = (number, f'{out[-1][1]} {heading[2:]}')
+                else:
+                    out.append((number, heading))
+                end = i + span
+        return tuple(out)
+
+    @property
     def disagreements(self) -> tuple[str, ...]:
         """Where the stated outline and the inferred structure differ, in words; empty when they agree or no outline."""
         return (

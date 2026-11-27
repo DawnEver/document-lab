@@ -39,7 +39,7 @@ _ON_SCREEN_ONLY: Final = 1 << 0  # kCGWindowListOptionOnScreenOnly: front to bac
 _INCLUDING_WINDOW: Final = 1 << 3  # kCGWindowListOptionIncludingWindow
 _EXCLUDE_DESKTOP: Final = 1 << 4  # kCGWindowListExcludeDesktopElements
 _NOMINAL_RESOLUTION: Final = 1 << 4  # kCGWindowImageNominalResolution: one pixel a point
-_FLOATING_LAYER: Final = 3  # NSFloatingWindowLevel: a window kept on top is a window still
+_KEPT_ON_TOP_LAYER: Final = 19  # kCGUtilityWindowLevel, where Tk keeps a -topmost window; the Dock is 20
 _SINT64: Final = 4  # kCFNumberSInt64Type
 _DOUBLE: Final = 13  # kCFNumberDoubleType
 _UTF8: Final = 0x08000100  # kCFStringEncodingUTF8
@@ -287,7 +287,7 @@ def client(window: Window) -> Region:
 
 def _shown() -> list[_Info]:
     """The on-screen windows of programs (normal or kept on top), front to back, named or not."""
-    return [i for i in _infos(_ON_SCREEN_ONLY | _EXCLUDE_DESKTOP) if 0 <= i.layer <= _FLOATING_LAYER and i.alpha > 0]
+    return [i for i in _infos(_ON_SCREEN_ONLY | _EXCLUDE_DESKTOP) if 0 <= i.layer <= _KEPT_ON_TOP_LAYER and i.alpha > 0]
 
 
 def _sized(listed: list[_Info]) -> list[Window]:

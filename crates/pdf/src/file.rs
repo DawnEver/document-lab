@@ -13,6 +13,7 @@ use crate::filter::{self, Decoded};
 use crate::font::Font;
 use crate::object::{Dict, Object, Stream};
 use crate::parser::{Parser, find};
+use crate::shape::{Fallbacks, Fetch};
 use crate::xref::{self, Entry, Xref};
 
 /// An object stream's members: (number, value) in stream order.
@@ -37,6 +38,8 @@ pub struct File {
     decryptor: Option<(Decryptor, Option<u32>)>,
     /// Fonts read, by their dictionary's object number: read once for every page showing them.
     pub(crate) fonts: RefCell<HashMap<u32, Rc<Font>>>,
+    /// The fallback font programs its fonts that embed none and have no substitute are drawn with.
+    pub(crate) fallbacks: Fallbacks,
 }
 
 impl File {
@@ -75,6 +78,7 @@ impl File {
             read: RefCell::new(HashMap::new()),
             decryptor: None,
             fonts: RefCell::new(HashMap::new()),
+            fallbacks: Fallbacks::default(),
         };
         if let Some(encrypt) = file.xref.trailer.get(b"Encrypt").cloned() {
             let dict = match file.resolve(&encrypt)? {
@@ -140,6 +144,13 @@ impl File {
             .entry(num)
             .or_insert_with(|| Rc::clone(&made) as Rc<dyn Any>);
         Ok(made)
+    }
+
+    /// Draw its fonts that embed no program and have no substitute with the fallback programs `fetch` gives by name
+    /// ([`crate::shape::FALLBACKS`]), each asked for once, when a glyph first needs it. Without it, their glyphs are
+    /// missing, by name.
+    pub fn fetch_fallbacks(&self, fetch: Rc<Fetch>) {
+        self.fallbacks.set(fetch);
     }
 
     /// The SHA-256 digest of the file's bytes, as read: what a reading cites as its source.

@@ -25,6 +25,9 @@ from tests.synthetic import (
     to_page,
 )
 
+#: Glyph shapes are read against document_lab.glyphs' reference font, fetched first (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures('reference_font')
+
 XS = [float(x) for x in range(0, 101, 10)]
 
 
@@ -523,6 +526,15 @@ def test_an_outlined_word_is_read_at_its_own_scale_and_a_lone_letter_by_shape_al
     spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=stray)
     page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1)
     assert sorted(s.text for s in outline_text(page)) == ['B', 'OX', 'ox']
+
+
+def test_an_outlined_word_of_one_shape_at_either_scale_is_refused(tmp_path):
+    """``xx`` and ``zz`` draw the same shapes as ``XX`` and ``ZZ``: nothing tells their scale, so neither is read;
+    ``max.`` is read at the x-height, its ``m`` and ``a`` lying far from their place at the ascent."""
+    stray = [('xx', 450.0, 120.0, 8.0), ('ZZ', 450.0, 140.0, 8.0), ('max.', 450.0, 160.0, 8.0)]
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=stray)
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1)
+    assert [s.text for s in outline_text(page)] == ['max.']
 
 
 def test_an_outlined_number_before_min_or_max_is_one_bound_span(tmp_path):

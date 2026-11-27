@@ -18,6 +18,7 @@ use std::fmt::Write;
 use std::fs;
 use std::io::{self, BufWriter};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use pdf::color::PatternKind;
 use pdf::destination::{Action, Destination, Targets};
@@ -301,8 +302,13 @@ struct Reader {
 
 /// Open the PDF `source` with `password` (empty: none): the file at a path (`str` or `os.PathLike`), read whole
 /// here, or the bytes of one already in memory (`bytes`), copied. Python holds no copy of a file read here.
+///
+/// `fonts`: what fetches a fallback font program by its name (one of `FALLBACK_FONTS`), called when a glyph first
+/// needs it, at most once a name -- its `bytes`, or an exception whose message says why it cannot be had (the glyphs
+/// it would draw are then counted in `render`'s undrawn, by that message). None: no fallback is fetched.
 #[pyfunction]
-fn open(source: &Bound<'_, PyAny>, password: &[u8]) -> PyResult<Reader> {
+#[pyo3(signature = (source, password, *, fonts = None))]
+fn open(source: &Bound<'_, PyAny>, password: &[u8], fonts: Option<Py<PyAny>>) -> PyResult<Reader> {
     let data = if let Ok(bytes) = source.cast::<PyBytes>() {
         bytes.as_bytes().to_vec()
     } else {
@@ -310,6 +316,19 @@ fn open(source: &Bound<'_, PyAny>, password: &[u8]) -> PyResult<Reader> {
         fs::read(&path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?
     };
     let file = pdf::File::open(data, password).map_err(|e| refused(&e))?;
+    if let Some(fetch) = fonts {
+        file.fetch_fallbacks(Rc::new(move |name: &str| {
+            Python::attach(|py| {
+                let said = |e: PyErr| e.value(py).to_string();
+                let program = fetch.call1(py, (name,)).map_err(said)?;
+                let bytes = program
+                    .bind(py)
+                    .cast::<PyBytes>()
+                    .map_err(|_| format!("{name}: the fetch gave no bytes"))?;
+                Ok(bytes.as_bytes().to_vec())
+            })
+        }));
+    }
     let pages = file.pages().map_err(|e| refused(&e))?;
     Ok(Reader {
         file,
@@ -604,6 +623,25 @@ fn create(path: PathBuf, level: u8) -> PyResult<Writer> {
         .map_err(|e| PyOSError::new_err(format!("{}: {e}", path.display())))?;
     let inner = pdf::writer::Writer::new(BufWriter::new(file), level).map_err(|e| refused(&e))?;
     Ok(Writer { inner: Some(inner) })
+}
+
+/// `text` set in the font program `program` at `size` pixels an em, the first glyph's origin on its baseline at
+/// `origin` (pixels, y down), on a canvas `width` by `height`: each pixel's ink 0-255, rows top-down
+/// (`render::specimen`).
+#[pyfunction]
+fn specimen<'py>(
+    py: Python<'py>,
+    program: &[u8],
+    text: &str,
+    size: f64,
+    origin: (f64, f64),
+    width: u32,
+    height: u32,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let (x, y) = origin;
+    let ink = render::specimen::specimen(program, text, size, Point { x, y }, width, height)
+        .map_err(|e| refused(&e))?;
+    Ok(PyBytes::new(py, &ink))
 }
 
 /// The Python exception of `e`'s kind.
@@ -1013,6 +1051,8 @@ fn extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(open, module)?)?;
     module.add_class::<Reader>()?;
     module.add_function(wrap_pyfunction!(create, module)?)?;
+    module.add_function(wrap_pyfunction!(specimen, module)?)?;
+    module.add("FALLBACK_FONTS", pdf::shape::FALLBACKS.to_vec())?;
     module.add_class::<Writer>()?;
     let py = module.py();
     module.add("Refused", py.get_type::<Refused>())?;

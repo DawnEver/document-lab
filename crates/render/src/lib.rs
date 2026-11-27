@@ -15,21 +15,23 @@
 //! for the anti-aliasing of a curve's edge, which differs by a few coverage steps where the region's edge cuts it.
 //!
 //! What is not drawn is never silently missing. What in the region the renderer cannot draw as the file states it
-//! is counted by kind in [`Raster::undrawn`] -- a glyph whose shape cannot be read (a font that embeds no program
-//! and has no substitute, by name), a text clip holding such a glyph (by its box), an image whose data does not
+//! is counted by kind in [`Raster::undrawn`] -- a glyph whose shape cannot be read (a font that embeds no program,
+//! with no substitute and no fallback to be had, by name), a text clip holding such a glyph (by its box), an image whose data does not
 //! decode, or decodes only past what a strict decoder refuses ([`codec`]), a shading, pattern or soft mask that does
 //! not read (by why), patterns and soft masks nested too deep -- for the caller to refuse or accept. Hidden optional
 //! content and what the colorant `None` paints mark nothing and are not drawn.
 //!
 //! Layers: [`codec`] (image codecs to samples) -> [`image`] (an image's samples to pixels), [`clip`] (clipping
 //! paths to masks) and [`shade`] (a shading's colors to pixels) -> this module (the page painted), [`paint`] (what a
-//! color paints with) and [`transparency`] (groups and soft masks).
+//! color paints with) and [`transparency`] (groups and soft masks). Apart from a page, [`specimen`] sets characters
+//! of a font program on their own.
 
 pub mod clip;
 pub mod codec;
 pub mod image;
 mod paint;
 mod shade;
+pub mod specimen;
 mod transparency;
 
 use std::collections::{BTreeMap, HashMap};

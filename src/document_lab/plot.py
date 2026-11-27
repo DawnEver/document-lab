@@ -57,7 +57,7 @@ from typing import TYPE_CHECKING, Final, Literal
 import numpy as np
 
 from document_lab.glyphs import (
-    HELVETICA,
+    SANS,
     STROKE,
     Font,
     Glyph,
@@ -788,7 +788,7 @@ def _outline_words(paths: Sequence[VectorPath]) -> list[tuple[float | None, str 
         else:
             host[1].append(shape.points)
     glyphs = _dotted([g for g in glyphs if not (len(g[1]) == 1 and _arrowhead(g[1][0], g[0]))])
-    return _read_words([Glyph(rasterize(polys, tuple(box)), tuple(box)) for box, polys in glyphs], HELVETICA)
+    return _read_words([Glyph(rasterize(polys, tuple(box)), tuple(box)) for box, polys in glyphs], SANS)
 
 
 def _stroke_words(paths: Sequence[VectorPath]) -> tuple[list[tuple[float | None, str | None, BBox]], set[int]]:
@@ -1809,9 +1809,7 @@ def _raster_labels(
         glyphs.append(Glyph(np.where(labels[cut] == k, dark[cut], 0.0), tuple(glyph_box)))
     out, refusals = [], {}
     boxes = [BBox(*g.box) for g in glyphs]
-    title = {
-        i for column in _columns(glyphs, HELVETICA) for i in column
-    }  # a turned y title in the label column is no label
+    title = {i for column in _columns(glyphs, SANS) for i in column}  # a turned y title in the label column is no label
     rest = [i for i in range(len(glyphs)) if i not in title]
     for word in _words([boxes[i] for i in rest]):
         members = [glyphs[rest[k]] for k in word]

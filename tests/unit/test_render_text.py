@@ -338,3 +338,58 @@ def test_a_standard_font_not_embedded_is_drawn_as_its_substitute_embedded_is(sho
     assert agrees(mean, share), f'{short}: mean {mean:.3f}, {share:.4%} of the inked pixels off'
     wrong, _ = own(_standard_page(short, shifted=True), DPI)
     assert not agrees(*disagreement(wrong, truth)), f'{short}: a line moved 2 points passed'
+
+
+#: Text in a CJK font the file does not embed: two lines of characters of Adobe-GB1, by their UCS-2 codes.
+CJK_TEXT = 'BT /F1 28 Tf 10 100 Td <4E2D658775284F8B> Tj ET BT /F1 11 Tf {x} 40 Td <78C1602796F64EF6002C0041> Tj ET'
+
+
+def _cjk_page(flags: int, *, shifted: bool = False) -> bytes:
+    """A page of GB1 text in a composite font that embeds no program, its descriptor's flags ``flags``."""
+    objects = {
+        'F1': (
+            '<< /Type /Font /Subtype /Type0 /BaseFont /FZSSK--GBK1-0 /Encoding /UniGB-UCS2-H /DescendantFonts [{C}] >>',
+            None,
+        ),
+        'C': (
+            (
+                '<< /Type /Font /Subtype /CIDFontType0 /BaseFont /FZSSK--GBK1-0 /CIDSystemInfo << /Registry (Adobe) '
+                '/Ordering (GB1) /Supplement 2 >> /FontDescriptor {D} /DW 1000 >>'
+            ),
+            None,
+        ),
+        'D': (DESCRIPTOR.format(name='FZSSK--GBK1-0', flags=flags, file=''), None),
+    }
+    return page_pdf(CJK_TEXT.format(x=10 + 2 * shifted), objects, resources=FONT)
+
+
+@pytest.mark.parametrize(('flags', 'fallback'), [(4, 'noto-sans-sc'), (6, 'noto-serif-sc')])
+def test_a_cjk_font_not_embedded_is_drawn_from_its_fallback_as_mupdf_draws_it(flags, fallback):
+    """The fallback (sans or serif by the descriptor's flags, as MuPDF chooses) is fetched once, by name. PyMuPDF
+    draws such a font with its own Droid Sans Fallback: served as the fallback here, the very program is drawn on
+    both sides, so where each glyph is placed and which one, through its CID's character, are compared, not the
+    design; a line moved 2 points is reported."""
+    droid = bytes(pymupdf.Font('cjk').buffer)
+    asked = []
+
+    def served(name: str) -> bytes:
+        asked.append(name)
+        return droid
+
+    data = _cjk_page(flags)
+    pixels, undrawn = own(data, DPI, fonts=served)
+    assert (undrawn, asked) == ({}, [fallback])
+    truth = reference(data, DPI)
+    mean, share = disagreement(pixels, truth)
+    assert agrees(mean, share), f'mean {mean:.3f}, {share:.4%} of the inked pixels off'
+    wrong, _ = own(_cjk_page(flags, shifted=True), DPI, fonts=served)
+    assert not agrees(*disagreement(wrong, truth)), 'a line moved 2 points passed'
+
+
+def test_a_fallback_that_cannot_be_had_leaves_its_glyphs_undrawn_by_name():
+    def offline(name: str) -> bytes:
+        msg = f'{name} cannot be had: offline'
+        raise RuntimeError(msg)
+
+    _, undrawn = own(_cjk_page(4), DPI, fonts=offline)
+    assert undrawn == {'font FZSSK--GBK1-0 is not embedded and its fallback noto-sans-sc cannot be had: offline': 10}

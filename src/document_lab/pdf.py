@@ -5,8 +5,9 @@ links beside them; what the document states beside its pages -- outline, page la
 files -- on the :class:`Document`. Pixels are the reader's only as an image's own samples (no codec is decoded):
 :func:`read_raster` takes a region that is one image whole from them, and draws any other with a renderer -- PyMuPDF
 (the reference, the default) or document-lab's own (``renderer='own'``: the ``render`` crate, drawing from this
-reader's interpreter, text from its fonts' outlines; it refuses a region holding what it cannot draw, by name
--- D37 of task document-lab-pdf-reader; what text a region shows is `document_lab.ir.Page.shown`'s); an
+reader's interpreter, text from its fonts' outlines -- a font the file does not embed and no built-in substitute
+stands for from a fallback :mod:`document_lab.fonts` fetches on first use; it refuses a region holding what it cannot
+draw, by name -- D37 of task document-lab-pdf-reader; what text a region shows is `document_lab.ir.Page.shown`'s); an
 embedded file's bytes are :func:`read_attachment`'s.
 
 A tagged file's structure tree comes back as :attr:`~document_lab.ir.Document.structure`, each element holding the
@@ -31,7 +32,7 @@ from typing import Final, Literal, overload
 import numpy as np
 import pymupdf
 
-from document_lab import _pdf
+from document_lab import _pdf, fonts
 from document_lab._pdf import Locked, Malformed, NotPdf, Refused, Unsupported
 from document_lab.ir import (
     Action,
@@ -577,7 +578,8 @@ def read_raster(
 
     Raises:
         Unsupported: ``renderer='own'`` and the region holds what it cannot draw (a glyph of a font it has no
-            program for, a JPX or JBIG2 image, a shading that does not read, ...).
+            program for, or whose fallback cannot be had: :class:`document_lab.fonts.FontUnavailable`'s message, an
+            image that does not decode, a shading that does not read, ...).
 
     """
     if renderer not in ('pymupdf', 'own'):
@@ -585,7 +587,7 @@ def read_raster(
         raise ValueError(msg)
     path = Path(path)
     data = path.read_bytes()  # rendered and cited alike: the pixels are those of the bytes hashed
-    reader = _pdf.open(data, password.encode())
+    reader = _pdf.open(data, password.encode(), fonts=fonts.program)
     rows, paths, images, _ = reader.page(page, annotations=True, curve_samples=1)
     here = Provenance(reader.sha256, file_uri(path.resolve()), page=page, bbox=bbox)
     _, width, height = reader.pages[page - 1]

@@ -14,7 +14,13 @@ ink, held to its own reference turned upside down and moved a few pixels, must b
 
 A standard font a document does not embed is drawn with PDFium's Foxit substitute where PyMuPDF draws URW's, two
 designs (``tests/unit/test_render_text.py`` holds the substitution itself to PyMuPDF drawing the Foxit program):
-its glyphs' edges differ, which the measurement below includes.
+its glyphs' edges differ, which the measurement below includes. A CJK font a document does not embed is drawn from a
+fallback fetched on first use (Noto Sans or Serif CJK, ``document_lab.fonts``), where PyMuPDF draws every one with its
+own Droid Sans Fallback: dense strokes of two designs differ on up to a third of their pixels (32.8 % on IEC 60205's
+first page), so here the reader is handed PyMuPDF's own program for those fallbacks (:func:`_fallback`) -- the
+choice of glyph and its place are compared, not the design. Measured on 2026-11-27, the 10 pages of the one local
+document holding such fonts: 0.00-0.02 % off with Droid on both sides; with the fallbacks themselves 3.2-32.8 %
+(sans only, 2.2-19.3 %).
 
 Measured on 2026-11-28 over 283 local PDFs, every 10th page (774 pages; 1 holding what is not drawn -- a Chinese
 font not embedded): of the 773 compared, 78.0 % have at most 0.5 % of their inked pixels off, 93.5 % at most 2 %,
@@ -36,7 +42,7 @@ import numpy as np
 import pymupdf
 import pytest
 
-from document_lab import _pdf
+from document_lab import _pdf, fonts
 from tests.reference.test_reference import PDFS, _needs_documents
 from tests.rendering import PIXEL_TOLERANCE, blurred_difference, inked
 
@@ -57,10 +63,17 @@ def _pixels(data: bytes, width: int, height: int) -> np.ndarray:
     return np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3)
 
 
+def _fallback(name: str) -> bytes:
+    """PyMuPDF's own CJK program for a CJK fallback (the design compared away); any other fetched as in use."""
+    if name.startswith(('noto-sans-', 'noto-serif-')) and name[-3:] in ('-sc', '-tc', '-jp', '-kr'):
+        return bytes(pymupdf.Font('cjk').buffer)
+    return fonts.program(name)
+
+
 @lru_cache(maxsize=1)  # the document under test; never the whole corpus at once
 def _document(pdf: Path) -> tuple[bytes, _pdf.Reader]:
     data = pdf.read_bytes()
-    return data, _pdf.open(data, b'')
+    return data, _pdf.open(data, b'', fonts=_fallback)
 
 
 def _reference(data: bytes, number: int, *, managed: bool) -> np.ndarray:

@@ -30,6 +30,7 @@ code_roots = ['crates/']
 'output/runcache' = ['.jsonl']
 'output/cache' = []
 'output/cache/corpus' = ['.pdf']  # the corpus part's fetched sources, each named by its sha256
+'output/cache/fonts' = ['.cff', '.otf', '.ttf']  # document_lab.fonts' downloads when DOCUMENT_LAB_CACHE names output/cache (the tests)
 'scratch' = ['*']
 'scripts' = ['.py']
 'src' = ['.py']

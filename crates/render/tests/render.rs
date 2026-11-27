@@ -148,23 +148,35 @@ fn a_glyph_is_its_outline_filled_stroked_or_clipped_to() {
 
 #[test]
 fn a_glyph_whose_font_has_no_program_and_no_substitute_is_counted_by_its_font() {
-    let font = "<< /Type /Font /Subtype /Type0 /BaseFont /MSMincho /Encoding /Identity-H /DescendantFonts [<< \
-                /Type /Font /Subtype /CIDFontType2 /BaseFont /MSMincho /CIDSystemInfo << /Registry (Adobe) \
-                /Ordering (Japan1) /Supplement 2 >> /FontDescriptor << /Type /FontDescriptor /FontName /MSMincho \
-                /Flags 4 >> >>] >>";
-    let r = texted(
-        "/Resources << /Font << /F2 5 0 R >> >>",
-        "BT /F2 20 Tf 10 10 Td <00010002> Tj ET",
-        &[font],
-    );
-    assert!(r.data.iter().all(|&v| v == 255));
-    assert_eq!(
-        r.undrawn
-            .get("font MSMincho is not embedded and has no substitute"),
-        Some(&2),
-        "{:?}",
-        r.undrawn
-    );
+    // Its CIDs of no collection known (Adobe-Identity): no substitute, no fallback. Of Adobe-Japan1 a fallback stands
+    // for it, but nothing fetches one here: missing too, saying so.
+    let font = |ordering: &str| {
+        format!(
+            "<< /Type /Font /Subtype /Type0 /BaseFont /MSMincho /Encoding /Identity-H /DescendantFonts [<< \
+             /Type /Font /Subtype /CIDFontType2 /BaseFont /MSMincho /CIDSystemInfo << /Registry (Adobe) \
+             /Ordering ({ordering}) /Supplement 0 >> /FontDescriptor << /Type /FontDescriptor /FontName /MSMincho \
+             /Flags 4 >> >>] >>"
+        )
+    };
+    for (ordering, why) in [
+        (
+            "Identity",
+            "font MSMincho is not embedded and has no substitute",
+        ),
+        (
+            "Japan1",
+            "font MSMincho is not embedded and its fallback noto-sans-jp is not at hand: nothing fetches fallback \
+             fonts here",
+        ),
+    ] {
+        let r = texted(
+            "/Resources << /Font << /F2 5 0 R >> >>",
+            "BT /F2 20 Tf 10 10 Td <00010002> Tj ET",
+            &[&font(ordering)],
+        );
+        assert!(r.data.iter().all(|&v| v == 255));
+        assert_eq!(r.undrawn.get(why), Some(&2), "{:?}", r.undrawn);
+    }
 }
 
 #[test]

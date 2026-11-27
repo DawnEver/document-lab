@@ -432,10 +432,11 @@ def test_the_own_renderer_draws_a_region_holding_text(tmp_path):
 
 
 def test_the_own_renderer_refuses_a_region_holding_a_glyph_it_has_no_program_for_by_name(tmp_path):
+    # Not embedded, its CIDs of no collection known (Adobe-Identity): no substitute, no fallback reaches its glyphs.
     font = (
         '<< /Type /Font /Subtype /Type0 /BaseFont /MSMincho /Encoding /Identity-H /DescendantFonts [<< /Type /Font '
-        '/Subtype /CIDFontType2 /BaseFont /MSMincho /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) '
-        '/Supplement 2 >> /FontDescriptor << /Type /FontDescriptor /FontName /MSMincho /Flags 4 >> >>] >>'
+        '/Subtype /CIDFontType2 /BaseFont /MSMincho /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) '
+        '/Supplement 0 >> /FontDescriptor << /Type /FontDescriptor /FontName /MSMincho /Flags 4 >> >>] >>'
     )
     path = tmp_path / 'cjk.pdf'
     path.write_bytes(

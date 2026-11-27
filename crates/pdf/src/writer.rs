@@ -1,16 +1,24 @@
 //! The image-page writer: a PDF written as its pages come -- each an image filling the page, or a page copied
-//! whole from a PDF this crate reads -- so a document of any length costs one page of memory. [`Writer::finish`]
-//! adds the page tree, the catalog and the cross-reference table (ISO 32000-2 sections 7.5 and 7.7).
+//! whole from a PDF this crate reads, perhaps with an invisible text layer laid over it -- so a document of any
+//! length costs one page of memory. [`Writer::finish`] adds the text layers' font, the page tree, the catalog and
+//! the cross-reference table (ISO 32000-2 sections 7.5 and 7.7).
 //!
 //! An image is handed in as stored: its samples, encoded or not, and the name of the filter they are encoded with.
 //! The writer does not compress; it writes what it is given.
+//!
+//! A text layer ([`Writer::copy_page_with_text`]) shows each word in render mode 3 -- invisible -- stretched over
+//! the box it is seen in, so selecting and reading the page find it there. Its font draws nothing and embeds
+//! nothing: a `Type0` font, `Identity-H`, whose every glyph is half an em wide (Tesseract's `GlyphLessFont`); each
+//! character met is given the next CID, and the font's `/ToUnicode` maps the CIDs back, so Latin, CJK and any other
+//! script are laid alike. One font serves the whole document, written when it is finished.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::io::{self, Write};
 
 use crate::error::{Error, Kind, Result};
 use crate::file::File;
-use crate::geometry::Rect;
+use crate::geometry::{Matrix, Rect};
 use crate::object::{Dict, ObjRef, Object};
 use crate::page::Page;
 
@@ -20,6 +28,29 @@ const CATALOG: u32 = 1;
 const PAGES: u32 = 2;
 /// The image's name in a written page's resources.
 const IMAGE: &[u8] = b"Im0";
+/// The text layer's font's name, as Tesseract names a font that draws nothing.
+const GLYPHLESS: &[u8] = b"GlyphLessFont";
+/// Every glyph's advance in the text layer's font, in thousandths of an em.
+const ADVANCE: f64 = 500.0;
+/// The most `bfchar` entries one block of a `CMap` may hold.
+const BFCHAR_BLOCK: usize = 100;
+
+/// A word of a text layer: its text and the box it is seen in, in page space (points, y down, origin at the top
+/// left of the page as displayed).
+#[derive(Debug, Clone, Copy)]
+pub struct Word<'a> {
+    /// The text.
+    pub text: &'a str,
+    /// The box, in page space.
+    pub bbox: Rect,
+}
+
+/// The text layers' font: its object number, reserved when first used, and each character's CID (its place + 1).
+struct LayerFont {
+    number: u32,
+    cids: HashMap<char, u16>,
+    chars: Vec<char>,
+}
 
 /// An image as stored in the file: its samples, and the filter they are encoded with.
 #[derive(Debug, Clone, Copy)]
@@ -47,6 +78,8 @@ pub struct Writer<W: Write> {
     offsets: Vec<Option<u64>>,
     /// The pages' object numbers, in order.
     kids: Vec<u32>,
+    /// The text layers' font, once a layer is laid.
+    font: Option<LayerFont>,
 }
 
 impl<W: Write> Writer<W> {
@@ -61,6 +94,7 @@ impl<W: Write> Writer<W> {
             written: 0,
             offsets: vec![None, None],
             kids: Vec::new(),
+            font: None,
         };
         writer.put(b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n")?;
         Ok(writer)
@@ -136,16 +170,63 @@ impl<W: Write> Writer<W> {
     ///
     /// Refuses an object of `file` that cannot be read, and a failed write.
     pub fn copy_page(&mut self, file: &File, page: &Page) -> Result<()> {
+        self.copy(file, page, &[])
+    }
+
+    /// Add `page` of `file` as [`Writer::copy_page`] does, with `words` laid over it as an invisible text layer.
+    /// What the page draws is drawn first within a saved graphics state, so nothing it leaves changed moves a word.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a word without text or without a box of positive size, besides what [`Writer::copy_page`] refuses.
+    pub fn copy_page_with_text(&mut self, file: &File, page: &Page, words: &[Word]) -> Result<()> {
+        for word in words {
+            let Rect { x0, y0, x1, y1 } = word.bbox;
+            if word.text.is_empty()
+                || !([x0, y0, x1, y1].iter().all(|v| v.is_finite()) && x1 > x0 && y1 > y0)
+            {
+                return Err(Error::invalid(format!(
+                    "a word of a text layer has text and a box of positive size, not {:?} at [{x0} {y0} {x1} {y1}]",
+                    word.text
+                )));
+            }
+        }
+        self.copy(file, page, words)
+    }
+
+    /// `page` of `file` copied, with `words` laid over it when there are any.
+    fn copy(&mut self, file: &File, page: &Page, words: &[Word]) -> Result<()> {
+        let layered = !words.is_empty();
         let mut own = Dict::new();
         for (key, value) in page.dict.iter() {
-            if !matches!(
+            let replaced = matches!(
                 key,
                 b"Parent" | b"Resources" | b"MediaBox" | b"CropBox" | b"Rotate"
-            ) {
+            ) || (layered && key == b"Contents");
+            if !replaced {
                 own.insert(key.to_vec(), value.clone());
             }
         }
-        own.insert(b"Resources".to_vec(), Object::Dict(page.resources.clone()));
+        let mut resources = page.resources.clone();
+        if layered {
+            // Made direct here, so the layer's font and content are added to the copies after renumbering.
+            let fonts = match file.get(&resources, b"Font")? {
+                Some(Object::Dict(fonts)) => fonts,
+                _ => Dict::new(),
+            };
+            resources = replaced(&resources, b"Font", Object::Dict(fonts));
+            let drawn = match page.dict.get(b"Contents") {
+                None => Vec::new(),
+                Some(Object::Reference(r)) => match file.object(r.num)? {
+                    Object::Array(streams) => streams,
+                    _ => vec![Object::Reference(*r)],
+                },
+                Some(Object::Array(streams)) => streams.clone(),
+                Some(other) => vec![other.clone()],
+            };
+            own.insert(b"Contents".to_vec(), Object::Array(drawn));
+        }
+        own.insert(b"Resources".to_vec(), Object::Dict(resources));
         own.insert(b"MediaBox".to_vec(), rect(page.media_box));
         own.insert(b"CropBox".to_vec(), rect(page.crop_box));
         own.insert(
@@ -165,18 +246,149 @@ impl<W: Write> Writer<W> {
             let value = copy.renumber(self, value, 0)?;
             self.object(at, &value)?;
         }
+        if layered {
+            own = self.lay(&own, page, words)?;
+        }
         own.insert(b"Parent".to_vec(), reference(PAGES));
         self.object(number, &Object::Dict(own))?;
         self.kids.push(number);
         Ok(())
     }
 
-    /// Write the page tree, the catalog and the cross-reference table, and hand `out` back.
+    /// `own`, a copied page whose resources and contents are direct, with `words` shown over what it draws: its
+    /// contents saved before and restored after, then a stream showing each word, invisible, stretched over its box.
+    fn lay(&mut self, own: &Dict, page: &Page, words: &[Word]) -> Result<Dict> {
+        let resources = own
+            .get(b"Resources")
+            .and_then(Object::as_dict)
+            .cloned()
+            .unwrap_or_else(Dict::new);
+        let mut fonts = resources
+            .get(b"Font")
+            .and_then(Object::as_dict)
+            .cloned()
+            .unwrap_or_else(Dict::new);
+        let resource = (0..=fonts.len()) // one more name than there are fonts: one is free
+            .map(|i| format!("OCR{i}").into_bytes())
+            .find(|n| fonts.get(n).is_none())
+            .expect("a free name");
+        if self.font.is_none() {
+            let number = self.reserve();
+            self.font = Some(LayerFont {
+                number,
+                cids: HashMap::new(),
+                chars: Vec::new(),
+            });
+        }
+        let font = self.font.as_mut().expect("the font was just made");
+        fonts.insert(resource.clone(), reference(font.number));
+        let mut shows = format!(
+            "Q\nBT\n3 Tr\n/{} 1 Tf\n",
+            String::from_utf8_lossy(&resource)
+        );
+        let to_user = inverse(page.to_page_space());
+        for word in words {
+            let cids = word
+                .text
+                .chars()
+                .map(|c| font.cid(c))
+                .collect::<Result<Vec<_>>>()?;
+            #[expect(clippy::cast_precision_loss, reason = "a word's length is small")]
+            let advance = cids.len() as f64 * ADVANCE / 1000.0;
+            let Rect { x0, y0, x1, y1 } = word.bbox;
+            // Text space, font size 1, onto the box: the baseline along its bottom, an em its height.
+            let Matrix(m) = Matrix([(x1 - x0) / advance, 0.0, 0.0, y0 - y1, x0, y1]).then(to_user);
+            let m: Vec<String> = m.iter().map(|&v| real(v)).collect();
+            let _ = write!(shows, "{} Tm <", m.join(" "));
+            for cid in cids {
+                let _ = write!(shows, "{cid:04X}");
+            }
+            shows.push_str("> Tj\n");
+        }
+        shows.push_str("ET\n");
+        let (save, layer) = (self.reserve(), self.reserve());
+        self.stream(save, &Dict::new(), b"q\n")?;
+        self.stream(layer, &Dict::new(), shows.as_bytes())?;
+        let mut contents = vec![reference(save)];
+        if let Some(drawn) = own.get(b"Contents").and_then(Object::as_array) {
+            contents.extend_from_slice(drawn);
+        }
+        contents.push(reference(layer));
+        let resources = replaced(&resources, b"Font", Object::Dict(fonts));
+        let own = replaced(own, b"Resources", Object::Dict(resources));
+        Ok(replaced(&own, b"Contents", Object::Array(contents)))
+    }
+
+    /// The text layers' font: a `Type0` font over a `CIDFontType2` that draws nothing, every glyph half an em wide,
+    /// and a `/ToUnicode` naming each CID's character.
+    fn write_font(&mut self, font: &LayerFont) -> Result<()> {
+        let (descendant, descriptor, to_unicode) = (self.reserve(), self.reserve(), self.reserve());
+        let mut cmap = String::from(
+            "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+             /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+             /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
+             1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
+        );
+        for (block, chars) in font.chars.chunks(BFCHAR_BLOCK).enumerate() {
+            let _ = writeln!(cmap, "{} beginbfchar", chars.len());
+            for (i, c) in chars.iter().enumerate() {
+                let _ = write!(cmap, "<{:04X}> <", block * BFCHAR_BLOCK + i + 1);
+                for unit in c.encode_utf16(&mut [0; 2]) {
+                    let _ = write!(cmap, "{unit:04X}");
+                }
+                cmap.push_str(">\n");
+            }
+            cmap.push_str("endbfchar\n");
+        }
+        cmap.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+        self.stream(to_unicode, &Dict::new(), cmap.as_bytes())?;
+        let mut dict = Dict::new();
+        dict.insert(b"Type".to_vec(), name(b"FontDescriptor"));
+        dict.insert(b"FontName".to_vec(), name(GLYPHLESS));
+        dict.insert(b"Flags".to_vec(), Object::Integer(5)); // fixed pitch, symbolic
+        dict.insert(b"FontBBox".to_vec(), numbers(&[0.0, 0.0, ADVANCE, 1000.0]));
+        dict.insert(b"ItalicAngle".to_vec(), Object::Integer(0));
+        dict.insert(b"Ascent".to_vec(), Object::Integer(1000));
+        dict.insert(b"Descent".to_vec(), Object::Integer(0));
+        dict.insert(b"CapHeight".to_vec(), Object::Integer(1000));
+        dict.insert(b"StemV".to_vec(), Object::Integer(80));
+        self.object(descriptor, &Object::Dict(dict))?;
+        let mut system = Dict::new();
+        system.insert(b"Registry".to_vec(), Object::String(b"Adobe".to_vec()));
+        system.insert(b"Ordering".to_vec(), Object::String(b"Identity".to_vec()));
+        system.insert(b"Supplement".to_vec(), Object::Integer(0));
+        let mut dict = Dict::new();
+        dict.insert(b"Type".to_vec(), name(b"Font"));
+        dict.insert(b"Subtype".to_vec(), name(b"CIDFontType2"));
+        dict.insert(b"BaseFont".to_vec(), name(GLYPHLESS));
+        dict.insert(b"CIDSystemInfo".to_vec(), Object::Dict(system));
+        dict.insert(b"FontDescriptor".to_vec(), reference(descriptor));
+        dict.insert(b"DW".to_vec(), Object::Real(ADVANCE));
+        dict.insert(b"CIDToGIDMap".to_vec(), name(b"Identity"));
+        self.object(descendant, &Object::Dict(dict))?;
+        let mut dict = Dict::new();
+        dict.insert(b"Type".to_vec(), name(b"Font"));
+        dict.insert(b"Subtype".to_vec(), name(b"Type0"));
+        dict.insert(b"BaseFont".to_vec(), name(GLYPHLESS));
+        dict.insert(b"Encoding".to_vec(), name(b"Identity-H"));
+        dict.insert(
+            b"DescendantFonts".to_vec(),
+            Object::Array(vec![reference(descendant)]),
+        );
+        dict.insert(b"ToUnicode".to_vec(), reference(to_unicode));
+        self.object(font.number, &Object::Dict(dict))
+    }
+
+    /// Write the text layers' font if a layer was laid, the page tree, the catalog and the cross-reference table,
+    /// and hand `out` back.
     ///
     /// # Errors
     ///
     /// Refuses when `out` cannot be written.
     pub fn finish(mut self) -> Result<W> {
+        if let Some(font) = self.font.take() {
+            self.write_font(&font)?;
+        }
         let mut tree = Dict::new();
         tree.insert(b"Type".to_vec(), name(b"Pages"));
         tree.insert(
@@ -328,6 +540,45 @@ impl Copy<'_> {
         self.queue.push((n, value));
         Ok(reference(n))
     }
+}
+
+impl LayerFont {
+    /// `c`'s CID: its own, or the next when first met.
+    fn cid(&mut self, c: char) -> Result<u16> {
+        if let Some(&cid) = self.cids.get(&c) {
+            return Ok(cid);
+        }
+        let cid = u16::try_from(self.chars.len() + 1).map_err(|_| {
+            Error::invalid("a text layer's font names at most 65535 characters, and more were met")
+        })?;
+        self.cids.insert(c, cid);
+        self.chars.push(c);
+        Ok(cid)
+    }
+}
+
+/// The matrix undoing `m`, which turns, flips and moves (a page's, never singular).
+fn inverse(m: Matrix) -> Matrix {
+    let [xx, xy, yx, yy, dx, dy] = m.0;
+    let det = xx * yy - xy * yx;
+    Matrix([
+        yy / det,
+        -xy / det,
+        -yx / det,
+        xx / det,
+        (yx * dy - yy * dx) / det,
+        (xy * dx - xx * dy) / det,
+    ])
+}
+
+/// `dict` with `key`'s value `value`, added where it had none.
+fn replaced(dict: &Dict, key: &[u8], value: Object) -> Dict {
+    let mut out = Dict::new();
+    for (k, v) in dict.iter().filter(|(k, _)| *k != key) {
+        out.insert(k.to_vec(), v.clone());
+    }
+    out.insert(key.to_vec(), value);
+    out
 }
 
 fn failed(e: &io::Error) -> Error {

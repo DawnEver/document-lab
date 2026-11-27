@@ -32,7 +32,7 @@ FONTS = (
 def entry(name: str, short: str, ascent: int, descent: int) -> str:
     """One font's ``Metrics`` literal."""
     font = pymupdf.Font(short)
-    widths = [(c, round(font.glyph_advance(c) * 1000)) for c in range(0x20, 0x2800) if font.has_glyph(c)]
+    widths = [(c, round(font.glyph_advance(c) * 1000)) for c in range(0x20, 0x10000) if font.has_glyph(c)]
     rows = ',\n'.join(f'            ({c:#06x}, {w})' for c, w in widths)
     return (
         f'    Metrics {{\n        name: "{name}",\n        ascent: {ascent}.0,\n        descent: {descent}.0,\n'

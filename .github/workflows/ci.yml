@@ -222,7 +222,8 @@
       },
       "needs": [
         "parts",
-        "part"
+        "part",
+        "part-corpus"
       ],
       "if": "${{ (!(github.event.pull_request.draft || startsWith(github.event.pull_request.title, 'WIP:') || startsWith(github.event.pull_request.title, '[WIP]'))) && ((inputs.measurement_paths == '' && inputs.measurement_sha == '') && (always() && needs.parts.result == 'success' && needs.parts.outputs.matrix != '')) }}",
       "runs-on": "ubuntu-latest",
@@ -426,6 +427,64 @@
         "contents": "write",
         "statuses": "write",
         "pull-requests": "write"
+      }
+    },
+    "part-corpus": {
+      "env": {
+        "GITHUB_TOKEN": "${{ github.token }}",
+        "LAB_COMMONS_BOX": "${{ github.workspace }}/../lab-commons/box.sqlite"
+      },
+      "needs": "parts",
+      "if": "${{ (!(github.event.pull_request.draft || startsWith(github.event.pull_request.title, 'WIP:') || startsWith(github.event.pull_request.title, '[WIP]'))) && ((inputs.measurement_paths == '' && inputs.measurement_sha == '') && (needs.parts.outputs.matrix != '')) }}",
+      "name": "tests/corpus",
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 90,
+      "steps": [
+        {
+          "uses": "actions/checkout@v4",
+          "with": {
+            "ref": "${{ env.HEAD_SHA }}",
+            "fetch-depth": 0
+          }
+        },
+        {
+          "name": "Install uv",
+          "uses": "astral-sh/setup-uv@v5",
+          "with": {
+            "enable-cache": true
+          }
+        },
+        {
+          "name": "Sync the environment",
+          "run": "uv sync --frozen --extra dev"
+        },
+        {
+          "name": "Sync the part's extras",
+          "shell": "bash",
+          "run": "uv sync --frozen $(uv run --no-sync python -m dev_lab.dev.depneeds flags --part \"corpus\")"
+        },
+        {
+          "name": "Set up tests/corpus",
+          "run": "uv run --no-sync python -m tests.corpus.sources"
+        },
+        {
+          "name": "Produce and post the part",
+          "run": "uv run --no-sync python -m dev_lab.dev.jobparts produce corpus"
+        },
+        {
+          "name": "Keep the part's verify log",
+          "if": "${{ always() }}",
+          "uses": "actions/upload-artifact@v4",
+          "with": {
+            "name": "verify-log-corpus-${{ github.run_attempt }}",
+            "path": "**/verify/verify-*.log\n**/verify/verify-*.outcomes/**",
+            "if-no-files-found": "warn"
+          }
+        }
+      ],
+      "permissions": {
+        "contents": "write",
+        "statuses": "write"
       }
     }
   }

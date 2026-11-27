@@ -946,21 +946,24 @@ class _Around:
     def beyond(self, line: layout.Line) -> bool:
         """Is the number on ``line``, in the right column short of its right, the left column's, set past its edge?
 
-        Level with a piece of a left-column formula, and nothing of its own column before it.
+        The number alone on its line, level with a left-column formula's piece that shows math (:func:`_math`; a
+        plot's tick labels do not); nothing of its own column level with it before it, nor words after it (a reference
+        list's ``(7) K. Fujisaki, ...``).
         """
-        if not self.two or line.column != 'R':
+        if not self.two or line.column != 'R' or not _NUMBERED.fullmatch(line.text.strip()):
             return False
         box, reach = _spans_box(line), EQUATION_REACH * self.body
         own = any(
             ln.column == 'R'
             and ln is not line
-            and (b := _spans_box(ln)).x1 <= box.x0
+            and ((b := _spans_box(ln)).x1 <= box.x0 or (b.x0 >= box.x1 and _reads(ln.spans, ln.text, self.face)))
             and box.y0 <= (b.y0 + b.y1) / 2 <= box.y1
             for ln in self.lines
         )
         theirs = any(
             ln.column == 'L'
             and not self.prose(ln)
+            and _math([ln])
             and (b := _spans_box(ln)).y0 <= box.y1 + reach
             and box.y0 - reach <= b.y1
             for ln in self.lines

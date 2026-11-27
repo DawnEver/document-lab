@@ -508,6 +508,9 @@ def test_a_number_set_past_its_column_is_its_formulas(tmp_path):
     box = crop(doc, 10)
     assert faults(doc.pages[0], box, formula) == []
     assert faults(doc.pages[0], without(box, right=80), formula)  # planted: the number left out
+    reference = [(365, 419, 'Fujisaki, Electric machines', 'helv', 10)]  # a reference list's (10), its words after it
+    doc = read(tmp_path, [*left, *right, *reference])
+    assert crop(doc, 10) is None  # planted: a reference's number beside a formula is no equation's
 
 
 def test_a_number_beside_a_taller_display_of_the_other_column_takes_its_column_alone(tmp_path):

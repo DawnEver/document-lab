@@ -89,7 +89,7 @@ class Provenance:
 
 @dataclass(frozen=True, slots=True)
 class TextSpan:
-    """A run of text in one font and size, along one baseline."""
+    """A run of text in one font and size: along a baseline, or down a column when written vertically."""
 
     text: str
     size: float
@@ -103,6 +103,10 @@ class TextSpan:
     #: How its glyphs are painted, the PDF text render mode: 0 fill, 1 stroke, 2 both, 3 invisible (an OCR layer),
     #: 4-7 those adding the glyphs to the clip. None: its source has no render modes.
     render_mode: int | None = None
+    #: Written vertically (its font's writing mode, WMode 1): its glyphs stand upright and advance down a column, its
+    #: text reads top to bottom, its box is the column's. Text turned sideways is not this: it is written
+    #: horizontally along a turned baseline.
+    vertical: bool = False
     #: The unit vector its baseline runs along, in page space (y down): ``(1, 0)`` for text set left to right,
     #: ``(0, -1)`` for text set bottom to top (a margin stamp turned sideways).
     direction: tuple[float, float] = (1.0, 0.0)

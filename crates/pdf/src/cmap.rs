@@ -24,6 +24,8 @@ pub struct CMap {
     identity: bool,
     /// The predefined `CMap` this is, whose tables give the `CID`s.
     predefined: Option<&'static Predefined>,
+    /// The writing mode an embedded `CMap`'s program defines (`/WMode 1 def`: vertical), if it defines one.
+    wmode: Option<i64>,
 }
 
 impl CMap {
@@ -95,6 +97,13 @@ impl CMap {
                         }
                     }
                 }
+                b"def" => {
+                    if let [.., Object::Name(key), Object::Integer(mode)] = items.as_slice()
+                        && key == b"WMode"
+                    {
+                        cmap.wmode = Some(*mode);
+                    }
+                }
                 b"endcidrange" => {
                     for triple in items.as_chunks::<3>().0 {
                         if let (Object::String(lo), Object::String(hi), Some(cid)) =
@@ -112,6 +121,12 @@ impl CMap {
             }
         }
         cmap
+    }
+
+    /// The writing mode the `CMap`'s program defines (0 horizontal, 1 vertical), if it defines one.
+    #[must_use]
+    pub fn wmode(&self) -> Option<i64> {
+        self.wmode
     }
 
     fn bf_range(&mut self, triple: &[Object]) {

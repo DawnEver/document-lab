@@ -136,3 +136,10 @@ fn text_without_a_font_is_a_warning() {
     assert_eq!(events, Vec::new());
     assert_eq!(warnings.len(), 1);
 }
+
+#[test]
+fn win_ansi_names_a_hyphen_and_spaces_not_their_latin_1_twins() {
+    let font = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>";
+    let (events, _) = texts(r"BT /F1 10 Tf 0 50 Td (a\255b c\240d) Tj ET", font, &[]);
+    assert_eq!(text(&events[0]), "a-b c d"); // the glyphs `hyphen` and `space`: U+002D and U+0020
+}

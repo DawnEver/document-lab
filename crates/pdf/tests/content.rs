@@ -199,3 +199,56 @@ fn colors_of_named_spaces_resolve_through_the_resources() {
         Some([0.0, 1.0, 0.0])
     );
 }
+
+/// The text a page shows, glyph by glyph.
+fn shown(content: &pdf::Content) -> String {
+    content
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Text(t) => Some(
+                t.glyphs
+                    .iter()
+                    .filter_map(|g| g.text.clone())
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+        .collect()
+}
+
+const FONT: &str = "/Resources << /Font << /F1 5 0 R >> /XObject << /X 6 0 R >> >>";
+const HELVETICA: &str = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>";
+
+#[test]
+fn a_mark_outside_a_clipping_path_is_not_seen() {
+    let content = "q 0 0 100 100 re W n \
+                   BT /F1 10 Tf 10 10 Td (in) Tj 150 0 Td (out) Tj ET \
+                   0 0 1 rg 150 10 20 20 re f 10 10 20 20 re f Q \
+                   BT /F1 10 Tf 150 50 Td (back) Tj ET";
+    let form = common::stream("/Type /XObject /Subtype /Form /BBox [0 0 1 1]", "");
+    let (content, _) = events(FONT, content, &[HELVETICA, &form]);
+    assert_eq!(shown(&content), "inback"); // the clip ends with its `Q`
+    assert_eq!(paths(&content).len(), 1);
+}
+
+#[test]
+fn a_form_shows_only_what_lies_in_its_bbox() {
+    let form = common::stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 50 50] /Resources << /Font << /F1 5 0 R >> >>",
+        "BT /F1 10 Tf 10 10 Td (seen) Tj 100 0 Td (cut) Tj ET 0 0 1 rg 120 10 5 5 re f",
+    );
+    let (content, _) = events(FONT, "1 0 0 1 20 20 cm /X Do", &[HELVETICA, &form]);
+    assert_eq!(shown(&content), "seen");
+    assert_eq!(paths(&content).len(), 0);
+}
+
+#[test]
+fn a_mark_off_the_page_is_not_seen() {
+    let (content, _) = events(
+        FONT,
+        "BT /F1 10 Tf 10 10 Td (on) Tj 300 0 Td (off) Tj ET",
+        &[HELVETICA],
+    );
+    assert_eq!(shown(&content), "on");
+}

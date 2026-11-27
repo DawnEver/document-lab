@@ -465,14 +465,9 @@ impl File {
             _ => Some(builtin),
         };
         let mut encoding: Vec<Option<String>> = (0..=255u8)
-            .map(|b| base.and_then(|m| m.get(b)).map(String::from))
-            // The tables map code 32, the glyph `space`, to U+00A0; it is U+0020 (the AGL's `space`).
-            .map(|t| {
-                if t.as_deref() == Some("\u{A0}") {
-                    Some(" ".to_string())
-                } else {
-                    t
-                }
+            .map(|b| {
+                base.and_then(|m| m.get(b))
+                    .map(|t| glyph_of_table(t).to_string())
             })
             .collect();
         // An embedded Type 1 program with no base encoding named: the program's own encoding is the base.
@@ -594,6 +589,17 @@ impl File {
             },
             vertical,
         ))
+    }
+}
+
+/// The text of a base-encoding table entry as its glyph's name says. The tables give Latin-1's characters where
+/// ISO 32000 Annex D names the glyphs `space` (code 32, and `WinAnsiEncoding` octal 240) and `hyphen` (its octal 255):
+/// U+00A0 and U+00AD; the Adobe Glyph List's `space` and `hyphen` are U+0020 and U+002D.
+fn glyph_of_table(text: char) -> char {
+    match text {
+        '\u{A0}' => ' ',
+        '\u{AD}' => '-',
+        other => other,
     }
 }
 

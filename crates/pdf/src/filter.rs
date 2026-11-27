@@ -5,6 +5,8 @@
 //! `CCITTFaxDecode`) is not decoded: the data stops there and is handed over with the codec's name and parameters,
 //! for whoever turns it into pixels.
 
+use std::borrow::Cow;
+
 use crate::error::{Error, Result};
 use crate::inflate::inflate;
 use crate::object::{Dict, Object};
@@ -59,7 +61,7 @@ pub fn decode(
         dict.get(b"DecodeParms").or_else(|| dict.get(b"DP")), // spelling-ignore-line: the PDF name
         resolve,
     )?;
-    let mut data = raw.to_vec();
+    let mut data = Cow::Borrowed(raw);
     for (i, filter) in filters.iter().enumerate() {
         let name = filter.as_name().ok_or_else(|| {
             Error::malformed(format!("a filter is a name, not a {}", filter.kind()))
@@ -68,31 +70,34 @@ pub fn decode(
             Some(Object::Dict(d)) => Some(d),
             _ => None,
         };
-        data = match full_name(name) {
+        data = Cow::Owned(match full_name(name) {
             b"ASCIIHexDecode" => ascii_hex(&data)?,
             b"ASCII85Decode" => ascii85(&data)?,
-            b"LZWDecode" => predict(&lzw(&data, early_change(param.as_ref()))?, param.as_ref())?,
-            b"FlateDecode" => predict(&inflate(&data)?, param.as_ref())?, // spelling-ignore-line: the PDF name
+            b"LZWDecode" => predict(lzw(&data, early_change(param.as_ref()))?, param.as_ref())?,
+            b"FlateDecode" => predict(inflate(&data)?, param.as_ref())?, // spelling-ignore-line: the PDF name
             b"RunLengthDecode" => run_length(&data)?,
             codec @ (b"DCTDecode" | b"JPXDecode" | b"JBIG2Decode" | b"CCITTFaxDecode") => {
                 return Ok(Decoded {
-                    data,
+                    data: data.into_owned(),
                     codec: Some(Codec {
                         name: codec.to_vec(),
                         params: param,
                     }),
                 });
             }
-            b"Crypt" => data, // the identity crypt filter; a named one is the security handler's, applied before
+            b"Crypt" => continue, // the identity crypt filter; a named one is the security handler's, applied before
             other => {
                 return Err(Error::unsupported(format!(
                     "unknown filter /{}",
                     String::from_utf8_lossy(other)
                 )));
             }
-        };
+        });
     }
-    Ok(Decoded { data, codec: None })
+    Ok(Decoded {
+        data: data.into_owned(),
+        codec: None,
+    })
 }
 
 /// `/Filter` or `/DecodeParms` as a list: one value is a list of one. <!-- spelling-ignore-line: the PDF name -->
@@ -317,10 +322,10 @@ fn emit(table: &[(Option<usize>, u8, usize)], code: usize, out: &mut Vec<u8>) {
 }
 
 /// Undo `/Predictor` (2: TIFF; 10-15: PNG, each row tagged with its own filter).
-fn predict(data: &[u8], param: Option<&Dict>) -> Result<Vec<u8>> {
+fn predict(data: Vec<u8>, param: Option<&Dict>) -> Result<Vec<u8>> {
     let predictor = int(param, b"Predictor", 1);
     if predictor == 1 {
-        return Ok(data.to_vec());
+        return Ok(data);
     }
     let colors = positive(param, b"Colors", 1);
     let bpc = positive(param, b"BitsPerComponent", 8);
@@ -329,18 +334,18 @@ fn predict(data: &[u8], param: Option<&Dict>) -> Result<Vec<u8>> {
     let row = (colors * bpc * columns).div_ceil(8);
     match predictor {
         2 => tiff(data, row, colors, bpc),
-        10..=15 => png(data, row, bpp),
+        10..=15 => png(&data, row, bpp),
         other => Err(Error::malformed(format!("unknown predictor {other}"))),
     }
 }
 
-fn tiff(data: &[u8], row: usize, colors: usize, bpc: usize) -> Result<Vec<u8>> {
+fn tiff(data: Vec<u8>, row: usize, colors: usize, bpc: usize) -> Result<Vec<u8>> {
     if bpc != 8 {
         return Err(Error::unsupported(format!(
             "TIFF predictor with {bpc} bits per component is not read"
         )));
     }
-    let mut out = data.to_vec();
+    let mut out = data;
     for line in out.chunks_mut(row) {
         for i in colors..line.len() {
             line[i] = line[i].wrapping_add(line[i - colors]);

@@ -264,6 +264,44 @@ def test_white_text_is_judged_by_what_strokes_paint_in_its_box_not_by_their_path
     assert bool(inside.min() == 255) is unseen
 
 
+#: Black text, its baseline at (150, 150) in user space, on a :data:`tests.synthetic.PAGE`-sized page.
+BLACK = 'BT 0 g /F1 10 Tf 150 150 Td (black) Tj ET'
+
+#: Strokes drawn in black (unless they say otherwise) under black text, each with whether the text then shows
+#: nothing; the first a band that holds the text, then that band's planted wrong truths, each leaving page white in it.
+STROKES_UNDER_BLACK = {
+    'a thick black stroke across it': (lambda *box: f'30 w {_across(*box)} S', True),
+    'clipped round it': (lambda *box: f'q {_framed(3, *box)} W n 30 w {_across(*box)} S Q', True),
+    'dashed across it': (lambda *box: f'30 w [3 2] 0 d {_across(*box)} S', False),
+    'thinner than it is tall': (lambda *box: f'6 w {_across(*box)} S', False),
+    'ending inside it': (
+        lambda x0, b, x1, t: f'30 w {x0 - 5} {(b + t) / 2} m {(x0 + x1) / 2} {(b + t) / 2} l S',
+        False,
+    ),
+    'clipped to half of it': (
+        lambda x0, b, x1, t: f'q {x0 - 3} {b - 3} {(x1 - x0) / 2} {t - b + 6} re W n 30 w {_across(x0, b, x1, t)} S Q',
+        False,
+    ),
+}
+
+
+@pytest.mark.parametrize('case', STROKES_UNDER_BLACK)
+def test_text_inside_a_solid_band_of_its_color_shows_nothing(tmp_path, case):
+    strokes, unseen = STROKES_UNDER_BLACK[case]
+    (alone,) = read_pdf(content_pdf(tmp_path / 'alone.pdf', [BLACK])).spans()
+    x0, top, x1, bottom = alone.provenance.bbox
+    height = PAGE[1]
+    path = content_pdf(tmp_path / 'stroked.pdf', [f'0 G {strokes(x0, height - bottom, x1, height - top)} {BLACK}'])
+    (span,) = read_pdf(path).spans()
+    assert span.in_background_color is unseen
+    # The truth, from another renderer: whether anything but black shows in the text's box (as for white text).
+    with pymupdf.open(path) as doc:
+        pixmap = doc[0].get_pixmap(matrix=pymupdf.Matrix(4, 4), colorspace=pymupdf.csGRAY, alpha=False)
+    grey = np.frombuffer(pixmap.samples, np.uint8).reshape(pixmap.height, pixmap.width)
+    inside = grey[round(top * 4) + 1 : round(bottom * 4) - 1, round(x0 * 4) + 1 : round(x1 * 4) - 1]
+    assert bool(inside.max() == 0) is unseen
+
+
 def test_an_encrypted_file_opens_with_its_password_and_refuses_without(tmp_path):
     doc = pymupdf.open()
     doc.new_page().insert_text((72, 72), 'secret', fontname='helv', fontsize=10)

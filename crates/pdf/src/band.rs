@@ -1,6 +1,7 @@
 //! What a stroke paints, bounded from outside: never smaller than what it paints, so a reader that does not draw it
 //! can still ask whether it may paint inside a box ([`Stroke::may_paint`]) and how far past its path it may reach
-//! ([`Stroke::reach`]). Drawing it is the renderer's (`crates/render`, through `tiny-skia`'s stroker); this bound is
+//! ([`Stroke::reach`]); and from inside, never larger, so it can ask whether it surely paints all of a box
+//! ([`Stroke::paints_all`]: a solid stroke's straight bands). Drawing it is the renderer's (`crates/render`, through `tiny-skia`'s stroker); this bound is
 //! what both read when they only need to know where a stroke may reach.
 //!
 //! A stroke paints its band -- a straight piece swept across by half its line width either way (8.4.3.2) -- and
@@ -115,24 +116,97 @@ impl Stroke {
         reach.round(&subpath, rect)
     }
 
+    /// Whether stroking `segments` (page space) surely paints all of `rect`, bounded from inside: never where it
+    /// does not paint, within rounding. Solid, it paints every straight piece's band whole, so `rect` inside one
+    /// band is painted; its caps, joins and curves are left out, as a bound from inside may leave them, and a dashed
+    /// stroke paints all of nothing, its gaps anywhere along its band.
+    #[must_use]
+    pub fn paints_all(&self, segments: &[Segment], rect: Rect) -> bool {
+        if !self.dashes.is_empty() || self.half_width().is_infinite() {
+            return false;
+        }
+        let (mut start, mut at): (Option<Point>, Option<Point>) = (None, None);
+        for segment in segments {
+            let piece = match *segment {
+                Segment::MoveTo(p) => {
+                    (start, at) = (Some(p), Some(p));
+                    None
+                }
+                Segment::LineTo(p) => {
+                    let a = at.unwrap_or(p);
+                    start = start.or(Some(a));
+                    at = Some(p);
+                    Some((a, p))
+                }
+                Segment::CurveTo(_, _, d) => {
+                    start = start.or(at);
+                    at = Some(d);
+                    None
+                }
+                // A segment after a close starts at the closed subpath's start (8.5.2.1).
+                Segment::Close => {
+                    let closing = at.zip(start);
+                    at = start;
+                    closing
+                }
+            };
+            if piece.is_some_and(|(a, b)| self.holds(a, b, rect)) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether the band of the straight piece from `a` to `b` -- the parallelogram [`Self::band`] tests -- holds
+    /// `rect` whole: each of its corners within the piece's length along it and its half width across it.
+    fn holds(&self, a: Point, b: Point, rect: Rect) -> bool {
+        let along = Point {
+            x: b.x - a.x,
+            y: b.y - a.y,
+        };
+        let Some(across) = self.across(along) else {
+            return false;
+        };
+        let cross = |u: Point, v: Point| u.x * v.y - u.y * v.x;
+        let area = cross(along, across);
+        if area == 0.0 || !area.is_finite() {
+            return false;
+        }
+        rect.corners().iter().all(|&corner| {
+            let from = Point {
+                x: corner.x - a.x,
+                y: corner.y - a.y,
+            };
+            // The corner lies `lengths` of the piece along it and `halves` half widths across it from `a`.
+            let (lengths, halves) = (cross(from, across) / area, cross(along, from) / area);
+            (0.0..=1.0).contains(&lengths) && (-1.0..=1.0).contains(&halves)
+        })
+    }
+
+    /// Half the line width across the page space direction `along`, in page space: the user space normal to it,
+    /// half the user space width long, mapped by the matrix; None for no direction.
+    fn across(&self, along: Point) -> Option<Point> {
+        let [xx, xy, yx, yy, ..] = self.ctm.0;
+        let user = self.user(along)?;
+        let user_half = self.width / self.ctm.scale() / 2.0;
+        let (nx, ny) = (-user.y * user_half, user.x * user_half);
+        Some(Point {
+            x: xx * nx + yx * ny,
+            y: xy * nx + yy * ny,
+        })
+    }
+
     /// Whether the straight piece from `a` to `b`, stroked, shares some area with `rect` (touching does not): its
     /// band, in user space the piece swept across by half the line width either way, a parallelogram on the page.
     /// Apart when one of the four axes the two shapes' edges are normal to parts them. A piece of no length has no
     /// band.
     fn band(&self, a: Point, b: Point, rect: Rect) -> bool {
-        let [xx, xy, yx, yy, ..] = self.ctm.0;
         let along = Point {
             x: b.x - a.x,
             y: b.y - a.y,
         };
-        let Some(user) = self.user(along) else {
+        let Some(across) = self.across(along) else {
             return false;
-        };
-        let user_half = self.width / self.ctm.scale() / 2.0;
-        let (nx, ny) = (-user.y * user_half, user.x * user_half);
-        let across = Point {
-            x: xx * nx + yx * ny,
-            y: xy * nx + yy * ny,
         };
         let axes = [
             Point { x: 1.0, y: 0.0 },
@@ -500,6 +574,47 @@ mod tests {
         ];
         assert!(!dashed(0).may_paint(&arc, TEXT));
         assert!(dashed(2).may_paint(&arc, TEXT));
+    }
+
+    #[test]
+    fn a_solid_band_paints_all_of_a_box_it_holds_and_never_more() {
+        // A level line through the text's middle, past both its ends, 12 wide (half 6): its band holds the box.
+        let across = line(pt(90.0, 105.0), pt(210.0, 105.0));
+        assert!(solid(12.0, 0, 0, 10.0).paints_all(&across, TEXT));
+        // The planted wrong truths. 8 wide (half 4) it leaves the box's top and bottom.
+        assert!(!solid(8.0, 0, 0, 10.0).paints_all(&across, TEXT));
+        // Ending inside the box: a square cap would reach past its end, but caps are no part of the bound from inside.
+        let short = line(pt(90.0, 105.0), pt(199.0, 105.0));
+        assert!(!solid(12.0, 2, 0, 10.0).paints_all(&short, TEXT));
+        // Dashed: its gaps may fall in the box.
+        assert!(!stroke(12.0, 0, 0, 10.0, &[4.0, 4.0], Matrix::IDENTITY).paints_all(&across, TEXT));
+        // A curve: left out of the bound, however wide.
+        let arc = vec![
+            Segment::MoveTo(pt(90.0, 105.0)),
+            Segment::CurveTo(pt(130.0, 105.0), pt(170.0, 105.0), pt(210.0, 105.0)),
+        ];
+        assert!(!solid(30.0, 0, 0, 10.0).paints_all(&arc, TEXT));
+        // A closed frame round the text: the closing piece's band counts as any other's, here the left side's.
+        let closed = vec![
+            Segment::MoveTo(pt(250.0, 105.0)),
+            Segment::LineTo(pt(250.0, 300.0)),
+            Segment::LineTo(pt(-50.0, 300.0)),
+            Segment::LineTo(pt(-50.0, 105.0)),
+            Segment::Close,
+        ];
+        assert!(!solid(12.0, 0, 0, 10.0).paints_all(&closed[..4], TEXT));
+        assert!(solid(12.0, 0, 0, 10.0).paints_all(&closed, TEXT));
+        // A skewing matrix (x' = x + y) slants the band: the same half 6 in user space leans 6 along it across its
+        // width, so a line starting 4 left of the box holds it upright, but sheared its band starts 1 right of the
+        // box's left side at its bottom edge.
+        let shear = Matrix([1.0, 0.0, 1.0, 1.0, 0.0, 0.0]);
+        let tight = line(pt(96.0, 105.0), pt(204.0, 105.0));
+        assert!(solid(12.0, 0, 0, 10.0).paints_all(&tight, TEXT));
+        assert!(!stroke(12.0, 0, 0, 10.0, &[], shear).paints_all(&tight, TEXT));
+        assert!(
+            stroke(12.0, 0, 0, 10.0, &[], shear)
+                .paints_all(&line(pt(80.0, 105.0), pt(220.0, 105.0)), TEXT)
+        );
     }
 
     #[test]

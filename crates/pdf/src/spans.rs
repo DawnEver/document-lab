@@ -34,9 +34,11 @@
 //! where its band, caps or joins may reach into it ([`Stroke::may_paint`](crate::interpret::Stroke::may_paint): a
 //! frame round white text paints only its band, not the text), a glyph where its box (grown by its stroke's reach
 //! when stroked) does --, down to one covering its box whole -- a path filled in one opaque
-//! color whose region, by its fill rule, holds the box, and so does every clip in force: a rectangle, a polygon, a
-//! rounded box, a clip intersected in (`covers`: it never covers wrongly, a curve covering only where the box
-//! of its control points stays clear of the span's) -- or, when none covers it, the page, white. The colors are
+//! color whose region, by its fill rule, holds the box, or stroked so that one straight piece's band holds it, solid
+//! ([`Stroke::paints_all`](crate::interpret::Stroke::paints_all): black text on a thick black rule), and so does
+//! every clip in force: a rectangle, a polygon, a rounded box, a clip intersected in (`covers`: it never covers
+//! wrongly, a curve covering only where the box of its control points stays clear of the span's) -- or, when none
+//! covers it, the page, white. The colors are
 //! compared exactly, as sRGB. Any other mark overlapping its box (an image, a shading, a pattern, a translucent
 //! paint, a glyph or a path in a color of its own: a black `!` on a white triangle glyph on a black box) shows the
 //! text; a glyph covers no box for sure, its outline not read. What hidden or inkless layers draw is under nothing.
@@ -403,23 +405,31 @@ fn in_background_color(open: &Open, below: &[Event], marks: &[Option<Rect>]) -> 
                 }
             }
             Event::Path(path) => {
-                // Each paint counts where it may paint: a fill inside its points' box, a stroke on its band.
-                let stroke = path.stroke.as_ref().is_none_or(|s| {
-                    !s.may_paint(&path.segments, bbox)
-                        || paints(&s.color, &path.compositing, path.compositing.stroke_alpha)
-                });
+                // Each paint counts where it may paint: a fill inside its points' box, a stroke on its band. The
+                // stroke is painted over the fill (8.5.3.1): one covering the box hides the fill under it.
+                let clipped = || path.clip.as_deref().is_none_or(|c| clip_covers(c, bbox));
+                if let Some(s) = path.stroke.as_ref()
+                    && s.may_paint(&path.segments, bbox)
+                {
+                    if !paints(&s.color, &path.compositing, path.compositing.stroke_alpha) {
+                        return false;
+                    }
+                    if s.paints_all(&path.segments, bbox) && clipped() {
+                        return true;
+                    }
+                }
                 let filled = path.fill.as_ref().is_none_or(|f| {
                     !Rect::around(&points(&path.segments)).is_some_and(|b| b.overlaps(bbox))
                         || paints(&f.color, &path.compositing, path.compositing.fill_alpha)
                 });
-                if !(stroke && filled) {
+                if !filled {
                     return false;
                 }
                 if path
                     .fill
                     .as_ref()
                     .is_some_and(|f| covers(&path.segments, f.even_odd, bbox))
-                    && path.clip.as_deref().is_none_or(|c| clip_covers(c, bbox))
+                    && clipped()
                 {
                     return true;
                 }

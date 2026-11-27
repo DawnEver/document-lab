@@ -1,13 +1,14 @@
 """A real scrollable window for the OS parts (``windows``, ``macos``, ``linux``): a known tall image in a Tk canvas.
 
-``python capture_viewer.py <title> <seed>`` shows :func:`picture` ``(seed)`` one pixel a pixel (on Windows the
-process is made per-monitor DPI aware, so Windows does not rescale it). Each wheel event scrolls :data:`NOTCH`
-pixels a notch -- Windows' and Tk 9's ``<MouseWheel>`` count 120 a notch, Tk 8.6 on macOS one event a notch, X11's
-are ``<Button-4>``/``<Button-5>`` -- and the Down arrow :data:`ARROW` pixels, both stopping at the end, as a document
-viewer does.
+``python capture_viewer.py <title> <seed>`` says its own pid on stdout first (the window's owner), then shows
+:func:`picture` ``(seed)`` one pixel a pixel (on Windows the process is made per-monitor DPI aware, so Windows does not
+rescale it). Each wheel event scrolls :data:`NOTCH` pixels a notch -- Windows' and Tk 9's ``<MouseWheel>`` count 120 a
+notch, Tk 8.6 on macOS one event a notch, X11's are ``<Button-4>``/``<Button-5>`` -- and the Down arrow :data:`ARROW`
+pixels, both stopping at the end, as a document viewer does.
 """
 
 import ctypes
+import os
 import sys
 
 import numpy as np
@@ -15,6 +16,7 @@ import numpy as np
 WIDTH, HEIGHT, VIEW = 360, 1900, 300
 NOTCH, ARROW = 40, 37
 _WHEEL_DELTA = 120
+_SHOWN_MS = 300  # after this the window is up, and its view is drawn again
 
 
 def picture(seed: int) -> np.ndarray:
@@ -30,6 +32,8 @@ def notches(delta: int) -> int:
 
 
 def main(title: str, seed: int) -> None:
+    sys.stdout.write(f'{os.getpid()}\n')  # the window's owner: on Windows a venv launcher's child
+    sys.stdout.flush()
     import tkinter as tk  # noqa: PLC0415 -- only the window needs Tk; a runner without one collects this module
 
     if sys.platform == 'win32':
@@ -50,7 +54,15 @@ def main(title: str, seed: int) -> None:
     root.bind_all('<Down>', lambda _: canvas.yview_scroll(ARROW, 'units'))
     root.geometry('+200+200')
     root.focus_force()
+    root.after(_SHOWN_MS, _redrawn, root, canvas)
     root.mainloop()
+
+
+def _redrawn(root: object, canvas: object) -> None:
+    """Draw the view again once the window is up: Tk 9 on macOS may leave a window blank until it is next drawn."""
+    root.focus_force()
+    canvas.yview_scroll(1, 'units')
+    canvas.yview_scroll(-1, 'units')
 
 
 if __name__ == '__main__':

@@ -37,7 +37,7 @@ def test_the_text_layer_reads_back_over_the_same_pixels(tmp_path):
     check('eng', PLACES)
     image = rendered(WORDS)
     capture = to_pdf(image, tmp_path / 'capture.pdf', page_height=0, dpi=96)
-    assert text_layer(capture, tmp_path / 'ocr.pdf', places=PLACES) == 1
+    assert len(text_layer(capture, tmp_path / 'ocr.pdf', places=PLACES).readings) == 1
     with pymupdf.open(capture) as before, pymupdf.open(tmp_path / 'ocr.pdf') as after:
         assert after.page_count == 1
         assert after[0].rect == before[0].rect
@@ -47,7 +47,7 @@ def test_the_text_layer_reads_back_over_the_same_pixels(tmp_path):
         assert all(word in after[0].get_text().casefold() for word in WORDS)  # an independent reader reads them
     drawn_where_they_are(tmp_path / 'ocr.pdf')
     laid_again = text_layer(tmp_path / 'ocr.pdf', tmp_path / 'again.pdf', places=PLACES)
-    assert laid_again == 0  # a page with text is never laid twice
+    assert laid_again.readings == ()  # a page with text is never laid twice
 
 
 def drawn_where_they_are(pdf) -> None:
@@ -69,7 +69,7 @@ def test_a_fax_scan_reads_back_upright_on_a_page_turned_or_not(tmp_path, rotate)
     params = f'/DecodeParms << /K -1 /Columns {columns} >>'  # spelling-ignore-line: the PDF name
     size = (columns * 72 / 96, rows * 72 / 96)
     pdf = image_pdf(tmp_path / 'fax.pdf', fax_g4(stored), f'{image} {params}', size=size, deflate=False, rotate=rotate)
-    assert text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES) == 1
+    assert len(text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES).readings) == 1
     with pymupdf.open(tmp_path / 'ocr.pdf') as after:
         assert all(word in after[0].get_text().casefold() for word in WORDS)  # an independent reader reads them
     drawn_where_they_are(tmp_path / 'ocr.pdf')
@@ -135,7 +135,7 @@ def test_cjk_reads_back_in_its_lines_or_columns_columns_as_vertical_writing(tmp_
     check(languages, PLACES)
     pixels, extents = cjk_page(lines, font, vertical=vertical)
     capture = to_pdf(pixels, tmp_path / 'capture.pdf', page_height=0, dpi=CJK_DPI)
-    assert text_layer(capture, tmp_path / 'ocr.pdf', languages, places=PLACES) == 1
+    assert len(text_layer(capture, tmp_path / 'ocr.pdf', languages, places=PLACES).readings) == 1
     page = read_pdf(tmp_path / 'ocr.pdf').pages[0]
     assert page.spans
     assert all(span.vertical == vertical for span in page.spans), [(s.text, s.vertical) for s in page.spans]

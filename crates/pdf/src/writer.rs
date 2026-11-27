@@ -8,13 +8,14 @@
 //! drawing, a text layer, its font's `/ToUnicode` -- it compresses (`FlateDecode`, zlib) at the [`Writer`]'s level. <!-- spelling-ignore-line: the PDF name -->
 //!
 //! A text layer ([`Writer::copy_page_with_text`]) shows each word in render mode 3 -- invisible -- stretched over
-//! the box it is seen in, so selecting and reading the page find it there. Its font draws nothing and embeds
-//! nothing: a `CIDFontType2` whose every glyph is half an em wide and steps an em down a column (Tesseract's
-//! `GlyphLessFont`); each character met is given the next CID, and the `/ToUnicode` maps the CIDs back, so Latin,
-//! CJK and any other script are laid alike. A word written horizontally is shown through the `Type0` font over it
-//! by `Identity-H`, along the box's bottom; one written vertically (CJK set in columns) by `Identity-V`, writing
-//! mode 1 (ISO 32000-2 9.7.4.3): its characters stand upright and step down the box, so a reader reads it as
-//! vertical writing, not as text turned sideways. The fonts serve the whole document, written when it is finished.
+//! the box it is seen in, along the baseline it is seen on (a table set sideways, a scan fed askew), so selecting and
+//! reading the page find it there. Its font draws nothing and embeds nothing: a `CIDFontType2` whose every glyph is
+//! half an em wide and steps an em down a column (Tesseract's `GlyphLessFont`); each character met is given the next
+//! CID, and the `/ToUnicode` maps the CIDs back, so Latin, CJK and any other script are laid alike. A word written
+//! horizontally is shown through the `Type0` font over it by `Identity-H`, along the box's bottom; one written
+//! vertically (CJK set in columns) by `Identity-V`, writing mode 1 (ISO 32000-2 9.7.4.3): its characters stand
+//! upright and step down the box, so a reader reads it as vertical writing, not as text turned sideways. The fonts
+//! serve the whole document, written when it is finished.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -43,14 +44,18 @@ const BFCHAR_BLOCK: usize = 100;
 /// 6 leaves 24% and 25% for 1-2 ms more a page, and 9 or 10 save at most 2.3% more for 3 to 5 times 6's time.
 pub const LEVEL: u8 = 6;
 
-/// A word of a text layer: its text, the box it is seen in, in page space (points, y down, origin at the top
-/// left of the page as displayed), and how it is written.
+/// A word of a text layer: its text, its box and the angle its baseline runs at, in page space (points, y down,
+/// origin at the top left of the page as displayed), and how it is written.
 #[derive(Debug, Clone, Copy)]
 pub struct Word<'a> {
     /// The text.
     pub text: &'a str,
-    /// The box, in page space.
+    /// The box, in page space, as the word stands turned back level by `angle` about the box's center: as long as
+    /// the word along its baseline, as high as it across.
     pub bbox: Rect,
+    /// Degrees its baseline is turned from left to right, clockwise as seen: 0 level, -90 set bottom to top (a
+    /// table printed sideways), a few degrees on a scan fed askew.
+    pub angle: f64,
     /// Whether it is written vertically: its characters stand upright down the box, read top to bottom.
     pub vertical: bool,
 }
@@ -204,11 +209,13 @@ impl<W: Write> Writer<W> {
         for word in words {
             let Rect { x0, y0, x1, y1 } = word.bbox;
             if word.text.is_empty()
-                || !([x0, y0, x1, y1].iter().all(|v| v.is_finite()) && x1 > x0 && y1 > y0)
+                || !([x0, y0, x1, y1, word.angle].iter().all(|v| v.is_finite())
+                    && x1 > x0
+                    && y1 > y0)
             {
                 return Err(Error::invalid(format!(
-                    "a word of a text layer has text and a box of positive size, not {:?} at [{x0} {y0} {x1} {y1}]",
-                    word.text
+                    "a word of a text layer has text, a box of positive size and a finite angle, not {:?} at                      [{x0} {y0} {x1} {y1}] turned {}",
+                    word.text, word.angle
                 )));
             }
         }
@@ -335,32 +342,7 @@ impl<W: Write> Writer<W> {
                 let _ = writeln!(shows, "/{} 1 Tf", String::from_utf8_lossy(resource));
                 writing = Some(word.vertical);
             }
-            #[expect(clippy::cast_precision_loss, reason = "a word's length is small")]
-            let length = cids.len() as f64;
-            let Rect { x0, y0, x1, y1 } = word.bbox;
-            // Text space, font size 1, onto the box. Horizontally: the baseline along its bottom, an em its height,
-            // the advances its width. Vertically: the first glyph's vertical origin at its top center, an em its
-            // width, its height shared out among the em steps down.
-            let onto = if word.vertical {
-                Matrix([
-                    x1 - x0,
-                    0.0,
-                    0.0,
-                    (y0 - y1) / length,
-                    f64::midpoint(x0, x1),
-                    y0,
-                ])
-            } else {
-                Matrix([
-                    (x1 - x0) / (length * ADVANCE / 1000.0),
-                    0.0,
-                    0.0,
-                    y0 - y1,
-                    x0,
-                    y1,
-                ])
-            };
-            let Matrix(m) = onto.then(to_user);
+            let Matrix(m) = onto(word, cids.len()).then(to_user);
             let m: Vec<String> = m.iter().map(|&v| real(v)).collect();
             let _ = write!(shows, "{} Tm <", m.join(" "));
             for cid in cids {
@@ -636,6 +618,46 @@ impl LayerFont {
 }
 
 /// The matrix undoing `m`, which turns, flips and moves (a page's, never singular).
+/// From the text space of `word`, `length` glyphs shown at font size 1, onto its box in page space. Horizontally: the
+/// baseline along its bottom, an em its height, the advances its width. Vertically: the first glyph's vertical origin
+/// at its top center, an em its width, its height shared out among the em steps down. Then the box turned by the
+/// word's angle about its center.
+fn onto(word: &Word, length: usize) -> Matrix {
+    #[expect(clippy::cast_precision_loss, reason = "a word's length is small")]
+    let length = length as f64;
+    let Rect { x0, y0, x1, y1 } = word.bbox;
+    let level = if word.vertical {
+        Matrix([
+            x1 - x0,
+            0.0,
+            0.0,
+            (y0 - y1) / length,
+            f64::midpoint(x0, x1),
+            y0,
+        ])
+    } else {
+        Matrix([
+            (x1 - x0) / (length * ADVANCE / 1000.0),
+            0.0,
+            0.0,
+            y0 - y1,
+            x0,
+            y1,
+        ])
+    };
+    let (sin, cos) = word.angle.to_radians().sin_cos();
+    let (cx, cy) = (f64::midpoint(x0, x1), f64::midpoint(y0, y1));
+    let turned = Matrix([
+        cos,
+        sin,
+        -sin,
+        cos,
+        sin.mul_add(cy, cos.mul_add(-cx, cx)),
+        cos.mul_add(-cy, sin.mul_add(-cx, cy)),
+    ]);
+    level.then(turned)
+}
+
 fn inverse(m: Matrix) -> Matrix {
     let [xx, xy, yx, yy, dx, dy] = m.0;
     let det = xx * yy - xy * yx;

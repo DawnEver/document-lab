@@ -8,6 +8,7 @@ from document_lab import layout
 from document_lab.ir import BBox, Page, Provenance, TextSpan
 from document_lab.layout import lines
 from document_lab.pdf import read_pdf
+from tests.synthetic import ACTUAL_TEXT_LINES, actual_text_pdf
 
 
 def _line_texts(path):
@@ -87,6 +88,58 @@ def test_vertical_columns_stacked_read_top_band_first():
     assert [ln.text for ln in layout.ordered(layout.lines(page, weighted=True))] == ['TOP1', 'TOP2', 'LOW']
 
 
+def test_a_stated_space_reads_as_a_space_a_word_joiner_as_none_and_a_ligature_as_its_letters(tmp_path):
+    page = read_pdf(actual_text_pdf(tmp_path / 'actual.pdf')).page(1)
+    # The IR states each replacement as the document does; reading it as lines is layout's.
+    top_down = sorted(page.spans, key=lambda s: s.provenance.bbox.y0)
+    assert [s.text for s in top_down] == [before + actual + after for before, _, actual, after in ACTUAL_TEXT_LINES]
+    assert [ln.text for ln in layout.ordered(lines(page, weighted=True))] == ['80 V', '80 V', '80V', 'Exfinal']
+
+
+def test_a_span_of_a_zero_width_space_holds_no_text():
+    bold = TextSpan('Head', SIZE, 'Helvetica-Bold', SRC.at(bbox=BBox(100, 100, 120, 110)), bold=True)
+    gap = TextSpan('\u200b', SIZE, 'Helvetica', SRC.at(bbox=BBox(120, 100, 123, 110)))
+    (line,) = layout.lines(_page(bold, gap), weighted=True)
+    assert (line.text, line.bold) == ('Head', True)
+    assert layout.lines(_page(gap), weighted=True) == []
+
+
+def _running_pdf(path, pages=4):
+    """A data sheet's pages: a running head (title left, part number right) and a foot (page number, issue)."""
+    doc = pymupdf.open()
+    for number in range(1, pages + 1):
+        page = doc.new_page(width=595, height=842)
+        page.insert_text((42, 60), 'Data and Signal Line Chokes', fontsize=11)
+        page.insert_text((499, 60), 'ACT1210', fontsize=11)
+        page.insert_text((37, 120), f'Section {number} opens the page with its own words', fontsize=11)
+        page.insert_text((37, 400), 'Notes', fontsize=11)  # the same words, the same place, in the body
+        page.insert_text((37, 600), 'The body closes the page' + ' here' * number, fontsize=11)
+        page.insert_text((291, 822), str(number), fontsize=11)
+        page.insert_text((319, 822), '6/25', fontsize=11)
+    doc.save(path)
+    return path
+
+
+def test_running_heads_and_feet_repeat_at_the_page_edges_page_numbers_varying(tmp_path):
+    found = layout.running(read_pdf(_running_pdf(tmp_path / 'sheet.pdf')))
+    assert [[ln.text for ln in page.head] for page in found] == [['Data and Signal Line Chokes', 'ACT1210']] * 4
+    assert [[ln.text for ln in page.foot] for page in found] == [[str(n), '6/25'] for n in range(1, 5)]
+
+
+def test_a_page_alone_and_a_line_on_too_few_pages_run_nowhere(tmp_path):
+    assert [(p.head, p.foot) for p in layout.running(read_pdf(_running_pdf(tmp_path / 'one.pdf', pages=1)))] == [
+        ((), ())
+    ]
+    doc = pymupdf.open()
+    for number in range(4):  # a head on two pages of four: what most pages lack is no running head
+        page = doc.new_page(width=595, height=842)
+        if number < 2:
+            page.insert_text((42, 60), 'Draft for comment', fontsize=11)
+        page.insert_text((37, 120), f'Clause {number} text', fontsize=11)
+    doc.save(tmp_path / 'few.pdf')
+    assert all(p.head == () for p in layout.running(read_pdf(tmp_path / 'few.pdf')))
+
+
 def test_vertical_writing_beside_the_text_is_no_furniture_but_a_sideways_stamp_is():
     """A column of vertical writing runs down the page as a turned stamp does, but it is the page's text: only text
     turned sideways, outside the box of the page's text (vertical columns included), is furniture.
@@ -96,3 +149,20 @@ def test_vertical_writing_beside_the_text_is_no_furniture_but_a_sideways_stamp_i
     page = _page(_flat('body text of the page', 100, 100), _flat('more body text here', 100, 120), column, stamp)
     assert layout.furniture(page) == [stamp]
     assert 'ABCDE' in [line.text for line in lines(page, weighted=False)]
+
+
+def test_a_sideways_stamp_on_every_page_is_furniture_never_also_a_running_line(tmp_path):
+    doc = pymupdf.open()
+    for number in range(1, 5):
+        page = doc.new_page(width=595, height=842)
+        page.insert_text((20, 600), 'arXiv:2301.01621v3 [cs.CL] 9 Jan 2023', fontsize=11, rotate=90)
+        page.insert_text((42, 60), 'Data and Signal Line Chokes', fontsize=11)
+        page.insert_text((60, 120), f'Section {number} opens the page with its own words', fontsize=11)
+        page.insert_text((291, 822), str(number), fontsize=11)
+    doc.save(tmp_path / 'stamped.pdf')
+    read = read_pdf(tmp_path / 'stamped.pdf')
+    stamps = [{id(s) for s in layout.furniture(page)} for page in read.pages]
+    assert all(stamps)
+    for run, stamped in zip(layout.running(read), stamps, strict=True):
+        assert [ln.text for ln in run.head] == ['Data and Signal Line Chokes']
+        assert not stamped & {id(s) for ln in (*run.head, *run.foot) for s in ln.spans}

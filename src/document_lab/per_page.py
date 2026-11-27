@@ -46,7 +46,7 @@ from document_lab.ink import Drawing, drawings, rulings
 from document_lab.ir import BBox
 from document_lab.markdown import page_markdowns
 from document_lab.markdown import table as markdown_table
-from document_lab.pdf import read_pdf, read_raster
+from document_lab.pdf import Renderer, read_pdf, read_raster
 from document_lab.regions import Region, regions
 from document_lab.tables import tables
 
@@ -93,10 +93,13 @@ def _scanned(page: Page) -> bool:
     return len(page.figures) == 1 and _covers(page.figures[0].provenance.bbox, BBox(0, 0, page.width, page.height))
 
 
-def _picture(pdf: Path, page: Page) -> tuple[np.ndarray, float]:
-    """The page as seen, RGB rows, and its pixels per point: a page one image covers at that image's resolution."""
+def _picture(pdf: Path, page: Page, renderer: Renderer) -> tuple[np.ndarray, float]:
+    """The page as seen, RGB rows, and its pixels per point.
+
+    A page one image covers is read at that image's resolution, any other drawn by ``renderer``.
+    """
     whole = BBox(0, 0, page.width, page.height)
-    pixels = read_raster(pdf, page.number, whole, dpi=None if _scanned(page) else RENDER_DPI).pixels
+    pixels = read_raster(pdf, page.number, whole, dpi=None if _scanned(page) else RENDER_DPI, renderer=renderer).pixels
     return pixels, pixels.shape[1] / page.width
 
 
@@ -263,15 +266,18 @@ def _placed(name: str, page: Page, found: list[Region], ruled: tuple[Table, ...]
     return out
 
 
-def write_pages(pdf: Path, out: Path) -> Paged:
-    """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive."""
+def write_pages(pdf: Path, out: Path, *, renderer: Renderer = 'pymupdf') -> Paged:
+    """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive.
+
+    Each page's picture is drawn by ``renderer`` (`document_lab.pdf.read_raster`).
+    """
     read = read_pdf(pdf)
     body = layout.body_size(read)
     width = max(3, len(str(len(read.pages))))
     names = [f'page-{number:0{width}d}' for number in range(1, len(read.pages) + 1)]
     drawn, ruled = [], []
     for page in read.pages:
-        pixels, scale = _picture(pdf, page)
+        pixels, scale = _picture(pdf, page, renderer)
         drawn.append(_drawings(pixels, scale, page, body))
         ruled.append(_tables(page, pixels, scale))
     drawn = _without_furniture(drawn, body)
@@ -286,7 +292,7 @@ def write_pages(pdf: Path, out: Path) -> Paged:
         if out / pdf.name != pdf:  # the layout stands alone; a PDF already where it goes is not copied onto itself
             put(pdf.name, pdf.read_bytes())
         for number, (name, md, page, held) in enumerate(zip(names, texts, read.pages, found, strict=True), start=1):
-            pixels, scale = _picture(pdf, page)
+            pixels, scale = _picture(pdf, page, renderer)
             put(f'{name}.png', png.encode(pixels))
             for region in held:
                 put(_file(name, region), png.encode(_cut(pixels, scale, region)))

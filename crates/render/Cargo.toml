@@ -1,0 +1,16 @@
+[package]
+name = "render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# document-lab's own renderer: a page's drawing events (from `pdf`'s interpreter) rasterized to 8-bit pixels.
+[dependencies]
+pdf.workspace = true
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
+zune-jpeg = "0.5"
+hayro-ccitt = "0.5"
+zune-core = "0.5"
+
+[lints]
+workspace = true

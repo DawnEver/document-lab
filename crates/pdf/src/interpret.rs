@@ -18,6 +18,9 @@
 //! event. A box holds the true clip, so a mark outside a curved clip (or between two clipping glyphs) but inside
 //! its box is kept: never one lost, at worst one kept that a viewer hides. A shading's event is the box it may
 //! paint: the clip's, within the shading's own `/BBox`, not the narrower area a non-extended gradient covers.
+//! Each event also carries the clip itself, for whoever draws it: the chain of clipping paths in force ([`Clip`]) --
+//! each `W`/`W*` path, each Form's `/BBox`, each text object's clipping glyphs (by their boxes) -- and how it is
+//! composited ([`Compositing`]: the constant alphas, blend mode and whether a soft mask is in force).
 //!
 //! Marked content (14.6) is tracked as a stack apart from the graphics state: `q`/`Q` neither saves nor ends it,
 //! and a Form's sequences end with the Form (one left open is closed there, with a warning). What optional
@@ -82,7 +85,7 @@ pub enum Segment {
 pub struct Stroke {
     /// The stroking color.
     pub color: Color,
-    /// The line width in page space (points).
+    /// The line width in page space (points): the user space width scaled by [`Matrix::scale`] of `ctm`.
     pub width: f64,
     /// The dash array in page space (on, off, ...); empty for a solid line.
     pub dashes: Vec<f64>,
@@ -92,6 +95,129 @@ pub struct Stroke {
     pub cap: i64,
     /// The line join style (0 miter, 1 round, 2 bevel).
     pub join: i64,
+    /// The miter limit (`M`, `/ML`): the longest a miter join may be, in line widths, before it is beveled.
+    pub miter_limit: f64,
+    /// The matrix from user space to page space it was painted under (8.5.3.2: a line is stroked in user space,
+    /// so under a matrix that scales unevenly its width varies with direction).
+    pub ctm: Matrix,
+}
+
+/// A clipping path in force (8.5.4): what shows of a mark is what lies inside it and inside every clip it narrows.
+#[derive(Debug, PartialEq)]
+pub struct Clip {
+    /// Its outline.
+    pub outline: Outline,
+    /// The clip in force when it was set, which it narrows; None: the page's alone.
+    pub within: Option<Rc<Clip>>,
+}
+
+/// The outline of a clipping path.
+#[derive(Debug, PartialEq)]
+pub enum Outline {
+    /// A path in page space (a clipping path's, a Form's `/BBox`), filled by the even-odd rule or the nonzero.
+    Path {
+        /// Its segments, page space.
+        segments: Vec<Segment>,
+        /// Even-odd (`W*`) rather than nonzero winding (`W`).
+        even_odd: bool,
+    },
+    /// The glyphs shown in a clipping text mode (4-7) in one text object, by their boxes: their outlines are not
+    /// read here.
+    Glyphs(Vec<Rect>),
+}
+
+/// How a mark is composited onto what lies below it (11.3.5, 11.6.4): the graphics state's constant alphas, blend
+/// mode and soft mask.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Compositing {
+    /// The constant alpha (`/ca`) of filling: a fill, an image, a shading, text filled.
+    pub fill_alpha: f64,
+    /// The constant alpha (`/CA`) of stroking.
+    pub stroke_alpha: f64,
+    /// The blend mode (`/BM`).
+    pub blend: Blend,
+    /// A soft mask (`/SMask` a dictionary) is in force: what shows is further masked by it.
+    pub soft_mask: bool,
+    /// It is drawn inside a transparency group (a Form with a `/Group`, 11.6.6) entered with a constant alpha below
+    /// 1, a blend mode other than `Normal` or a soft mask: the group's result, not each mark, is composited so. The
+    /// group's own marks start from the initial alphas, blend mode and soft mask, as the standard has them.
+    pub grouped: bool,
+}
+
+impl Default for Compositing {
+    fn default() -> Self {
+        Self {
+            fill_alpha: 1.0,
+            stroke_alpha: 1.0,
+            blend: Blend::Normal,
+            soft_mask: false,
+            grouped: false,
+        }
+    }
+}
+
+/// A blend mode (11.3.5): how a mark's color mixes with the backdrop's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Blend {
+    /// `Normal` (and `Compatible`): the mark's color.
+    #[default]
+    Normal,
+    /// `Multiply`.
+    Multiply,
+    /// `Screen`.
+    Screen,
+    /// `Overlay`.
+    Overlay,
+    /// `Darken`.
+    Darken,
+    /// `Lighten`.
+    Lighten,
+    /// `ColorDodge`.
+    ColorDodge,
+    /// `ColorBurn`.
+    ColorBurn,
+    /// `HardLight`.
+    HardLight,
+    /// `SoftLight`.
+    SoftLight,
+    /// `Difference`.
+    Difference,
+    /// `Exclusion`.
+    Exclusion,
+    /// `Hue`.
+    Hue,
+    /// `Saturation`.
+    Saturation,
+    /// `Color`.
+    Color,
+    /// `Luminosity`.
+    Luminosity,
+}
+
+impl Blend {
+    /// The blend mode `name` names; None for a name the standard does not define.
+    #[must_use]
+    pub fn named(name: &[u8]) -> Option<Self> {
+        Some(match name {
+            b"Normal" | b"Compatible" => Self::Normal,
+            b"Multiply" => Self::Multiply,
+            b"Screen" => Self::Screen,
+            b"Overlay" => Self::Overlay,
+            b"Darken" => Self::Darken,
+            b"Lighten" => Self::Lighten,
+            b"ColorDodge" => Self::ColorDodge,
+            b"ColorBurn" => Self::ColorBurn,
+            b"HardLight" => Self::HardLight,
+            b"SoftLight" => Self::SoftLight,
+            b"Difference" => Self::Difference,
+            b"Exclusion" => Self::Exclusion,
+            b"Hue" => Self::Hue,
+            b"Saturation" => Self::Saturation,
+            b"Color" => Self::Color,
+            b"Luminosity" => Self::Luminosity,
+            _ => return None,
+        })
+    }
 }
 
 /// How a path is filled.
@@ -114,6 +240,10 @@ pub struct PathEvent {
     pub fill: Option<Fill>,
     /// The layer it is drawn in.
     pub layer: Layer,
+    /// The clip in force; None: the page's alone.
+    pub clip: Option<Rc<Clip>>,
+    /// How it is composited.
+    pub compositing: Compositing,
 }
 
 /// Where an event is drawn beyond the page's own visible content: in optional content the default view hides, in
@@ -142,10 +272,27 @@ pub struct ImageEvent {
     pub height: i64,
     /// The image `XObject`'s object number; None for an inline image.
     pub object: Option<u32>,
-    /// An inline image's dictionary and data (still encoded); None for an image `XObject`.
-    pub inline: Option<(Dict, Vec<u8>)>,
+    /// An inline image; None for an image `XObject`.
+    pub inline: Option<Inline>,
+    /// The fill color in force: what a stencil mask (`/ImageMask true`) paints.
+    pub fill: Color,
     /// The layer it is drawn in.
     pub layer: Layer,
+    /// The clip in force; None: the page's alone.
+    pub clip: Option<Rc<Clip>>,
+    /// How it is composited.
+    pub compositing: Compositing,
+}
+
+/// An inline image (`BI` ... `ID` ... `EI`, 8.9.7).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Inline {
+    /// Its dictionary, its keys and names as written (abbreviated or not).
+    pub dict: Dict,
+    /// Its data, still encoded.
+    pub data: Vec<u8>,
+    /// The resources in force where it is placed: a color space it names is one of theirs.
+    pub resources: Dict,
 }
 
 /// One glyph of a text event.
@@ -186,6 +333,10 @@ pub struct TextEvent {
     pub glyphs: Vec<Glyph>,
     /// The layer it is drawn in.
     pub layer: Layer,
+    /// The clip in force; None: the page's alone.
+    pub clip: Option<Rc<Clip>>,
+    /// How it is composited.
+    pub compositing: Compositing,
 }
 
 /// An event of a page, in drawing order.
@@ -208,6 +359,10 @@ pub struct ShadingEvent {
     pub bbox: Rect,
     /// The layer it is drawn in.
     pub layer: Layer,
+    /// The clip in force; None: the page's alone.
+    pub clip: Option<Rc<Clip>>,
+    /// How it is composited.
+    pub compositing: Compositing,
 }
 
 /// An open marked-content sequence (`BMC`/`BDC` ... `EMC`).
@@ -247,11 +402,15 @@ struct State {
     dash_phase: f64,
     cap: i64,
     join: i64,
+    miter_limit: f64,
     text: TextState,
     /// The box the clip lies in, page space.
     clip: Rect,
+    /// The clipping paths in force, innermost first; None: the page's alone.
+    clips: Option<Rc<Clip>>,
     /// The rendering intent colors convert at.
     intent: Intent,
+    compositing: Compositing,
 }
 
 /// The text state parameters (9.3), part of the graphics state.
@@ -281,7 +440,10 @@ impl State {
             dash_phase: 0.0,
             cap: 0,
             join: 0,
+            miter_limit: 10.0,
+            clips: None,
             intent: Intent::default(),
+            compositing: Compositing::default(),
             text: TextState {
                 char_spacing: 0.0,
                 word_spacing: 0.0,
@@ -303,13 +465,14 @@ struct Interpreter<'a> {
     path: Vec<Segment>,
     current: Option<Point>,
     start: Option<Point>,
-    /// A clipping path is set (`W`, `W*`): the path ends by narrowing the clip, after it is painted.
-    clipping: bool,
+    /// A clipping path is set (`W`, `W*`: whether by the even-odd rule): the path ends by narrowing the clip, after
+    /// it is painted.
+    clipping: Option<bool>,
     /// The text matrix and the text line matrix (9.4.2), between `BT` and `ET`.
     text_matrix: Matrix,
     line_matrix: Matrix,
-    /// The union of the boxes of the glyphs shown in a clipping mode in this text object: the clip at `ET`.
-    text_clip: Option<Rect>,
+    /// The boxes of the glyphs shown in a clipping mode in this text object: the clip at `ET`.
+    text_clip: Vec<Rect>,
     /// The default view of the file's optional content.
     optional: OptionalContent,
     /// The open marked-content sequences, outermost first.
@@ -371,10 +534,10 @@ impl File {
             path: Vec::new(),
             current: None,
             start: None,
-            clipping: false,
+            clipping: None,
             text_matrix: Matrix::IDENTITY,
             line_matrix: Matrix::IDENTITY,
-            text_clip: None,
+            text_clip: Vec::new(),
             optional: self.optional_content()?,
             marked: Vec::new(),
             marked_floor: 0,
@@ -476,15 +639,21 @@ impl Interpreter<'_> {
                             .and_then(Object::as_integer)
                     };
                     let inkless = self.image_inkless(dict, true, resources);
+                    let inline = Inline {
+                        dict: dict.clone(),
+                        data: data.to_vec(),
+                        resources: resources.clone(),
+                    };
                     self.image(
                         int(b"Width", b"W").unwrap_or(0),
                         int(b"Height", b"H").unwrap_or(0),
-                        (None, Some((dict.clone(), data.to_vec()))),
+                        (None, Some(inline)),
                         inkless,
                     );
                 }
             }
-            b"W" | b"W*" => self.clipping = true,
+            b"W" => self.clipping = Some(false),
+            b"W*" => self.clipping = Some(true),
             b"sh" => self.shading(operands, resources)?,
             b"BMC" => self.marked.push(Marked { hides: false }),
             b"BDC" => self.begin_marked(operands, resources),
@@ -626,9 +795,12 @@ impl Interpreter<'_> {
                 inkless,
                 ..self.layer()
             };
-            self.out
-                .events
-                .push(Event::Shading(ShadingEvent { bbox, layer }));
+            self.out.events.push(Event::Shading(ShadingEvent {
+                bbox,
+                layer,
+                clip: self.state.clips.clone(),
+                compositing: self.state.compositing,
+            }));
         }
         Ok(())
     }
@@ -664,6 +836,7 @@ impl Interpreter<'_> {
             b"w" => self.state.line_width = last::<1>(operands)?[0],
             b"J" => self.state.cap = integer(operands)?,
             b"j" => self.state.join = integer(operands)?,
+            b"M" => self.state.miter_limit = last::<1>(operands)?[0],
             b"d" => {
                 let array = operands
                     .first()
@@ -781,11 +954,13 @@ impl Interpreter<'_> {
         match operator {
             b"BT" => {
                 (self.text_matrix, self.line_matrix) = (Matrix::IDENTITY, Matrix::IDENTITY);
-                self.text_clip = None;
+                self.text_clip.clear();
             }
             b"ET" => {
-                if let Some(glyphs) = self.text_clip.take() {
+                let boxes = std::mem::take(&mut self.text_clip);
+                if let Some(glyphs) = boxes.iter().copied().reduce(Rect::union) {
                     self.state.clip = self.state.clip.intersect(glyphs);
+                    self.narrow(Outline::Glyphs(boxes));
                 }
             }
             b"Tc" => text.char_spacing = last::<1>(operands)?[0],
@@ -982,11 +1157,7 @@ impl Interpreter<'_> {
 
     fn text_event(&mut self, mut glyphs: Vec<Glyph>) {
         if (4..=7).contains(&self.state.text.render_mode) {
-            self.text_clip = glyphs
-                .iter()
-                .map(|g| g.bbox)
-                .chain(self.text_clip)
-                .reduce(Rect::union);
+            self.text_clip.extend(glyphs.iter().map(|g| g.bbox));
         }
         let Some(font) = &self.state.text.font else {
             return;
@@ -1017,6 +1188,8 @@ impl Interpreter<'_> {
             vertical: font.vertical(),
             glyphs,
             layer: self.layer(),
+            clip: self.state.clips.clone(),
+            compositing: self.state.compositing,
         };
         self.out.events.push(Event::Text(event));
     }
@@ -1190,15 +1363,22 @@ impl Interpreter<'_> {
         self.ended(bounds);
     }
 
-    /// The path, in `bounds`, has ended: when it clips, the clip narrows to them.
+    /// The path, in `bounds`, has ended: when it clips, the clip narrows to it (its box to `bounds`).
     fn ended(&mut self, bounds: Option<Rect>) {
-        if std::mem::take(&mut self.clipping)
+        let segments = std::mem::take(&mut self.path);
+        if let Some(even_odd) = self.clipping.take()
             && let Some(bounds) = bounds
         {
             self.state.clip = self.state.clip.intersect(bounds);
+            self.narrow(Outline::Path { segments, even_odd });
         }
-        self.path.clear();
         (self.current, self.start) = (None, None);
+    }
+
+    /// The clip narrows to `outline`.
+    fn narrow(&mut self, outline: Outline) {
+        let within = self.state.clips.take();
+        self.state.clips = Some(Rc::new(Clip { outline, within }));
     }
 
     fn paint(&mut self, stroke: bool, fill: Option<bool>) {
@@ -1234,6 +1414,8 @@ impl Interpreter<'_> {
                 dash_phase: state.dash_phase * scale,
                 cap: state.cap,
                 join: state.join,
+                miter_limit: state.miter_limit,
+                ctm: state.ctm,
             }),
             fill: fill.map(|even_odd| Fill {
                 color: state.fill_color.clone(),
@@ -1243,6 +1425,8 @@ impl Interpreter<'_> {
                 inkless,
                 ..self.layer()
             },
+            clip: state.clips.clone(),
+            compositing: state.compositing,
         };
         self.out.events.push(Event::Path(event));
     }
@@ -1270,6 +1454,32 @@ impl Interpreter<'_> {
         }
         if let Some(j) = self.file.get(&gs, b"LJ")?.and_then(|o| o.as_integer()) {
             self.state.join = j;
+        }
+        if let Some(m) = self.file.get(&gs, b"ML")?.and_then(|o| o.as_number()) {
+            self.state.miter_limit = m;
+        }
+        let compositing = &mut self.state.compositing;
+        if let Some(a) = self.file.get(&gs, b"CA")?.and_then(|o| o.as_number()) {
+            compositing.stroke_alpha = a.clamp(0.0, 1.0);
+        }
+        if let Some(a) = self.file.get(&gs, b"ca")?.and_then(|o| o.as_number()) {
+            compositing.fill_alpha = a.clamp(0.0, 1.0);
+        }
+        match self.file.get(&gs, b"BM")? {
+            // An array names modes in order of preference: the first one known (11.6.3).
+            Some(Object::Name(n)) => compositing.blend = Blend::named(&n).unwrap_or_default(),
+            Some(Object::Array(names)) => {
+                compositing.blend = names
+                    .iter()
+                    .find_map(|n| n.as_name().and_then(Blend::named))
+                    .unwrap_or_default();
+            }
+            _ => {}
+        }
+        match self.file.get(&gs, b"SMask")? {
+            Some(Object::Dict(_)) => compositing.soft_mask = true,
+            Some(Object::Name(n)) if n == b"None" => compositing.soft_mask = false,
+            _ => {}
         }
         if let Some(Object::Name(intent)) = self.file.get(&gs, b"RI")? {
             self.set_intent(&intent);
@@ -1350,8 +1560,29 @@ impl Interpreter<'_> {
             self.start,
         );
         self.state.ctm = matrix.then(self.state.ctm);
-        if let Some(shown) = self.user_box(&stream.dict)? {
+        if self.file.get(&stream.dict, b"Group")?.is_some() {
+            let entered = self.state.compositing;
+            let composited = entered.fill_alpha < 1.0
+                || entered.stroke_alpha < 1.0
+                || entered.blend != Blend::Normal
+                || entered.soft_mask
+                || entered.grouped;
+            self.state.compositing = Compositing {
+                grouped: composited,
+                ..Compositing::default()
+            };
+        }
+        if let Some([x0, y0, x1, y1]) = four(self.file.get(&stream.dict, b"BBox")?) {
+            let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| self.point(x, y));
+            let shown = Rect::around(&corners).expect("four corners");
             self.state.clip = self.state.clip.intersect(shown);
+            let mut segments = vec![Segment::MoveTo(corners[0])];
+            segments.extend(corners[1..].iter().map(|&c| Segment::LineTo(c)));
+            segments.push(Segment::Close);
+            self.narrow(Outline::Path {
+                segments,
+                even_odd: false,
+            });
         }
         let floor = std::mem::replace(&mut self.marked_floor, self.marked.len());
         self.run(&data, &own, depth + 1);
@@ -1516,7 +1747,7 @@ impl Interpreter<'_> {
         &mut self,
         width: i64,
         height: i64,
-        (object, inline): (Option<u32>, Option<(Dict, Vec<u8>)>),
+        (object, inline): (Option<u32>, Option<Inline>),
         inkless: bool,
     ) {
         let m = self.state.ctm;
@@ -1537,10 +1768,13 @@ impl Interpreter<'_> {
             height,
             object,
             inline,
+            fill: self.state.fill_color.clone(),
             layer: Layer {
                 inkless,
                 ..self.layer()
             },
+            clip: self.state.clips.clone(),
+            compositing: self.state.compositing,
         }));
     }
 }

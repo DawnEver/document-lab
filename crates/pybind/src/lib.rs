@@ -2,10 +2,10 @@
 //!
 //! `open(source, password)` reads a PDF -- a file by its path, read here, or one already in memory as bytes -- and
 //! gives its `sha256`; its `page(number, annotations=, curve_samples=, flatness=)` returns what the page draws as
-//! tuples and columns, which `document_lab.pdf` turns into the IR, its `image(object)` an image's samples and its
-//! `rgb(object)` their sRGB where they show as they stand. `create(path, level)` writes a PDF of image pages, or of
-//! pages copied from a `Reader` (`document_lab.capture`), perhaps with a text layer laid over them
-//! (`document_lab.ocr`).
+//! tuples and columns, which `document_lab.pdf` turns into the IR, its `render(...)` a region drawn by the own
+//! renderer (`render`), its `image(object)` an image's samples and its `rgb(object)` their sRGB where they show as
+//! they stand. `create(path, level)` writes a PDF of image pages, or of pages copied from a `Reader`
+//! (`document_lab.capture`), perhaps with a text layer laid over them (`document_lab.ocr`).
 //!
 //! A refusal raises by its kind: [`Refused`] and its kinds when the reader refuses the input, `ValueError` for a
 //! request it cannot honor, `OSError` when writing fails.
@@ -144,6 +144,10 @@ type SamplesRow = (
 );
 /// A `CCITTFaxDecode` image's coding: K, columns, end-of-line codes, rows byte-aligned, 1 bits black.
 type FaxRow = (i64, i64, bool, bool, bool);
+
+/// A region drawn: width, height, channels (3 RGB, 4 RGBA), the pixels rows top-down, and each kind of mark not
+/// drawn as the file states it with how many.
+type RasterRow = (u32, u32, u8, Vec<u8>, Vec<(String, usize)>);
 
 /// A PDF opened.
 #[pyclass(unsendable)]
@@ -284,6 +288,38 @@ impl Reader {
         }
         let paths = columns(py, &lines, &groups, styles);
         Ok((spans, paths, images, warnings))
+    }
+
+    /// The `region` (page space; None: the whole page) of page `number` drawn by the own renderer (`render`) at
+    /// `scale` pixels a point -- text only when `text` (refused until stage 2), annotations' appearances when
+    /// `annotations`, on transparency when `alpha` (else white): (width, height, channels, pixels, undrawn), the
+    /// pixels rows top-down, `undrawn` each kind of mark in the region not drawn as the file states it and how many.
+    #[pyo3(signature = (number, region, scale, *, text, annotations, alpha))]
+    fn render(
+        &self,
+        number: usize,
+        region: Option<Box4>,
+        scale: f64,
+        text: bool,
+        annotations: bool,
+        alpha: bool,
+    ) -> PyResult<RasterRow> {
+        let page = self.at(number)?;
+        let options = render::Options {
+            region: region.map(|(x0, y0, x1, y1)| Rect { x0, y0, x1, y1 }),
+            scale,
+            text,
+            annotations,
+            alpha,
+        };
+        let raster = render::render(&self.file, page, &options).map_err(|e| refused(&e))?;
+        Ok((
+            raster.width,
+            raster.height,
+            raster.channels,
+            raster.data,
+            raster.undrawn.into_iter().collect(),
+        ))
     }
 
     /// The image `XObject` `object`'s samples as 8-bit sRGB, three bytes a sample, rows top-down -- through its

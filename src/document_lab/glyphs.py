@@ -10,13 +10,15 @@ A word is glyphs on one row. Its sign and decimal point are read from geometry r
 taller than ``MARK_HEIGHT`` of the tallest digit is a minus when it is wider than tall and sits at mid height, a
 point when it sits on the baseline. Only a minus leading the word and at most one point are numbers.
 
-A word that is TEXT (a unit such as ``mT``, a grade such as ``N96``) is read by :func:`read_word` over ``ALPHABET``,
-where shape alone cannot tell an ``o`` from an ``O``: each glyph is also compared by where its ink sits against the
-word's baseline (the median glyph bottom), in ems taken from the word's tallest top assumed to be ``ASCENT`` -- a
-word with no capital, ascender or digit is mis-scaled and is then refused, never guessed. The same ``ACCEPT`` and
-``MARGIN`` refuse a near tie (``l``, ``I`` and ``1`` are one bar in Helvetica, so a word holding one raises). A
-small raised mark taller than wide is a prime (``mu'``, ``mu''`` read as ``µ'``, ``µ''``); a word of one letter is
-read by shape alone (:func:`_word_chars`).
+A word that is TEXT (a unit such as ``mT`` or ``Ω``, a grade such as ``N96``) is read by :func:`read_word` over
+``ALPHABET``, where shape alone cannot tell an ``o`` from an ``O``: each glyph is also compared by where its ink sits
+against the word's baseline (the median glyph bottom), in ems taken from the word's tallest top assumed to be
+``ASCENT`` -- a word with no capital, ascender or digit is mis-scaled and is then refused, never guessed. The same
+``ACCEPT`` and ``MARGIN`` refuse a near tie (``l``, ``I`` and ``1`` are one bar in Helvetica, so a word holding one
+raises). A small raised mark taller than wide is a prime (``mu'``, ``mu''`` read as ``µ'``, ``µ''``); a word of one
+letter is read by shape alone (:func:`_word_chars`). A refusal names the characters it could not choose between
+(:attr:`UnreadableGlyph.candidates`): when they are one letter's two cases, the glyph is a letter all the same
+(:func:`has_letter`).
 
 The references are a :class:`Font`. ``HELVETICA`` renders them; ``STROKE`` strokes the polylines of
 :mod:`document_lab.strokefont` (the stroke-font lettering of TDK SIFERRIT sheets) with :func:`stroke`, which is also
@@ -56,7 +58,7 @@ __all__ = [
 #: The font the reference digits are rendered in (PyMuPDF's built-in Helvetica).
 REFERENCE_FONT: Final = 'helv'
 #: The characters :func:`read_word` reads.
-ALPHABET: Final = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzµ'
+ALPHABET: Final = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzµΩ'
 #: The height above the baseline (ems) of a ``REFERENCE_FONT`` capital, ascender or digit (0.73 measured).
 ASCENT: Final = 0.73
 #: Weight of a glyph's top and bottom (ems from the baseline) in a word reading's distance.
@@ -95,7 +97,12 @@ Shapes = dict[str, tuple[list[tuple[np.ndarray, float]], tuple[float, float]]]
 
 
 class UnreadableGlyph(ValueError):
-    """A glyph matches no reference digit clearly enough to read."""
+    """A glyph matches no reference clearly enough to read."""
+
+    def __init__(self, msg: str, candidates: tuple[str, ...] = ()) -> None:
+        """``candidates``: the characters it reads as near equally (a near tie, or one and its twins), else empty."""
+        super().__init__(msg)
+        self.candidates = candidates
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -258,8 +265,21 @@ def read_word(glyphs: Sequence[Glyph], font: Font = HELVETICA) -> str:
 
 
 def has_letter(glyphs: Sequence[Glyph], font: Font = HELVETICA) -> bool:
-    """Whether a glyph of the row reads clearly as a letter, however the rest read: the row is a word, not a number."""
-    return any(isinstance(char, str) and char.isalpha() for char in _word_chars(glyphs, font))
+    """Whether a glyph of the row reads clearly as a letter, however the rest read: the row is a word, not a number.
+
+    A glyph refused only for its case (a lone ``C``, which by shape alone is a ``c``) is a letter too; one refused
+    between two characters (``l`` or ``I``, either a sheet's ``1``; ``O`` or ``0``) is not.
+    """
+    return any(
+        (isinstance(char, str) and char.isalpha())
+        or (isinstance(char, UnreadableGlyph) and _one_letter(char.candidates))
+        for char in _word_chars(glyphs, font)
+    )
+
+
+def _one_letter(candidates: Sequence[str]) -> bool:
+    """Whether ``candidates`` are one letter, its cases aside."""
+    return bool(candidates) and all(c.isalpha() for c in candidates) and len({c.lower() for c in candidates}) == 1
 
 
 def _word_chars(glyphs: Sequence[Glyph], font: Font) -> list[str | UnreadableGlyph]:
@@ -345,11 +365,12 @@ def _read_char(ink: np.ndarray, place: tuple[float, float] | None, font: Font) -
     (best, char), (second, runner) = ranked[0], ranked[1]
     if best > ACCEPT or second - best < MARGIN:
         msg = f'a glyph reads as {char!r} at {best:.2f} and {runner!r} at {second:.2f}: no clear character'
-        raise UnreadableGlyph(msg)
+        tied = () if best > ACCEPT else tuple(c for d, c in ranked if d - best < MARGIN)
+        raise UnreadableGlyph(msg, tied)
     twins = _twins(ink.shape[0], font, placed=place is not None)[char]
     if twins:  # the reference itself cannot be told apart: matching it clearly says nothing
         msg = f'a glyph reads as {char!r}, which the reference font draws within {TWIN} of {"".join(twins)!r}'
-        raise UnreadableGlyph(msg)
+        raise UnreadableGlyph(msg, (char, *twins))
     return char
 
 
@@ -475,10 +496,18 @@ def _digit_height() -> float:
     return _crop(_render('0', 100.0, (0.0, 0.0))).shape[0] / 100.0
 
 
+@functools.cache
+def _reference_font() -> pymupdf.Font:
+    """``REFERENCE_FONT`` as a font object."""
+    return pymupdf.Font(REFERENCE_FONT)
+
+
 def _render(text: str, size: float, offset: tuple[float, float]) -> np.ndarray:
     """``text`` at ``size`` (one pixel per point), shifted by ``offset`` pixels, as darkness."""
     with pymupdf.open() as doc:
         page = doc.new_page(width=size * 2 + 10, height=size * 2 + 10)
-        page.insert_text((5 + offset[0], size * 1.5 + offset[1]), text, fontname=REFERENCE_FONT, fontsize=size)
+        writer = pymupdf.TextWriter(page.rect)  # a font object draws every glyph it has (``Ω``), not only Latin-1
+        writer.append((5 + offset[0], size * 1.5 + offset[1]), text, font=_reference_font(), fontsize=size)
+        writer.write_text(page)
         pix = page.get_pixmap(dpi=72, colorspace=pymupdf.csGRAY)
     return 1 - np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w) / 255

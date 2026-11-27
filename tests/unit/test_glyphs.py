@@ -4,7 +4,17 @@ import numpy as np
 import pymupdf
 import pytest
 
-from document_lab.glyphs import STROKE, Font, Glyph, UnreadableGlyph, read_glyph, read_number, read_word, stroke
+from document_lab.glyphs import (
+    STROKE,
+    Font,
+    Glyph,
+    UnreadableGlyph,
+    has_letter,
+    read_glyph,
+    read_number,
+    read_word,
+    stroke,
+)
 from document_lab.strokefont import TEMPLATES
 
 
@@ -137,3 +147,38 @@ def test_a_character_the_font_draws_as_another_is_refused_as_a_twin():
     with pytest.raises(UnreadableGlyph, match='within'):
         read_word(zero, _Variant(with_o))
     assert read_word(zero, STROKE) == '0'  # the control: without the twin, a 0
+
+
+def test_a_lone_letter_whose_case_alone_is_unclear_is_still_a_letter():
+    """TDK ACT1210 p6 sets ``°C`` in place of a tick label: its lone ``C`` is a ``c`` by shape, yet a letter."""
+    ink = _ink('C')
+    c = [Glyph(ink, (0, 0, ink.shape[1], ink.shape[0]))]
+    with pytest.raises(UnreadableGlyph):
+        read_word(c)  # the planted premise: by shape alone a C is a c's twin
+    assert has_letter(c)
+
+
+def _between(a, b):
+    """The stroke font with no ``0``, ``a`` and ``b`` its shape 0.95 either side: a ``0`` reads as both near equally."""
+
+    def planted(refs):
+        variants, place = refs['0']
+        shifted = {a: -0.475, b: 0.475}  # aspect weight 2: each 0.95 from the glyph, 1.9 apart (no twins)
+        rest = {c: r for c, r in refs.items() if c != '0'}
+        return {**rest, **{c: ([(f, x + d) for f, x in variants], place) for c, d in shifted.items()}}
+
+    return _Variant(planted)
+
+
+def test_a_near_tie_between_the_cases_of_one_letter_is_a_letter():
+    zero = [Glyph(_stroked('0'), (0, 0, 4, 7))]
+    with pytest.raises(UnreadableGlyph, match='no clear character'):
+        read_word(zero, _between('O', 'o'))
+    assert has_letter(zero, _between('O', 'o'))
+
+
+@pytest.mark.parametrize(('a', 'b'), [('O', 'Q'), ('O', '0')])
+def test_a_near_tie_between_two_characters_is_no_letter(a, b):
+    """The control: two letters (an ``l`` or an ``I`` may be a sheet's ``1``), or a letter and a digit, say nothing."""
+    zero = [Glyph(_stroked('0'), (0, 0, 4, 7))]
+    assert not has_letter(zero, _between(a, b))

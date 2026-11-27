@@ -145,6 +145,24 @@ def test_a_drawing_every_page_repeats_is_furniture_and_one_page_s_table_is_still
     assert cut == ['page-001-table-untitled-1.png']
 
 
+def test_the_index_names_each_page_by_the_clauses_its_outline_states(tmp_path):
+    with pymupdf.open() as doc:
+        for clause in ('Scope', 'Terms and definitions'):
+            page = doc.new_page(width=400, height=300)
+            page.insert_text((40, 60), clause, fontsize=12)  # plain words: the rules cannot tell a clause by them
+            page.insert_text((40, 100), 'The text of the clause, in a sentence of its own.', fontsize=10)
+        doc.set_toc([[1, 'Scope', 1], [1, 'Terms and definitions', 2]])
+        doc.save(tmp_path / 'std.pdf')
+    done = write_pages(tmp_path / 'std.pdf', tmp_path / 'out')
+    assert done.structure.source == 'outline'
+    index = (tmp_path / 'out' / 'INDEX.md').read_text(encoding='utf-8')
+    assert '- [page 1](page-001.md) -- Scope\n' in index
+    assert '- [page 2](page-002.md) -- Terms and definitions\n' in index
+    inferred = write_pages(tmp_path / 'std.pdf', tmp_path / 'inferred', outline=False)
+    assert inferred.structure.source == 'inferred'
+    assert '-- Scope' not in (tmp_path / 'inferred' / 'INDEX.md').read_text(encoding='utf-8')
+
+
 def test_a_ruled_table_is_written_as_a_pipe_table_in_place_of_its_words(tmp_path):
     with pymupdf.open() as doc:
         page = doc.new_page(width=612, height=792)

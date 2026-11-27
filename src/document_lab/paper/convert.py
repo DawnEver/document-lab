@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Final, Literal
 
 from document_lab import layout
-from document_lab.markdown import to_markdown
+from document_lab.markdown import Headings, headings, to_markdown
 from document_lab.pdf import read_pdf
 
 __all__ = [
@@ -129,10 +129,14 @@ def choose_tool(tool: Tool | None = None) -> ToolChoice:
     return ToolChoice('marker', f'asked by the caller ({marker})')
 
 
-def convert(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> tuple[str, ToolChoice]:
-    """The markdown of ``pdf`` and the choice it was made by (:func:`choose_tool` of ``tool``).
+def convert(
+    pdf: Path, out_dir: Path, *, tool: Tool | None = None, outline: bool = True
+) -> tuple[str, ToolChoice, Headings | None]:
+    """The markdown of ``pdf``, its :func:`choose_tool` choice of ``tool``, and how its sections were headed.
 
-    marker's images land in ``out_dir/img/flat``; the IR path writes none (figures are cropped later).
+    On the IR path the PDF's stated outline names the sections when it matches the pages and ``outline`` asks for it,
+    else the rules infer them (`document_lab.markdown.headings`, returned for the caller to report); marker heads
+    its own (None). marker's images land in ``out_dir/img/flat``; the IR path writes none (figures are cropped later).
 
     Raises:
         MarkerUnavailable: ``tool='marker'`` and something marker needs is missing.
@@ -141,10 +145,11 @@ def convert(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> tuple[str,
     choice = choose_tool(tool)
     flat = out_dir / 'img' / 'flat'
     flat.mkdir(parents=True, exist_ok=True)
-    markdown = (
-        _run_marker(pdf, out_dir) if choice.tool == 'marker' else to_markdown(layout.without_running(read_pdf(pdf)))
-    )
-    return markdown, choice
+    if choice.tool == 'marker':
+        return _run_marker(pdf, out_dir), choice, None
+    doc = layout.without_running(read_pdf(pdf))
+    sections = headings(doc, outline=outline)
+    return to_markdown(doc, sections=sections), choice, sections
 
 
 def _run_marker(pdf: Path, out_dir: Path) -> str:

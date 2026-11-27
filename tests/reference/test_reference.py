@@ -2,11 +2,11 @@
 
 ``DOCUMENT_LAB_REFERENCE_PDFS`` names PDFs, or directories searched for them, ``os.pathsep``-separated (real
 documents are never committed); the part FAILS without one rather than skip. Every document must read whole, refuse
-a password exactly when PyMuPDF does, match PyMuPDF's page count and page sizes, and place no image PyMuPDF does not;
-its text must agree with PyMuPDF's, stand where PyMuPDF's stands, and its painted paths be PyMuPDF's drawings, within
-the tolerances below (`tests.reference.compare` says how each is compared). The planted controls, each of which must
-be reported: another document's reading taken as this one's, PyMuPDF's geometry shifted, every second line of its
-text risen, its colors turned.
+a password exactly when PyMuPDF does, match PyMuPDF's page count and page sizes, place no image PyMuPDF does not, and
+state the outline and page labels PyMuPDF states; its text must agree with PyMuPDF's, stand where PyMuPDF's stands,
+and its painted paths be PyMuPDF's drawings, within the tolerances below (`tests.reference.compare` says how each is
+compared). The planted controls, each of which must be reported: another document's reading (its text and outline)
+taken as this one's, PyMuPDF's geometry shifted, every second line of its text risen, its colors turned.
 
 The tolerances were measured on 283 local PDFs (6499 pages: papers, standards, theses) on 2026-11-26. Page sizes
 agree within 3e-5 pt and no image is invented. Text agrees 0.9986 at worst. Of 4,250,325 characters stated, 0.99984
@@ -91,6 +91,7 @@ def problems(found: Compared) -> list[str]:
     if found.agreement < DOCUMENT_AGREEMENT:
         pages = [f'{p.number} ({p.agreement:.2f})' for p in found.pages if p.whole - p.matched > PAGE_SLACK]
         out.append(f'text agrees {found.agreement:.4f} < {DOCUMENT_AGREEMENT}; pages {", ".join(pages[:10])}')
+    out += _stated(found)
     if found.location < DOCUMENT_LOCATION:
         worst = sorted((p for p in found.pages if p.locatable > p.located), key=lambda p: p.located - p.locatable)
         pages = ', '.join(f'{p.number} ({p.locatable - p.located} not located)' for p in worst[:10])
@@ -110,6 +111,22 @@ def problems(found: Compared) -> list[str]:
     unreported = [p.number for p in found.pages for _ in range(p.unreported)]
     if len(unreported) > PATHS_OFF * paths:
         out.append(f'{len(unreported)} fills and strokes PyMuPDF draws are not reported; pages {_pages(unreported)}')
+    return out
+
+
+def _stated(found: Compared) -> list[str]:
+    """Where ``found``'s outline and page labels are apart from PyMuPDF's, in words."""
+    out = []
+    if found.outline != found.reference_outline:
+        first = next(
+            (i for i, (a, b) in enumerate(zip(found.outline, found.reference_outline, strict=False)) if a != b),
+            min(len(found.outline), len(found.reference_outline)),
+        )
+        ours, theirs = len(found.outline), len(found.reference_outline)
+        out.append(f'outline of {ours} items, PyMuPDF {theirs}; first apart at item {first}')
+    if found.labels != found.reference_labels:
+        apart = [i + 1 for i, (a, b) in enumerate(zip(found.labels, found.reference_labels, strict=False)) if a != b]
+        out.append(f'page labels apart from PyMuPDF on pages {apart[:10]}')
     return out
 
 
@@ -137,6 +154,8 @@ def test_another_documents_reading_is_reported(pdf):
     if other is None:
         return
     planted = compare(pdf, other)
+    if planted.outline != planted.reference_outline:  # either states an outline: the other's must be told apart
+        assert any(p.startswith('outline') for p in problems(planted)), f"{other.name}'s outline passed as {pdf.name}'s"
     if sum(p.reference for p in planted.pages) == 0:
         return
     found = problems(planted)

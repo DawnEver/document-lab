@@ -624,10 +624,10 @@ def running(doc: Document) -> list[Running]:
     A line repeats when :data:`RUNNING_PAGES` pages (every page of a shorter document, two at least) set its text --
     as :func:`_furniture_key` compares it, so a page number repeats -- at its place. The head is the page's lines
     from the top while each repeats, the foot from the bottom: a repeated line inside the body (a heading each page
-    opens a table with) is not reached, and a head stands above the page's other lines, a foot below them: a line
-    level with the body's text (an integral's limit ``0`` at a column's last baseline, repeated by chance where
-    other pages set a limit or a tick label) is the body's however it repeats. Only a whole document can tell, and a
-    page alone has none. Built on
+    opens a table with) is not reached, and one level with the body's text runs only where half the document's pages
+    repeat it (a journal's head, a page number beside a first page's notes do; an integral's limit ``0`` at a column's
+    last baseline, repeated by chance where two other pages set a limit, does not). Only a whole document can tell,
+    and a page alone has none. Built on
     :func:`lines`, it never sees a page's :func:`furniture` (a sideways stamp): a span is one or the other, never both.
     A line turned sideways is no running line (:func:`_across`): the cells of a landscape table continued over pages
     recur at the page's top, its running head over them.
@@ -642,7 +642,7 @@ def running(doc: Document) -> list[Running]:
         for line in found:
             seen.setdefault(_furniture_key(line.text), []).append((number, line))
 
-    def repeats(number: int, line: Line) -> bool:
+    def repeats(number: int, line: Line, pages_needed: float = need) -> bool:
         reach = line.size
         here = {
             other
@@ -651,7 +651,7 @@ def running(doc: Document) -> list[Running]:
             and min(abs(them.x0 - line.x0), abs(them.x1 - line.x1), abs(them.x0 + them.x1 - line.x0 - line.x1) / 2)
             <= reach
         }
-        return len(here | {number}) >= need
+        return len(here | {number}) >= pages_needed
 
     out = []
     for number, found in enumerate(pages):
@@ -659,10 +659,14 @@ def running(doc: Document) -> list[Running]:
         rest = found[len(head) :]
         foot = list(itertools.takewhile(lambda ln, n=number: repeats(n, ln), reversed(rest)))
         body = rest[: len(rest) - len(foot)]
-        if body:  # a head stands above the body, a foot below it: a line level with the body's text is the body's
-            top, bottom = min(ln.y0 for ln in body), max(ln.y1 for ln in body)
-            head = list(itertools.takewhile(lambda ln, top=top: (ln.y0 + ln.y1) / 2 < top, head))
-            foot = list(itertools.takewhile(lambda ln, bottom=bottom: (ln.y0 + ln.y1) / 2 > bottom, foot))
+        if body:  # a line level with the body's text runs only where half the document's pages repeat it
+            top, bottom, most = min(ln.y0 for ln in body), max(ln.y1 for ln in body), max(need, len(pages) / 2)
+
+            def runs(line: Line, n: int = number, top: float = top, bottom: float = bottom, most: float = most) -> bool:
+                return not top <= (line.y0 + line.y1) / 2 <= bottom or repeats(n, line, most)
+
+            head = list(itertools.takewhile(runs, head))
+            foot = list(itertools.takewhile(runs, foot))
         out.append(Running(tuple(head), tuple(reversed(foot))))
     return out
 

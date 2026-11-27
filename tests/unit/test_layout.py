@@ -157,21 +157,26 @@ def test_an_equation_number_closing_pages_at_one_place_is_no_running_foot(tmp_pa
 
 
 def test_a_lone_digit_level_with_the_body_s_last_line_is_no_running_foot(tmp_path):
-    """Each page ends with an integral's lower limit ``0`` in the left column, level with the right column's last line
-    and at one place on every page (as a limit or a tick label may be): it repeats as a page number does, but stands
-    level with the body's text, so it is the body's. The page numbers below the body still run."""
+    """Three pages of eight end with an integral's lower limit ``0`` in the left column at one place, level with the
+    right column's last line: it repeats on enough pages to run, as a page number does, but standing level with the
+    body's text it runs only where half the pages repeat it, so it is the body's. A line so level that every page
+    repeats (a page number beside a first page's notes) still runs; the page numbers below the body run."""
     doc = pymupdf.open()
-    for number in range(1, 5):
+    for number in range(1, 9):
         page = doc.new_page(width=595, height=842)
         page.insert_text((37, 120), f'Section {number} opens the page with its own words', fontsize=10)
-        page.insert_text((150, 740), '0', fontsize=7)
+        if number in {2, 5, 7}:
+            page.insert_text((150, 740), '0', fontsize=7)
         page.insert_text((320, 742), f'the right column closes page {number} with words of its own', fontsize=10)
+        page.insert_text((60, 742), 'Journal 12', fontsize=7)  # level with the body, on every page
         page.insert_text((291, 800), str(number), fontsize=10)
     doc.save(tmp_path / 'paper.pdf')
     found = layout.running(read_pdf(tmp_path / 'paper.pdf'))
-    assert [[ln.text for ln in page.foot] for page in found] == [[str(n)] for n in range(1, 5)]
-    planted = [['0', str(n)] for n in range(1, 5)]  # the limit taken for a running foot, as before
-    assert [[ln.text for ln in page.foot] for page in found] != planted
+    feet = [[ln.text for ln in page.foot] for page in found]
+    assert feet == [['Journal 12', str(n)] for n in range(1, 9)]
+    assert feet != [
+        ['0', 'Journal 12', str(n)] if n in {2, 5, 7} else ['Journal 12', str(n)] for n in range(1, 9)
+    ]  # planted
 
 
 def test_an_equation_number_in_the_gutter_takes_nothing_of_the_next_column(tmp_path):

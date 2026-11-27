@@ -306,9 +306,25 @@ struct Reader {
 /// `fonts`: what fetches a fallback font program by its name (one of `FALLBACK_FONTS`), called when a glyph first
 /// needs it, at most once a name -- its `bytes`, or an exception whose message says why it cannot be had (the glyphs
 /// it would draw are then counted in `render`'s undrawn, by that message). None: no fallback is fetched.
+/// `fallback_widths`: how a composite (CJK) font's fallback glyphs are set across -- `own` (each at the fallback's
+/// own advance), or `stated` (stretched across the widths the file states).
 #[pyfunction]
-#[pyo3(signature = (source, password, *, fonts = None))]
-fn open(source: &Bound<'_, PyAny>, password: &[u8], fonts: Option<Py<PyAny>>) -> PyResult<Reader> {
+#[pyo3(signature = (source, password, *, fonts = None, fallback_widths = "own"))]
+fn open(
+    source: &Bound<'_, PyAny>,
+    password: &[u8],
+    fonts: Option<Py<PyAny>>,
+    fallback_widths: &str,
+) -> PyResult<Reader> {
+    let widths = match fallback_widths {
+        "own" => pdf::shape::FallbackWidths::Own,
+        "stated" => pdf::shape::FallbackWidths::Stated,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "fallback_widths {other:?}: one of own, stated"
+            )));
+        }
+    };
     let data = if let Ok(bytes) = source.cast::<PyBytes>() {
         bytes.as_bytes().to_vec()
     } else {
@@ -316,6 +332,7 @@ fn open(source: &Bound<'_, PyAny>, password: &[u8], fonts: Option<Py<PyAny>>) ->
         fs::read(&path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?
     };
     let file = pdf::File::open(data, password).map_err(|e| refused(&e))?;
+    file.set_fallback_widths(widths);
     if let Some(fetch) = fonts {
         file.fetch_fallbacks(Rc::new(move |name: &str| {
             Python::attach(|py| {
@@ -464,6 +481,7 @@ impl Reader {
             }
         }
         let paths = columns(py, &lines, &groups, styles);
+        let warnings = warnings.into_iter().map(|w| w.why).collect();
         Ok((spans, paths, images, warnings))
     }
 
@@ -541,9 +559,16 @@ impl Reader {
 
     /// The `region` (page space; None: the whole page) of page `number` drawn by the own renderer (`render`) at
     /// `scale` pixels a point -- text only when `text`, annotations' appearances when
-    /// `annotations`, on transparency when `alpha` (else white): (width, height, channels, pixels, undrawn), the
+    /// `annotations`, on transparency when `alpha` (else white), a JPEG 2000 image's `/Decode` applied to an image
+    /// that is no mask when `jpx_decode` and its opacity channel under `/SMaskInData 0` when `jpx_opacity` (`MuPDF`'s
+    /// readings; by default the standard's, which ignores both): (width, height, channels, pixels, undrawn), the
     /// pixels rows top-down, `undrawn` each kind of mark in the region not drawn as the file states it and how many.
-    #[pyo3(signature = (number, region, scale, *, text, annotations, alpha))]
+    #[pyo3(signature = (number, region, scale, *, text, annotations, alpha, jpx_decode = false, jpx_opacity = false))]
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::fn_params_excessive_bools,
+        reason = "Python's keyword arguments"
+    )]
     fn render(
         &self,
         number: usize,
@@ -552,6 +577,8 @@ impl Reader {
         text: bool,
         annotations: bool,
         alpha: bool,
+        jpx_decode: bool,
+        jpx_opacity: bool,
     ) -> PyResult<RasterRow> {
         let page = self.at(number)?;
         let options = render::Options {
@@ -560,6 +587,10 @@ impl Reader {
             text,
             annotations,
             alpha,
+            jpx: render::image::Jpx {
+                decode: jpx_decode,
+                opacity: jpx_opacity,
+            },
         };
         let raster = render::render(&self.file, page, &options).map_err(|e| refused(&e))?;
         Ok((

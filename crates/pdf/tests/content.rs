@@ -6,7 +6,7 @@ use pdf::color::PatternKind;
 use pdf::geometry::Matrix;
 use pdf::geometry::Segment;
 use pdf::geometry::{Point, Rect};
-use pdf::interpret::{ImageEvent, PathEvent};
+use pdf::interpret::{ImageEvent, PathEvent, Reach};
 use pdf::{Event, File};
 
 fn events(page_extra: &str, content: &str, extra: &[&str]) -> (pdf::Content, pdf::Page) {
@@ -189,7 +189,11 @@ fn an_unreadable_operation_is_a_named_warning() {
     let (content, _) = events("", "/Missing gs 0 0 1 1 re f", &[]);
     assert_eq!(paths(&content).len(), 1);
     assert_eq!(content.warnings.len(), 1);
-    assert!(content.warnings[0].contains("gs"), "{:?}", content.warnings);
+    assert!(
+        content.warnings[0].why.contains("gs"),
+        "{:?}",
+        content.warnings
+    );
 }
 
 #[test]
@@ -290,7 +294,7 @@ fn a_shading_painted_with_sh_covers_the_clip_within_its_bbox() {
             r(10.0, 80.0, 20.0, 90.0)
         ]
     );
-    assert_eq!(content.warnings, Vec::<String>::new());
+    assert!(content.warnings.is_empty(), "{:?}", content.warnings);
 }
 
 #[test]
@@ -346,7 +350,7 @@ fn a_fill_with_a_pattern_says_which_pattern_it_is_and_an_uncolored_tilings_tint(
         .unwrap();
     assert_eq!(first.matrix, Matrix([1.0, 0.0, 0.0, -1.0, 0.0, 100.0]));
     assert_eq!(content.warnings.len(), 1, "{:?}", content.warnings);
-    assert!(content.warnings[0].contains("Missing"));
+    assert!(content.warnings[0].why.contains("Missing"));
 }
 
 #[test]
@@ -498,8 +502,26 @@ fn a_graphics_state_sets_alphas_blend_mode_soft_mask_and_miter_limit() {
     assert_eq!(found[1].stroke.as_ref().unwrap().miter_limit, 2.0);
     assert_eq!(content.warnings.len(), 1, "{:?}", content.warnings);
     assert!(
-        content.warnings[0].contains("/G is not a Form"),
+        content.warnings[0].why.contains("/G is not a Form"),
         "a mask with no group is named: {:?}",
+        content.warnings
+    );
+    // The state it would have set is not in force: the marks drawn after it (none here) may differ.
+    assert_eq!(content.warnings[0].reach, Reach::From(2));
+}
+
+#[test]
+fn a_warning_says_what_of_the_drawing_it_may_change() {
+    let (content, _) = events(
+        "",
+        "0 0 1 1 re f /Missing gs 0 0 2 2 re f /Nothing Do /Tag BMC",
+        &[],
+    );
+    let reaches: Vec<Reach> = content.warnings.iter().map(|w| w.reach).collect();
+    assert_eq!(
+        reaches,
+        [Reach::From(1), Reach::Anywhere, Reach::Unseen],
+        "{:?}",
         content.warnings
     );
 }

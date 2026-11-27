@@ -1,31 +1,46 @@
 //! An image placed on a page to pixels (ISO 32000-2 section 8.9): its dictionary as the reader reads it
 //! (`pdf::image::Samples`, for `Reader.image` alike), its samples decoded ([`crate::codec`] for a codec the reader
-//! hands over), mapped through `/Decode`, converted to sRGB as the reader converts colors -- `DeviceGray`,
-//! `DeviceRGB` and `DeviceCMYK` by the standard's formulas, `ICCBased` through its profile (a profile that does not
-//! read: as the device space of its component count), every other space (`Indexed`, `CalGray`/`CalRGB`, `Lab`,
-//! `Separation`, `DeviceN`) through `pdf::color::Space::color` -- and masked: a stencil mask (`/ImageMask`) paints
-//! the fill color, an `/SMask` (with `/Matte`) or a `/Mask` image gives each sample its alpha, a `/Mask` array of
-//! color key ranges hides the samples in them.
+//! hands over; a JPEG 2000's dictionary read as [`Jpx`] says), mapped through `/Decode`, converted to sRGB as the
+//! reader converts colors -- `DeviceGray`, `DeviceRGB` and `DeviceCMYK` by the standard's formulas, `ICCBased`
+//! through its profile (a profile that does not read: as the device space of its component count), every other space
+//! (`Indexed`, `CalGray`/`CalRGB`, `Lab`, `Separation`, `DeviceN`) through `pdf::color::Space::color` -- and
+//! masked: a stencil mask (`/ImageMask`) paints the fill color, an `/SMask` (with `/Matte`) or a `/Mask` image gives
+//! each sample its alpha, a `/Mask` array of color key ranges hides the samples in them.
 //!
 //! Placed as viewers place it (measured against `MuPDF`): an image square to the page is grid-fitted -- its box
 //! widened to the whole pixels it touches -- and drawn without anti-aliased edges; an image drawn smaller than its
 //! samples is first shrunk to its drawn size by averaging the samples each pixel covers; one drawn larger, or turned
 //! or skewed, is interpolated (bilinear) -- but magnified more than twice it shows each sample as a block (nearest),
-//! unless it asks to be interpolated (`/Interpolate true`).
+//! unless it asks to be interpolated (`/Interpolate true`). Drawn nearest, an image -- a stencil mask alike -- is
+//! sampled as `MuPDF`'s painter samples it, in truncated fixed-point steps (`sampled`).
 
 use std::collections::HashMap;
 
 use pdf::File;
 use pdf::color::Space;
 use pdf::filter::Codec;
-use pdf::geometry::{Matrix, Point};
+use pdf::geometry::{Matrix, Point, Rect};
 use pdf::icc::Intent;
 use pdf::image::{Role, Samples};
 use pdf::interpret::ImageEvent;
 use pdf::object::Object;
 use tiny_skia::{IntSize, Pixmap, PixmapRef};
 
+use crate::Grid;
 use crate::codec;
+
+/// How a JPEG 2000 image's dictionary is read where ISO 32000 and `MuPDF` part: the standard's reading by default,
+/// `MuPDF`'s each selectable (measured on `PyMuPDF` 2026-11-27).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Jpx {
+    /// `/Decode` applied to an image that is no stencil mask, as `MuPDF` applies it (but to one in an `Indexed` space,
+    /// whose `/Decode` it ignores at every depth); by default ignored -- "If the image uses the `JPXDecode` filter and
+    /// `ImageMask` is false, `Decode` shall be ignored" (Table 87; 7.4.9).
+    pub decode: bool,
+    /// The data's opacity channel taken as the image's soft mask under `/SMaskInData 0` too, as `MuPDF` takes it; by
+    /// default ignored -- 0: "If present, encoded soft-mask image information shall be ignored" (Table 87).
+    pub opacity: bool,
+}
 
 /// An image's pixels, decoded and converted, before it is placed: one decoding serves every placement of it.
 pub struct Decoded {
@@ -44,10 +59,12 @@ pub struct Decoded {
 pub struct Pixels {
     /// Its pixels shrunk to the size it is drawn at; None when it is drawn at its own size or larger.
     shrunk: Option<Pixmap>,
-    /// Whether it is drawn interpolated (bilinear) rather than nearest.
+    /// Whether it is drawn interpolated (bilinear) rather than nearest (`sampled`).
     pub smooth: bool,
     /// The matrix from its pixels to the canvas's.
     pub matrix: Matrix,
+    /// The matrix from its unit square (PDF's, y up) to the canvas, grid-fitted when it is square to the page.
+    pub unit: Matrix,
     /// Whether it was grid-fitted (square to the page): drawn on whole pixels, edges not anti-aliased.
     pub grid_fitted: bool,
 }
@@ -70,13 +87,13 @@ impl Pixels {
 ///
 /// Refuses what cannot be drawn, in words that name it: a codec not decoded here, data that does not decode, a
 /// stencil mask in a color with no RGB, samples whose space gives no RGB.
-pub fn decode(file: &File, event: &ImageEvent) -> Result<Decoded, String> {
-    let image = Image::of(file, event)?;
+pub fn decode(file: &File, event: &ImageEvent, jpx: Jpx) -> Result<Decoded, String> {
+    let image = Image::of(file, event, jpx)?;
     let mut notes = Vec::new();
     let rgba = if image.stencil {
         stencil(&image, event)?
     } else {
-        colored(file, &image, &mut notes)?
+        colored(file, &image, jpx, &mut notes)?
     };
     if let Some(why) = &image.partial {
         notes.push(why.clone());
@@ -126,19 +143,7 @@ pub fn place(decoded: &Decoded, to_pixels: Matrix) -> Result<Pixels, String> {
     } else {
         None
     };
-    // A canvas pixel whose center falls on the line between two samples takes the first (the lower index), as
-    // MuPDF's fixed-point sampling does: the samples sit a 1024th of a sample further on.
-    let tie = 1.0 / 1024.0;
-    let matrix = Matrix([1.0, 0.0, 0.0, 1.0, tie, tie])
-        .then(Matrix([
-            1.0 / f64::from(w),
-            0.0,
-            0.0,
-            -1.0 / f64::from(h),
-            0.0,
-            1.0,
-        ]))
-        .then(unit);
+    let matrix = Matrix([1.0 / f64::from(w), 0.0, 0.0, -1.0 / f64::from(h), 0.0, 1.0]).then(unit);
     Ok(Pixels {
         shrunk,
         smooth: smooth(
@@ -148,8 +153,134 @@ pub fn place(decoded: &Decoded, to_pixels: Matrix) -> Result<Pixels, String> {
             decoded.interpolate,
         ),
         matrix,
+        unit,
         grid_fitted,
     })
+}
+
+/// The pixels `source` paints drawn nearest through `unit` (its unit square, y up, to the canvas of `grid`) within
+/// `scissor` (device space: the page's pixels, [`crate::clip::scissor`]), sampled as `MuPDF`'s affine painter samples
+/// them (measured 2026-11-27, `fz_paint_image_imp`): in device space, in single precision, the inverse matrix scaled
+/// to 14-bit fixed point and each step truncated; the first pixel's position -- the scissor's first within the
+/// image's box -- taken at its center, every other one stepped from it. So a sample's edge near a pixel's center falls
+/// where those truncated steps put it, a fraction of a pixel from where exact sampling would (6 samples over 241
+/// pixels: the third edge, 122.33 rows down exactly, a row lower), images and stencil masks alike. Each canvas pixel
+/// the source covers is its sample, whole (no anti-aliased edge); None when none is covered. The second value: the
+/// canvas pixel of its top-left corner.
+#[must_use]
+pub(crate) fn sampled(
+    source: PixmapRef,
+    unit: Matrix,
+    grid: &Grid,
+    scissor: Rect,
+) -> Option<(Pixmap, (i32, i32))> {
+    // MuPDF's matrix: the unit square, its top row first, to device space.
+    let device = Matrix([1.0, 0.0, 0.0, -1.0, 0.0, 1.0])
+        .then(unit)
+        .then(Matrix([1.0, 0.0, 0.0, 1.0, grid.left, grid.top]));
+    let steps = Stepping::of(device, (source.width(), source.height()), scissor)?;
+    // What of it lies on this canvas: whole device pixels, stepped to from the first.
+    let canvas = grid.device_box();
+    #[expect(clippy::cast_possible_truncation, reason = "whole pixels")]
+    let (x0, y0, x1, y1) = (
+        steps.x.max(canvas.x0 as i64),
+        steps.y.max(canvas.y0 as i64),
+        (steps.x + i64::from(steps.width)).min(canvas.x1 as i64),
+        (steps.y + i64::from(steps.height)).min(canvas.y1 as i64),
+    );
+    let (width, height) = (u32::try_from(x1 - x0).ok()?, u32::try_from(y1 - y0).ok()?);
+    let mut out = Pixmap::new(width, height)?;
+    let pixels = source.pixels();
+    let (columns, rows) = (i64::from(source.width()), i64::from(source.height()));
+    let (skip_x, skip_y) = (x0 - steps.x, y0 - steps.y);
+    let mut row_u = steps.start.0 + skip_x * steps.across[0] + skip_y * steps.down[0];
+    let mut row_v = steps.start.1 + skip_x * steps.across[1] + skip_y * steps.down[1];
+    for row in out.pixels_mut().chunks_exact_mut(width as usize) {
+        let (mut u, mut v) = (row_u, row_v);
+        for pixel in row {
+            let (column, line) = (u >> Stepping::PREC, v >> Stepping::PREC);
+            if (0..columns).contains(&column) && (0..rows).contains(&line) {
+                *pixel = pixels[usize::try_from(line * columns + column).ok()?];
+            }
+            u += steps.across[0];
+            v += steps.across[1];
+        }
+        row_u += steps.down[0];
+        row_v += steps.down[1];
+    }
+    #[expect(clippy::cast_possible_truncation, reason = "whole pixels")]
+    let at = |device: i64, origin: f64| i32::try_from(device - origin as i64).ok();
+    Some((out, (at(x0, grid.left)?, at(y0, grid.top)?)))
+}
+
+/// How `MuPDF`'s affine painter steps through an image's samples (`fz_paint_image_imp`): positions in 14-bit fixed
+/// point, from its first pixel's center, a pixel across and a row down each a truncated step.
+struct Stepping {
+    /// The device pixel of the first painted pixel, and how many are painted across and down.
+    x: i64,
+    y: i64,
+    width: u32,
+    height: u32,
+    /// The sample position (across, down) at the first pixel's center.
+    start: (i64, i64),
+    /// The change of position a pixel across, and a row down.
+    across: [i64; 2],
+    down: [i64; 2],
+}
+
+impl Stepping {
+    const PREC: u32 = 14;
+
+    /// The stepping through an image of `size` samples placed by `device` (its unit square, top row first, to device
+    /// space) within `scissor` (device space); None when it paints no pixel or cannot be inverted.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        reason = "MuPDF's single precision and fixed point, on purpose"
+    )]
+    fn of(device: Matrix, size: (u32, u32), scissor: Rect) -> Option<Self> {
+        let one = (1u32 << Self::PREC) as f32;
+        let [xx, xy, yx, yy, tx, ty] = device.0.map(|entry| entry as f32);
+        let xs = [tx, xx + tx, yx + tx, xx + yx + tx];
+        let ys = [ty, xy + ty, yy + ty, xy + yy + ty];
+        let low = |c: [f32; 4]| c.into_iter().fold(f32::INFINITY, f32::min).floor();
+        let high = |c: [f32; 4]| c.into_iter().fold(f32::NEG_INFINITY, f32::max).ceil();
+        let x = low(xs).max(scissor.x0 as f32) as i64;
+        let y = low(ys).max(scissor.y0 as f32) as i64;
+        let width = u32::try_from(high(xs).min(scissor.x1 as f32) as i64 - x).ok()?;
+        let height = u32::try_from(high(ys).min(scissor.y1 as f32) as i64 - y).ok()?;
+        if width == 0 || height == 0 {
+            return None;
+        }
+        // Its unit square scaled to its samples, inverted in double precision from single (`fz_invert_matrix`),
+        // each entry single again, then scaled to fixed point.
+        let (across, down) = (1.0 / size.0 as f32, 1.0 / size.1 as f32);
+        let [xx, xy, yx, yy] = [xx * across, xy * across, yx * down, yy * down].map(f64::from);
+        let det = xx * yy - xy * yx;
+        if det.abs() <= f64::EPSILON {
+            return None;
+        }
+        let reciprocal = 1.0 / det;
+        let inverse = [yy, -xy, -yx, xx].map(|entry| entry * reciprocal);
+        let [ixx, ixy, iyx, iyy] = inverse;
+        let (tx, ty) = (f64::from(tx), f64::from(ty));
+        let shift = [-tx * ixx - ty * iyx, -tx * ixy - ty * iyy];
+        let [ixx, ixy, iyx, iyy] = inverse.map(|entry| entry as f32 * one);
+        let [itx, ity] = shift.map(|entry| entry as f32 * one);
+        // The first pixel's position: at its center ((a + c) / 2 a half step), in single precision, truncated.
+        let (px, py) = (x as f32, y as f32);
+        let start_u = (ixx * px + iyx * py + itx + f32::midpoint(ixx, iyx)) as i32;
+        let start_v = (ixy * px + iyy * py + ity + f32::midpoint(ixy, iyy)) as i32;
+        Some(Self {
+            x,
+            y,
+            width,
+            height,
+            start: (i64::from(start_u), i64::from(start_v)),
+            across: [ixx as i64, ixy as i64],
+            down: [iyx as i64, iyy as i64],
+        })
+    }
 }
 
 /// Whether an image whose pixels are drawn `across` x `down` canvas pixels each is interpolated (see the module).
@@ -214,18 +345,19 @@ struct Image {
 }
 
 impl Image {
-    /// The image `event` places, its samples as the reader reads its dictionary (`pdf::image`).
-    fn of(file: &File, event: &ImageEvent) -> Result<Self, String> {
+    /// The image `event` places, its samples as the reader reads its dictionary (`pdf::image`), a JPEG 2000's as
+    /// `jpx` says.
+    fn of(file: &File, event: &ImageEvent, jpx: Jpx) -> Result<Self, String> {
         let samples = match (&event.inline, event.object) {
             (Some(inline), _) => file.inline_image(inline),
             (None, Some(num)) => file.image(num),
             (None, None) => return Err("an image with neither data nor object".to_string()),
         };
-        Self::read(file, samples.map_err(|e| e.to_string())?)
+        Self::read(file, samples.map_err(|e| e.to_string())?, jpx)
     }
 
-    /// The image `samples` state, its codec's data decoded ([`codec`]).
-    fn read(file: &File, samples: Samples) -> Result<Self, String> {
+    /// The image `samples` state, its codec's data decoded ([`codec`]), a JPEG 2000's read as `jpx` says.
+    fn read(file: &File, samples: Samples, jpx: Jpx) -> Result<Self, String> {
         let count = |value: i64, key: &str| {
             u32::try_from(value)
                 .ok()
@@ -239,6 +371,7 @@ impl Image {
         let stencil = samples.space.is_none();
         let mut space = samples.space;
         let (mut bits, mut data, mut partial, mut opacity) = (1, samples.data, None, None);
+        let mut decode = samples.decode;
         match &samples.codec {
             None if !stencil => bits = count(samples.bits, "BitsPerComponent")?,
             None => {}
@@ -248,12 +381,18 @@ impl Image {
                 if let Some(s) = space {
                     space = Some(codec_space(stated, &found, s)?);
                 }
-                // `/SMaskInData` (Table 87): 0 ignores the data's opacity, 1 takes it as the soft mask, 2 too with
-                // the colors preblended; an `/SMask` stated takes precedence.
+                // `/SMaskInData` (Table 87): 0 ignores the data's opacity (unless read as `MuPDF` reads it), 1 takes
+                // it as the soft mask, 2 too with the colors preblended; an `/SMask` stated takes precedence.
+                let taken = |code: i64| matches!(code, 1 | 2) || (code == 0 && jpx.opacity);
                 if samples.soft_mask.is_none()
-                    && let (Some(alpha), code @ (1 | 2)) = (found.opacity, samples.in_data)
+                    && let Some(alpha) = found.opacity
+                    && taken(samples.in_data)
                 {
-                    opacity = Some((alpha, code == 2));
+                    opacity = Some((alpha, samples.in_data == 2));
+                }
+                let indexed = matches!(space, Some(Space::Indexed(..)));
+                if stated.name == b"JPXDecode" && !stencil && (!jpx.decode || indexed) {
+                    decode = None;
                 }
                 bits = found.bits;
                 (data, partial) = (found.data, found.partial);
@@ -268,7 +407,7 @@ impl Image {
             stencil,
             bits,
             space,
-            decode: samples.decode,
+            decode,
             interpolate: samples.interpolate,
             intent: samples.intent,
             data,
@@ -360,7 +499,12 @@ fn stencil(image: &Image, event: &ImageEvent) -> Result<Vec<u8>, String> {
 }
 
 /// A color image's pixels, premultiplied RGBA: its samples converted, then masked.
-fn colored(file: &File, image: &Image, notes: &mut Vec<String>) -> Result<Vec<u8>, String> {
+fn colored(
+    file: &File,
+    image: &Image,
+    jpx: Jpx,
+    notes: &mut Vec<String>,
+) -> Result<Vec<u8>, String> {
     let space = image.space.as_ref().ok_or("an image with no color space")?;
     let n = space.components();
     if n == 0 {
@@ -413,7 +557,7 @@ fn colored(file: &File, image: &Image, notes: &mut Vec<String>) -> Result<Vec<u8
             continue;
         };
         let (mask, stated_matte) =
-            mask_alpha(file, stream, soft, (image.width, image.height), notes)?;
+            mask_alpha(file, stream, soft, (image.width, image.height), jpx, notes)?;
         for (a, m) in alpha.iter_mut().zip(mask) {
             *a = mul(*a, m);
         }
@@ -472,17 +616,19 @@ fn level(v: f64) -> u8 {
 }
 
 /// A soft mask's (`soft`) or a stencil `/Mask`'s alpha, sample by sample, resampled (nearest) to `size`; and a soft
-/// mask's `/Matte`. What of the mask's data was not decoded as it stands joins `notes`.
+/// mask's `/Matte`; a JPEG 2000 mask read as `jpx` says. What of the mask's data was not decoded as it stands joins
+/// `notes`.
 fn mask_alpha(
     file: &File,
     stream: &pdf::Stream,
     soft: bool,
     (width, height): (u32, u32),
+    jpx: Jpx,
     notes: &mut Vec<String>,
 ) -> Result<(Vec<u8>, Option<Vec<f64>>), String> {
     let failed = |e: pdf::Error| e.to_string();
     let role = if soft { Role::SoftMask } else { Role::Stencil };
-    let mask = Image::read(file, file.image_stream(stream, role).map_err(failed)?)?;
+    let mask = Image::read(file, file.image_stream(stream, role).map_err(failed)?, jpx)?;
     if let Some(why) = &mask.partial {
         notes.push(format!("a mask's {why}"));
     }

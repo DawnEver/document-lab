@@ -94,6 +94,11 @@ INVISIBLE_TEXT: Final = 3
 
 #: What draws a region: PyMuPDF, or document-lab's own renderer.
 Renderer = Literal['pymupdf', 'own']
+#: How the own renderer reads what ISO 32000 and MuPDF read apart: as the standard says, or as MuPDF does.
+Reading = Literal['standard', 'mupdf']
+#: How the own renderer sets a CJK font's fallback glyphs across: at the fallback's own advance, or stretched to the
+#: widths the file states.
+FallbackWidths = Literal['own', 'stated']
 
 
 def read_pdf(
@@ -570,6 +575,9 @@ def read_raster(
     dpi: float | None = None,
     password: str = '',
     renderer: Renderer = 'pymupdf',
+    jpx_decode: Reading = 'standard',
+    jpx_opacity: Reading = 'standard',
+    fallback_widths: FallbackWidths = 'own',
 ) -> Raster:
     """The region ``bbox`` of 1-based ``page`` as pixels, everything drawn there composited.
 
@@ -580,18 +588,30 @@ def read_raster(
     image's own samples where the reader holds them as the page shows them (:func:`_samples`); any other region is
     drawn by ``renderer``: PyMuPDF, or the own renderer (:func:`_drawn`).
 
+    The own renderer's readings where ISO 32000 and MuPDF part (PyMuPDF draws MuPDF's): a JPEG 2000 image's
+    ``/Decode`` (``jpx_decode``) and its opacity channel under ``/SMaskInData 0`` (``jpx_opacity``) are ignored, as
+    the standard says, or applied, as MuPDF applies them (an ``Indexed`` image's ``/Decode`` it ignores too); a CJK
+    font that embeds no program is drawn from a fallback whose glyphs are set at their own advance (``'own'``, as
+    MuPDF sets its own) or stretched across the widths the file states (``fallback_widths='stated'``).
+
     Raises:
         Unsupported: ``renderer='own'`` and the region holds what it cannot draw (a glyph of a font it has no
             program for, or whose fallback cannot be had: :class:`document_lab.fonts.FontUnavailable`'s message, an
-            image that does not decode, a shading that does not read, ...).
+            image that does not decode, a shading that does not read, an operation of its content that does not read
+            and whose mark, or the state the marks after it are drawn in, meets the region, ...).
+        ValueError: a renderer or a reading not named above.
 
     """
     if renderer not in ('pymupdf', 'own'):
         msg = f'renderer {renderer!r}: one of pymupdf, own'
         raise ValueError(msg)
+    for name, reading in (('jpx_decode', jpx_decode), ('jpx_opacity', jpx_opacity)):
+        if reading not in ('standard', 'mupdf'):
+            msg = f'{name} {reading!r}: one of standard, mupdf'
+            raise ValueError(msg)
     path = Path(path)
     data = path.read_bytes()  # rendered and cited alike: the pixels are those of the bytes hashed
-    reader = _pdf.open(data, password.encode(), fonts=fonts.program)
+    reader = _pdf.open(data, password.encode(), fonts=fonts.program, fallback_widths=fallback_widths)
     rows, paths, images, _ = reader.page(page, annotations=True, curve_samples=1)
     here = Provenance(reader.sha256, file_uri(path.resolve()), page=page, bbox=bbox)
     _, width, height = reader.pages[page - 1]
@@ -603,7 +623,7 @@ def read_raster(
         dpi = max(filter(None, map(_native, under)), default=VECTOR_DPI)
     pixels = _samples(reader, under, bbox, dpi) if _alone(spans, paths, bbox) else None
     if pixels is None and renderer == 'own':
-        pixels = _drawn(reader, page, bbox, dpi)
+        pixels = _drawn(reader, page, bbox, dpi, jpx_decode=jpx_decode == 'mupdf', jpx_opacity=jpx_opacity == 'mupdf')
     if pixels is None:
         pixels = _rendered(data, page, bbox, dpi, password)
     return Raster(pixels, here)
@@ -649,10 +669,23 @@ def _texts(spans: Sequence[TextSpan], bbox: BBox) -> int:
     )
 
 
-def _drawn(reader: _pdf.Reader, page: int, bbox: BBox, dpi: float) -> np.ndarray:
-    """``bbox`` drawn by the own renderer, refusing a region holding what it cannot draw, by name and count."""
+def _drawn(
+    reader: _pdf.Reader, page: int, bbox: BBox, dpi: float, *, jpx_decode: bool, jpx_opacity: bool
+) -> np.ndarray:
+    """``bbox`` drawn by the own renderer, refusing a region holding what it cannot draw, by name and count.
+
+    A JPEG 2000 image's ``/Decode`` (``jpx_decode``) and opacity channel under ``/SMaskInData 0``
+    (``jpx_opacity``) are read as MuPDF reads them when asked, else as the standard does.
+    """
     width, height, channels, pixels, undrawn = reader.render(
-        page, tuple(bbox), dpi / 72, text=True, annotations=True, alpha=False
+        page,
+        tuple(bbox),
+        dpi / 72,
+        text=True,
+        annotations=True,
+        alpha=False,
+        jpx_decode=jpx_decode,
+        jpx_opacity=jpx_opacity,
     )
     if undrawn:
         named = ', '.join(f'{what} x{count}' for what, count in undrawn)

@@ -53,9 +53,9 @@
 //!
 //! Not interpreted with the page: a pattern's content and a soft mask's group (each drawn alone, above); optional
 //! content usage ([`crate::optional`] says which). An operation
-//! that cannot be read is skipped and named in [`Content::warnings`], never silently; a color whose space, profile
-//! or tint transform does not read is set by its components alone, with no RGB, and named there too -- never left in
-//! the space set before.
+//! that cannot be read is skipped and named in [`Content::warnings`], never silently, with what of the drawing it may
+//! change ([`Reach`]); a color whose space, profile or tint transform does not read is set by its components alone,
+//! with no RGB, and named there too -- never left in the space set before.
 //!
 //! The rendering intent (`ri`, a graphics state's `/RI`; relative colorimetric until one is set) is part of the
 //! graphics state: a color in an `ICCBased` space converts at the intent in force when it is painted.
@@ -547,9 +547,39 @@ struct ActualText {
 pub struct Content {
     /// Its events, in drawing order.
     pub events: Vec<Event>,
-    /// Operations skipped and why, in words.
-    pub warnings: Vec<String>,
+    /// Operations skipped, or read otherwise than stated, and why.
+    pub warnings: Vec<Warning>,
 }
+
+/// An operation skipped, or read otherwise than stated: why, in words, and what of the drawing it may change.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Warning {
+    /// Why, in words.
+    pub why: String,
+    /// What of the drawing it may change.
+    pub reach: Reach,
+}
+
+/// What of a page's drawing a [`Warning`] may change.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Reach {
+    /// Nothing drawn: what only the reader reports (a marked content sequence left open, a font program's weight),
+    /// or what each mark it changes says itself (a color with no RGB: the mark painted in it is not drawn as stated).
+    Unseen,
+    /// The marks from this event on (an index into [`Content::events`]): a state they are drawn in was not read as
+    /// stated (a `gs` whose soft mask does not read leaves the one before it in force).
+    From(usize),
+    /// A mark not drawn, which would paint within this box (page space).
+    Within(Rect),
+    /// A mark not drawn, whose place is not known (an `XObject` that does not read, the rest of a content stream).
+    Anywhere,
+}
+
+/// The operators that paint a mark: one skipped is a mark not drawn.
+const PAINTS: [&[u8]; 18] = [
+    b"Do", b"BI", b"ID", b"EI", b"sh", b"Tj", b"TJ", b"'", b"\"", b"f", b"F", b"f*", b"B", b"B*",
+    b"b", b"b*", b"S", b"s",
+];
 
 #[derive(Debug, Clone)]
 struct State {
@@ -875,21 +905,35 @@ impl Interpreter<'_> {
     fn run(&mut self, data: &[u8], resources: &Dict, depth: usize) {
         let err = operations(data, |op| {
             if let Err(e) = self.operation(op, resources, depth) {
-                self.out.warnings.push(format!(
-                    "`{}` skipped: {e}",
-                    String::from_utf8_lossy(op.operator)
-                ));
+                let reach = if PAINTS.contains(&op.operator) {
+                    Reach::Anywhere
+                } else {
+                    self.onward()
+                };
+                let why = format!("`{}` skipped: {e}", String::from_utf8_lossy(op.operator));
+                self.warned(why, reach);
             }
         });
         if let Some(e) = err {
-            self.out
-                .warnings
-                .push(format!("the content stream stops being readable: {e}"));
+            self.warned(
+                format!("the content stream stops being readable: {e}"),
+                Reach::Anywhere,
+            );
         }
     }
 
     fn point(&self, x: f64, y: f64) -> Point {
         self.state.ctm.apply(Point { x, y })
+    }
+
+    /// A warning: `why`, reaching `reach`.
+    fn warned(&mut self, why: String, reach: Reach) {
+        self.out.warnings.push(Warning { why, reach });
+    }
+
+    /// The reach of a state not read as stated: the marks drawn from now on.
+    fn onward(&self) -> Reach {
+        Reach::From(self.out.events.len())
     }
 
     fn operation(&mut self, op: &Operation, resources: &Dict, depth: usize) -> Result<()> {
@@ -982,9 +1026,8 @@ impl Interpreter<'_> {
             Ok(())
         });
         if let Err(e) = read {
-            self.out
-                .warnings
-                .push(format!("`BDC` read as plain marked content: {e}"));
+            let reach = self.onward();
+            self.warned(format!("`BDC` read as plain marked content: {e}"), reach);
         }
         self.marked.push(sequence);
     }
@@ -1009,9 +1052,10 @@ impl Interpreter<'_> {
     fn close_marked(&mut self, what: &str) {
         let open = self.marked.len() - self.marked_floor;
         if open > 0 {
-            self.out.warnings.push(format!(
-                "{what} leaves {open} marked content sequence(s) open; they end with it"
-            ));
+            self.warned(
+                format!("{what} leaves {open} marked content sequence(s) open; they end with it"),
+                Reach::Unseen,
+            );
             self.marked.truncate(self.marked_floor);
             if self
                 .actual
@@ -1054,9 +1098,8 @@ impl Interpreter<'_> {
             return true;
         };
         self.optional.shows(self.file, oc).unwrap_or_else(|e| {
-            self.out
-                .warnings
-                .push(format!("an XObject's /OC read as showing: {e}"));
+            let reach = self.onward();
+            self.warned(format!("an XObject's /OC read as showing: {e}"), reach);
             true
         })
     }
@@ -1376,11 +1419,15 @@ impl Interpreter<'_> {
         };
         let font = Rc::new(self.file.font(&dict)?);
         for warning in &font.warnings {
-            self.out.warnings.push(format!(
-                "font /{} ({}): {warning}",
-                String::from_utf8_lossy(name),
-                font.info.name
-            ));
+            // A font's warnings concern what the reader reports of it (its weight), not its glyphs.
+            self.warned(
+                format!(
+                    "font /{} ({}): {warning}",
+                    String::from_utf8_lossy(name),
+                    font.info.name
+                ),
+                Reach::Unseen,
+            );
         }
         if let Some(n) = number {
             self.file.fonts.borrow_mut().insert(n, Rc::clone(&font));
@@ -1404,9 +1451,10 @@ impl Interpreter<'_> {
     /// The glyphs `bytes` shows, the text matrix advanced past each.
     fn glyphs(&mut self, bytes: &[u8]) -> Vec<Glyph> {
         let Some(font) = self.state.text.font.clone() else {
-            self.out
-                .warnings
-                .push("text shown with no font set; skipped".to_string());
+            self.warned(
+                "text shown with no font set; skipped".to_string(),
+                Reach::Anywhere,
+            );
             return Vec::new();
         };
         let mut out = Vec::new();
@@ -1505,20 +1553,20 @@ impl Interpreter<'_> {
             clip: self.state.clips.clone(),
             compositing: self.state.compositing.clone(),
         };
-        let shown: Vec<(u32, Matrix)> = match self.procedures {
+        let shown: Vec<(u32, Matrix, Rect)> = match self.procedures {
             Some(place) if paints && font.info.subtype == "Type3" => event
                 .glyphs
                 .iter()
-                .map(|g| (g.code, place(g.matrix)))
+                .map(|g| (g.code, place(g.matrix), g.bbox))
                 .collect(),
             _ => Vec::new(),
         };
         self.out.events.push(Event::Text(event));
-        for (code, matrix) in shown {
+        for (code, matrix, bbox) in shown {
             if let Err(e) = self.procedure(&font, code, matrix, resources, depth) {
-                self.warn(
-                    b"Tj",
-                    &format!("a Type 3 glyph's procedure is not drawn: {e}"),
+                self.warned(
+                    format!("`Tj`: a Type 3 glyph's procedure is not drawn: {e}"),
+                    Reach::Within(bbox),
                 );
             }
         }
@@ -1690,11 +1738,12 @@ impl Interpreter<'_> {
         Ok(true)
     }
 
+    /// A color read otherwise than stated: the mark painted in it says so itself (its color has no RGB).
     fn warn(&mut self, operator: &[u8], message: &str) {
-        self.out.warnings.push(format!(
-            "`{}`: {message}",
-            String::from_utf8_lossy(operator)
-        ));
+        self.warned(
+            format!("`{}`: {message}", String::from_utf8_lossy(operator)),
+            Reach::Unseen,
+        );
     }
 
     /// The color of `components` in `space`, at the intent in force; when the space gives them no RGB for a cause (a
@@ -2124,21 +2173,23 @@ impl Interpreter<'_> {
             Ok(Some(Object::Array(a))) => a,
             Ok(_) => return,
             Err(e) => {
-                self.out.warnings.push(format!("/Annots unreadable: {e}"));
+                self.warned(format!("/Annots unreadable: {e}"), Reach::Anywhere);
                 return;
             }
         };
         match self.form_resources() {
             Ok(resources) => self.form_resources = resources,
-            Err(e) => self.out.warnings.push(format!(
-                "the form's default resources (/AcroForm /DR) unreadable: {e}"
-            )),
+            Err(e) => {
+                let reach = self.onward();
+                self.warned(
+                    format!("the form's default resources (/AcroForm /DR) unreadable: {e}"),
+                    reach,
+                );
+            }
         }
         for (i, annotation) in annotations.iter().enumerate() {
             if let Err(e) = self.annotation(annotation, initial) {
-                self.out
-                    .warnings
-                    .push(format!("annotation {i} not drawn: {e}"));
+                self.warned(format!("annotation {i} not drawn: {e}"), Reach::Anywhere);
             }
         }
         self.annotation = None;

@@ -10,7 +10,9 @@
 //! than Symbol and Zapf Dingbats, and a composite font, that embeds none has no substitute: a CJK composite font
 //! (its `CID`s of one of Adobe's CJK collections) and a Microsoft symbol font (Wingdings, Webdings) are drawn with
 //! redistributable fallback programs not shipped here ([`FALLBACKS`]), each fetched by name when a glyph first
-//! needs it (the file's [`Fetch`], [`crate::File::fetch_fallbacks`]) and reached through each glyph's character. A
+//! needs it (the file's [`Fetch`], [`crate::File::fetch_fallbacks`]) and reached through each glyph's character --
+//! a composite font's glyphs at the fallback's own advance, as `MuPDF` sets its own, or stretched across the widths
+//! the file states ([`FallbackWidths`], [`crate::File::set_fallback_widths`]). A
 //! glyph none can draw -- any other font's, a fallback that cannot be had, a character none holds -- is
 //! [`Shape::Missing`], by name, never guessed. A Type 3 glyph is its procedure (`/CharProcs`), which the
 //! interpreter runs.
@@ -183,6 +185,19 @@ pub const FALLBACKS: [&str; 11] = [
 /// The fallbacks a Microsoft symbol font's characters are drawn from, in turn (together they hold every character
 /// of Wingdings 1-3 and Webdings but U+2042 and U+2E3F).
 const SYMBOL_CHAIN: [&str; 3] = ["noto-sans-symbols-2", "noto-sans-symbols", "noto-sans-math"];
+
+/// How a composite font's fallback glyphs (a CJK font that embeds no program) are set across: a simple font's
+/// substitute and fallback are always stretched across the widths the file states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FallbackWidths {
+    /// Each glyph at the fallback's own advance, as `MuPDF` sets its CJK substitute: a proportional Latin letter
+    /// wider than the file's width overlaps the next.
+    #[default]
+    Own,
+    /// Each glyph stretched across the width the file states for its `CID` (`/W`, else `/DW`), as a simple font's
+    /// substitute is.
+    Stated,
+}
 
 /// Fetches the fallback program a name of [`FALLBACKS`] names: its bytes, or why it cannot be had, in words.
 pub type Fetch = dyn Fn(&str) -> std::result::Result<Vec<u8>, String>;

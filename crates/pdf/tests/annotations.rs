@@ -216,7 +216,7 @@ fn an_annotation_that_cannot_be_drawn_is_a_warning() {
     let content = drawn("", "6 0 R", "", &[annotation, &ap], true);
     assert_eq!(content.events, Vec::new());
     assert_eq!(content.warnings.len(), 1, "{:?}", content.warnings);
-    assert!(content.warnings[0].contains("annotation 0"));
+    assert!(content.warnings[0].why.contains("annotation 0"));
 }
 
 #[test]
@@ -233,7 +233,7 @@ fn an_annotation_without_an_appearance_draws_nothing() {
     let content = file.interpret(&file.pages().unwrap()[0], true).unwrap();
     assert_eq!(
         (content.events, content.warnings),
-        (Vec::new(), Vec::<String>::new())
+        (Vec::new(), Vec::<pdf::interpret::Warning>::new())
     );
 }
 
@@ -266,7 +266,7 @@ fn an_appearance_without_resources_draws_with_the_form_s_default_resources() {
         (texts(&content), content.warnings),
         (
             vec![("filled".to_string(), Some("Widget".to_string()))],
-            Vec::<String>::new()
+            Vec::<pdf::interpret::Warning>::new()
         )
     );
 }
@@ -293,7 +293,7 @@ fn without_default_resources_an_appearance_s_missing_font_is_a_warning() {
     let content = drawn("", "6 0 R", "", &[field, &ap], true);
     assert_eq!(texts(&content), Vec::new());
     assert!(
-        content.warnings.iter().any(|w| w.contains("/Helv")),
+        content.warnings.iter().any(|w| w.why.contains("/Helv")),
         "{:?}",
         content.warnings
     );

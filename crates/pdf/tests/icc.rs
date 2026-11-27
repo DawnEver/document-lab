@@ -112,7 +112,7 @@ fn an_icc_based_color_converts_through_its_embedded_profile() {
         assert!(truth.iter().zip(color).any(|(a, b)| (a - b).abs() > 0.02));
         assert_near(rgb, truth, 2e-3);
     }
-    assert_eq!(content.warnings, Vec::<String>::new());
+    assert!(content.warnings.is_empty(), "{:?}", content.warnings);
 }
 
 #[test]
@@ -243,12 +243,14 @@ fn a_profile_that_does_not_read_keeps_the_components_and_says_why() {
     );
     assert_eq!(content.warnings.len(), 2, "{:?}", content.warnings);
     assert!(
-        content.warnings[0].contains("its ICC profile does not read"),
+        content.warnings[0]
+            .why
+            .contains("its ICC profile does not read"),
         "{:?}",
         content.warnings
     );
     assert!(
-        content.warnings[1].contains("not the 1 its /N states"),
+        content.warnings[1].why.contains("not the 1 its /N states"),
         "{:?}",
         content.warnings
     );
@@ -282,5 +284,5 @@ fn cal_rgb_and_cal_gray_convert_through_their_parameters() {
     // No /Gamma, no /Matrix: each 1 and the identity, so the components are CIE XYZ -- half of D65 white's here,
     // which is sRGB's linear 0.5.
     assert_near(found[4].1, [encoded(0.5); 3], 1e-3);
-    assert_eq!(content.warnings, Vec::<String>::new());
+    assert!(content.warnings.is_empty(), "{:?}", content.warnings);
 }

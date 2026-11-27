@@ -103,7 +103,7 @@ fn what_a_group_that_is_off_draws_is_reported_hidden() {
         kinds(&content),
         ["hidden path", "hidden text", "text", "path"]
     );
-    assert_eq!(content.warnings, Vec::<String>::new());
+    assert!(content.warnings.is_empty(), "{:?}", content.warnings);
 }
 
 #[test]
@@ -242,7 +242,7 @@ fn a_form_leaving_its_marked_content_open_is_closed_with_a_warning() {
     assert_eq!(kinds(&content), ["hidden path", "path"]);
     assert_eq!(content.warnings.len(), 1, "{:?}", content.warnings);
     assert!(
-        content.warnings[0].contains("marked content"),
+        content.warnings[0].why.contains("marked content"),
         "{:?}",
         content.warnings
     );

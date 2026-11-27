@@ -367,14 +367,16 @@ impl Font {
         self.info.flags & 4 != 0
     }
 
-    /// The width a simple font's `/Widths` states for `code`, in text space units of one font size; None when it
-    /// states none.
+    /// The width the font states for `code`, in text space units of one font size: a simple font's `/Widths`
+    /// entry, None when it states none; a composite font's `/W` entry for the code's `CID`, else its `/DW`.
     pub(crate) fn stated_width(&self, code: u32) -> Option<f64> {
-        let Kind::Simple { first, widths, .. } = &self.kind else {
-            return None;
+        let width = match &self.kind {
+            Kind::Simple { first, widths, .. } => {
+                *widths.get(usize::try_from(i64::from(code) - first).ok()?)?
+            }
+            Kind::Composite { cmap, widths, .. } => widths.of(cmap.cid(code)),
         };
-        let index = usize::try_from(i64::from(code) - first).ok()?;
-        widths.get(index).map(|w| w * self.matrix.0[0])
+        Some(width * self.matrix.0[0])
     }
 
     /// Split `bytes` into codes, each with its text and advances.
@@ -824,7 +826,8 @@ impl File {
             (_, _, Some(chain)) => Source::Fallback {
                 fallbacks: self.fallbacks.clone(),
                 chain,
-                stretched: composite.is_none(),
+                stretched: composite.is_none()
+                    || self.fallback_widths.get() == shape::FallbackWidths::Stated,
             },
             _ => Source::Unavailable(
                 format!("font {} is not embedded and has no substitute", info.name).into(),

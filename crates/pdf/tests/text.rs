@@ -29,7 +29,7 @@ fn texts(content: &str, font: &str, extra: &[&str]) -> (Vec<TextEvent>, Vec<Stri
             }
         })
         .collect();
-    (texts, content.warnings)
+    (texts, content.warnings.into_iter().map(|w| w.why).collect())
 }
 
 fn text(event: &TextEvent) -> String {

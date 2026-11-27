@@ -28,7 +28,11 @@ def _parser() -> argparse.ArgumentParser:
     ocr = sub.add_parser('ocr', help='a text layer over a PDF of page images (Tesseract); the pixels kept exactly')
     ocr.add_argument('pdf', type=Path)
     ocr.add_argument('-o', '--out', type=Path, help='the PDF to write (default: the PDF itself, replaced when whole)')
-    ocr.add_argument('--lang', default='eng', help="Tesseract's languages, '+'-joined (default eng; e.g. chi_sim+eng)")
+    ocr.add_argument(
+        '--lang',
+        default='eng',
+        help="Tesseract's languages, '+'-joined (default eng; e.g. chi_sim+eng; jpn_vert, chi_sim_vert for columns)",
+    )
     pages = sub.add_parser(
         'pages',
         help='a PDF as page-NNN.md and page-NNN.png per page, its regions cut out, and INDEX.md (a folder or a .zip)',

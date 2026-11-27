@@ -185,7 +185,7 @@ def _rgb(samples: tuple) -> np.ndarray | None:
     unmasked, mapped as stated by default (no ``/Decode``, or ``[0 1]`` for each component), holding every row. A
     codec, Indexed, CMYK, 16 bits, another ``/Decode`` or a mask is the renderer's.
     """
-    width, height, space, components, bits, data, codec, decode, masked, _ = samples
+    width, height, space, components, bits, data, codec, decode, masked, *_ = samples
     remapped = decode is not None and decode != [0.0, 1.0] * components
     if codec is not None or masked or remapped or space not in _GRAY_OR_RGB:
         return None

@@ -193,7 +193,7 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         nargs='?',
         const='eng',
         metavar='LANGS',
-        help="add a searchable text layer in Tesseract's LANGS (default eng; e.g. chi_sim+eng)",
+        help="add a searchable text layer in Tesseract's LANGS (default eng; e.g. chi_sim+eng, jpn_vert for columns)",
     )
     pdf.add_argument('--png', type=Path, help='also write the stitched image here')
     pdf.add_argument('--open', action='store_true', help='open the PDF once it is written')
@@ -276,7 +276,11 @@ def add_files_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser
     )
     files.add_argument('--dpi', type=float, default=SCREEN_DPI, help='pixels per inch the pages are laid out at')
     files.add_argument(
-        '--ocr', nargs='?', const='eng', metavar='LANGS', help="a text layer over each capture (Tesseract; 'eng')"
+        '--ocr',
+        nargs='?',
+        const='eng',
+        metavar='LANGS',
+        help="add a searchable text layer over each capture in Tesseract's LANGS (default eng; e.g. chi_sim+eng)",
     )
     return files
 
@@ -352,6 +356,11 @@ def _attempt(
 
 def run_files(args: argparse.Namespace) -> int:
     """Run ``document-lab capture-files``; 0 when every PDF was captured whole."""
+    if args.ocr is not None:
+        from document_lab.ocr import TesseractPlaces, check  # noqa: PLC0415
+
+        # before the first capture: a missing Tesseract or language is said now, not after it
+        check(args.ocr, TesseractPlaces.of(os.environ))
     from document_lab.capture import desktop, files  # noqa: PLC0415 -- the run alone touches the desktop
 
     pdfs = files.listed(args.sources)

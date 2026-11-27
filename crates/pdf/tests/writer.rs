@@ -179,6 +179,15 @@ fn word(text: &str, [x0, y0, x1, y1]: [f64; 4]) -> Word<'_> {
     Word {
         text,
         bbox: Rect { x0, y0, x1, y1 },
+        vertical: false,
+    }
+}
+
+/// `text` written vertically down the box.
+fn column(text: &str, bbox: [f64; 4]) -> Word<'_> {
+    Word {
+        vertical: true,
+        ..word(text, bbox)
     }
 }
 
@@ -294,6 +303,69 @@ fn pages_laid_in_one_document_share_one_font_that_names_every_character() {
         })
         .count();
     assert_eq!(fonts, 1);
+}
+
+#[test]
+fn a_word_written_vertically_reads_back_as_vertical_writing_down_its_box() {
+    // A column of CJK (stator winding) between horizontal words, on a page turned or not.
+    let zh = "\u{5b9a}\u{5b50}\u{7ed5}\u{7ec4}";
+    for rotate in ["", "/Rotate 90"] {
+        let source = common::one_page(rotate, "", &[]);
+        let words = [
+            word("stator", [10.0, 20.0, 70.0, 35.0]),
+            column(zh, [82.0, 10.0, 98.0, 90.0]),
+            word("winding", [10.0, 50.0, 80.0, 65.0]),
+        ];
+        let (copy, pages) = laid(&source, &words);
+        let read: Vec<_> = pdf::spans::spans(&copy.interpret(&pages[0]).unwrap().events)
+            .into_iter()
+            .map(|s| {
+                let b = s.bbox;
+                (s.text, s.vertical, [b.x0, b.y0, b.x1, b.y1], s.render_mode)
+            })
+            .collect();
+        assert_eq!(read.len(), 3, "{read:?}");
+        for ((text, vertical, bbox, mode), word) in read.iter().zip(&words) {
+            assert_eq!(
+                (text.as_str(), *vertical, *mode),
+                (word.text, word.vertical, 3)
+            );
+            let b = word.bbox;
+            assert!(
+                near(*bbox, [b.x0, b.y0, b.x1, b.y1]),
+                "{bbox:?} for {text} {rotate}"
+            );
+        }
+    }
+}
+
+#[test]
+fn both_ways_of_writing_share_one_glyphless_font_and_its_text() {
+    let source = common::one_page("", "", &[]);
+    let (copy, _) = laid(
+        &source,
+        &[
+            word("ab", [0.0, 0.0, 20.0, 10.0]),
+            column("cd", [30.0, 0.0, 40.0, 20.0]),
+        ],
+    );
+    let dicts: Vec<_> = copy
+        .numbers()
+        .into_iter()
+        .filter_map(|n| copy.object(n).unwrap().as_dict().cloned())
+        .collect();
+    let named = |key: &[u8], value: &[u8]| {
+        dicts
+            .iter()
+            .filter(|d| d.get(key).and_then(Object::as_name) == Some(value))
+            .count()
+    };
+    assert_eq!(named(b"Encoding", b"Identity-H"), 1);
+    assert_eq!(named(b"Encoding", b"Identity-V"), 1);
+    assert_eq!(named(b"Subtype", b"CIDFontType2"), 1);
+    let unicode: Vec<_> = dicts.iter().filter_map(|d| d.get(b"ToUnicode")).collect();
+    assert_eq!(unicode.len(), 2);
+    assert_eq!(unicode[0], unicode[1]);
 }
 
 #[test]

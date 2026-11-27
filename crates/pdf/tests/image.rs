@@ -78,3 +78,95 @@ fn another_codec_states_no_fax_coding() {
     let codec = samples("/Filter /DCTDecode").codec.unwrap();
     assert_eq!(codec.fax().unwrap(), None);
 }
+
+/// The headers of JPEG data up to its first scan: a frame header (SOF0, or SOF2 when `progressive`) of `components`,
+/// the first sampled `sampling`, behind Adobe's marker with `adobe` as its transform when given.
+fn jpeg(components: u8, sampling: u8, adobe: Option<u8>, progressive: bool) -> Vec<u8> {
+    let mut data = vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 7, b'J', b'F', b'I', b'F', 0];
+    if let Some(transform) = adobe {
+        data.extend([0xFF, 0xEE, 0, 14]);
+        data.extend(b"Adobe");
+        data.extend([0, 100, 0, 0, 0, 0, transform]);
+    }
+    let length = 8 + 3 * u16::from(components);
+    data.extend([0xFF, if progressive { 0xC2 } else { 0xC0 }]);
+    data.extend(length.to_be_bytes());
+    data.extend([8, 0, 1, 0, 2, components]);
+    for id in 1..=components {
+        data.extend([id, if id == 1 { sampling } else { 0x11 }, 0]);
+    }
+    data.extend([0xFF, 0xDA, 0, 2]);
+    data
+}
+
+fn dct(data: &[u8], params: Option<&str>) -> pdf::error::Result<Option<pdf::filter::Dct>> {
+    let params = params.map(|p| {
+        let file = File::open(common::one_page("", "", &[p]), b"").unwrap();
+        file.object(5).unwrap().as_dict().unwrap().clone()
+    });
+    let codec = pdf::filter::Codec {
+        name: b"DCTDecode".to_vec(),
+        params,
+    };
+    codec.dct(data)
+}
+
+#[test]
+fn a_jpeg_states_its_coding_and_whether_its_colors_are_transformed() {
+    let coded = |components, sampling, transform| pdf::filter::Dct {
+        precision: 8,
+        components,
+        sampling,
+        transform,
+    };
+    // Three components are YCbCr unless Adobe's marker, else /ColorTransform, says they are not.
+    assert_eq!(
+        dct(&jpeg(3, 0x22, None, false), None).unwrap(),
+        Some(coded(3, (2, 2), true))
+    );
+    assert_eq!(
+        dct(&jpeg(3, 0x11, Some(0), true), None).unwrap(),
+        Some(coded(3, (1, 1), false))
+    );
+    let untransformed = Some("<< /ColorTransform 0 >>");
+    assert_eq!(
+        dct(&jpeg(3, 0x21, None, false), untransformed).unwrap(),
+        Some(coded(3, (2, 1), false))
+    );
+    assert_eq!(
+        dct(&jpeg(3, 0x22, Some(1), false), untransformed).unwrap(),
+        Some(coded(3, (2, 2), true))
+    );
+    // Gray is never transformed; four components only when said to be (YCCK).
+    assert_eq!(
+        dct(&jpeg(1, 0x11, None, false), None).unwrap(),
+        Some(coded(1, (1, 1), false))
+    );
+    assert_eq!(
+        dct(&jpeg(4, 0x11, Some(2), false), None).unwrap(),
+        Some(coded(4, (1, 1), true))
+    );
+}
+
+#[test]
+fn a_jpeg_without_a_frame_header_or_with_a_wrong_parameter_is_refused() {
+    let headless = [0xFF, 0xD8, 0xFF, 0xDA, 0, 2];
+    let error = dct(&headless, None).unwrap_err();
+    assert!(error.message.contains("no frame header"), "{error}");
+    let cut = &jpeg(3, 0x22, None, false)[..15];
+    assert!(dct(cut, None).unwrap_err().message.contains("ends inside"));
+    let error = dct(
+        &jpeg(3, 0x22, None, false),
+        Some("<< /ColorTransform /No >>"),
+    )
+    .unwrap_err();
+    assert!(
+        error.message.contains("/ColorTransform is an integer"),
+        "{error}"
+    );
+    let other = pdf::filter::Codec {
+        name: b"JPXDecode".to_vec(),
+        params: None,
+    };
+    assert_eq!(other.dct(b"").unwrap(), None);
+}

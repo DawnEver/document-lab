@@ -1,27 +1,37 @@
 """A text layer over a PDF of page images, by Tesseract: its words readable, its pixels exactly as they were.
 
-Each page that is one image and has no text is recognized by the ``tesseract`` executable, run on the image at the
-resolution it carries and as the page shows it -- upright, though its samples be placed turned or mirrored by quarter
-turns (a scan on a ``/Rotate`` page); a placement at another angle is refused. Lossless samples are handed over as a
-PGM/PPM, turned upright and, under a ``/Decode`` of ``[1 0]``, inverted exactly; any other ``/Decode`` is refused. An
-image still in a codec is never decoded here: JPEG and JPEG 2000 go as their encoded data, untouched, and are refused
-placed turned or inverted; CCITT fax data goes, as stored, inside a TIFF (:func:`_fax_tiff`) whose tags say its coding,
-its black and its placement; any other codec is refused by name. The words Tesseract reports (TSV, each with its
-pixel box on the upright image) are laid invisible over where they are seen, by `document_lab._pdf`'s writer
-(`Writer.copy_page_with_text`); every page is otherwise copied as it is, so a layer is never laid twice.
+Each page that is one image and has no text is recognized by the ``tesseract`` executable in the languages asked
+for (its ``-l``: ``eng``, ``chi_sim+eng``, ``jpn_vert``), run on the image at the resolution it carries and as the
+page shows it -- upright, though its samples be placed turned or mirrored by quarter turns (a scan on a ``/Rotate``
+page); a placement at another angle is refused. Lossless samples are handed over as a PGM/PPM, turned upright and,
+under a ``/Decode`` of ``[1 0]``, inverted exactly; any other ``/Decode`` is refused. An image still in a codec is
+never decoded here: its data goes as stored, packaged so that Leptonica, Tesseract's image reader, shows it as the
+page does. JPEG and JPEG 2000 placed upright go as files of their own; JPEG placed turned or mirrored inside a TIFF
+(:func:`_jpeg_tiff`) whose Orientation says the placement; CCITT fax data always inside a TIFF (:func:`_fax_tiff`)
+whose tags say its coding, its black and its placement. Refused by name, as showing them so needs their pixels
+decoded: JPEG or JPEG 2000 inverted by its ``/Decode``, JPEG 2000 placed turned or mirrored (its file says no
+placement, and no TIFF holds it for Leptonica), and any other codec.
+
+Tesseract reports each word (its PAGE XML at word level) with its pixel box on the upright image and the direction
+it reads in; each is laid invisible over where it is seen by `document_lab._pdf`'s writer
+(`Writer.copy_page_with_text`), a word read top to bottom -- CJK set in columns, which the ``_vert`` languages read
+-- written vertically, so a reader reads it as vertical writing. Every page is otherwise copied as it is, so a layer
+is never laid twice.
 
 Tesseract is the user's to install, never bundled: :func:`check` finds it -- on PATH, else in the
 :class:`TesseractPlaces` an entry reads from the environment (beside ``TESSDATA_PREFIX``, where its Windows
-installer puts it) -- and refuses a missing one or a missing language, saying where it looked and how to install
-it, before any work is spent.
+installer puts it) -- and refuses, before any work is spent, a missing one, one older than 5.3 (the first to write
+PAGE XML), and a language it has no data for, saying what it has, where it looked and how to install it.
 """
 
 from __future__ import annotations
 
+import re
 import shutil
 import struct
 import subprocess
 import tempfile
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Self
@@ -41,10 +51,13 @@ _INSTALL: Final = (
     'folder to PATH or set TESSDATA_PREFIX to its tessdata; macOS: `brew install tesseract tesseract-lang`; '
     'Debian/Ubuntu: `apt install tesseract-ocr tesseract-ocr-<lang>`'
 )
+#: The first Tesseract to write PAGE XML, whose words say the direction they read in.
+_PAGE_XML_SINCE: Final = (5, 3)
 #: Codecs Tesseract reads from a file of their own, by the suffix that names the file's format.
 _CODEC_FILES: Final = {'DCTDecode': '.jpg', 'JPXDecode': '.jp2'}
 _J2K_CODESTREAM: Final = b'\xff\x4f\xff\x51'  # a JPEG 2000 codestream without the JP2 box around it
-_WORD_LEVEL: Final = '5'  # a TSV row's level for one word
+#: A PAGE XML word's reading direction (Tesseract writes these three), as whether it is written vertically.
+_VERTICAL: Final = {'left-to-right': False, 'right-to-left': False, 'top-to-bottom': True}
 _CURVE_SAMPLES: Final = 1  # a page's paths are not looked at
 #: An image's placement (the reader's: turned, rows reversed, columns reversed) when it shows its samples as stored.
 _UPRIGHT: Final = (False, False, False)
@@ -54,12 +67,20 @@ _TIFF_HEADER: Final = 8  # bytes before the one image directory
 _TIFF_G4: Final = 4  # Compression: CCITT T.6
 _TIFF_G3: Final = 3  # Compression: CCITT T.4, each row behind an end-of-line code
 _TIFF_RLE: Final = 2  # Compression: CCITT modified Huffman, rows byte-aligned, no end-of-line codes
+_TIFF_JPEG: Final = 7  # Compression: JPEG, each strip a whole JPEG stream
 _T4_2D: Final = 1  # T4Options: rows coded two-dimensionally too
 _T4_FILL: Final = 4  # T4Options: fill bits end each end-of-line code on a byte boundary
+_JPEG_BITS: Final = 8  # the only JPEG precision Leptonica reads
+_RGB: Final = 3  # components
+#: The Orientation (rows run up the page, first column at its bottom) Leptonica shows turned half round when the JPEG
+#: in a TIFF has three components: it reads them through libtiff's RGBA path and completes the part of the placement
+#: libtiff applies wrongly for this one (Leptonica 1.84.1, libtiff 4.6.0; the ocr part shows it still does).
+_COLOR_JPEG_SHOWN_WRONG: Final = 8
 
 type Box = tuple[float, float, float, float]
 type Placement = tuple[bool, bool, bool]
-type Words = list[tuple[str, Box]]
+type Words = list[tuple[str, Box, bool]]
+type Tags = dict[int, tuple[int, tuple[int, ...]]]
 
 
 @dataclass(frozen=True)
@@ -108,15 +129,28 @@ def _executable(places: TesseractPlaces) -> Path:
 
 
 def check(languages: str, places: TesseractPlaces) -> Path:
-    """The ``tesseract`` executable, found on PATH or in ``places``, with every ``+``-joined language in ``languages``.
+    """The ``tesseract`` executable, found on PATH or in ``places``, able to read in ``languages``.
 
-    Refused, naming what is missing, where it looked and how to install it, when either is missing.
+    It is 5.3 or later and has data for every ``+``-joined language in ``languages``. Refused, naming what is
+    missing, where it looked and how to install it, when any is missing: for a language, the languages it has and
+    the folder their data is in, where a language's ``<lang>.traineddata`` goes.
     """
     executable = _executable(places)
+    said = _run([str(executable), '--version'])
+    version = re.match(r'\s*tesseract v?(\d+)\.(\d+)', said)
+    if version is None or (int(version[1]), int(version[2])) < _PAGE_XML_SINCE:
+        first = said.strip().splitlines()[0] if said.strip() else 'silent'
+        msg = f'{executable} says {first!r}: OCR needs Tesseract 5.3 or later, which writes PAGE XML; {_INSTALL}'
+        raise OSError(msg)
     header, *listed = _run([str(executable), '--list-langs']).splitlines()
-    available = {name.strip() for name in listed}
+    available = sorted(name.strip() for name in listed if name.strip())
     if missing := [lang for lang in languages.split('+') if lang not in available]:
-        msg = f'{executable} has no language data for {missing} ({header.strip()}); {_INSTALL}'
+        folder = re.search(r'"(.+)"', header)
+        where = folder[1] if folder else header.strip()
+        msg = (
+            f'{executable} has no language data for {missing}: it has {available}, in {where}; a language is its '
+            f'<lang>.traineddata in that folder (https://github.com/tesseract-ocr/tessdata_best), or {_INSTALL}'
+        )
         raise OSError(msg)
     return executable
 
@@ -149,6 +183,38 @@ def _inverted(decode: list[float] | None, components: int, name: str) -> bool:
     raise ValueError(msg)
 
 
+def _tiff(width: int, height: int, data: bytes, tags: Tags) -> bytes:
+    """``data`` as the one strip of a little-endian TIFF of ``width`` x ``height`` samples, described by ``tags``.
+
+    Each tag is its field type and its values; the TIFF's size and where its strip is are added to them.
+    """
+    tags = {
+        256: (_TIFF_LONG, (width,)),  # ImageWidth
+        257: (_TIFF_LONG, (height,)),  # ImageLength
+        273: (_TIFF_LONG, (0,)),  # StripOffsets: the data's, once the values before it are laid out
+        278: (_TIFF_LONG, (height,)),  # RowsPerStrip: one strip
+        279: (_TIFF_LONG, (len(data),)),  # StripByteCounts
+        **tags,
+    }
+    packed = {
+        tag: b''.join(struct.pack('<H' if kind == _TIFF_SHORT else '<I', v) for v in values)
+        for tag, (kind, values) in tags.items()
+    }
+    beyond, offsets = b'', {}  # values longer than an entry holds, each at an even offset after the directory
+    start = _TIFF_HEADER + 2 + 12 * len(tags) + 4
+    for tag in sorted(t for t, raw in packed.items() if len(raw) > 4):  # noqa: PLR2004 -- an entry's value bytes
+        offsets[tag] = start + len(beyond)
+        beyond += packed[tag] + b'\0' * (len(packed[tag]) % 2)
+    packed[273] = struct.pack('<I', start + len(beyond))
+    entries = b''.join(
+        struct.pack('<HHI', tag, kind, len(values))
+        + (struct.pack('<I', offsets[tag]) if tag in offsets else packed[tag].ljust(4, b'\0'))
+        for tag, (kind, values) in sorted(tags.items())
+    )
+    directory = struct.pack('<H', len(tags)) + entries + struct.pack('<I', 0)  # no next directory
+    return struct.pack('<2sHI', b'II', 42, _TIFF_HEADER) + directory + beyond + data
+
+
 def _fax_tiff(
     width: int, height: int, data: bytes, fax: tuple, *, inverted: bool, orientation: int, name: str
 ) -> bytes:
@@ -163,12 +229,12 @@ def _fax_tiff(
     if columns != width:
         msg = f'{name} is CCITT fax of {columns} columns on an image {width} samples wide'
         raise ValueError(msg)
-    options = {}
+    options: Tags = {}
     if k < 0 and not (end_of_line or byte_align):
         compression = _TIFF_G4
     elif k >= 0 and end_of_line:
         compression = _TIFF_G3
-        options[292] = (_TIFF_LONG, (_T4_2D if k > 0 else 0) | (_T4_FILL if byte_align else 0))  # T4Options
+        options[292] = (_TIFF_LONG, ((_T4_2D if k > 0 else 0) | (_T4_FILL if byte_align else 0),))  # T4Options
     elif k == 0 and byte_align:
         compression = _TIFF_RLE
     else:
@@ -177,57 +243,99 @@ def _fax_tiff(
         raise ValueError(msg)
     # Decoded, a black run is 1 bits: WhiteIsZero (0) shows them black, as BlackIs1 false does; BlackIsZero (1) white.
     photometric = int(black_is_1 != inverted)
-    tags = {
-        256: (_TIFF_LONG, width),  # ImageWidth
-        257: (_TIFF_LONG, height),  # ImageLength
-        258: (_TIFF_SHORT, 1),  # BitsPerSample
-        259: (_TIFF_SHORT, compression),
-        262: (_TIFF_SHORT, photometric),
-        273: (_TIFF_LONG, 0),  # StripOffsets: the data's, once the directory's size is known
-        274: (_TIFF_SHORT, orientation),
-        277: (_TIFF_SHORT, 1),  # SamplesPerPixel
-        278: (_TIFF_LONG, height),  # RowsPerStrip: one strip
-        279: (_TIFF_LONG, len(data)),  # StripByteCounts
+    tags: Tags = {
+        258: (_TIFF_SHORT, (1,)),  # BitsPerSample
+        259: (_TIFF_SHORT, (compression,)),
+        262: (_TIFF_SHORT, (photometric,)),
+        274: (_TIFF_SHORT, (orientation,)),
+        277: (_TIFF_SHORT, (1,)),  # SamplesPerPixel
         **options,
     }
-    tags[273] = (_TIFF_LONG, _TIFF_HEADER + 2 + 12 * len(tags) + 4)
-    entries = b''.join(
-        struct.pack('<HHI', tag, kind, 1)
-        + (struct.pack('<HH', value, 0) if kind == _TIFF_SHORT else struct.pack('<I', value))
-        for tag, (kind, value) in sorted(tags.items())
-    )
-    directory = struct.pack('<H', len(tags)) + entries + struct.pack('<I', 0)  # no next directory
-    return struct.pack('<2sHI', b'II', 42, _TIFF_HEADER) + directory + data
+    return _tiff(width, height, data, tags)
+
+
+def _jpeg_tiff(width: int, height: int, data: bytes, dct: tuple, *, orientation: int, name: str) -> bytes:
+    """JPEG ``data``, as stored, in a TIFF of one strip (Compression 7): packaging, never decoding.
+
+    Its tags say what the JPEG's own headers do (``dct``, ``Reader.image``) -- gray (BlackIsZero), or three components
+    coded YCbCr (their luminance's sampling its YCbCrSubSampling) or RGB -- and how the page places it as its
+    Orientation. Refused by name: a JPEG of other than 8-bit gray or three components, and one of three components
+    at :data:`_COLOR_JPEG_SHOWN_WRONG`, which Leptonica shows wrongly.
+    """
+    precision, components, sampling, transform = dct
+    if precision != _JPEG_BITS or components not in {1, _RGB}:
+        msg = (
+            f'{name} is a JPEG of {components} {precision}-bit components placed turned or mirrored: Tesseract is '
+            'handed one in a TIFF as 8-bit gray or three components only'
+        )
+        raise ValueError(msg)
+    if components == _RGB and orientation == _COLOR_JPEG_SHOWN_WRONG:
+        msg = (
+            f'{name} is a color JPEG placed turned a quarter with its rows reversed (TIFF Orientation 8), which '
+            'Leptonica shows turned half round from that; showing it upright needs its pixels decoded, which is not '
+            'done here'
+        )
+        raise ValueError(msg)
+    photometric = 1 if components == 1 else 6 if transform else 2  # BlackIsZero, YCbCr, RGB
+    tags: Tags = {
+        258: (_TIFF_SHORT, (_JPEG_BITS,) * components),  # BitsPerSample
+        259: (_TIFF_SHORT, (_TIFF_JPEG,)),
+        262: (_TIFF_SHORT, (photometric,)),
+        274: (_TIFF_SHORT, (orientation,)),
+        277: (_TIFF_SHORT, (components,)),  # SamplesPerPixel
+        284: (_TIFF_SHORT, (1,)),  # PlanarConfiguration: components interleaved
+    }
+    if photometric == 6:  # noqa: PLR2004 -- YCbCr
+        tags[530] = (_TIFF_SHORT, sampling)  # YCbCrSubSampling
+    return _tiff(width, height, data, tags)
+
+
+def _codec_file(samples: tuple, placement: Placement, inverted: bool, folder: Path, name: str) -> Path:  # noqa: FBT001
+    """The image ``samples`` still in a codec, as a file in ``folder`` Leptonica shows as ``placement`` says.
+
+    Refused, by name, when it could not be shown so without its pixels decoded.
+    """
+    width, height, _space, _components, _bits, data, codec, _decode, _masked, fax, dct = samples
+    if codec == 'CCITTFaxDecode':
+        path = folder / 'page.tif'
+        orientation = _tiff_orientation(placement)
+        path.write_bytes(_fax_tiff(width, height, data, fax, inverted=inverted, orientation=orientation, name=name))
+        return path
+    if codec not in _CODEC_FILES:
+        msg = f'{name} is in {codec}, which Tesseract does not read'
+        raise ValueError(msg)
+    if inverted:
+        msg = f'{name} is in {codec}, inverted by its /Decode: showing it so needs its pixels decoded, not done here'
+        raise ValueError(msg)
+    if placement == _UPRIGHT:
+        path = folder / f'page{".j2k" if data.startswith(_J2K_CODESTREAM) else _CODEC_FILES[codec]}'
+        path.write_bytes(data)
+        return path
+    if codec == 'JPXDecode':
+        msg = (
+            f'{name} is in JPXDecode, placed turned or mirrored: a JPEG 2000 file says no placement and no TIFF holds '
+            'one for Leptonica, so showing it so needs its pixels decoded, which is not done here'
+        )
+        raise ValueError(msg)
+    path = folder / 'page.tif'
+    path.write_bytes(_jpeg_tiff(width, height, data, dct, orientation=_tiff_orientation(placement), name=name))
+    return path
 
 
 def _image_file(samples: tuple, placement: Placement, folder: Path, name: str) -> Path:
     """The image ``samples`` (``Reader.image``), shown as ``placement`` says, as a file Tesseract reads upright.
 
     Written in ``folder``: lossless samples as an 8-bit PGM/PPM, turned upright and inverted as their ``/Decode``
-    says; a codec's data as stored, CCITT fax's inside a TIFF. Refused, by name, when Tesseract could not read it,
-    or not as the page shows it.
+    says; a codec's data as stored (:func:`_codec_file`). Refused, by name, when Tesseract could not read it, or not
+    as the page shows it.
     """
-    width, height, space, components, bits, data, codec, decode, _masked, fax = samples
-    if codec is None and (components not in {1, 3} or space == 'Indexed'):
+    width, height, space, components, bits, data, codec, decode, *_ = samples
+    if codec is None and (components not in {1, _RGB} or space == 'Indexed'):
         msg = f'{name} is {space} ({components} components): Tesseract is handed gray or RGB samples only'
         raise ValueError(msg)
     inverted = _inverted(decode, components, name)
-    if codec == 'CCITTFaxDecode':
-        path = folder / 'page.tif'
-        orientation = _tiff_orientation(placement)
-        path.write_bytes(_fax_tiff(width, height, data, fax, inverted=inverted, orientation=orientation, name=name))
-        return path
     if codec is not None:
-        if codec not in _CODEC_FILES:
-            msg = f'{name} is in {codec}, which Tesseract does not read'
-            raise ValueError(msg)
-        for wrong, how in ((placement != _UPRIGHT, 'placed turned or mirrored'), (inverted, 'inverted by its /Decode')):
-            if wrong:
-                msg = f'{name} is in {codec}, {how}: showing it so needs its pixels decoded, which is not done here'
-                raise ValueError(msg)
-        path = folder / f'page{".j2k" if data.startswith(_J2K_CODESTREAM) else _CODEC_FILES[codec]}'
-        path.write_bytes(data)
-        return path
+        return _codec_file(samples, placement, inverted, folder, name)
     row = (width * components * bits + 7) // 8
     stored = np.frombuffer(data, dtype=np.uint8)[: row * height].reshape(height, row)
     if bits == 16:  # noqa: PLR2004 -- the high byte of each big-endian sample
@@ -249,17 +357,38 @@ def _image_file(samples: tuple, placement: Placement, folder: Path, name: str) -
     return path
 
 
-def _words(tsv: str, box: Box, width: int, height: int) -> Words:
-    """Each word of Tesseract's ``tsv`` and its box in page space: its pixels mapped onto the image's ``box``."""
+def _local(element: ET.Element) -> str:
+    """``element``'s name without its namespace."""
+    return element.tag.rpartition('}')[2]
+
+
+def _words(page: str, box: Box, width: int, height: int, name: str) -> Words:
+    """Each word of Tesseract's PAGE XML ``page`` (word level, boxes), in page space, and how it is written.
+
+    Its text; its box, its pixels mapped onto the image's ``box``; and whether it is written vertically (it reads top
+    to bottom). A word read in a direction Tesseract does not write is refused by name.
+    """
     x0, y0, x1, y1 = box
     sx, sy = (x1 - x0) / width, (y1 - y0) / height
     out = []
-    for line in tsv.splitlines()[1:]:
-        level, *_, left, top, across, down, _conf, text = line.split('\t')
-        left, top, across, down = int(left), int(top), int(across), int(down)
-        if level == _WORD_LEVEL and text.strip() and across > 0 and down > 0:
-            seen = (x0 + left * sx, y0 + top * sy, x0 + (left + across) * sx, y0 + (top + down) * sy)
-            out.append((text.strip(), seen))
+    # Tesseract's own output, of the image we handed it: no entity or reference beyond the document in it
+    for word in ET.fromstring(page).iter():  # noqa: S314
+        if _local(word) != 'Word':
+            continue
+        children = {_local(c): c for c in word}
+        equiv = {_local(c): c for c in children['TextEquiv']} if 'TextEquiv' in children else {}
+        text = ''.join(equiv['Unicode'].itertext()).strip() if 'Unicode' in equiv else ''
+        coords = children['Coords'].get('points', '') if 'Coords' in children else ''
+        points = [tuple(map(int, p.split(','))) for p in coords.split()]
+        xs, ys = [x for x, _ in points], [y for _, y in points]
+        if not text or not points or max(xs) <= min(xs) or max(ys) <= min(ys):
+            continue
+        direction = word.get('readingDirection')
+        if direction not in _VERTICAL:
+            msg = f'Tesseract read {text!r} on {name} {direction or "in no direction"}: a word is laid as read so'
+            raise ValueError(msg)
+        seen = (x0 + min(xs) * sx, y0 + min(ys) * sy, x0 + max(xs) * sx, y0 + max(ys) * sy)
+        out.append((text, seen, _VERTICAL[direction]))
     return out
 
 
@@ -284,17 +413,17 @@ def _recognize(reader: _pdf.Reader, image: tuple, tesseract: list[str], name: st
     dpi = round(across * 72 / (box[2] - box[0]))
     with tempfile.TemporaryDirectory(prefix=TEMP_PREFIX) as folder:
         path = _image_file(reader.image(obj), placement, Path(folder), name)
-        tsv = _run([tesseract[0], str(path), *tesseract[1:], '--dpi', str(dpi), 'tsv'])
-    return _words(tsv, box, across, down)
+        page = _run([tesseract[0], str(path), *tesseract[1:], '--dpi', str(dpi), 'page'])
+    return _words(page, box, across, down, name)
 
 
 def text_layer(pdf: Path, out: Path, languages: str = 'eng', *, places: TesseractPlaces) -> int:
-    """``pdf`` with a text layer in ``languages`` over every page that is one image and has no text, to ``out``.
+    """``pdf`` with a text layer in Tesseract's ``languages`` over every page of one image and no text, to ``out``.
 
-    Tesseract is found on PATH or in ``places``, and only once there is a page to recognize: a document already
-    read needs none. ``out`` may be ``pdf`` itself: it is written beside as ``<out>.part`` and moved into place when
-    whole; nothing is written when a page cannot be recognized. How many pages were recognized (0: ``out`` is a
-    copy).
+    ``languages`` are Tesseract's, ``+``-joined (``chi_sim+eng``). Tesseract is found on PATH or in ``places``, and
+    only once there is a page to recognize: a document already read needs none. ``out`` may be ``pdf`` itself: it
+    is written beside as ``<out>.part`` and moved into place when whole; nothing is written when a page cannot be
+    recognized. How many pages were recognized (0: ``out`` is a copy).
     """
     reader = _pdf.open(pdf.read_bytes(), b'')
     layers: dict[int, Words] = {}
@@ -302,7 +431,9 @@ def text_layer(pdf: Path, out: Path, languages: str = 'eng', *, places: Tesserac
     for number, _, _ in reader.pages:
         if (image := _image(reader, number)) is None:
             continue
-        tesseract = tesseract or [str(check(languages, places)), 'stdout', '-l', languages]
+        if not tesseract:  # each word's box, as a box, and the direction it reads in
+            words = ['-c', 'page_xml_level=1', '-c', 'page_xml_polygon=0']
+            tesseract = [str(check(languages, places)), 'stdout', '-l', languages, *words]
         layers[number] = _recognize(reader, image, tesseract, f'page {number} of {pdf.name}')
     part = out.with_name(out.name + '.part')
     writer = _pdf.create(part)

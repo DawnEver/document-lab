@@ -80,7 +80,8 @@ type PlacementRow = (bool, bool, bool);
 type PageRows = (Vec<SpanRow>, Vec<PathRow>, Vec<ImageRow>, Vec<String>);
 /// An image's samples: width, height, color space family (None: a stencil mask), components, bits per component,
 /// the data after every lossless filter, the image codec it is still in (None: raw samples), its `/Decode` array
-/// (None: not stated), whether it states a mask, and its fax coding when its codec is `CCITTFaxDecode`.
+/// (None: not stated), whether it states a mask, its fax coding when its codec is `CCITTFaxDecode`, and its JPEG
+/// coding when it is `DCTDecode`.
 type SamplesRow = (
     i64,
     i64,
@@ -92,9 +93,13 @@ type SamplesRow = (
     Option<Vec<f64>>,
     bool,
     Option<FaxRow>,
+    Option<DctRow>,
 );
 /// A `CCITTFaxDecode` image's coding: K, columns, end-of-line codes, rows byte-aligned, 1 bits black.
 type FaxRow = (i64, i64, bool, bool, bool);
+/// A `DCTDecode` image's coding: bits per sample, components, the first component's sampling (across, down), and
+/// whether its colors are transformed (YCbCr).
+type DctRow = (u8, u8, (u8, u8), bool);
 
 /// A PDF opened.
 #[pyclass(unsendable)]
@@ -178,9 +183,12 @@ impl Reader {
     /// The samples of the image `XObject` `object`.
     fn image(&self, object: u32) -> PyResult<SamplesRow> {
         let samples = self.file.image(object).map_err(|e| refused(&e))?;
-        let fax = match &samples.codec {
-            Some(codec) => codec.fax().map_err(|e| refused(&e))?,
-            None => None,
+        let (fax, dct) = match &samples.codec {
+            Some(codec) => (
+                codec.fax().map_err(|e| refused(&e))?,
+                codec.dct(&samples.data).map_err(|e| refused(&e))?,
+            ),
+            None => (None, None),
         };
         let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
         Ok((
@@ -197,6 +205,7 @@ impl Reader {
             samples.decode,
             samples.masked,
             fax.map(|f| (f.k, f.columns, f.end_of_line, f.byte_align, f.black_is_1)),
+            dct.map(|d| (d.precision, d.components, d.sampling, d.transform)),
         ))
     }
 }
@@ -288,8 +297,8 @@ impl Writer {
             .map_err(|e| refused(&e))
     }
 
-    /// Add page `number` (1-based) of `reader` as the next page, with `words` -- `(text, (x0, y0, x1, y1))`, each
-    /// box in page space -- laid over it as an invisible text layer.
+    /// Add page `number` (1-based) of `reader` as the next page, with `words` -- `(text, (x0, y0, x1, y1),
+    /// vertical)`, each box in page space, vertical when written down it -- laid over it as an invisible text layer.
     #[expect(
         clippy::needless_pass_by_value,
         reason = "pyo3 hands a list over owned"
@@ -298,12 +307,12 @@ impl Writer {
         &mut self,
         reader: &Reader,
         number: usize,
-        words: Vec<(String, Box4)>,
+        words: Vec<(String, Box4, bool)>,
     ) -> PyResult<()> {
         let page = reader.at(number)?;
         let words: Vec<pdf::writer::Word> = words
             .iter()
-            .map(|(text, (x0, y0, x1, y1))| pdf::writer::Word {
+            .map(|(text, (x0, y0, x1, y1), vertical)| pdf::writer::Word {
                 text,
                 bbox: Rect {
                     x0: *x0,
@@ -311,6 +320,7 @@ impl Writer {
                     x1: *x1,
                     y1: *y1,
                 },
+                vertical: *vertical,
             })
             .collect();
         self.open()?

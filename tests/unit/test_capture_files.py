@@ -1,6 +1,7 @@
 """capture-files without a desktop: which PDFs a run names, a page told from its viewer's backdrop, the end of paging,
 and the pages written one image each."""
 
+import argparse
 from dataclasses import dataclass
 
 import numpy as np
@@ -171,3 +172,20 @@ def test_every_page_image_is_stored_deflated(tmp_path):
     with pymupdf.open(out) as doc:
         filters = {doc.xref_get_key(doc[i].get_images(full=True)[0][0], 'Filter')[1] for i in range(doc.page_count)}
     assert filters == {'/FlateDecode'}  # spelling-ignore-line: the PDF filter's own name
+
+
+def test_a_run_with_a_text_layer_refuses_a_missing_language_before_any_capture(tmp_path, monkeypatch):
+    from document_lab import ocr  # noqa: PLC0415
+    from document_lab.capture import cli  # noqa: PLC0415
+
+    monkeypatch.setattr(ocr, '_executable', lambda _places: tmp_path / 'tesseract')
+    said = {'--version': 'tesseract v5.4.0\n', '--list-langs': 'List of available languages in "/t/" (1):\neng\n'}
+    monkeypatch.setattr(ocr, '_run', lambda command: said[command[1]])
+    parser = argparse.ArgumentParser()
+    cli.add_files_parser(parser.add_subparsers(dest='command'))
+    args = parser.parse_args(
+        ['capture-files', str(tmp_path / 'none.pdf'), '-o', str(tmp_path / 'out'), '--ocr', 'jpn_vert']
+    )
+    with pytest.raises(OSError, match=r"no language data for \['jpn_vert'\]: it has \['eng'\]"):
+        cli.run_files(args)
+    assert not (tmp_path / 'out').exists()  # refused before the run made anything

@@ -19,28 +19,46 @@ from document_lab.ocr import TesseractPlaces, check, text_layer
 from document_lab.pdf import read_pdf
 from tests.synthetic import fax_g4, image_pdf
 
-TSV_HEADER = 'level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext'
+PAGE_NS = 'http://schema.primaresearch.org/PAGE/gts/pagecontent/2019-07-15'
 
 
-def tsv(*words: tuple[str, int, int, int, int]) -> str:
-    """Tesseract's TSV for ``words`` -- (text, left, top, width, height) in pixels -- behind a page row."""
-    rows = [TSV_HEADER, '1\t1\t0\t0\t0\t0\t0\t0\t400\t300\t-1\t']
-    rows += [f'5\t1\t1\t1\t1\t{i}\t{x}\t{y}\t{w}\t{h}\t96.5\t{t}' for i, (t, x, y, w, h) in enumerate(words, 1)]
-    return '\n'.join(rows) + '\n'
+def page(*words: tuple) -> str:
+    """Tesseract's PAGE XML (word level, boxes) for ``words`` -- (text, left, top, width, height) in pixels, then
+    the direction each reads in when not left to right -- in one text line."""
+    laid = []
+    for i, (text, x, y, w, h, *direction) in enumerate(words):
+        reads = direction[0] if direction else 'left-to-right'
+        points = f'{x},{y} {x + w},{y} {x + w},{y + h} {x},{y + h}'
+        laid.append(
+            f'<Word id="w{i}" readingDirection="{reads}"><Coords points="{points}"/>'
+            f'<TextEquiv index="1" conf="0.96"><Unicode>{text}</Unicode></TextEquiv></Word>'
+        )
+    region = f'<TextRegion id="r0"><TextLine id="l0">{"".join(laid)}</TextLine></TextRegion>'
+    return f'<?xml version="1.0" encoding="UTF-8"?><PcGts xmlns="{PAGE_NS}"><Page>{region}</Page></PcGts>'
+
+
+#: How Tesseract names itself and its Leptonica (``--version``).
+VERSION = 'tesseract v5.4.0.20240606\n leptonica-1.84.1\n'
+#: Its options for PAGE XML of words in boxes, and the page config.
+PAGE = ['-c', 'page_xml_level=1', '-c', 'page_xml_polygon=0']
 
 
 class FakeTesseract:
-    """Answers each recognition with the next canned TSV, keeping the command and the image file it was handed."""
+    """Answers each recognition with the next canned PAGE XML, keeping the command and the image file it was
+    handed."""
 
-    def __init__(self, *answers: str) -> None:
+    def __init__(self, *answers: str, version: str = VERSION) -> None:
         self.answers = list(answers)
+        self.version = version
         self.images: list[tuple[str, bytes]] = []
         self.commands: list[list[str]] = []
 
     def __call__(self, command: list[str]) -> str:
         self.commands.append(command)
+        if command[1] == '--version':
+            return self.version
         if command[1] == '--list-langs':
-            return 'List of available languages in "/fake/tessdata/" (2):\neng\nchi_sim\n'
+            return 'List of available languages in "/fake/tessdata/" (3):\neng\nchi_sim\nchi_sim_vert\n'
         image = Path(command[1])
         self.images.append((image.suffix, image.read_bytes()))
         return self.answers.pop(0)
@@ -123,24 +141,37 @@ def test_tesseract_is_found_beside_its_tessdata(no_tesseract, monkeypatch):
     assert check('eng', no_tesseract) == executable
 
 
-def test_a_missing_language_is_refused_naming_it_where_it_looked_and_how_to_add_it(tesseract):
+def test_a_missing_language_is_refused_naming_those_installed_and_where_language_data_goes(tesseract):
     tesseract()
     check('eng', PLACES)
-    check('chi_sim+eng', places=PLACES)
-    with pytest.raises(OSError, match='jpn') as refused:
-        check('jpn+eng', PLACES)
-    assert '/fake/tessdata/' in str(refused.value)
-    assert 'tesseract-ocr-<lang>' in str(refused.value)
+    check('chi_sim_vert+chi_sim+eng', places=PLACES)
+    for asked in ('jpn+eng', 'eng+', 'jpn_vert'):
+        with pytest.raises(OSError, match='no language data') as refused:
+            check(asked, PLACES)
+        message = str(refused.value)
+        for said in ("['chi_sim', 'chi_sim_vert', 'eng']", '/fake/tessdata/', '<lang>.traineddata', 'tessdata_best'):
+            assert said in message
+        assert 'tesseract-ocr-<lang>' in message
+
+
+@pytest.mark.parametrize('said', ['tesseract 4.1.1\n leptonica-1.82.0\n', 'tesseract v5.2.0\n', ''])
+def test_a_tesseract_older_than_5_3_is_refused_by_its_version(tesseract, said):
+    fake = tesseract()
+    fake.version = said
+    with pytest.raises(OSError, match=r'5\.3 or later') as refused:
+        check('eng', PLACES)
+    assert (said.splitlines()[0] if said else 'silent') in str(refused.value)
+    assert 'UB Mannheim' in str(refused.value)
 
 
 def test_the_words_are_laid_invisible_where_they_are_seen_over_the_same_pixels(tmp_path, tesseract):
     pdf, image = capture(tmp_path)
-    fake = tesseract(tsv(('stator', 40, 30, 120, 36), ('winding', 200, 150, 160, 40)))
+    fake = tesseract(page(('stator', 40, 30, 120, 36), ('winding', 200, 150, 160, 40)))
     assert text_layer(pdf, tmp_path / 'ocr.pdf', 'eng', places=PLACES) == 1
     ((suffix, handed),) = fake.images
     assert suffix == '.ppm'
     assert handed == b'P6\n400 300\n255\n' + image.tobytes()  # the samples as stored, losslessly
-    assert fake.commands[-1][2:] == ['stdout', '-l', 'eng', '--dpi', '96', 'tsv']
+    assert fake.commands[-1][2:] == ['stdout', '-l', 'eng', *PAGE, '--dpi', '96', 'page']
     scale = 72 / 96
     expected = [('stator', (40, 30, 160, 66)), ('winding', (200, 150, 360, 190))]
     read = words(tmp_path / 'ocr.pdf')
@@ -162,7 +193,10 @@ def test_the_words_are_laid_invisible_where_they_are_seen_over_the_same_pixels(t
 def test_the_layer_s_streams_are_deflated_and_an_independent_reader_reads_them_as_stored_ones(tmp_path):
     pdf, _ = capture(tmp_path)
     reader = _pdf.open(pdf.read_bytes(), b'')
-    layer = [('stator', (30.0, 20.0, 120.0, 47.0)), (chr(0x5B9A) + chr(0x5B50), (150.0, 112.0, 270.0, 142.0))]
+    layer = [
+        ('stator', (30.0, 20.0, 120.0, 47.0), False),
+        (chr(0x5B9A) + chr(0x5B50), (150.0, 112.0, 270.0, 142.0), False),
+    ]
     read = {}
     for level in (0, None):  # stored as deflate's stored blocks, and at the measured default
         out = tmp_path / f'level-{level}.pdf'
@@ -179,7 +213,7 @@ def test_the_layer_s_streams_are_deflated_and_an_independent_reader_reads_them_a
                 out.stat().st_size,
             )
     assert read[0][:2] == read[None][:2]
-    assert read[0][1] == [text for text, _ in layer]
+    assert read[0][1] == [text for text, *_ in layer]
     assert read[None][2] < read[0][2]
     with pytest.raises(ValueError, match='0 to 10, not 11'):
         _pdf.create(tmp_path / 'never.pdf', 11)
@@ -188,11 +222,29 @@ def test_the_layer_s_streams_are_deflated_and_an_independent_reader_reads_them_a
 def test_cjk_text_is_laid_and_read_back(tmp_path, tesseract):
     pdf, _ = capture(tmp_path)
     recognized = [''.join(map(chr, (0x5B9A, 0x5B50, 0x7ED5, 0x7EC4))), ''.join(map(chr, (0x6E29, 0x5347)))]
-    tesseract(tsv((recognized[0], 40, 30, 160, 40), (recognized[1], 40, 100, 80, 40)))
+    tesseract(page((recognized[0], 40, 30, 160, 40), (recognized[1], 40, 100, 80, 40)))
     assert text_layer(pdf, tmp_path / 'ocr.pdf', 'chi_sim+eng', places=PLACES) == 1
     assert [t for t, _ in words(tmp_path / 'ocr.pdf')] == recognized
     with pymupdf.open(tmp_path / 'ocr.pdf') as doc:
         assert [w[4] for w in doc[0].get_text('words')] == recognized
+
+
+def test_words_read_top_to_bottom_are_laid_as_vertical_writing(tmp_path, tesseract):
+    pdf, _ = capture(tmp_path)
+    column = ''.join(map(chr, (0x5B9A, 0x5B50, 0x7ED5, 0x7EC4)))  # stator winding, down a column
+    tesseract(page((column, 340, 20, 40, 160, 'top-to-bottom'), ('stator', 40, 30, 120, 36)))
+    assert text_layer(pdf, tmp_path / 'ocr.pdf', 'chi_sim_vert+eng', places=PLACES) == 1
+    spans = read_pdf(tmp_path / 'ocr.pdf').pages[0].spans
+    assert [(s.text, s.vertical) for s in spans] == [(column, True), ('stator', False)]
+    assert near(tuple(spans[0].provenance.bbox), [v * 72 / 96 for v in (340, 20, 380, 180)])
+
+
+def test_a_word_read_in_a_direction_no_layer_writes_is_refused_by_name(tmp_path, tesseract):
+    pdf, _ = capture(tmp_path)
+    tesseract(page(('upward', 40, 30, 36, 120, 'bottom-to-top')))
+    with pytest.raises(ValueError, match=r"'upward'.*bottom-to-top"):
+        text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES)
+    assert not (tmp_path / 'ocr.pdf').exists()
 
 
 def test_a_page_with_text_is_copied_untouched_and_needs_no_tesseract(tmp_path, no_tesseract):
@@ -209,7 +261,7 @@ def test_only_the_pages_of_one_image_without_text_are_recognized(tmp_path, tesse
         doc.insert_pdf(again)  # page 2: the same image ...
         doc[1].insert_text((20, 20), 'searchable')  # ... with text: left alone
         doc.save(tmp_path / 'two.pdf')
-    fake = tesseract(tsv(('stator', 40, 30, 120, 36)))
+    fake = tesseract(page(('stator', 40, 30, 120, 36)))
     assert text_layer(tmp_path / 'two.pdf', tmp_path / 'ocr.pdf', places=PLACES) == 1
     assert len(fake.images) == 1
     pages = read_pdf(tmp_path / 'ocr.pdf').pages
@@ -219,7 +271,7 @@ def test_only_the_pages_of_one_image_without_text_are_recognized(tmp_path, tesse
 def test_a_jpeg_is_handed_to_tesseract_as_it_is_stored(tmp_path, tesseract):
     jpeg = pymupdf.Pixmap(pymupdf.csRGB, 30, 20, bytes([200]) * 30 * 20 * 3, False).tobytes('jpg')
     pdf = one_image(tmp_path / 'scan.pdf', size=(30, 20), space='DeviceRGB', bits=8, codec='DCTDecode', data=jpeg)
-    fake = tesseract(tsv(('scan', 2, 3, 20, 10)))
+    fake = tesseract(page(('scan', 2, 3, 20, 10)))
     assert text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES) == 1
     assert fake.images == [('.jpg', jpeg)]  # never decoded by us
     assert words(tmp_path / 'ocr.pdf')[0][0] == 'scan'
@@ -229,7 +281,7 @@ def test_one_bit_samples_are_handed_as_eight_bit_gray(tmp_path, tesseract):
     pdf = one_image(
         tmp_path / 'bits.pdf', size=(3, 2), space='DeviceGray', bits=1, codec=None, data=bytes([0b01000000, 0b10100000])
     )
-    fake = tesseract(tsv())
+    fake = tesseract(page())
     assert text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES) == 1
     assert fake.images == [('.pgm', b'P5\n3 2\n255\n' + bytes([0, 255, 0, 255, 0, 255]))]
     assert words(tmp_path / 'ocr.pdf') == []
@@ -259,21 +311,26 @@ def test_a_capture_without_tesseract_is_refused_and_left_untouched(tmp_path, no_
 
 def test_the_layer_replaces_the_pdf_it_was_laid_on(tmp_path, tesseract):
     pdf, _ = capture(tmp_path)
-    tesseract(tsv(('stator', 40, 30, 120, 36)))
+    tesseract(page(('stator', 40, 30, 120, 36)))
     assert text_layer(pdf, pdf, places=PLACES) == 1
     assert [t for t, _ in words(pdf)] == ['stator']
     assert sorted(p.name for p in tmp_path.iterdir()) == ['capture.pdf']
 
 
-def tiff_tags(tiff: bytes) -> dict[int, int]:
-    """Each tag of the one-strip TIFF ``tiff`` (little-endian, one value a tag) and its value."""
+def tiff_tags(tiff: bytes) -> dict[int, int | tuple[int, ...]]:
+    """Each tag of the one-strip TIFF ``tiff`` (little-endian) and its value, or its values when it has several."""
     assert tiff[:4] == b'II*\x00'
     (directory,) = struct.unpack_from('<I', tiff, 4)
     (count,) = struct.unpack_from('<H', tiff, directory)
     tags = {}
     for i in range(count):
-        tag, kind, _, value = struct.unpack_from('<HHII', tiff, directory + 2 + 12 * i)
-        tags[tag] = value & 0xFFFF if kind == 3 else value
+        tag, kind, many = struct.unpack_from('<HHI', tiff, directory + 2 + 12 * i)
+        size = 2 if kind == 3 else 4
+        at = directory + 2 + 12 * i + 8
+        if many * size > 4:
+            (at,) = struct.unpack_from('<I', tiff, at)
+        values = struct.unpack_from(f'<{many}{"H" if kind == 3 else "I"}', tiff, at)
+        tags[tag] = values[0] if many == 1 else values
     return tags
 
 
@@ -299,7 +356,7 @@ def test_a_fax_image_is_handed_as_stored_in_a_tiff_that_shows_what_the_page_show
 ):
     data = fax_g4(FAX)
     pdf = fax_pdf(tmp_path / 'fax.pdf', data, f'/K -1 /Columns 64 /BlackIs1 {black_is_1}', extra=decode)
-    fake = tesseract(tsv(('fax', 2, 3, 20, 10)))
+    fake = tesseract(page(('fax', 2, 3, 20, 10)))
     assert text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES) == 1
     ((suffix, handed),) = fake.images
     assert suffix == '.tif'
@@ -318,12 +375,12 @@ def test_a_fax_image_placed_turned_is_handed_with_its_placement_as_the_tiff_s_or
     data = fax_g4(FAX)
     # 64 x 40 samples on a 32 x 20 point page turned a quarter clockwise: shown 20 x 32, 40 x 64 pixels upright
     pdf = fax_pdf(tmp_path / 'fax.pdf', data, '/K -1 /Columns 64', size=(32, 20), rotate=90)
-    fake = tesseract(tsv(('turned', 4, 6, 16, 4)))
+    fake = tesseract(page(('turned', 4, 6, 16, 4)))
     assert text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES) == 1
     ((_, handed),) = fake.images
     assert handed.endswith(data)
     assert tiff_tags(handed)[274] == 6
-    assert fake.commands[-1][-2:] == ['144', 'tsv']  # 40 pixels across 20 points
+    assert fake.commands[-1][-2:] == ['144', 'page']  # 40 pixels across 20 points
     ((text, box),) = words(tmp_path / 'ocr.pdf')
     assert text == 'turned'
     assert near(box, (2, 3, 10, 5))
@@ -339,7 +396,7 @@ def test_a_fax_image_placed_turned_is_handed_with_its_placement_as_the_tiff_s_or
 )
 def test_a_group_3_fax_image_s_coding_is_stated_in_its_tiff(tmp_path, tesseract, params, compression, t4):
     pdf = fax_pdf(tmp_path / 'fax.pdf', b'coded rows', f'{params} /Columns 64 /BlackIs1 true')
-    fake = tesseract(tsv())
+    fake = tesseract(page())
     text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES)
     ((_, handed),) = fake.images
     tags = tiff_tags(handed)
@@ -376,7 +433,7 @@ def test_a_fax_coding_no_tiff_holds_is_refused_by_name(tmp_path, tesseract, para
 )
 def test_lossless_samples_a_decode_inverts_are_handed_inverted_exactly(tmp_path, tesseract, image, stored, handed):
     pdf = image_pdf(tmp_path / 'inverted.pdf', bytes(stored), f'/Width 2 /Height 2 {image}', size=(2, 2))
-    fake = tesseract(tsv())
+    fake = tesseract(page())
     text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES)
     kind, samples = handed
     assert fake.images[0][1] == f'{kind}\n2 2\n255\n'.encode() + bytes(samples)
@@ -390,16 +447,72 @@ def test_a_decode_that_neither_keeps_nor_inverts_the_samples_is_refused_by_name(
         text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES)
 
 
-@pytest.mark.parametrize(
-    ('decode', 'rotate', 'refusal'), [(' /Decode [1 0 1 0 1 0]', 0, 'inverted'), ('', 90, 'placed turned')]
-)
-def test_a_jpeg_shown_inverted_or_turned_is_refused_by_name(tmp_path, tesseract, decode, rotate, refusal):
-    jpeg = pymupdf.Pixmap(pymupdf.csRGB, 30, 20, bytes([200]) * 30 * 20 * 3, False).tobytes('jpg')
-    image = f'/Width 30 /Height 20 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode{decode}'
-    pdf = image_pdf(tmp_path / 'scan.pdf', jpeg, image, size=(30, 20), deflate=False, rotate=rotate)
+def jpeg(rows: int, columns: int, components: int) -> bytes:
+    """A JPEG of ``rows`` x ``columns`` samples of ``components`` (1: gray, 3: RGB), each its own value."""
+    space = pymupdf.csGRAY if components == 1 else pymupdf.csRGB
+    samples = np.arange(rows * columns * components, dtype=np.uint8).tobytes()
+    return pymupdf.Pixmap(space, columns, rows, samples, False).tobytes('jpg')
+
+
+def jpeg_pdf(path: Path, data: bytes, components: int, *, decode: str = '', rotate: int = 0, matrix=None) -> Path:
+    """A 30 x 20 point page of one 30 x 20 JPEG ``data`` of ``components``, placed by ``rotate`` and ``matrix``."""
+    space = 'DeviceGray' if components == 1 else 'DeviceRGB'
+    image = f'/Width 30 /Height 20 /ColorSpace /{space} /BitsPerComponent 8 /Filter /DCTDecode{decode}'
+    size = (20, 30) if matrix and matrix[0] == 0 else (30, 20)
+    return image_pdf(path, data, image, size=size, deflate=False, rotate=rotate, matrix=matrix)
+
+
+@pytest.mark.parametrize(('codec', 'refusal'), [('DCTDecode', 'inverted'), ('JPXDecode', 'inverted')])
+def test_a_jpeg_or_jpeg_2000_shown_inverted_is_refused_by_name(tmp_path, tesseract, codec, refusal):
+    image = f'/Width 30 /Height 20 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /{codec} /Decode [1 0 1 0 1 0]'
+    pdf = image_pdf(tmp_path / 'scan.pdf', jpeg(20, 30, 3), image, size=(30, 20), deflate=False)
     tesseract()
-    with pytest.raises(ValueError, match=f'DCTDecode, {refusal}.*decoded'):
+    with pytest.raises(ValueError, match=f'{codec}, {refusal}.*decoded'):
         text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES)
+
+
+@pytest.mark.parametrize(
+    ('components', 'placement', 'orientation'),
+    [
+        (3, (90, None), 6),  # a color scan on a page turned a quarter clockwise
+        (3, (180, None), 3),
+        (1, (270, None), 8),  # gray: every orientation, this one too
+        (3, (0, (0, -30, -20, 0, 20, 30)), 5),  # drawn transposed: turned a quarter and mirrored
+        (3, (0, (0, 30, 20, 0, 0, 0)), 7),  # drawn transposed the other way
+    ],
+)
+def test_a_jpeg_placed_turned_is_handed_as_stored_in_a_tiff_whose_orientation_places_it(
+    tmp_path, tesseract, components, placement, orientation
+):
+    rotate, matrix = placement
+    data = jpeg(20, 30, components)
+    pdf = jpeg_pdf(tmp_path / 'scan.pdf', data, components, rotate=rotate, matrix=matrix)
+    fake = tesseract(page(('turned', 2, 3, 10, 4)))
+    assert text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES) == 1
+    ((suffix, handed),) = fake.images
+    assert suffix == '.tif'
+    assert handed.endswith(data)  # packaged, never decoded
+    tags = tiff_tags(handed)
+    assert (tags[256], tags[257], tags[259], tags[274], tags[277]) == (30, 20, 7, orientation, components)
+    if components == 1:
+        assert (tags[258], tags[262]) == (8, 1)  # BlackIsZero
+    else:  # YCbCr, its luminance sampled as the JPEG says (PyMuPDF writes 4:4:4)
+        assert (tags[258], tags[262], tags[530]) == ((8, 8, 8), 6, (1, 1))
+    assert words(tmp_path / 'ocr.pdf')[0][0] == 'turned'
+
+
+def test_a_color_jpeg_leptonica_would_show_wrongly_and_a_jpeg_2000_placed_turned_are_refused_by_name(
+    tmp_path, tesseract
+):
+    tesseract()
+    pdf = jpeg_pdf(tmp_path / 'scan.pdf', jpeg(20, 30, 3), 3, rotate=270)  # TIFF Orientation 8
+    with pytest.raises(ValueError, match=r'Orientation 8.*Leptonica'):
+        text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES)
+    image = '/Width 30 /Height 20 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /JPXDecode'
+    pdf = image_pdf(tmp_path / 'jpx.pdf', b'\x00\x00\x00\x0cjP  ', image, size=(30, 20), deflate=False, rotate=90)
+    with pytest.raises(ValueError, match=r'JPXDecode, placed turned or mirrored.*no TIFF'):
+        text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['jpx.pdf', 'scan.pdf']
 
 
 #: 8 x 6 gray samples, each its own value, so any turn or mirror shows.
@@ -423,11 +536,11 @@ def test_samples_placed_turned_or_mirrored_are_handed_upright_and_their_words_la
     size, matrix, rotate = placement
     image = '/Width 8 /Height 6 /ColorSpace /DeviceGray /BitsPerComponent 8'
     pdf = image_pdf(tmp_path / 'placed.pdf', SAMPLES.tobytes(), image, size=size, matrix=matrix, rotate=rotate)
-    fake = tesseract(tsv(('placed', 1, 2, 4, 3)))  # pixels of the upright image, two to the point
+    fake = tesseract(page(('placed', 1, 2, 4, 3)))  # pixels of the upright image, two to the point
     assert text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES) == 1
     rows, columns = shown.shape
     assert fake.images == [('.pgm', f'P5\n{columns} {rows}\n255\n'.encode() + shown.tobytes())]
-    assert fake.commands[-1][-2:] == ['144', 'tsv']
+    assert fake.commands[-1][-2:] == ['144', 'page']
     ((text, box),) = words(tmp_path / 'ocr.pdf')
     assert text == 'placed'
     assert near(box, (0.5, 1, 2.5, 2.5))

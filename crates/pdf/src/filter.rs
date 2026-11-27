@@ -34,7 +34,98 @@ pub struct Fax {
     pub black_is_1: bool,
 }
 
+/// How a `DCTDecode` codec's data is coded, as its own headers say (ITU-T T.81 B.2.2, Adobe's `APP14` marker) and
+/// its `/ColorTransform`: what a container of the data as stored -- a TIFF -- must state of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Dct {
+    /// Bits per sample: 8 or 12.
+    pub precision: u8,
+    /// Color components: 1 (gray), 3 or 4.
+    pub components: u8,
+    /// The first component's sampling factors, across and down: how many of its samples there are to one of a
+    /// component sampled least (a luminance's 2 and 2 for chroma subsampled 4:2:0).
+    pub sampling: (u8, u8),
+    /// Whether decoding turns the components back from YCbCr to RGB (from YCCK to CMYK): as Adobe's marker says,
+    /// else as `/ColorTransform` does, else for three components (ISO 32000-2 Table 13).
+    pub transform: bool,
+}
+
 impl Codec {
+    /// How `data` is coded when the codec is `DCTDecode` ([`Dct`]); None for any other codec. The headers before
+    /// the first scan are read; no sample is decoded.
+    ///
+    /// # Errors
+    ///
+    /// Refuses data with no frame header before its first scan, or a `/ColorTransform` that is no integer.
+    pub fn dct(&self, data: &[u8]) -> Result<Option<Dct>> {
+        if self.name != b"DCTDecode" {
+            return Ok(None);
+        }
+        let truncated =
+            || Error::malformed("DCTDecode data ends inside a marker segment".to_string());
+        let mut frame = None;
+        let mut adobe = None;
+        let mut at = 2; // past the start-of-image marker
+        while frame.is_none() || adobe.is_none() {
+            let Some(&[0xFF, marker]) = data.get(at..at + 2) else {
+                break;
+            };
+            match marker {
+                0xFF => {
+                    at += 1; // a fill byte
+                    continue;
+                }
+                0x01 | 0xD0..=0xD8 => {
+                    at += 2; // a marker standing alone
+                    continue;
+                }
+                0xDA | 0xD9 => break, // the first scan, or the end of the image
+                _ => {}
+            }
+            let Some(&[high, low]) = data.get(at + 2..at + 4) else {
+                return Err(truncated());
+            };
+            let length = usize::from(u16::from_be_bytes([high, low]));
+            let segment = data.get(at + 4..at + 2 + length).ok_or_else(truncated)?;
+            let is_frame = matches!(marker, 0xC0..=0xCF) && !matches!(marker, 0xC4 | 0xC8 | 0xCC);
+            if is_frame && frame.is_none() {
+                // precision, lines, samples per line, components, then each component: id, sampling, table
+                let (&[precision, _, _, _, _, components], rest) =
+                    segment.split_first_chunk::<6>().ok_or_else(truncated)?;
+                let first = rest.get(1).ok_or_else(truncated)?;
+                frame = Some((precision, components, (first >> 4, first & 0x0F)));
+            } else if marker == 0xEE && segment.starts_with(b"Adobe") {
+                adobe = Some(*segment.get(11).ok_or_else(truncated)?); // its transform: 0 none, 1 YCbCr, 2 YCCK
+            }
+            at += 2 + length;
+        }
+        let Some((precision, components, sampling)) = frame else {
+            return Err(Error::malformed(
+                "DCTDecode data has no frame header before its first scan".to_string(),
+            ));
+        };
+        let stated = match self.params.as_ref().and_then(|p| p.get(b"ColorTransform")) {
+            None => None,
+            Some(v) => Some(v.as_integer().ok_or_else(|| {
+                Error::malformed(format!(
+                    "DCTDecode's /ColorTransform is an integer, not a {}",
+                    v.kind()
+                ))
+            })?),
+        };
+        let transform = match (adobe, stated) {
+            (Some(code), _) => code != 0,
+            (None, Some(code)) => code != 0,
+            (None, None) => components == 3,
+        };
+        Ok(Some(Dct {
+            precision,
+            components,
+            sampling,
+            transform,
+        }))
+    }
+
     /// Its parameters when it is `CCITTFaxDecode`; None for any other codec.
     ///
     /// # Errors

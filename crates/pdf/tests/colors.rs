@@ -1,5 +1,6 @@
 //! Colors in every space a page paints in, read to RGB: `Separation` and `DeviceN` through each type of tint
-//! transform, `Lab`, `Indexed`, and the colorants `None` and `All`.
+//! transform, `Lab`, `CalGray`, `CalRGB`, `ICCBased` through its profile at each rendering intent, `Indexed`, and the
+//! colorants `None` (inkless) and `All`.
 
 mod common;
 
@@ -240,23 +241,86 @@ fn a_separation_converts_into_lab_and_an_indexed_color_through_a_separation() {
 }
 
 #[test]
-fn the_colorant_none_paints_nothing() {
+fn what_the_colorant_none_paints_is_reported_inkless() {
     let none = "[/Separation /None /DeviceRGB << /FunctionType 2 /Domain [0 1] /C0 [1 1 1] /C1 [1 0 0] /N 1 >>]";
     let content = painted(
         none,
-        "/CS0 cs 1 sc 0 0 1 1 re f 0 0 1 RG 0 0 2 2 re B \
-         [/DeviceN [/None /None] /DeviceRGB 6 0 R] cs 1 1 sc 0 0 3 3 re f",
+        "/CS0 cs 1 sc 0 0 1 1 re f 0 0 1 RG 0 0 2 2 re B          [/DeviceN [/None /None] /DeviceRGB 6 0 R] cs 1 1 sc 0 0 3 3 re f          0 g 0 0 4 4 re f",
         &[&common::stream(
             "/FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1]",
             "{ pop 0 0 }",
         )],
     );
-    let found = paths(&content);
-    assert_eq!(found.len(), 1, "only the stroke paints: {found:?}");
-    assert!(found[0].fill.is_none());
+    // Each painting, in order: its fill's and stroke's RGB (None: not painted), and whether it is inkless.
+    let found: Vec<_> = paths(&content)
+        .iter()
+        .map(|p| {
+            (
+                p.fill.as_ref().map(|f| f.color.rgb),
+                p.stroke.as_ref().map(|s| s.color.rgb),
+                p.layer.inkless,
+            )
+        })
+        .collect();
     assert_eq!(
-        found[0].stroke.as_ref().unwrap().color.rgb,
-        Some([0.0, 0.0, 1.0])
+        found,
+        [
+            (Some(None), None, true),
+            // `B`: the stroke marks, the fill does not -- an event each.
+            (None, Some(Some([0.0, 0.0, 1.0])), false),
+            (Some(None), None, true),
+            (Some(None), None, true),
+            (Some(Some([0.0; 3])), None, false),
+        ]
+    );
+    assert!(paths(&content).iter().all(|p| !p.layer.hidden));
+    assert_eq!(content.warnings, Vec::<String>::new());
+}
+
+#[test]
+fn a_stencil_mask_an_image_and_a_shading_in_the_colorant_none_are_inkless() {
+    let none =
+        "[/Separation /None /DeviceGray << /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >>]";
+    let pdf = common::one_page(
+        "/Resources << /ColorSpace << /CS0 5 0 R >> /XObject << /M 6 0 R /I 7 0 R /J 8 0 R >>          /Shading << /S 9 0 R /T 10 0 R >> >>",
+        "q 10 0 0 10 0 0 cm /M Do /I Do /J Do Q /CS0 cs 1 sc q 10 0 0 10 0 0 cm /M Do Q          q 0 0 5 5 re W n /S sh /T sh Q",
+        &[
+            none,
+            &common::stream("/Subtype /Image /Width 1 /Height 1 /ImageMask true", " "),
+            &common::stream(
+                "/Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /CS0",
+                "a",
+            ),
+            &common::stream(
+                "/Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray",
+                "a",
+            ),
+            "<< /ShadingType 2 /ColorSpace 5 0 R /Coords [0 0 1 0] /Function << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >> >>",
+            "<< /ShadingType 2 /ColorSpace /DeviceGray /Coords [0 0 1 0] /Function << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >> >>",
+        ],
+    );
+    let file = File::open(pdf, b"").unwrap();
+    let page = file.pages().unwrap().remove(0);
+    let content = file.interpret(&page, false).unwrap();
+    let inkless: Vec<_> = content
+        .events
+        .iter()
+        .map(|e| match e {
+            Event::Image(i) => ("image", i.layer.inkless),
+            Event::Shading(s) => ("shading", s.layer.inkless),
+            _ => ("other", false),
+        })
+        .collect();
+    assert_eq!(
+        inkless,
+        [
+            ("image", false), // the mask in the gray black it was set in
+            ("image", true),  // samples in the colorant None
+            ("image", false),
+            ("image", true), // the mask in the colorant None
+            ("shading", true),
+            ("shading", false),
+        ]
     );
     assert_eq!(content.warnings, Vec::<String>::new());
 }

@@ -3,7 +3,9 @@
 What a page draws comes back as text spans, vector paths and image figures, each with its box in page space, and its
 links beside them; what the document states beside its pages -- outline, page labels, metadata, form fields, embedded
 files -- on the :class:`Document`. Pixels are the reader's only as an image's own samples (no codec is decoded):
-:func:`read_raster` takes a region that is one image whole from them, and renders any other with PyMuPDF (D4 of task
+:func:`read_raster` takes a region that is one image whole from them, and draws any other with a renderer -- PyMuPDF
+(the reference, the default) or document-lab's own (``renderer='own'``: the ``render`` crate, drawing from this
+reader's interpreter; it draws no text until its stage 2, so it refuses a region holding text -- D37 of task
 document-lab-pdf-reader); an embedded file's bytes are :func:`read_attachment`'s.
 
 What the reader refuses raises a :class:`Refused` of its kind -- :class:`NotPdf`, :class:`Locked` (the password
@@ -17,7 +19,7 @@ import math
 from collections.abc import Callable, Sequence
 from functools import partial
 from pathlib import Path
-from typing import Final, overload
+from typing import Final, Literal, overload
 
 import numpy as np
 import pymupdf
@@ -52,6 +54,7 @@ __all__ = [
     'Malformed',
     'NotPdf',
     'Refused',
+    'Renderer',
     'Unsupported',
     'read_attachment',
     'read_pdf',
@@ -75,12 +78,9 @@ _SPAN_LAYER: Final = 9
 _IMAGE_LAYER: Final = 6
 #: The text rendering mode that neither fills nor strokes (an OCR layer): text that shows nothing.
 INVISIBLE_TEXT: Final = 3
-#: Gray depths whose levels spread over 0..255 exactly (255 is a multiple of each level count less one).
-_GRAY_BITS: Final = frozenset({1, 2, 4, 8})
-#: Families whose samples are gray or RGB as they stand. An ``ICCBased`` one is the gray or RGB of its component
-#: count, its profile not applied: the crate's color model (``pdf::color::Space::Icc``) reads it so, and this follows.
-#: Exact for an sRGB profile (the IEC scans measured); a wider-gamut profile would show otherwise once rendered.
-_GRAY_OR_RGB: Final = frozenset({'DeviceGray', 'DeviceRGB', 'ICCBased'})
+
+#: What draws a region: PyMuPDF, or document-lab's own renderer (no text until its stage 2).
+Renderer = Literal['pymupdf', 'own']
 
 
 def read_pdf(
@@ -103,9 +103,9 @@ def read_pdf(
 
     ``annotations``: each page's annotations' appearances read too, after its content, each value citing its
     annotation's subtype -- off by default, as a page's text is its content's (PyMuPDF's too). Optional content the
-    file's default view hides is read either way, each value flagged ``hidden`` for the caller to keep or drop.
-    Links, the outline and the rest of what the document states beside its pages are read either way: they are
-    data, not ink.
+    file's default view hides, and what the colorant ``None`` paints, are read either way, each value flagged
+    ``hidden`` or ``inkless`` for the caller to keep or drop (`document_lab.ir`). Links, the outline and the rest of
+    what the document states beside its pages are read either way: they are data, not ink.
 
     Raises:
         ValueError: both ``flatness`` and ``curve_samples`` are given, or one is not above 0.
@@ -220,8 +220,8 @@ def _page(
         spans=tuple(_span(row, cite) for row in spans),
         paths=_paths(paths, cite),
         figures=tuple(
-            Figure(cite(bbox=box), w, h, image, hidden=hidden, annotation=annotation)
-            for box, w, h, image, _, _, (hidden, annotation) in images
+            Figure(cite(bbox=box), w, h, image, hidden=hidden, inkless=inkless, annotation=annotation)
+            for box, w, h, image, _, _, (hidden, inkless, annotation) in images
         ),
         links=tuple(
             Link(here.at(bbox=BBox(*box)), _destination(destination), _action(action))
@@ -312,7 +312,7 @@ def _attachment(row: tuple, here: Provenance) -> Attachment:
 
 
 def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
-    text, font, size, bold, box, mode, unspaced, vertical, direction, (hidden, annotation), fill = row
+    text, font, size, bold, box, mode, unspaced, vertical, direction, (hidden, _, annotation), fill = row
     return TextSpan(
         text,
         size,
@@ -348,9 +348,10 @@ def _paths(columns: tuple, cite: Callable[..., Provenance]) -> tuple[VectorPath,
             rule,
             pattern,
             hidden,
+            inkless,
             annotation,
         )
-        for stroke, width, dashes, phase, fill, rule, pattern, (hidden, annotation) in styles
+        for stroke, width, dashes, phase, fill, rule, pattern, (hidden, inkless, annotation) in styles
     ]
     out = []
     for start, end, box, shut, group in zip(
@@ -361,7 +362,7 @@ def _paths(columns: tuple, cite: Callable[..., Provenance]) -> tuple[VectorPath,
         np.frombuffer(groups, dtype=np.int64).tolist(),
         strict=True,
     ):
-        stroke, width, dashes, phase, fill, even_odd, pattern, hidden, annotation = painted[group]
+        stroke, width, dashes, phase, fill, even_odd, pattern, hidden, inkless, annotation = painted[group]
         out.append(
             VectorPath(
                 points=xy[start:end],
@@ -376,6 +377,7 @@ def _paths(columns: tuple, cite: Callable[..., Provenance]) -> tuple[VectorPath,
                 pattern=pattern,
                 group=group,
                 hidden=hidden,
+                inkless=inkless,
                 annotation=annotation,
             )
         )
@@ -397,33 +399,46 @@ def read_attachment(path: Path | str, attachment: Attachment, *, password: str =
     return bytes(reader.attachment(attachment.object))
 
 
-def read_raster(path: Path | str, page: int, bbox: BBox, *, dpi: float | None = None, password: str = '') -> Raster:
+def read_raster(
+    path: Path | str,
+    page: int,
+    bbox: BBox,
+    *,
+    dpi: float | None = None,
+    password: str = '',
+    renderer: Renderer = 'pymupdf',
+) -> Raster:
     """The region ``bbox`` of 1-based ``page`` as pixels, everything drawn there composited.
 
-    What is drawn there is what the page shows: its annotations' appearances too, nothing a hidden layer draws.
-    ``dpi`` defaults to the finest native resolution among the images shown the region overlaps, so a pixel is a
-    source pixel and none is invented; a region holding no image renders at ``VECTOR_DPI``. A region that is one image
-    whole at its native resolution, nothing else visible on it, is that image's own samples where the reader holds
-    them as the page shows them (:func:`_samples`); any other region is rendered by PyMuPDF.
+    What is drawn there is what the page shows: its annotations' appearances too, nothing a hidden layer draws, no
+    image the colorant ``None`` paints. ``dpi`` defaults to the finest native resolution among the images shown the
+    region overlaps, so a pixel is a source pixel and none is invented; a region holding no image renders at
+    ``VECTOR_DPI``. A region that is one image whole at its native resolution, nothing else visible on it, is that
+    image's own samples where the reader holds them as the page shows them (:func:`_samples`); any other region is
+    drawn by ``renderer``: PyMuPDF, or the own renderer (:func:`_drawn`).
+
+    Raises:
+        Unsupported: ``renderer='own'`` and the region holds what it does not draw yet (text, a shading, ...).
+
     """
+    if renderer not in ('pymupdf', 'own'):
+        msg = f'renderer {renderer!r}: one of pymupdf, own'
+        raise ValueError(msg)
     path = Path(path)
     data = path.read_bytes()  # rendered and cited alike: the pixels are those of the bytes hashed
     reader = _pdf.open(data, password.encode())
     spans, paths, images, _ = reader.page(page, annotations=True, curve_samples=1)
-    spans, images = _shown(spans, _SPAN_LAYER), _shown(images, _IMAGE_LAYER)
-    under = [row for row in images if _meets(row[0], bbox)]
+    spans = [row for row in spans if not row[_SPAN_LAYER][0]]  # text is text whatever its color: hidden only
+    under = [row for row in images if not any(row[_IMAGE_LAYER][:2]) and _meets(row[0], bbox)]
     if dpi is None:
         dpi = max(filter(None, map(_native, under)), default=VECTOR_DPI)
     pixels = _samples(reader, under, bbox, dpi) if _alone(spans, paths, bbox) else None
+    if pixels is None and renderer == 'own':
+        pixels = _drawn(reader, page, bbox, dpi, spans)
     if pixels is None:
         pixels = _rendered(data, page, bbox, dpi, password)
     here = Provenance(reader.sha256, file_uri(path.resolve()), page=page, bbox=bbox)
     return Raster(pixels, here)
-
-
-def _shown(rows: list, layer: int) -> list:
-    """The rows (spans or images, each holding its layer at index ``layer``) no hidden layer draws."""
-    return [row for row in rows if not row[layer][0]]
 
 
 def _meets(box: tuple[float, float, float, float], bbox: BBox) -> bool:
@@ -438,31 +453,60 @@ def _native(image: tuple) -> float:
 
 
 def _alone(spans: list, paths: tuple, bbox: BBox) -> bool:
-    """Whether no path shown and no visible text (an OCR layer is invisible) is drawn on ``bbox``.
+    """Whether no path that shows and no visible text (an OCR layer is invisible) is drawn on ``bbox``.
 
     ``paths`` are the reader's columns (``PathColumns`` in ``crates/pybind``): each subpath's box, its stroke's
-    width and its layer its painted path's. A path a hidden layer draws is not shown: it is never in the way.
+    width and its layer its painted path's. A path a hidden layer draws, or the colorant ``None`` paints, does not
+    show: it is never in the way.
     """
     _, _, boxes, _, groups, styles = paths
     widths = [width for _, width, *_ in styles]
-    shown = [not hidden for *_, (hidden, _) in styles]
+    shows = [not (hidden or inkless) for *_, (hidden, inkless, _) in styles]
     for (x0, y0, x1, y1), group in zip(
         np.frombuffer(boxes, dtype=np.float64).reshape(-1, 4).tolist(),
         np.frombuffer(groups, dtype=np.int64).tolist(),
         strict=True,
     ):
         reach = widths[group] / 2
-        if shown[group] and _meets((x0 - reach, y0 - reach, x1 + reach, y1 + reach), bbox):
+        if shows[group] and _meets((x0 - reach, y0 - reach, x1 + reach, y1 + reach), bbox):
             return False
-    return not any(mode != INVISIBLE_TEXT and _meets(box, bbox) for _, _, _, _, box, mode, *_ in spans)
+    return not _texts(spans, bbox)
+
+
+def _texts(spans: list, bbox: BBox) -> int:
+    """How many of ``spans`` (none hidden) are visible text (an OCR layer is invisible) drawn on ``bbox``."""
+    return sum(mode != INVISIBLE_TEXT and _meets(box, bbox) for _, _, _, _, box, mode, *_ in spans)
+
+
+def _drawn(reader: _pdf.Reader, page: int, bbox: BBox, dpi: float, spans: list) -> np.ndarray:
+    """``bbox`` drawn by the own renderer, refusing a region holding what it does not draw yet, by name and count."""
+    texts = _texts(spans, bbox)
+    if texts:
+        msg = (
+            f'page {page}: the own renderer draws no text until its stage 2, and the region holds {texts} span(s) of '
+            "it; render it with renderer='pymupdf'"
+        )
+        raise Unsupported(msg)
+    width, height, channels, pixels, undrawn = reader.render(
+        page, tuple(bbox), dpi / 72, text=False, annotations=True, alpha=False
+    )
+    if undrawn:
+        named = ', '.join(f'{what} x{count}' for what, count in undrawn)
+        msg = (
+            f'page {page}: the own renderer does not draw all the region holds yet: {named}; render it with '
+            "renderer='pymupdf'"
+        )
+        raise Unsupported(msg)
+    return np.frombuffer(pixels, dtype=np.uint8).reshape(height, width, channels).copy()
 
 
 def _samples(reader: _pdf.Reader, under: list, bbox: BBox, dpi: float) -> np.ndarray | None:
     """The one image under ``bbox`` as RGB rows from its own samples; None unless they are what the page shows.
 
     They are when it is placed square to the page -- turned or mirrored by quarter turns, its samples turned alike --
-    edge to edge on ``bbox`` within :data:`WHOLE_IMAGE_SLACK` of a pixel, a sample a pixel at ``dpi``, and its samples
-    are what :func:`_rgb` takes. Anything else -- skewed, part of it, resampled, an inline image -- is the renderer's.
+    edge to edge on ``bbox`` within :data:`WHOLE_IMAGE_SLACK` of a pixel, a sample a pixel at ``dpi``, and the reader
+    holds its samples as they show (``Reader.rgb``: lossless gray or RGB, or an ICC-based image through its profile).
+    Anything else -- skewed, part of it, resampled, an inline image -- is the renderer's.
     """
     if len(under) != 1:
         return None
@@ -476,37 +520,13 @@ def _samples(reader: _pdf.Reader, under: list, bbox: BBox, dpi: float) -> np.nda
     edges = (box[0] - bbox.x0, box[1] - bbox.y0, box[2] - bbox.x1, box[3] - bbox.y1)
     if any(abs(gap) > slack for gap in (*sides, *edges)):
         return None
-    rows = _rgb(reader.image(number))
-    if rows is None:
+    srgb = reader.rgb(number)
+    if srgb is None:
         return None
+    rows = np.frombuffer(srgb, dtype=np.uint8).reshape(height, width, 3)
     if turned:
         rows = rows.transpose(1, 0, 2)
     return np.array(rows[:: -1 if rows_reversed else 1, :: -1 if columns_reversed else 1])
-
-
-def _rgb(samples: tuple) -> np.ndarray | None:
-    """An image's samples as RGB rows; None unless the reader holds them as they show.
-
-    It does for lossless gray of 1, 2, 4 or 8 bits (its levels spread over 0..255) and 8-bit RGB (:data:`_GRAY_OR_RGB`),
-    unmasked, mapped as stated by default (no ``/Decode``, or ``[0 1]`` for each component), holding every row. A
-    codec, Indexed, CMYK, 16 bits, another ``/Decode`` or a mask is the renderer's.
-    """
-    width, height, space, components, bits, data, codec, decode, masked, _ = samples
-    remapped = decode is not None and decode != [0.0, 1.0] * components
-    if codec is not None or masked or remapped or space not in _GRAY_OR_RGB:
-        return None
-    if not ((components == 1 and bits in _GRAY_BITS) or (components == 3 and bits == 8)):  # noqa: PLR2004 -- RGB
-        return None
-    stride = (width * components * bits + 7) // 8  # each row ends on a whole byte
-    if len(data) < stride * height:
-        return None
-    rows = np.frombuffer(data, dtype=np.uint8, count=stride * height).reshape(height, stride)
-    if bits < 8:  # noqa: PLR2004 -- whole bytes
-        places = np.unpackbits(rows, axis=1).reshape(height, -1, bits)
-        weights = (1 << np.arange(bits - 1, -1, -1)).astype(np.uint8)
-        rows = (places * weights).sum(axis=2, dtype=np.uint8)[:, :width] * np.uint8(255 // (2**bits - 1))
-    pixels = rows[:, : width * components].reshape(height, width, components)
-    return np.repeat(pixels, 3, axis=2) if components == 1 else pixels
 
 
 def _rendered(data: bytes, page: int, bbox: BBox, dpi: float, password: str) -> np.ndarray:

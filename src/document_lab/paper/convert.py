@@ -1,4 +1,9 @@
-"""A paper PDF to markdown: marker-pdf on a GPU (the ``gpu`` extra), else document_lab's own IR on CPU.
+"""A paper PDF to markdown: document_lab's own IR by default; marker-pdf (the ``gpu`` extra) only when asked.
+
+marker is never chosen for the caller: surya 0.23, its OCR, needs a model server (vllm in Docker on an NVIDIA GPU, else
+a ``llama-server``), and marker is GPL-3.0 with model weights under a non-commercial license. Its remaining value over
+the IR path is equations as LaTeX and an ML layout, so it stays an option (``tool='marker'``) that refuses by name
+when its server is missing (D54).
 
 The IR path writes the paper without its running heads and feet (`document_lab.layout.without_running`): a journal's
 name and a page number repeated at every page's edge are no part of its text.
@@ -9,6 +14,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
 
@@ -17,82 +23,140 @@ from document_lab.markdown import Headings, headings, to_markdown
 from document_lab.pdf import read_pdf
 
 __all__ = [
-    'MARKER_MIN_VRAM_GB',
+    'MarkerUnavailable',
     'Tool',
+    'ToolChoice',
     'choose_tool',
     'convert',
-    'detect_gpu_vram_gb',
     'find_marker_single',
+    'has_nvidia_gpu',
+    'missing_surya_backend',
 ]
 
 Tool = Literal['marker', 'ir']
 
-#: marker-pdf is chosen only with at least this much VRAM; below it the CPU path is faster.
-MARKER_MIN_VRAM_GB: Final = 4.0
+#: Seconds ``docker info`` or ``nvidia-smi -L`` may take to answer.
+PROBE_S: Final = 15.0
+
+#: The device node an NVIDIA driver makes on Linux: surya's first sign of an NVIDIA GPU.
+NVIDIA_DEVICE: Final = Path('/dev/nvidia0')
 
 
-def detect_gpu_vram_gb() -> float:
-    """VRAM of the first CUDA GPU in GB, else 0.
+class MarkerUnavailable(RuntimeError):
+    """The caller asked for marker and something it needs is missing; the message names it."""
 
-    macOS returns 0: surya (marker's OCR) does not run on MPS and falls back to CPU, where the IR path is faster.
-    """
-    if sys.platform == 'darwin':
-        return 0.0
+
+@dataclass(frozen=True, slots=True)
+class ToolChoice:
+    """The converter a run uses and why."""
+
+    tool: Tool
+    why: str
+
+
+def has_nvidia_gpu() -> bool:
+    """An NVIDIA GPU is on this host, by surya's own test: the device node, else ``nvidia-smi -L`` listing one."""
+    if NVIDIA_DEVICE.exists():
+        return True
     smi = shutil.which('nvidia-smi')
     if smi is None:
-        return 0.0
+        return False
     try:
-        out = subprocess.check_output(
-            [smi, '--query-gpu=memory.total', '--format=csv,noheader,nounits'], text=True, timeout=5
-        )
-        return float(out.strip().splitlines()[0]) / 1024
-    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
-        return 0.0
+        listed = subprocess.run([smi, '-L'], capture_output=True, text=True, timeout=PROBE_S, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return listed.returncode == 0 and 'GPU' in listed.stdout
 
 
 def find_marker_single() -> str | None:
-    """The ``marker_single`` executable on PATH or beside this interpreter, else ``None``."""
-    found = shutil.which('marker_single')
-    if found:
-        return found
+    """The ``marker_single`` beside this interpreter (the ``gpu`` extra's), else the one on PATH, else ``None``.
+
+    This environment's own comes first: one on PATH may be another install (a ``uv tool``) with its own marker and
+    torch, which this package neither pins nor tests.
+    """
     name = 'marker_single.exe' if sys.platform == 'win32' else 'marker_single'
     for folder in (Path(sys.executable).parent, Path(sys.prefix) / 'bin'):
         if (folder / name).is_file():
             return str(folder / name)
+    return shutil.which('marker_single')
+
+
+def missing_surya_backend() -> str | None:
+    """Why surya, marker's OCR, has no model server on this host, else ``None``.
+
+    surya 0.23 runs its model in an inference server it picks itself: vllm on an NVIDIA GPU, which it starts as a
+    Docker container (so ``docker`` on PATH whose daemon answers), else llama.cpp's ``llama-server`` on PATH. Its own
+    settings can name another (``SURYA_INFERENCE_BACKEND``, ``SURYA_INFERENCE_URL``, ``LLAMA_CPP_BINARY``); they
+    live in the environment, which this module does not read, so this mirrors surya's default.
+    """
+    if not has_nvidia_gpu():
+        if shutil.which('llama-server') is None:
+            return (
+                "surya (marker's OCR) serves its model through llama.cpp without an NVIDIA GPU, "
+                'and llama-server is not on PATH'
+            )
+        return None
+    lead = "surya (marker's OCR) serves its model through vllm in Docker on an NVIDIA GPU"
+    docker = shutil.which('docker')
+    if docker is None:
+        return f'{lead}, and docker is not on PATH'
+    try:
+        subprocess.run([docker, 'info'], capture_output=True, timeout=PROBE_S, check=True)
+    except (OSError, subprocess.SubprocessError):
+        return f'{lead}, and the docker daemon does not answer `docker info` ({docker})'
     return None
 
 
-def choose_tool() -> Tool:
-    """Marker on a GPU with enough VRAM when it is installed, else the IR path (``ir``)."""
-    if detect_gpu_vram_gb() >= MARKER_MIN_VRAM_GB and find_marker_single():
-        return 'marker'
-    return 'ir'
+def choose_tool(tool: Tool | None = None) -> ToolChoice:
+    """The IR path unless the caller names marker, which refuses by name when its executable or server is missing.
+
+    Raises:
+        MarkerUnavailable: ``tool='marker'`` and the gpu extra or surya's model server is missing.
+
+    """
+    if tool is None:
+        return ToolChoice('ir', 'the default')
+    if tool == 'ir':
+        return ToolChoice('ir', 'asked by the caller')
+    marker = find_marker_single()
+    if marker is None:
+        msg = 'marker asked for, and marker_single is not found: install the gpu extra (document-lab[gpu])'
+        raise MarkerUnavailable(msg)
+    missing = missing_surya_backend()
+    if missing is not None:
+        msg = f'marker asked for, and {missing}'
+        raise MarkerUnavailable(msg)
+    return ToolChoice('marker', f'asked by the caller ({marker})')
 
 
 def convert(
     pdf: Path, out_dir: Path, *, tool: Tool | None = None, outline: bool = True
-) -> tuple[str, Tool, Headings | None]:
-    """The markdown of ``pdf``, the tool used (``tool``, else :func:`choose_tool`), and how its sections were headed.
+) -> tuple[str, ToolChoice, Headings | None]:
+    """The markdown of ``pdf``, its :func:`choose_tool` choice of ``tool``, and how its sections were headed.
 
     On the IR path the PDF's stated outline names the sections when it matches the pages and ``outline`` asks for it,
     else the rules infer them (`document_lab.markdown.headings`, returned for the caller to report); marker heads
     its own (None). marker's images land in ``out_dir/img/flat``; the IR path writes none (figures are cropped later).
+
+    Raises:
+        MarkerUnavailable: ``tool='marker'`` and something marker needs is missing.
+
     """
-    used = tool or choose_tool()
+    choice = choose_tool(tool)
     flat = out_dir / 'img' / 'flat'
     flat.mkdir(parents=True, exist_ok=True)
-    if used == 'marker':
-        return _run_marker(pdf, out_dir), used, None
+    if choice.tool == 'marker':
+        return _run_marker(pdf, out_dir), choice, None
     doc = layout.without_running(read_pdf(pdf))
     sections = headings(doc, outline=outline)
-    return to_markdown(doc, sections=sections), used, sections
+    return to_markdown(doc, sections=sections), choice, sections
 
 
 def _run_marker(pdf: Path, out_dir: Path) -> str:
     marker = find_marker_single()
     if marker is None:
         msg = 'marker_single not found: install the gpu extra (document-lab[gpu])'
-        raise FileNotFoundError(msg)
+        raise MarkerUnavailable(msg)
     tmp = out_dir / '_marker_tmp'
     tmp.mkdir(parents=True, exist_ok=True)
     try:

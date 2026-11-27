@@ -1,12 +1,18 @@
 """Per-section files, image routing, clutter cleanup, paper.md and INDEX.md for one paper."""
 
+from __future__ import annotations
+
 import re
 import shutil
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from document_lab.paper.render import render_equation_images, render_figure_pages
 from document_lab.paper.text import RN_PATTERN as _RN
 from document_lab.paper.text import extract_title_from_preamble, slug
+
+if TYPE_CHECKING:
+    from document_lab.pdf import Renderer
 
 #: The head of a heading-less preamble paper.md keeps as the abstract when the paper states none.
 ABSTRACT_FALLBACK_CHARS = 800
@@ -293,8 +299,9 @@ def write_paper_output(
     md_text: str,
     title_override: str | None = None,
     pdf_path: Path | None = None,
+    renderer: Renderer = 'pymupdf',
 ) -> tuple[int, int, int]:
-    """Write per-section files, paper.md, images, INDEX.md for one paper.
+    """Write per-section files, paper.md, images (rendered by ``renderer``), INDEX.md for one paper.
 
     Returns (n_sections, n_figures, n_tables).
     """
@@ -320,9 +327,11 @@ def write_paper_output(
     # Render cropped figure/table images and insert inline
     figure_images: dict[str, str] = {}
     if pdf_path and pdf_path.exists():
-        figure_images, page_section_map = render_figure_pages(pdf_path, out_dir, body_sections)
+        figure_images, page_section_map = render_figure_pages(pdf_path, out_dir, body_sections, renderer=renderer)
 
-        figure_images = render_equation_images(pdf_path, out_dir, body_sections, figure_images, page_section_map)
+        figure_images = render_equation_images(
+            pdf_path, out_dir, body_sections, figure_images, page_section_map, renderer=renderer
+        )
 
     # Clean up raw converter clutter (raw images, picture-text blocks)
     clean_all_sections(out_dir, body_sections)

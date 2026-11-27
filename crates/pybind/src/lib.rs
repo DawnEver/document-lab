@@ -4,9 +4,10 @@
 //! gives its `sha256`; its `page(number, annotations=, curve_samples=, flatness=)` returns what the page draws as
 //! tuples and columns, which `document_lab.pdf` turns into the IR, its `links(number)` the page's links, its
 //! `document()` what the document states beside its pages (outline, labels, metadata, form fields, embedded files),
-//! its `image(object)` an image's samples and its `attachment(object)` an embedded file's bytes. Pages are numbered
-//! from 1 in every row. `create(path, level)` writes a PDF of image pages, or of pages copied from a `Reader`
-//! (`document_lab.capture`), perhaps with a text layer laid over them (`document_lab.ocr`).
+//! its `render(...)` a region drawn by the own renderer (`render`), its `image(object)` an image's samples, its
+//! `rgb(object)` their sRGB where they show as they stand and its `attachment(object)` an embedded file's bytes.
+//! Pages are numbered from 1 in every row. `create(path, level)` writes a PDF of image pages, or of pages copied from
+//! a `Reader` (`document_lab.capture`), perhaps with a text layer laid over them (`document_lab.ocr`).
 //!
 //! A refusal raises by its kind: [`Refused`] and its kinds when the reader refuses the input, `ValueError` for a
 //! request it cannot honor, `OSError` when writing fails.
@@ -66,8 +67,9 @@ create_exception!(
 
 /// A box as `(x0, y0, x1, y1)`.
 type Box4 = (f64, f64, f64, f64);
-/// The layer an event is drawn in: hidden by optional content, and the subtype of the annotation drawing it.
-type LayerRow = (bool, Option<String>);
+/// The layer an event is drawn in: hidden by optional content, inkless (painted in the colorant `None`), and the
+/// subtype of the annotation drawing it.
+type LayerRow = (bool, bool, Option<String>);
 /// A span: text, font name (no subset tag), size, bold, box, render mode, the number it shares with the spans its
 /// words run on into with no space between (None: none), whether it is written vertically, the unit vector its
 /// baseline runs along (page space, y down), its layer, and its fill color (None: not filled).
@@ -237,6 +239,9 @@ enum ValueRow {
     One(String),
     Several(Vec<String>),
 }
+/// A region drawn: width, height, channels (3 RGB, 4 RGBA), the pixels rows top-down, and each kind of mark not
+/// drawn as the file states it with how many.
+type RasterRow = (u32, u32, u8, Vec<u8>, Vec<(String, usize)>);
 
 /// A PDF opened.
 #[pyclass(unsendable)]
@@ -443,6 +448,44 @@ impl Reader {
     /// The bytes of the embedded file stream `object`, every filter undone.
     fn attachment(&self, object: u32) -> PyResult<Vec<u8>> {
         self.file.embedded(object).map_err(|e| refused(&e))
+    }
+
+    /// The `region` (page space; None: the whole page) of page `number` drawn by the own renderer (`render`) at
+    /// `scale` pixels a point -- text only when `text` (refused until stage 2), annotations' appearances when
+    /// `annotations`, on transparency when `alpha` (else white): (width, height, channels, pixels, undrawn), the
+    /// pixels rows top-down, `undrawn` each kind of mark in the region not drawn as the file states it and how many.
+    #[pyo3(signature = (number, region, scale, *, text, annotations, alpha))]
+    fn render(
+        &self,
+        number: usize,
+        region: Option<Box4>,
+        scale: f64,
+        text: bool,
+        annotations: bool,
+        alpha: bool,
+    ) -> PyResult<RasterRow> {
+        let page = self.at(number)?;
+        let options = render::Options {
+            region: region.map(|(x0, y0, x1, y1)| Rect { x0, y0, x1, y1 }),
+            scale,
+            text,
+            annotations,
+            alpha,
+        };
+        let raster = render::render(&self.file, page, &options).map_err(|e| refused(&e))?;
+        Ok((
+            raster.width,
+            raster.height,
+            raster.channels,
+            raster.data,
+            raster.undrawn.into_iter().collect(),
+        ))
+    }
+
+    /// The image `XObject` `object`'s samples as 8-bit sRGB, three bytes a sample, rows top-down -- through its
+    /// profile when it has one -- when they show as they stand (`pdf::image::Samples::rgb`); None when they do not.
+    fn rgb(&self, object: u32) -> PyResult<Option<Vec<u8>>> {
+        Ok(self.file.image(object).map_err(|e| refused(&e))?.rgb())
     }
 
     /// The samples of the image `XObject` `object`.
@@ -718,13 +761,13 @@ fn field(f: Field) -> FieldRow {
 
 /// A layer as its row.
 fn layer(l: &Layer) -> LayerRow {
-    (l.hidden, l.annotation.clone())
+    (l.hidden, l.inkless, l.annotation.clone())
 }
 
 /// A pattern's kind, by name.
 fn pattern(p: Pattern) -> &'static str {
     match p {
-        Pattern::Tiling => "tiling",
+        Pattern::Tiling { .. } => "tiling",
         Pattern::Shading => "shading",
     }
 }

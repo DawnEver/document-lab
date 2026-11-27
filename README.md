@@ -6,7 +6,7 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 | module | does |
 |---|---|
 | `ir` | frozen IR: `Provenance`, `TextSpan`, `VectorPath`, `Table`/`Cell`, `Figure`, `Raster`, `Page`, `Document` |
-| `pdf` | `read_pdf(path)`: spans, vector paths, ruled tables with per-cell boxes, image figures and captions (PyMuPDF); `read_raster(path, page, bbox)`: a region's pixels at its images' native resolution |
+| `pdf` | `read_pdf(path, password=)`: spans, vector paths and image figures, each with its page and box, read by the package's own reader (`document_lab._pdf`, the Rust crate `crates/pdf`); `read_raster(path, page, bbox)`: a region's pixels at its images' native resolution (rendered by PyMuPDF) |
 | `html` | `read_html(path)`: every `<table>` as a `Table` (standard-library parser) |
 | `plot` | `plots(page)`: curves digitized from VECTOR plots (axes linear, log10, or piecewise between labeled ticks; labels as text, glyph outlines or stroke-font polylines; fragments joined; legend samples apart); a raster plot raises `RasterPlot`. `raster_plot(raster)`: one plot traced from pixels, each point with its pixel uncertainty; unreadable labels raise `UnreadableTickLabels` unless stated (`x_values=`, `y_values=`) |
 | `strokes` | thick strokes in a `Raster`: `fragments` (a morphological opening drops hairlines), `link` (dashes joined end to start along their own direction; crossing curves stay apart), `bands` (fragments to the nearest solid curve), `dots` + `split_by_dots` (a smaller opening keeps dash-dot dots; they trace the dash-dot curve, telling it from a dashed one two strokes away) |
@@ -29,7 +29,7 @@ A screen-captured standard, end to end: `capture std.pdf` -> `ocr std.pdf` -> `p
 from document_lab.pdf import read_pdf
 from document_lab.plot import plots
 
-doc = read_pdf('sheet.pdf', tables=False)
+doc = read_pdf('sheet.pdf')
 for page in doc.pages:
     for plot in plots(page):  # x_scale= / y_scale= force 'linear' or 'log10'
         for curve in plot.curves:
@@ -139,7 +139,7 @@ a PDF already captured is kept (`--overwrite` takes it again); `--ocr` lays a te
 is named at the end, and the run goes on to the next.
 
 Any length: frames only move down, so every stitched row above the current view is final and is written at once --
-PDF pages as they fill (saved incrementally), the PNG compressed as it grows -- and a capture holds about one view in
+PDF pages as they fill (each written to the file as it is cut), the PNG compressed as it grows -- and a capture holds about one view in
 memory however long the page (`--page-height 0`, one page, is the exception: it is held whole). Both files are written
 as `<name>.part` and renamed into place when the capture ends, however it ends, so a reader never sees half a file.
 Everything runs in one thread, in order -- grab, scroll, stitch, write -- so nothing races. In Python:

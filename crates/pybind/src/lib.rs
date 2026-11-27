@@ -1,12 +1,18 @@
 //! `document_lab._pdf`: the `pdf` crate, exposed to Python as plain values -- no PDF logic of its own.
 //!
 //! `open(data, password)` reads a file; its `page(number, curve_samples)` returns what the page draws as tuples,
-//! which `document_lab.pdf` turns into the IR.
+//! which `document_lab.pdf` turns into the IR, and its `image(object)` an image's samples. `create(path)` writes a
+//! PDF of image pages, or of pages copied from a `Reader` (`document_lab.capture`).
+
+use std::fs;
+use std::io::BufWriter;
+use std::path::PathBuf;
 
 use pdf::color::Color;
 use pdf::geometry::{Point, Rect};
 use pdf::interpret::{Event, PathEvent, Segment};
-use pyo3::exceptions::PyValueError;
+use pdf::writer::Image;
+use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
 
 /// A box as `(x0, y0, x1, y1)`.
@@ -30,6 +36,17 @@ type PathRow = (
 type ImageRow = (Box4, i64, i64, Option<u32>);
 /// What a page draws: spans, paths, images, warnings.
 type PageRows = (Vec<SpanRow>, Vec<PathRow>, Vec<ImageRow>, Vec<String>);
+/// An image's samples: width, height, color space family (None: a stencil mask), components, bits per component,
+/// the data after every lossless filter, and the image codec it is still in (None: raw samples).
+type SamplesRow = (
+    i64,
+    i64,
+    Option<String>,
+    usize,
+    i64,
+    Vec<u8>,
+    Option<String>,
+);
 
 /// A PDF opened.
 #[pyclass(unsendable)]
@@ -41,9 +58,8 @@ struct Reader {
 /// Open the PDF `data` with `password` (empty: none).
 #[pyfunction]
 fn open(data: Vec<u8>, password: &[u8]) -> PyResult<Reader> {
-    let refuse = |e: pdf::Error| PyValueError::new_err(e.to_string());
-    let file = pdf::File::open(data, password).map_err(refuse)?;
-    let pages = file.pages().map_err(refuse)?;
+    let file = pdf::File::open(data, password).map_err(|e| refused(&e))?;
+    let pages = file.pages().map_err(|e| refused(&e))?;
     Ok(Reader { file, pages })
 }
 
@@ -67,14 +83,8 @@ impl Reader {
     /// What page `number` (1-based) draws: (spans, paths, images, warnings); each curve flattened to
     /// `curve_samples` points.
     fn page(&self, number: usize, curve_samples: usize) -> PyResult<PageRows> {
-        let page = number
-            .checked_sub(1)
-            .and_then(|i| self.pages.get(i))
-            .ok_or_else(|| PyValueError::new_err(format!("no page {number}")))?;
-        let content = self
-            .file
-            .interpret(page)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let page = self.at(number)?;
+        let content = self.file.interpret(page).map_err(|e| refused(&e))?;
         let spans = pdf::spans::spans(&content.events)
             .into_iter()
             .map(|s| {
@@ -106,6 +116,126 @@ impl Reader {
             }
         }
         Ok((spans, paths, images, content.warnings))
+    }
+
+    /// The samples of the image `XObject` `object`.
+    fn image(&self, object: u32) -> PyResult<SamplesRow> {
+        let samples = self.file.image(object).map_err(|e| refused(&e))?;
+        let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+        Ok((
+            samples.width,
+            samples.height,
+            samples.space.as_ref().map(|s| text(&s.family())),
+            samples
+                .space
+                .as_ref()
+                .map_or(1, pdf::color::Space::components),
+            samples.bits,
+            samples.data,
+            samples.codec.map(|c| text(&c.name)),
+        ))
+    }
+}
+
+/// A PDF being written, page by page, to a file.
+#[pyclass(unsendable)]
+struct Writer {
+    /// None once closed.
+    inner: Option<pdf::writer::Writer<BufWriter<fs::File>>>,
+}
+
+/// Start a PDF at `path` (created, or emptied).
+#[pyfunction]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "pyo3 hands a path over owned"
+)]
+fn create(path: PathBuf) -> PyResult<Writer> {
+    let file = fs::File::create(&path)
+        .map_err(|e| PyOSError::new_err(format!("{}: {e}", path.display())))?;
+    let inner = pdf::writer::Writer::new(BufWriter::new(file)).map_err(|e| refused(&e))?;
+    Ok(Writer { inner: Some(inner) })
+}
+
+fn refused(e: &pdf::Error) -> PyErr {
+    PyValueError::new_err(e.to_string())
+}
+
+#[pymethods]
+impl Writer {
+    /// How many pages were added.
+    #[getter]
+    fn pages(&self) -> usize {
+        self.inner.as_ref().map_or(0, pdf::writer::Writer::pages)
+    }
+
+    /// Add a page `page_width` x `page_height` points showing an image over all of it: `width` x `height` samples
+    /// in `space` (`DeviceGray`, `DeviceRGB`, `DeviceCMYK`), `bits` a component, `data` as stored, encoded with
+    /// `filter` (None: raw).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "an image's every stored attribute, each a plain value"
+    )]
+    #[pyo3(signature = (width, height, space, bits, filter, data, page_width, page_height))]
+    fn image_page(
+        &mut self,
+        width: u32,
+        height: u32,
+        space: &str,
+        bits: u8,
+        filter: Option<&str>,
+        data: &[u8],
+        page_width: f64,
+        page_height: f64,
+    ) -> PyResult<()> {
+        let image = Image {
+            width,
+            height,
+            space: space.as_bytes(),
+            bits,
+            filter: filter.map(str::as_bytes),
+            data,
+        };
+        self.open()?
+            .image_page(&image, (page_width, page_height))
+            .map_err(|e| refused(&e))
+    }
+
+    /// Add page `number` (1-based) of `reader` as the next page, with everything it draws.
+    fn copy_page(&mut self, reader: &Reader, number: usize) -> PyResult<()> {
+        let page = reader.at(number)?;
+        self.open()?
+            .copy_page(&reader.file, page)
+            .map_err(|e| refused(&e))
+    }
+
+    /// Finish the file: its page tree and cross-reference table; the pages written. Closing twice is refused.
+    fn close(&mut self) -> PyResult<usize> {
+        let writer = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("the PDF is closed"))?;
+        let pages = writer.pages();
+        writer.finish().map_err(|e| refused(&e))?;
+        Ok(pages)
+    }
+}
+
+impl Writer {
+    fn open(&mut self) -> PyResult<&mut pdf::writer::Writer<BufWriter<fs::File>>> {
+        self.inner
+            .as_mut()
+            .ok_or_else(|| PyValueError::new_err("the PDF is closed"))
+    }
+}
+
+impl Reader {
+    /// Page `number`, 1-based.
+    fn at(&self, number: usize) -> PyResult<&pdf::Page> {
+        number
+            .checked_sub(1)
+            .and_then(|i| self.pages.get(i))
+            .ok_or_else(|| PyValueError::new_err(format!("no page {number}")))
     }
 }
 
@@ -182,5 +312,7 @@ fn extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     module.add_function(wrap_pyfunction!(open, module)?)?;
     module.add_class::<Reader>()?;
+    module.add_function(wrap_pyfunction!(create, module)?)?;
+    module.add_class::<Writer>()?;
     Ok(())
 }

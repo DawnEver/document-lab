@@ -664,15 +664,12 @@ def _resumable(args: argparse.Namespace) -> Callable[[Window | Region, Region], 
         return _no_reason
 
     def refuse(target: Window | Region, area: Region) -> str | Region | None:
-        import pymupdf  # noqa: PLC0415
-
         from document_lab.capture import desktop  # noqa: PLC0415
         from document_lab.capture.join import tail_rows, width  # noqa: PLC0415
         from document_lab.capture.stitch import NoOverlap, Unstitchable, drift  # noqa: PLC0415
 
         name = args.resume.name
-        with pymupdf.open(args.resume) as doc:
-            wide = width(doc)
+        wide = width(args.resume)
         given = area
         if abs(area.width - wide) > args.width_tolerance:
             return f'The area is {area.width} px wide and {name} {wide} px: Adjust it to {wide} px, then Start.'

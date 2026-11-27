@@ -20,7 +20,7 @@ __all__ = [
     'find_marker_single',
 ]
 
-Tool = Literal['marker', 'pymupdf']
+Tool = Literal['marker', 'ir']
 
 #: marker-pdf is chosen only with at least this much VRAM; below it the CPU path is faster.
 MARKER_MIN_VRAM_GB: Final = 4.0
@@ -58,10 +58,10 @@ def find_marker_single() -> str | None:
 
 
 def choose_tool() -> Tool:
-    """Marker on a GPU with enough VRAM when it is installed, else the IR path (``pymupdf``)."""
+    """Marker on a GPU with enough VRAM when it is installed, else the IR path (``ir``)."""
     if detect_gpu_vram_gb() >= MARKER_MIN_VRAM_GB and find_marker_single():
         return 'marker'
-    return 'pymupdf'
+    return 'ir'
 
 
 def convert(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> tuple[str, Tool]:

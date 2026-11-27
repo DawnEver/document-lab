@@ -37,7 +37,7 @@ def _parser() -> argparse.ArgumentParser:
     paper = sub.add_parser('paper', help='a paper PDF to per-section markdown and cropped figures')
     paper.add_argument('pdf', type=Path)
     paper.add_argument('out', type=Path, help='the directory to write the paper layout into')
-    paper.add_argument('--tool', choices=('marker', 'pymupdf'), help='force a converter (default: best available)')
+    paper.add_argument('--tool', choices=('marker', 'ir'), help='force a converter (default: best available)')
     return parser
 
 

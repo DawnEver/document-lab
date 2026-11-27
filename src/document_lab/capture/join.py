@@ -8,17 +8,21 @@ first's tail by `document_lab.capture.stitch.drift`: a page that moved sideways 
 its side bar changed) is found with how far, and the second's pages are redrawn moved back in line. Two that share
 nothing, or fit more than one place, are refused -- never butted together -- and two of different widths before
 anything is read.
+
+A capture is read and written by `document_lab._pdf`: each page holds one image of 8-bit gray or RGB samples, stored
+losslessly; any other page is refused, naming what it holds.
 """
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 import numpy as np
-import pymupdf
 
-from document_lab.capture.export import check_page
+from document_lab import _pdf
+from document_lab.capture.export import check_page, image_page
 from document_lab.capture.stitch import AmbiguousOverlap, Match, NoOverlap, drift, shifted
 
 if TYPE_CHECKING:
@@ -29,6 +33,7 @@ __all__ = ['HEAD_ROWS', 'JOIN_TOLERANCE', 'Joined', 'join', 'tail_rows', 'width'
 JOIN_TOLERANCE: Final = Match.tolerance  # once aligned sideways, a reopened page matches as closely (0.06, measured)
 HEAD_ROWS: Final = 1000  # rows of the second capture's start looked for in the first: enough to be told apart
 _REACH: Final = 3  # the first's tail searched: this many times the head, so the second may start well before its end
+_CURVE_SAMPLES: Final = 1  # a capture's page draws no curve worth reading: its paths are not looked at
 
 
 @dataclass(frozen=True)
@@ -44,52 +49,94 @@ class Joined:
     shift: int = 0
 
 
-def _image(page: pymupdf.Page) -> pymupdf.Pixmap:
-    ((xref, *_), *_) = page.get_images()
-    pix = pymupdf.Pixmap(page.parent, xref)
-    return pymupdf.Pixmap(pix, 0) if pix.alpha else pix
+@dataclass(frozen=True)
+class _Image:
+    """A capture page's image: its object, its size in samples, and the page's width in points."""
+
+    object: int
+    width: int
+    height: int
+    page_width: float
 
 
-def _rows(page: pymupdf.Page) -> np.ndarray:
-    pix = _image(page)
-    return np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)[..., :3]
+class _Capture:
+    """A capture PDF, read: each page's one image, found when first asked for, and its rows."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.reader = _pdf.open(path.read_bytes(), b'')
+        self.count = len(self.reader.pages)
+        self._images: dict[int, _Image] = {}
+
+    def image(self, index: int) -> _Image:
+        """Page ``index``'s (0-based) image; refused unless the page holds exactly one."""
+        if index not in self._images:
+            number, page_width, _ = self.reader.pages[index]
+            _, _, placed, _ = self.reader.page(number, _CURVE_SAMPLES)
+            if len(placed) != 1 or placed[0][3] is None:
+                msg = f'page {number} of {self.path.name} holds {len(placed)} image(s), not one: it is no capture'
+                raise ValueError(msg)
+            _, width, height, obj = placed[0]
+            self._images[index] = _Image(obj, width, height, page_width)
+        return self._images[index]
+
+    @property
+    def width(self) -> int:
+        """The pixel width: the first page's image's."""
+        return self.image(0).width
+
+    def heights(self) -> list[int]:
+        """Each page's rows."""
+        return [self.image(i).height for i in range(self.count)]
+
+    def rows(self, index: int) -> np.ndarray:
+        """Page ``index``'s pixels, ``(h, w, 3)`` uint8."""
+        width, height, space, components, bits, data, codec = self.reader.image(self.image(index).object)
+        if codec is not None or bits != 8 or components not in {1, 3}:  # noqa: PLR2004 -- 8-bit samples
+            msg = (
+                f'page {index + 1} of {self.path.name} is a {space} image of {components} x {bits}-bit samples'
+                f'{f" in {codec}" if codec else ""}: a capture is 8-bit gray or RGB, stored losslessly'
+            )
+            raise ValueError(msg)
+        pixels = np.frombuffer(data, dtype=np.uint8)[: width * height * components].reshape(height, width, components)
+        return np.repeat(pixels, 3, axis=2) if components == 1 else pixels
+
+    def dpi(self, index: int) -> float:
+        """The pixels to the inch page ``index`` is laid out at."""
+        image = self.image(index)
+        return image.width * 72 / image.page_width
 
 
-def _heights(doc: pymupdf.Document) -> list[int]:
-    return [page.get_images()[0][3] for page in doc]
+def width(path: Path) -> int:
+    """The pixel width of the capture at ``path``: its first page's image's."""
+    return _Capture(path).width
 
 
-def width(doc: pymupdf.Document) -> int:
-    """The pixel width of a capture: its first page's image's."""
-    return doc[0].get_images()[0][2]
-
-
-def _tail(doc: pymupdf.Document, least: int) -> tuple[int, np.ndarray]:
+def _tail(doc: _Capture, least: int) -> tuple[int, np.ndarray]:
     """The last pages of ``doc`` holding at least ``least`` rows (all, if fewer): how many, and their rows."""
-    heights, count, rows = _heights(doc), 0, 0
+    heights, count, rows = doc.heights(), 0, 0
     while count < len(heights) and rows < least:
         count += 1
         rows += heights[-count]
-    return count, np.concatenate([_rows(doc[i]) for i in range(len(heights) - count, len(heights))])
+    return count, np.concatenate([doc.rows(i) for i in range(len(heights) - count, len(heights))])
 
 
 def tail_rows(path: Path, least: int) -> np.ndarray:
     """The rows of the last whole pages of the capture at ``path`` that hold at least ``least`` rows."""
-    with pymupdf.open(path) as doc:
-        return _tail(doc, least)[1]
+    return _tail(_Capture(path), least)[1]
 
 
-def _head(doc: pymupdf.Document, rows: int) -> np.ndarray:
+def _head(doc: _Capture, rows: int) -> np.ndarray:
     parts, held = [], 0
-    for page in doc:
+    for index in range(doc.count):
         if held >= rows:
             break
-        parts.append(_rows(page))
+        parts.append(doc.rows(index))
         held += len(parts[-1])
     return np.concatenate(parts)[:rows]
 
 
-def _found(doc: pymupdf.Document, frame: np.ndarray, match: Match) -> tuple[int, np.ndarray, int, int]:
+def _found(doc: _Capture, frame: np.ndarray, match: Match) -> tuple[int, np.ndarray, int, int]:
     """Where ``frame`` starts in the end of ``doc``: the tail pages searched, their rows, the row, the sideways shift.
 
     The search starts :data:`_REACH` frames back and doubles until it holds the whole document, so a second capture
@@ -101,17 +148,17 @@ def _found(doc: pymupdf.Document, frame: np.ndarray, match: Match) -> tuple[int,
         try:
             return count, tail, *drift(tail, frame, match)
         except NoOverlap:
-            if count == doc.page_count:
+            if count == doc.count:
                 raise
             least *= 2
 
 
-def _placed(a: pymupdf.Document, b: pymupdf.Document, head: int, match: Match) -> tuple[int, np.ndarray, int, int]:
+def _placed(a: _Capture, b: _Capture, head: int, match: Match) -> tuple[int, np.ndarray, int, int]:
     """Where ``b`` starts in the end of ``a`` (as :func:`_found`), its head doubled while it fits more than one place.
 
     A short head of a standard -- a recurring page header, white space -- fits many places; a longer one fits one.
     """
-    whole = sum(_heights(b))
+    whole = sum(b.heights())
     while True:
         try:
             return _found(a, _head(b, head), match)
@@ -121,33 +168,33 @@ def _placed(a: pymupdf.Document, b: pymupdf.Document, head: int, match: Match) -
             head *= 2
 
 
-def _seam(out: pymupdf.Document, rows: np.ndarray, page_height: int, dpi: float) -> None:
+def _seam(out: _pdf.Writer, rows: np.ndarray, page_height: int, dpi: float) -> None:
     """``rows`` onto new pages of ``out``, ``page_height`` rows each, the last shorter."""
     for top in range(0, len(rows), page_height):
-        part = np.ascontiguousarray(rows[top : top + page_height])
-        pix = pymupdf.Pixmap(pymupdf.csRGB, part.shape[1], len(part), part.tobytes(), 0)
-        rect = pymupdf.Rect(0, 0, pix.width * 72 / dpi, pix.height * 72 / dpi)
-        out.new_page(width=rect.width, height=rect.height).insert_image(rect, pixmap=pix)
+        image_page(out, rows[top : top + page_height], dpi)
 
 
-def _second(joined: pymupdf.Document, b: pymupdf.Document, cut: int, dx: int, dpi: float) -> None:
+def _second(joined: _pdf.Writer, b: _Capture, cut: int, dx: int, dpi: float) -> None:
     """``b`` from its row ``cut`` onto ``joined``.
 
     The page holding the cut is redrawn from there and the rest copied -- or, ``dx`` not 0, every page is redrawn,
     moved ``dx`` columns back in line with the first capture.
     """
     start = 0
-    for number, page in enumerate(b):
-        height = page.get_images()[0][3]
+    for index, height in enumerate(b.heights()):
         if start + height <= cut:
             start += height
             continue
         if dx or start < cut:
-            rows = _rows(page)[max(cut - start, 0) :]
-            _seam(joined, shifted(rows, dx), height, dpi)
+            _seam(joined, shifted(b.rows(index)[max(cut - start, 0) :], dx), height, dpi)
         else:
-            joined.insert_pdf(b, from_page=number, to_page=number)
+            joined.copy_page(b.reader, index + 1)
         start += height
+
+
+def _copy(joined: _pdf.Writer, doc: _Capture, pages: int) -> None:
+    for number in range(1, pages + 1):
+        joined.copy_page(doc.reader, number)
 
 
 def join(
@@ -162,30 +209,33 @@ def join(
 
     ``out`` may be ``first`` itself: it is written beside as ``<out>.part`` and moved into place only when whole.
     """
-    with pymupdf.open(first) as a, pymupdf.open(second) as b:
-        if width(a) != width(b):
-            msg = f'the captures are {width(a)} and {width(b)} px wide: only captures of one area join'
-            raise ValueError(msg)
-        count, tail, top, dx = _placed(a, b, head, match)
-        whole = sum(_heights(b))
-        joined = pymupdf.open()
+    a, b = _Capture(first), _Capture(second)
+    if a.width != b.width:
+        msg = f'the captures are {a.width} and {b.width} px wide: only captures of one area join'
+        raise ValueError(msg)
+    count, tail, top, dx = _placed(a, b, head, match)
+    whole = sum(b.heights())
+    part = out.with_name(out.name + '.part')
+    joined = _pdf.create(part)
+    try:
         if top + whole <= len(tail):  # the second shows nothing the first does not
-            joined.insert_pdf(a)
+            _copy(joined, a, a.count)
             shared, count = whole, 0
         else:
-            keep = a.page_count - count
-            if keep:
-                joined.insert_pdf(a, to_page=keep - 1)
-            seam = a[keep]
-            dpi = _image(seam).width * 72 / seam.rect.width
-            page_height = _heights(a)[0]
-            check_page(width(a), page_height, dpi)
+            keep = a.count - count
+            _copy(joined, a, keep)
+            dpi = a.dpi(keep)
+            page_height = a.image(0).height
+            check_page(a.width, page_height, dpi)
             shared = len(tail) - top
             cut = shared // 2  # mid-overlap: each capture's edge rows (a window border caught) left out
             _seam(joined, tail[: top + cut], page_height, dpi)
             _second(joined, b, cut, dx, dpi)
-        part = out.with_name(out.name + '.part')
-        joined.save(part, deflate=True)
         joined.close()
+    except BaseException:
+        with contextlib.suppress(ValueError):  # closed already: the failure came after
+            joined.close()
+        part.unlink(missing_ok=True)
+        raise
     part.replace(out)
     return Joined(out, shared, count, dx)

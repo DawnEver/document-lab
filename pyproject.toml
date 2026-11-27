@@ -12,7 +12,8 @@ description = "Documents (PDF, HTML tables) to typed data that carries its prove
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "Mingyang Bao" }]
-# PyMuPDF reads the PDF (text, vector drawings, tables, images); numpy carries the digitised curves.
+# The package's own Rust crate (`document_lab._pdf`) reads PDFs and writes captures; PyMuPDF renders a region to
+# pixels and lays the OCR layer; numpy carries the digitised curves.
 # lab-commons supplies what the family already owns: the output location and logging.
 dependencies = [
     "lab-commons[paths] @ git+https://github.com/DawnEver/lab-commons.git",
@@ -28,8 +29,8 @@ gpu = ["marker-pdf"]
 # Values a model reads out of a document (`document_lab.ai`), through the family's one model interface.
 ai = ["ai_lab @ git+https://github.com/DawnEver/ai-lab.git"]
 # `document_lab.capture` / `document-lab capture`: a window or screen region, scrolled and stitched, to a PDF. Windows
-# only, and it needs nothing beyond the base: ctypes drives the desktop, tkinter draws the region overlay, PyMuPDF
-# writes the PDF. The extra names the capability so a consumer can depend on it explicitly.
+# only, and it needs nothing beyond the base: ctypes drives the desktop, tkinter draws the region overlay, the
+# package's own writer (`document_lab._pdf`) writes the PDF. The extra names the capability so a consumer can depend on it explicitly.
 capture = []
 # The family's development kit: rules registry, rendered configs, shared test bodies, verify entry.
 dev = [

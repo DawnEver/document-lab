@@ -18,6 +18,13 @@ from document_lab.capture import cli as capture_cli
 
 __all__ = ['main']
 
+#: `--renderer`: what draws a page or region's pixels (`document_lab.pdf.read_raster`).
+_RENDERER = {
+    'choices': ('pymupdf', 'own'),
+    'default': 'pymupdf',
+    'help': "what draws the pictures: pymupdf (default) or own (document-lab's renderer: no text until its stage 2)",
+}
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog='document-lab', description=__doc__)
@@ -51,6 +58,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     pages.add_argument('pdf', type=Path)
     pages.add_argument('out', type=Path, help='the directory to write the pages into, or a .zip archive')
+    pages.add_argument('--renderer', **_RENDERER)
     _formulas_option(pages)
     paper = sub.add_parser('paper', help='a paper PDF to per-section markdown and cropped figures')
     paper.add_argument('pdf', type=Path)
@@ -60,6 +68,7 @@ def _parser() -> argparse.ArgumentParser:
         choices=('marker', 'ir'),
         help="the converter (default: ir; marker needs the gpu extra and surya's model server, and refuses without)",
     )
+    paper.add_argument('--renderer', **_RENDERER)
     _formulas_option(paper)
     return parser
 
@@ -100,7 +109,7 @@ def _pages(args: argparse.Namespace) -> int:
     from document_lab.per_page import write_pages  # noqa: PLC0415
 
     try:
-        done = write_pages(args.pdf, args.out, formulas=args.formulas)
+        done = write_pages(args.pdf, args.out, renderer=args.renderer, formulas=args.formulas)
     except FormulaUnavailable as refused:
         return _refused(refused)
     emit(f'{done.out}: {done.pages} page(s)')
@@ -120,7 +129,7 @@ def _paper(args: argparse.Namespace) -> int:
     from document_lab.paper.ingest import ingest  # noqa: PLC0415
 
     try:
-        done = ingest(args.pdf, args.out, tool=args.tool, formulas=args.formulas)
+        done = ingest(args.pdf, args.out, tool=args.tool, renderer=args.renderer, formulas=args.formulas)
     except (MarkerUnavailable, FormulaUnavailable) as refused:
         return _refused(refused)
     emit(

@@ -16,8 +16,9 @@ wrong CIDs for one-byte codes, measuring them full-width (0.9914: a known defect
 up to 0.06 pt along a justified line, which ours end on its margin to 0.005 pt -- and 99.82 % cut PyMuPDF's baseline
 within 0.01 of their font's share; a document's spans off either way are 8 % at most (an OCR text layer of
 overlapping runs; synthetic-oblique symbols, whose sheared boxes the two bound apart), 9.6 % for the CJK one. Of
-590,099 painted paths compared 4 go unmatched (one figure, 4 of a paper's 281) and PyMuPDF draws 1 fill or stroke
-we do not report. The plants are reported on every document: shifted 2 pt, 86 % of a document's spans or more stand
+590,099 painted paths compared 4 went unmatched -- one figure's TikZ hatch fills, tinted tiling patterns no longer
+compared (2026-11-27, 111 of those PDFs: 0 of 592,470 unmatched) -- and PyMuPDF draws 1 fill or stroke we do not
+report. The plants are reported on every document: shifted 2 pt, 86 % of a document's spans or more stand
 off and 34 % of its paths or more go unmatched (a mesh of 2 pt cells matches itself); risen 1 pt, 20 % of a
 document's spans or more stand off their baseline; turned, 12 % of its paths or more go unmatched.
 """

@@ -19,7 +19,7 @@ def _page(tmp_path, draw):
     draw(page)
     doc.save(tmp_path / 'r.pdf')
     read = read_pdf(tmp_path / 'r.pdf')
-    return read.pages[0], layout.body_size(read)
+    return read.pages[0], layout.body_face(read)
 
 
 def _text(page, y, text, *, x=50, size=10, ocr=False):
@@ -65,9 +65,9 @@ def test_a_table_runs_from_its_caption_down_to_the_prose_after_it(tmp_path):
 def test_an_equation_is_its_number_and_the_noise_beside_it_between_prose(tmp_path):
     def draw(page):
         _text(page, 100, PROSE)
-        _text(page, 160, 'U,=qW,+a, +220]', x=230, size=20)
-        _text(page, 162, '(A.1)', x=520)
-        _text(page, 185, '1/. +0U,', x=260, size=14)
+        _text(page, 160, 'U,=qW,+a, +220]', x=230, size=20, ocr=True)
+        _text(page, 162, '(A.1)', x=520, ocr=True)
+        _text(page, 185, '1/. +0U,', x=260, size=14, ocr=True)
         _text(page, 240, PROSE)
 
     found = regions(*_page(tmp_path, draw))
@@ -197,8 +197,8 @@ def test_a_ruled_table_of_two_columns_its_words_unread_is_a_table(tmp_path):
         _text(page, 100, PROSE)
         _text(page, 300, PROSE)
 
-    page, body = _page(tmp_path, draw)
-    found = regions(page, body, [_drawn((150, 150, 440, 230), rules=(3, 3), loose=6)])
+    page, face = _page(tmp_path, draw)
+    found = regions(page, face, [_drawn((150, 150, 440, 230), rules=(3, 3), loose=6)])
     assert [(r.kind, r.label) for r in found] == [('table', 'Untitled table 1')]
 
 
@@ -207,14 +207,14 @@ def test_a_frame_round_a_lines_words_a_margin_note_and_a_short_line_are_no_regio
         _text(page, 100, PROSE)
         _text(page, 200, 'IEC 60034-18-41 applies', x=60)
 
-    page, body = _page(tmp_path, draw)
+    page, face = _page(tmp_path, draw)
     link = _drawn((55, 190, 150, 204), rules=(2, 2))  # a link's frame round words of the line
     margin = _drawn((5, 100, 20, 700))  # a sideways license note beside the text column
     rule = _drawn((50, 400, 500, 401))  # a rule under a header
     words = _drawn((60, 500, 120, 540), stroke=8)  # words OCR missed: glyphs, no drawn line
     # a link's frame just before the line, its words unread: under three of its line's heights (10 pt Helvetica: 9.25)
     beside = _drawn((42, 190, 58, 216))
-    assert regions(page, body, [link, margin, rule, words, beside]) == []
+    assert regions(page, face, [link, margin, rule, words, beside]) == []
 
 
 def test_a_drawings_views_side_by_side_are_one_figure_and_prose_parts_two(tmp_path):
@@ -222,10 +222,10 @@ def test_a_drawings_views_side_by_side_are_one_figure_and_prose_parts_two(tmp_pa
         _text(page, 100, PROSE)
         _text(page, 420, PROSE)
 
-    page, body = _page(tmp_path, draw)
+    page, face = _page(tmp_path, draw)
     left, right = _drawn((80, 150, 220, 380)), _drawn((300, 160, 460, 390))
     below = _drawn((80, 450, 460, 650))
-    found = regions(page, body, [left, right, below])
+    found = regions(page, face, [left, right, below])
     assert [(r.kind, r.label) for r in found] == [('figure', 'Untitled figure 1'), ('figure', 'Untitled figure 2')]
     assert found[0].bbox.x0 < 80 and found[0].bbox.x1 > 460 and found[0].bbox.y1 < 420
 
@@ -236,8 +236,8 @@ def test_a_short_drawing_with_no_word_in_it_is_an_equation_without_a_number(tmp_
         _text(page, 160, 'he = h - d1 - d2', x=200)  # a formula, OCR'd, beside its fraction bars
         _text(page, 260, PROSE)
 
-    page, body = _page(tmp_path, draw)
-    found = regions(page, body, [_drawn((180, 145, 420, 175), stroke=60)])  # three lines high, under four
+    page, face = _page(tmp_path, draw)
+    found = regions(page, face, [_drawn((180, 145, 420, 175), stroke=60)])  # three lines high, under four
     assert [(r.kind, r.label) for r in found] == [('equation', 'Untitled equation 1')]
 
 
@@ -249,10 +249,10 @@ def test_what_a_hidden_layer_draws_is_no_region_unless_asked(tmp_path):
         _text(page, 360, 'Figure 2 - Short-time duty', x=200)
         _text(page, 420, PROSE)
 
-    page, body = _page(tmp_path, draw)
+    page, face = _page(tmp_path, draw)
     hidden = hidden_layer(page)
-    assert regions(hidden, body) == []
-    assert regions(hidden, body, include_hidden=True) == regions(page, body) != []
+    assert regions(hidden, face) == []
+    assert regions(hidden, face, include_hidden=True) == regions(page, face) != []
 
 
 def test_a_region_the_page_edge_leaves_no_room_for_is_none(tmp_path):
@@ -264,7 +264,7 @@ def test_a_region_the_page_edge_leaves_no_room_for_is_none(tmp_path):
     _text(page, 307, 'Figure 3 - At the foot')
     doc.save(tmp_path / 'r.pdf')
     read = read_pdf(tmp_path / 'r.pdf')
-    assert regions(read.pages[0], layout.body_size(read)) == []
+    assert regions(read.pages[0], layout.body_face(read)) == []
 
 
 def test_a_short_drawing_without_math_in_it_is_a_figure_not_an_equation(tmp_path):
@@ -276,9 +276,9 @@ def test_a_short_drawing_without_math_in_it_is_a_figure_not_an_equation(tmp_path
         _text(page, 470, 'TDK', x=330, size=14)  # brand text set inside the second logo
         _text(page, 600, PROSE)
 
-    page, body = _page(tmp_path, draw)
+    page, face = _page(tmp_path, draw)
     logo, branded = _drawn((300, 150, 420, 176), stroke=30), _drawn((300, 450, 420, 480), stroke=30)
-    found = regions(page, body, [logo, branded])
+    found = regions(page, face, [logo, branded])
     assert [(r.kind, r.label) for r in found] == [('figure', 'Untitled figure 1'), ('figure', 'Untitled figure 2')]
 
 
@@ -299,13 +299,13 @@ def _data_sheet_drawings(page):
 def test_drawings_under_their_own_titles_and_apart_are_separate_figures(tmp_path):
     """ACT1210 page 3: a dimensional drawing (two views touching), a layout beside it under its own title, a circuit
     below, a blister tape (two parts close together) and a reel (two views) under theirs -- once one figure."""
-    page, body = _page(tmp_path, _data_sheet_drawings)
+    page, face = _page(tmp_path, _data_sheet_drawings)
     views = [_drawn((36.9, 119.0, 159.8, 263.4)), _drawn((139.6, 119.0, 229.8, 213.0))]
     layout_ = _drawn((313.3, 119.0, 419.9, 212.6))
     circuit = _drawn((42.7, 315.3, 122.4, 382.4), stroke=19.7)  # its longest line: a pin to its coil
     tape = [_drawn((124.3, 442.4, 293.7, 610.8)), _drawn((45.6, 490.4, 105.1, 571.5))]
     reel = [_drawn((434.3, 442.9, 514.9, 586.4)), _drawn((359.9, 447.2, 416.0, 573.4))]
-    found = regions(page, body, [*views, layout_, circuit, *tape, *reel])
+    found = regions(page, face, [*views, layout_, circuit, *tape, *reel])
     assert [r.kind for r in found] == ['figure'] * 5
 
     def holding(*parts):
@@ -352,8 +352,8 @@ def test_rows_ruled_apart_with_text_are_a_table_a_striped_icon_without_text_is_n
             _text(page, y, 'Measured with a meter of the class stated at the rated frequency, 20 C.', x=160)
         _text(page, 400, PROSE)
 
-    page, body = _page(tmp_path, draw)
+    page, face = _page(tmp_path, draw)
     ruled = _drawn((48, 148, 470, 206), rules=(4, 1), loose=1)
     icon = _drawn((200, 260, 260, 320), rules=(5, 0), loose=8)
-    found = regions(page, body, [ruled, icon])
+    found = regions(page, face, [ruled, icon])
     assert [(r.kind, r.label) for r in found] == [('table', 'Untitled table 1'), ('figure', 'Untitled figure 1')]

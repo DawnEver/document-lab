@@ -165,7 +165,7 @@ fn an_inline_image_is_an_event_with_its_data() {
     );
     let found = images(&content)[0];
     assert_eq!(
-        (found.object, found.inline.as_ref().map(|(_, d)| d.clone())),
+        (found.object, found.inline.as_ref().map(|i| i.data.clone())),
         (None, Some(vec![0x7f]))
     );
 }
@@ -292,16 +292,24 @@ fn a_shading_painted_with_sh_covers_the_clip_within_its_bbox() {
 }
 
 #[test]
-fn a_fill_with_a_pattern_says_which_pattern_it_is() {
-    let tiling = common::stream(
-        "/PatternType 1 /PaintType 2 /TilingType 1 /BBox [0 0 4 4] /XStep 4 /YStep 4 /Resources << >>",
-        "0 0 2 2 re f",
-    );
+fn a_fill_with_a_pattern_says_which_pattern_it_is_and_an_uncolored_tilings_tint() {
+    let tiling = |paint: u8| {
+        common::stream(
+            &format!(
+                "/PatternType 1 /PaintType {paint} /TilingType 1 /BBox [0 0 4 4] /XStep 4 /YStep 4 /Resources << >>"
+            ),
+            "0 0 2 2 re f",
+        )
+    };
     let (content, _) = events(
-        "/Resources << /Pattern << /G 7 0 R /T 6 0 R >> >>",
-        "/Pattern cs /G scn 10 10 30 30 re f [/Pattern /DeviceRGB] cs 1 0 0 /T scn 50 10 5 5 re f \
-         /Missing scn 0 0 1 1 re f",
-        &[AXIAL, &tiling, "<< /PatternType 2 /Shading 5 0 R >>"],
+        "/Resources << /Pattern << /G 7 0 R /T 6 0 R /C 8 0 R >> >>",
+        "/Pattern cs /G scn 10 10 30 30 re f [/Pattern /DeviceCMYK] cs 0 1 1 0 /T scn 50 10 5 5 re f          /Missing scn 0 0 1 1 re f /Pattern cs /C scn 0 0 2 2 re f",
+        &[
+            AXIAL,
+            &tiling(2),
+            "<< /PatternType 2 /Shading 5 0 R >>",
+            &tiling(1),
+        ],
     );
     let fills: Vec<_> = paths(&content)
         .iter()
@@ -310,12 +318,15 @@ fn a_fill_with_a_pattern_says_which_pattern_it_is() {
             (color.pattern, color.components.clone(), color.rgb)
         })
         .collect();
+    let uncolored = Some(Pattern::Tiling { uncolored: true });
     assert_eq!(
         fills,
         [
             (Some(Pattern::Shading), vec![], None),
-            (Some(Pattern::Tiling), vec![1.0, 0.0, 0.0], None),
-            (Some(Pattern::Tiling), vec![1.0, 0.0, 0.0], None), // the unreadable `scn` is skipped
+            // The tint, in the pattern space's base: CMYK (0, 1, 1, 0) is red.
+            (uncolored, vec![0.0, 1.0, 1.0, 0.0], Some([1.0, 0.0, 0.0])),
+            (uncolored, vec![0.0, 1.0, 1.0, 0.0], Some([1.0, 0.0, 0.0])), // the unreadable `scn` is skipped
+            (Some(Pattern::Tiling { uncolored: false }), vec![], None), // a colored pattern paints its own colors
         ]
     );
     assert_eq!(content.warnings.len(), 1, "{:?}", content.warnings);
@@ -342,4 +353,129 @@ fn text_in_a_clipping_mode_narrows_the_clip_to_its_glyphs_at_et() {
         .collect();
     assert_eq!(modes, [7, 0, 0]);
     assert_eq!(paths(&content).len(), 3); // only the square off the glyphs is cut, and only until `Q`
+}
+
+#[test]
+fn each_event_carries_the_clipping_paths_in_force_as_they_nest() {
+    use pdf::interpret::Outline;
+    let (content, _) = events(
+        "",
+        "q 0 0 100 100 re W n q 10 10 50 50 re W* n 0 0 20 20 re f Q 0 0 6 6 re f Q 0 0 7 7 re f",
+        &[],
+    );
+    let found = paths(&content);
+    let inner = found[0].clip.as_ref().expect("two clips");
+    assert!(matches!(
+        inner.outline,
+        Outline::Path { even_odd: true, .. }
+    ));
+    let outer = inner.within.as_ref().expect("the outer clip");
+    assert!(matches!(
+        outer.outline,
+        Outline::Path {
+            even_odd: false,
+            ..
+        }
+    ));
+    assert!(outer.within.is_none());
+    assert_eq!(
+        found[1].clip.as_deref(),
+        Some(&**outer),
+        "Q restores the outer clip"
+    );
+    assert!(found[2].clip.is_none(), "the page's clip alone");
+}
+
+#[test]
+fn a_form_bbox_is_a_clipping_path_through_its_matrix() {
+    use pdf::interpret::Outline;
+    let form = common::stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Matrix [2 0 0 2 0 0]",
+        "0 0 5 5 re f",
+    );
+    let (content, _) = events(
+        "/Resources << /XObject << /Fm1 5 0 R >> >>",
+        "/Fm1 Do",
+        &[&form],
+    );
+    let clip = paths(&content)[0].clip.as_ref().expect("the form's box");
+    let Outline::Path { segments, even_odd } = &clip.outline else {
+        panic!("{clip:?}");
+    };
+    assert!(!even_odd);
+    // The box's far corner (10, 10) through the matrix is (20, 20) in user space, (20, 80) on the page.
+    assert_eq!(segments[2], Segment::LineTo(p(20.0, 80.0)));
+}
+
+#[test]
+fn a_text_object_clips_to_its_clipping_glyphs_boxes() {
+    use pdf::interpret::Outline;
+    let (content, _) = events(
+        "/Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>",
+        "BT /F1 10 Tf 7 Tr 10 10 Td (A) Tj ET 0 0 50 50 re f",
+        &[],
+    );
+    let clip = paths(&content)[0].clip.as_ref().expect("the glyphs' clip");
+    assert!(matches!(&clip.outline, Outline::Glyphs(boxes) if boxes.len() == 1));
+}
+
+#[test]
+fn a_graphics_state_sets_alphas_blend_mode_soft_mask_and_miter_limit() {
+    use pdf::interpret::Blend;
+    let (content, _) = events(
+        "/Resources << /ExtGState << /G1 << /ca 0.5 /CA 0.25 /BM [/Bogus /Multiply] /SMask << /S /Luminosity >> /ML 3 >> /G2 << /SMask /None >> >> >>",
+        "/G1 gs 0 0 5 5 re B /G2 gs 2 M 0 0 5 5 re S",
+        &[],
+    );
+    let found = paths(&content);
+    let c = found[0].compositing;
+    assert_eq!(
+        (c.fill_alpha, c.stroke_alpha, c.blend, c.soft_mask),
+        (0.5, 0.25, Blend::Multiply, true)
+    );
+    assert_eq!(found[0].stroke.as_ref().unwrap().miter_limit, 3.0);
+    assert!(
+        !found[1].compositing.soft_mask,
+        "/SMask /None ends the soft mask"
+    );
+    assert_eq!(found[1].stroke.as_ref().unwrap().miter_limit, 2.0);
+}
+
+#[test]
+fn a_stroke_keeps_the_matrix_it_was_painted_under() {
+    let (content, _) = events("", "2 0 0 1 0 0 cm 0 0 m 10 0 l S", &[]);
+    let stroke = paths(&content)[0].stroke.clone().unwrap();
+    assert_eq!(stroke.ctm.0, [2.0, 0.0, 0.0, -1.0, 0.0, 100.0]);
+}
+
+#[test]
+fn an_image_carries_the_fill_color_a_stencil_paints_in() {
+    let (content, _) = events(
+        "",
+        "1 0 0 rg q 10 0 0 10 0 0 cm BI /W 1 /H 1 /IM true ID \x00 EI Q",
+        &[],
+    );
+    assert_eq!(images(&content)[0].fill.rgb, Some([1.0, 0.0, 0.0]));
+}
+
+#[test]
+fn a_transparency_group_entered_with_an_alpha_starts_its_marks_afresh_and_flags_them() {
+    let group = common::stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Group << /S /Transparency >>",
+        "0 0 5 5 re f",
+    );
+    let (content, _) = events(
+        "/Resources << /XObject << /Fm1 5 0 R >> /ExtGState << /G1 << /ca 0.35 >> >> >>",
+        "/Fm1 Do /G1 gs /Fm1 Do 0 0 5 5 re f",
+        &[&group],
+    );
+    let found = paths(&content);
+    assert!(
+        !found[0].compositing.grouped,
+        "a group entered opaque is plain content"
+    );
+    let inside = found[1].compositing;
+    assert_eq!((inside.fill_alpha, inside.grouped), (1.0, true));
+    assert_eq!(found[2].compositing.fill_alpha, 0.35);
+    assert!(!found[2].compositing.grouped);
 }

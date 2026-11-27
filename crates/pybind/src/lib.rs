@@ -2,12 +2,13 @@
 //!
 //! `open(source, password)` reads a PDF -- a file by its path, read here, or one already in memory as bytes -- and
 //! gives its `sha256`; its `page(number, annotations=, curve_samples=, flatness=)` returns what the page draws as
-//! tuples and columns, which `document_lab.pdf` turns into the IR, its `links(number)` the page's links, its
-//! `document()` what the document states beside its pages (outline, labels, metadata, form fields, embedded files),
-//! its `render(...)` a region drawn by the own renderer (`render`), its `image(object)` an image's samples, its
-//! `rgb(object)` their sRGB where they show as they stand and its `attachment(object)` an embedded file's bytes.
-//! Pages are numbered from 1 in every row. `create(path, level)` writes a PDF of image pages, or of pages copied from
-//! a `Reader` (`document_lab.capture`), perhaps with a text layer laid over them (`document_lab.ocr`).
+//! tuples and columns, which `document_lab.pdf` turns into the IR, its `structure()` a tagged file's structure tree,
+//! its `links(number)` the page's links, its `document()` what the document states beside its pages (outline,
+//! labels, metadata, form fields, embedded files), its `render(...)` a region drawn by the own renderer (`render`),
+//! its `image(object)` an image's samples, its `rgb(object)` their sRGB where they show as they stand and its
+//! `attachment(object)` an embedded file's bytes. Pages are numbered from 1 in every row. `create(path, level)`
+//! writes a PDF of image pages, or of pages copied from a `Reader` (`document_lab.capture`), perhaps with a text
+//! layer laid over them (`document_lab.ocr`).
 //!
 //! A refusal raises by its kind: [`Refused`] and its kinds when the reader refuses the input, `ValueError` for a
 //! request it cannot honor, `OSError` when writing fails.
@@ -24,10 +25,11 @@ use pdf::error::Kind;
 use pdf::forms::{Field, Value};
 use pdf::geometry::{Point, Rect, Segment};
 use pdf::image::Placement;
-use pdf::interpret::{Event, Layer, PathEvent};
+use pdf::interpret::{Event, Layer, Marked, PathEvent};
 use pdf::metadata::{Metadata, Newer};
 use pdf::outline::Item;
 use pdf::paths::{Flattening, Polylines};
+use pdf::structure::{Element, Kid, Value as StructureValue};
 use pdf::writer::Image;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyOSError, PyValueError};
@@ -70,10 +72,15 @@ type Box4 = (f64, f64, f64, f64);
 /// The layer an event is drawn in: hidden by optional content, inkless (painted in the colorant `None`), and the
 /// subtype of the annotation drawing it.
 type LayerRow = (bool, bool, Option<String>);
+/// The marked content an event is drawn in: its `/MCID` (None: none), the Form `XObject` holding it (None: the
+/// page's content), and whether an `/Artifact` holds it.
+type MarkedRow = (Option<i64>, Option<u32>, bool);
 /// A span: text, font name (no subset tag), size, bold, box, render mode, the number it shares with the spans its
 /// words run on into with no space between (None: none), whether it is written vertically, the unit vector its
 /// baseline runs along (page space, y down), its layer, its fill color (None: not filled) and whether that is the
-/// color painted under it, and whether it continues the run of the span before it (`pdf::spans::Span`).
+/// color painted under it, and -- one tuple, as pyo3 converts twelve elements at most -- whether it continues the
+/// run of the span before it (`pdf::spans::Span`) and what its marked content says: the text its glyphs draw when an
+/// `/ActualText` replaced it (None: the text is that), and the sequence itself.
 type SpanRow = (
     String,
     String,
@@ -86,7 +93,7 @@ type SpanRow = (
     (f64, f64),
     LayerRow,
     (Option<Vec<f64>>, bool),
-    bool,
+    (bool, Option<String>, MarkedRow),
 );
 /// What a page paints as paths, as columns -- `document_lab.pdf` takes each buffer whole with `numpy.frombuffer`,
 /// no Python object per point. Buffers are native-endian; an entry per subpath (`pdf::paths::Polylines`) unless
@@ -119,10 +126,11 @@ type StyleRow = (
     bool,
     Option<&'static str>,
     LayerRow,
+    MarkedRow,
 );
 /// An image: box, sample width and height, object number (None inline), the matrix `(a, b, c, d, e, f)` from its
 /// unit square to page space, how it shows its samples (`pdf::image::Placement`: turned, rows reversed, columns
-/// reversed; None when it is skewed), and its layer.
+/// reversed; None when it is skewed), its layer and its marked content.
 type ImageRow = (
     Box4,
     i64,
@@ -131,9 +139,46 @@ type ImageRow = (
     [f64; 6],
     Option<PlacementRow>,
     LayerRow,
+    MarkedRow,
 );
 /// An image placed square to the page: whether its rows run down the page, and its rows and columns shown reversed.
 type PlacementRow = (bool, bool, bool);
+/// A structure tree: its elements in tree order, the indexes of those under the root, its warnings.
+type StructureRow = (Vec<ElementRow>, Vec<usize>, Vec<String>);
+/// A structure element: role as stated, standard role, title, language, alternate description, actual text,
+/// expansion, attributes (owner, name, value), page (1-based) and kids.
+type ElementRow = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Vec<(String, String, AttributeValue)>,
+    Option<usize>,
+    Vec<KidRow>,
+);
+/// A kid: `("element", index, None, None, None)`, `("marked", page, mcid, stream, None)` or `("object", page,
+/// None, object, rect)`.
+type KidRow = (
+    &'static str,
+    Option<usize>,
+    Option<i64>,
+    Option<u32>,
+    Option<Box4>,
+);
+
+/// An attribute's value as Python's: a bool, int, float, str (a name or a text string), list, or list of pairs.
+#[derive(IntoPyObject)]
+enum AttributeValue {
+    Bool(bool),
+    Integer(i64),
+    Real(f64),
+    Text(String),
+    Array(Vec<AttributeValue>),
+    Pairs(Vec<(String, AttributeValue)>),
+}
 /// What a page draws: spans, paths (as columns), images, warnings.
 type PageRows<'py> = (Vec<SpanRow>, PathColumns<'py>, Vec<ImageRow>, Vec<String>);
 /// An image's samples: width, height, color space family (None: a stencil mask), components, bits per component,
@@ -348,7 +393,7 @@ impl Reader {
                         s.fill.as_ref().map(pdf::color::Color::rgb_or_components),
                         s.in_background_color,
                     ),
-                    s.continues_run,
+                    (s.continues_run, s.drawn, marked(s.marked)),
                 )
             })
             .collect();
@@ -373,6 +418,7 @@ impl Reader {
                         Placement::of(&image.matrix)
                             .map(|p| (p.turned, p.rows_reversed, p.columns_reversed)),
                         layer(&image.layer),
+                        marked(image.marked),
                     ));
                 }
                 Event::Shading(shading) => {
@@ -387,6 +433,7 @@ impl Reader {
                         false,
                         Some(pattern(PatternKind::Shading)),
                         layer(&shading.layer),
+                        marked(shading.marked),
                     ));
                 }
                 Event::Text(_) => {}
@@ -394,6 +441,18 @@ impl Reader {
         }
         let paths = columns(py, &lines, &groups, styles);
         Ok((spans, paths, images, warnings))
+    }
+
+    /// The structure tree, when the file is tagged: (elements, roots, warnings); None when it is not.
+    fn structure(&self) -> PyResult<Option<StructureRow>> {
+        let structure = self.file.structure(&self.pages).map_err(|e| refused(&e))?;
+        Ok(structure.map(|s| {
+            (
+                s.elements.iter().map(element).collect(),
+                s.roots,
+                s.warnings,
+            )
+        }))
     }
 
     /// The links on page `number` (1-based), read whether or not annotations are drawn: (links, warnings).
@@ -770,6 +829,55 @@ fn layer(l: &Layer) -> LayerRow {
     (l.hidden, l.inkless, l.annotation.clone())
 }
 
+/// Marked content as its row.
+fn marked(m: Marked) -> MarkedRow {
+    (m.mcid, m.stream, m.artifact)
+}
+
+/// A structure element as its row.
+fn element(e: &Element) -> ElementRow {
+    (
+        e.role.clone(),
+        e.standard.clone(),
+        e.title.clone(),
+        e.lang.clone(),
+        e.alt.clone(),
+        e.actual_text.clone(),
+        e.expansion.clone(),
+        e.attributes
+            .iter()
+            .map(|a| (a.owner.clone(), a.name.clone(), value(&a.value)))
+            .collect(),
+        e.page,
+        e.kids
+            .iter()
+            .map(|k| match *k {
+                Kid::Element(i) => ("element", Some(i), None, None, None),
+                Kid::Marked { page, mcid, stream } => {
+                    ("marked", Some(page), Some(mcid), stream, None)
+                }
+                Kid::Object { page, object, rect } => {
+                    ("object", page, None, Some(object), rect.map(box4))
+                }
+            })
+            .collect(),
+    )
+}
+
+/// An attribute's value as Python's.
+fn value(v: &StructureValue) -> AttributeValue {
+    match v {
+        StructureValue::Bool(b) => AttributeValue::Bool(*b),
+        StructureValue::Integer(i) => AttributeValue::Integer(*i),
+        StructureValue::Real(r) => AttributeValue::Real(*r),
+        StructureValue::Name(t) | StructureValue::Text(t) => AttributeValue::Text(t.clone()),
+        StructureValue::Array(items) => AttributeValue::Array(items.iter().map(value).collect()),
+        StructureValue::Dict(entries) => {
+            AttributeValue::Pairs(entries.iter().map(|(k, v)| (k.clone(), value(v))).collect())
+        }
+    }
+}
+
 /// A pattern's kind, by name.
 fn pattern(kind: PatternKind) -> &'static str {
     match kind {
@@ -793,6 +901,7 @@ fn style(path: &PathEvent) -> StyleRow {
             .and_then(|f| f.color.pattern.as_ref())
             .map(|p| pattern(p.kind)),
         layer(&path.layer),
+        marked(path.marked),
     )
 }
 

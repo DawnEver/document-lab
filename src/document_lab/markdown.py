@@ -1,18 +1,27 @@
 """A document's markdown written from document_lab's own IR: headings and paragraphs from its lines.
 
-Lines and their reading order are `document_lab.layout`'s.
+Lines and their reading order are `document_lab.layout`'s -- or, for a tagged PDF, what its tags state
+(`document_lab.tags`; the ``tagged`` uses, all on by default): ``order``, lines in the stated order; ``headings``, a
+line heading as its tag says (``Title`` ``#``, ``H1`` ``##``, ...); ``paragraphs``, the lines of one tagged block (a
+paragraph, a list item, a cell) one paragraph, a block rejoined across a break only with its own element. A tagged
+heading the rules below make a heading too takes their level (a tag's level follows a word processor's styles: the
+IEEE template sets its acknowledgment and references as ``H5``); one only the tags state keeps its tag's level, at
+most one below the heading before it (no level skipped). Tags
+stating no heading at all leave every line's heading to the rules below, tags stating no title the title, and a
+heading those rules find heads no tagged block. A line the tags do not cover -- an artifact, a document tagged in
+part -- is read as an untagged one is.
 
 - Headings (:func:`headings`): a document stating an outline (bookmarks) has its sections named by it -- each item is
   looked for on the page its destination names (or the next, where a section starts at the top of a page), its title
   matched to a line (or two or three wrapped lines) up to case, punctuation and numbering, the nearest to the place
   the destination states; a top-level item heads ``##``, a child ``###`` and so on (a lone top-level item holding
   all others is the title, ``#``; an item without a title names no heading and is reported). The outline is used
-  when every titled item is found on its page and it names at least one of the headings the rules below find (when
-  they find any: an outline of a cover sheet's title and terms of use is no section structure). Then the outline
-  heads sections, beside the rules' title and back matter (an outline often leaves an unnumbered ``References`` or
-  ``Acknowledgments`` out), and the headings the rules would add are reported as ``unstated``; else what does not
-  match is reported and the rules decide. The rules -- the inferred structure, the alternative: a line that is a
-  Roman-numbered upper-case heading (``II. METHOD``) or a standalone back-matter word in
+  when every titled item is found on its page and it names at least one of the headings the tags and rules below
+  find (when they find any: an outline of a cover sheet's title and terms of use is no section structure). Then the
+  outline heads sections, beside their title and back matter (an outline often leaves an unnumbered ``References``
+  or ``Acknowledgments`` out), and the headings they would add are reported as ``unstated``; else what does not
+  match is reported and the tags and rules decide. The rules -- the inferred structure, the alternative: a line that
+  is a Roman-numbered upper-case heading (``II. METHOD``) or a standalone back-matter word in
   capitals or title case (``REFERENCES``, ``Acknowledgments``, ``Appendix``, ``Conclusion``) is a section (``##``),
   or a chapter (``#``) when set at least :data:`TITLE_SCALE` times the body as a thesis sets its chapters; else a
   line at least :data:`TITLE_SCALE` times the body size is a title (``#``: a paper bound in after the first opens
@@ -32,7 +41,8 @@ Lines and their reading order are `document_lab.layout`'s.
   line that is no sentence heads its clause, and any heading must read as words (`document_lab.layout.wordy`) -- a
   figure's labels, OCR'd, do not. A line without a letter (a page number), a run of four dots (a contents leader,
   however garbled) or a contents entry (a leader then a page number) never heads, nor does any line of a
-  table-of-contents page (:data:`TOC_LINES` such entries): it names the sections, it does not open them.
+  table-of-contents page (:data:`TOC_LINES` such entries): it names the sections, it does not open them. An
+  upper-case line right under a section heading the rules find is its wrapped line.
 - Paragraphs: lines of one column and one way closer than :data:`PARAGRAPH_GAP` line heights -- measured down their
   own frame (`document_lab.layout.Line.frame`), so a caption turned sideways joins its next line beside it -- join
   with a space (a hyphen at a line end joins the word); a larger gap, a heading or a column change starts a new
@@ -49,20 +59,26 @@ import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal
 
-from document_lab import layout
+from document_lab import layout, tags
 from document_lab.ir import BBox, Provenance, TextSpan
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Collection, Iterator, Sequence
 
-    from document_lab.ir import Document, OutlineItem, Page
+    from document_lab.ir import Document, Element, OutlineItem, Page
 
 
 #: A box of a page and the markdown that stands for the lines inside it.
 type Placed = tuple[BBox, str]
 _HOLDER: Final = '\N{OBJECT REPLACEMENT CHARACTER}'  # the text of the line that holds a placed block's place
-__all__ = ['Headings', 'Placed', 'back_matter', 'headings', 'page_markdowns', 'table', 'to_markdown']
+#: A block of markdown, and the tagged element it is set from (None: inferred).
+type _Block = tuple[str, Element | None]
+#: A page's heading lines: (index of the line in reading order, its markdown heading, the lines its text spans).
+type _Marks = tuple[tuple[int, str, int], ...]
+__all__ = ['MARKDOWN_USES', 'Headings', 'Placed', 'back_matter', 'headings', 'page_markdowns', 'table', 'to_markdown']
 
+#: The uses of a tagged PDF's tags (`document_lab.tags.USES`) markdown reads; the others are `document_lab.regions`'.
+MARKDOWN_USES: Final = frozenset({'order', 'headings', 'paragraphs'})
 #: A gap between lines larger than this many line heights starts a paragraph.
 PARAGRAPH_GAP: Final = 0.6
 #: How many blocks back a cut paragraph's continuation may look.
@@ -94,7 +110,7 @@ _LETTERED: Final = re.compile(r'^([A-Z](?:\.\d+)*)\.?\s+[A-Z]')
 #: A web address: never a title, however large.
 _URL: Final = re.compile(r'://|\bwww\.', re.IGNORECASE)
 #: A table-of-contents entry: words, a leader (dots, ellipses, middle dots, rules), a page number at the end.
-_TOC_ENTRY: Final = re.compile(r'^(?=.*[A-Za-z]).*?(?:(?:\.\s?){4,}|\u2026{2,}|\u00b7{3,}|_{4,})\s*[\dixvIXV]{1,5}$')
+_TOC_ENTRY: Final = re.compile(r'^(?=.*[A-Za-z]).*?(?:(?:\.\s?){4,}|…{2,}|·{3,}|_{4,})\s*[\dixvIXV]{1,5}$')
 #: Lines of a page that are contents entries for the page to be a table of contents.
 TOC_LINES: Final = 3
 #: Lines an outline item's title may wrap over.
@@ -110,23 +126,31 @@ _NUMBERING: Final = re.compile(r'^\(?(?:\d+|(?=[ivx])x{0,3}(?:ix|iv|v?i{0,3})|[a
 class Headings:
     """Which lines head a document's sections, and where that comes from: what :func:`headings` judged."""
 
-    #: ``'outline'``: the document's stated outline, found on its pages; ``'inferred'``: the rules.
-    source: Literal['outline', 'inferred']
+    #: ``'outline'``: the document's stated outline, found on its pages; ``'tags'``: a tagged PDF's tags, the rules
+    #: beside them; ``'inferred'``: the rules.
+    source: Literal['outline', 'tags', 'inferred']
     #: Each page's heading lines, by page: (index of the line in reading order, its markdown heading, the lines its
-    #: text wraps over).
-    marks: tuple[tuple[tuple[int, str, int], ...], ...]
+    #: text spans).
+    marks: tuple[_Marks, ...]
     #: How many items the document's outline states (0: it states none, or the outline was not asked for).
     stated: int = 0
     #: Outline items not found on their page, each as ``'title' (page N)``: why a stated outline was not used.
     unlocated: tuple[str, ...] = ()
-    #: Headings the rules find that the outline does not name (beside an outline found on its pages).
+    #: Headings the tags and rules find that the outline does not name (beside an outline found on its pages).
     unstated: tuple[str, ...] = ()
     #: The headings the outline put in the markdown, as written there (without their ``#``).
     named: tuple[str, ...] = ()
     #: Outline items stating no title, each as ``page N``: they name no heading.
     untitled: tuple[str, ...] = ()
-    #: How many of the rules' headings the outline names (beside an outline found on its pages).
+    #: How many of the tags' and rules' headings the outline names (beside an outline found on its pages).
     shared: int = 0
+    #: The uses of the tags they were judged with (of :data:`MARKDOWN_USES`): with ``order`` the lines' reading order
+    #: is the tags'.
+    uses: frozenset[str] = frozenset()
+    #: Whether the text hidden layers draw was judged too.
+    include_hidden: bool = False
+    #: Whether the text filled in the color under it was judged too.
+    include_in_background_color: bool = False
 
     @property
     def written(self) -> tuple[tuple[int, str], ...]:
@@ -157,44 +181,59 @@ class Headings:
 
 
 def headings(
-    doc: Document, *, outline: bool = True, include_hidden: bool = False, include_in_background_color: bool = False
+    doc: Document,
+    *,
+    outline: bool = True,
+    include_hidden: bool = False,
+    include_in_background_color: bool = False,
+    tagged: Collection[str] = tags.DEFAULT_USES,
 ) -> Headings:
-    """Which lines of ``doc`` head its sections: its stated outline, else the rules (the module says how).
+    """Which lines of ``doc`` head its sections: its stated outline, else its tags and the rules (the module says how).
 
     ``outline``: the outline is used when the document states one that matches its pages (the module says when);
-    False keeps to the rules. ``include_hidden``, ``include_in_background_color``: as for :func:`to_markdown`.
+    False keeps to the tags and rules. ``include_hidden``, ``include_in_background_color``, ``tagged``: as for
+    :func:`to_markdown`.
     """
+    uses = tags.checked(tagged) & MARKDOWN_USES
+    reading = tags.reading(doc) if uses else None
     shown = doc.shown(include_hidden=include_hidden, include_in_background_color=include_in_background_color)
     weighted = any(span.bold for span in shown.spans())
-    pages = [layout.ordered(layout.lines(page, weighted=weighted)) for page in shown.pages]
-    inferred = _inferred(shown, pages, weighted=weighted)
+    pages = [_ordered(layout.lines(page, weighted=weighted), reading, uses) for page in shown.pages]
+    judged = _judged(shown, pages, weighted=weighted, reading=reading, uses=uses)
+    base: Literal['tags', 'inferred'] = 'tags' if _tag_heads(reading, uses) else 'inferred'
+    options = {
+        'uses': uses,
+        'include_hidden': include_hidden,
+        'include_in_background_color': include_in_background_color,
+    }
     items = list(_flatten(doc.outline)) if outline else []
     if not items:
-        return Headings('inferred', inferred)
+        return Headings(base, judged, **options)
     located, unlocated, untitled = _locate(doc.outline, items, pages)
     if unlocated:
-        return Headings('inferred', inferred, len(items), tuple(unlocated), untitled=tuple(untitled))
+        return Headings(base, judged, len(items), tuple(unlocated), untitled=tuple(untitled), **options)
     covered = {(n, i + k) for (n, i), (_, span) in located.items() for k in range(span)}
-    rules = {(n, i): h for n, page in enumerate(inferred, start=1) for i, h, _ in page if not h.startswith('# ')}
-    shared = len(rules.keys() & covered)
-    unstated = tuple(h.lstrip('#').strip() for key, h in sorted(rules.items()) if key not in covered)
-    if rules and not shared:
-        return Headings('inferred', inferred, len(items), (), unstated, untitled=tuple(untitled))
+    found = {(n, i): h for n, page in enumerate(judged, start=1) for i, h, _ in page if not h.startswith('# ')}
+    shared = len(found.keys() & covered)
+    unstated = tuple(h.lstrip('#').strip() for key, h in sorted(found.items()) if key not in covered)
+    if found and not shared:
+        return Headings(base, judged, len(items), (), unstated, untitled=tuple(untitled), **options)
     marks = []
     named = []
-    for number, (lines, page_rules) in enumerate(zip(pages, inferred, strict=True), start=1):
+    for number, (lines, page_judged) in enumerate(zip(pages, judged, strict=True), start=1):
         page = [
             (i, h, span)
-            for i, h, span in page_rules
-            if (h.startswith('# ') or back_matter(h.lstrip('#').strip())) and (number, i) not in covered
+            for i, h, span in page_judged
+            if (h.startswith('# ') or back_matter(h.lstrip('#').strip()))
+            and all((number, i + k) not in covered for k in range(span))
         ]
         for (n, i), (level, span) in located.items():
             if n == number:
                 text = ' '.join(line.text for line in lines[i : i + span])
                 page.append((i, f'{"#" * level} {text}', span))
                 named.append(text)
-        marks.append(tuple(sorted(page)))  # the rules' title and back matter kept: an outline rarely names them
-    return Headings('outline', tuple(marks), len(items), (), unstated, tuple(named), tuple(untitled), shared)
+        marks.append(tuple(sorted(page)))  # the title and back matter kept: an outline rarely names them
+    return Headings('outline', tuple(marks), len(items), (), unstated, tuple(named), tuple(untitled), shared, **options)
 
 
 def to_markdown(
@@ -202,15 +241,19 @@ def to_markdown(
     *,
     include_hidden: bool = False,
     include_in_background_color: bool = False,
+    tagged: Collection[str] = tags.DEFAULT_USES,
     sections: Headings | None = None,
 ) -> str:
     """The document as markdown, page after page: a paragraph a page break cut is joined again.
 
     ``include_hidden``: the text hidden layers draw is written too; ``include_in_background_color``: the text filled
-    in the color under it too (see `document_lab.ir`). ``sections``: which lines head sections, as :func:`headings`
-    judged them (None: judged here, a stated outline first).
+    in the color under it too (see `document_lab.ir`). ``tagged``: what a tagged PDF's tags give (``order``,
+    ``headings``, ``paragraphs``; see the module); none infers it all from layout. ``sections``: which lines head
+    sections, as :func:`headings` judged them with the same ``include_hidden``, ``include_in_background_color`` and
+    ``tagged`` (None: judged here, a stated outline first).
     """
-    blocks = _blocks(doc, include_hidden, include_in_background_color, sections)
+    shown = _Shown(include_hidden, include_in_background_color)
+    blocks = _blocks(doc, _sections(doc, sections, shown, tagged=tagged))
     return '\n\n'.join(_rejoin([block for page in blocks for block in page])) + '\n'
 
 
@@ -220,16 +263,17 @@ def page_markdowns(
     *,
     include_hidden: bool = False,
     include_in_background_color: bool = False,
+    tagged: Collection[str] = tags.DEFAULT_USES,
     sections: Headings | None = None,
 ) -> list[str]:
     """Each page's own markdown, in order (empty for a page without text).
 
     Body size and title are judged over the whole document; nothing is joined across a page break: a page stands alone.
     ``placed``: each page's placed blocks (none for a page past its end). ``include_hidden``,
-    ``include_in_background_color`` and ``sections``: as for :func:`to_markdown`.
+    ``include_in_background_color``, ``tagged`` and ``sections``: as for :func:`to_markdown`.
     """
-    blocks = _blocks(doc, include_hidden, include_in_background_color, sections, placed)
-    return ['\n\n'.join(_rejoin(page)) + '\n' if page else '' for page in blocks]
+    sections = _sections(doc, sections, _Shown(include_hidden, include_in_background_color), tagged=tagged)
+    return ['\n\n'.join(_rejoin(page)) + '\n' if page else '' for page in _blocks(doc, sections, placed)]
 
 
 def table(rows: Sequence[Sequence[str]], boxes: Sequence[Sequence[BBox | None]] | None = None) -> str:
@@ -254,30 +298,75 @@ def table(rows: Sequence[Sequence[str]], boxes: Sequence[Sequence[BBox | None]] 
     return '\n'.join([lines[0], '|' + ' --- |' * width, *lines[1:]])
 
 
-def _blocks(
-    doc: Document,
-    include_hidden: bool,
-    include_in_background_color: bool,
-    sections: Headings | None,
-    placed: Sequence[Sequence[Placed]] = (),
-) -> list[list[str]]:
-    shown = doc.shown(include_hidden=include_hidden, include_in_background_color=include_in_background_color)
-    sections = sections or headings(
-        doc, include_hidden=include_hidden, include_in_background_color=include_in_background_color
+@dataclass(frozen=True, slots=True)
+class _Shown:
+    """What :meth:`~document_lab.ir.Document.shown` keeps beside what a document shows: the options it is asked with."""
+
+    include_hidden: bool
+    include_in_background_color: bool
+
+
+def _sections(doc: Document, sections: Headings | None, shown: _Shown, *, tagged: Collection[str]) -> Headings:
+    """``sections``, else judged here; refused when judged with other options: its marks index other lines."""
+    if sections is None:
+        return headings(
+            doc,
+            include_hidden=shown.include_hidden,
+            include_in_background_color=shown.include_in_background_color,
+            tagged=tagged,
+        )
+    uses = tags.checked(tagged) & MARKDOWN_USES
+    judged = (sections.uses, sections.include_hidden, sections.include_in_background_color)
+    if judged != (uses, shown.include_hidden, shown.include_in_background_color):
+        msg = (
+            f'the sections were judged with tagged={sorted(sections.uses)}, include_hidden={sections.include_hidden}, '
+            f'include_in_background_color={sections.include_in_background_color}; the markdown is asked with '
+            f'tagged={sorted(uses)}, include_hidden={shown.include_hidden}, '
+            f"include_in_background_color={shown.include_in_background_color}: judge them with the markdown's own "
+            '(headings(doc, include_hidden=..., include_in_background_color=..., tagged=...))'
+        )
+        raise ValueError(msg)
+    return sections
+
+
+def _blocks(doc: Document, sections: Headings, placed: Sequence[Sequence[Placed]] = ()) -> list[list[_Block]]:
+    reading = tags.reading(doc) if sections.uses else None
+    shown = doc.shown(
+        include_hidden=sections.include_hidden, include_in_background_color=sections.include_in_background_color
     )
     weighted = any(span.bold for span in shown.spans())
-    inferred = sections.source == 'inferred'
     return [
-        _page_blocks(page, marks, placed[i] if i < len(placed) else (), weighted=weighted, inferred=inferred)
+        _page_blocks(
+            page, marks, placed[i] if i < len(placed) else (), weighted=weighted, reading=reading, uses=sections.uses
+        )
         for i, (page, marks) in enumerate(zip(shown.pages, sections.marks, strict=True))
     ]
 
 
-def _inferred(doc: Document, pages: list[list[layout.Line]], *, weighted: bool) -> tuple:
-    """Each page's heading lines by the rules, page after page: (index, markdown heading, 1) each.
+def _ordered(lines: list[layout.Line], reading: tags.Reading | None, uses: frozenset[str]) -> list[layout.Line]:
+    """``lines`` in reading order: the order the tags state, where ``order`` is used, else layout's."""
+    return reading.ordered(lines) if reading is not None and 'order' in uses else layout.ordered(lines)
+
+
+def _tag_heads(reading: tags.Reading | None, uses: frozenset[str]) -> bool:
+    """Do the tags, used for ``headings``, state any heading?"""
+    return reading is not None and 'headings' in uses and reading.heads
+
+
+def _judged(
+    doc: Document,
+    pages: list[list[layout.Line]],
+    *,
+    weighted: bool,
+    reading: tags.Reading | None,
+    uses: frozenset[str],
+) -> tuple[_Marks, ...]:
+    """Each page's heading lines by the tags and the rules, page after page (the module says how).
 
     ``pages``: each page's lines in reading order. A contents page has none. A numbered line heads by its face only
-    where its parent number heads before it (`_continues`), so the pages are judged in order.
+    where its parent number heads before it (`_continues`), so the pages are judged in order. A heading spans its
+    tagged block's further lines, and an upper-case line wrapping a section heading the rules find
+    (`_continues_heading`).
     """
     body = layout.body_size(doc)
     face = layout.body_face(doc)
@@ -286,16 +375,57 @@ def _inferred(doc: Document, pages: list[list[layout.Line]], *, weighted: bool) 
     largest = max((ln.size for ln in first), default=0.0)
     at_largest = sum(ln.size >= largest for ln in first)
     title = largest if largest >= PAGE_TITLE_SCALE * body and at_largest <= PAGE_TITLE_LINES else None
+    stated = _tag_heads(reading, uses)
+    paragraphs = reading is not None and 'paragraphs' in uses
+    last = 0  # the level of the last heading, page after page
     out = []
     for n, lines in enumerate(pages):
-        marks = []
-        if sum(bool(_TOC_ENTRY.match(line.text)) for line in lines) < TOC_LINES:
-            for i, line in enumerate(lines):
-                heading = _heading(line, body, title if n == 0 else None, weighted=weighted, face=face, headed=headed)
-                if heading and (number := _NUMBERED.match(line.text)):
-                    headed.add(number.group(1))
-                if heading:
-                    marks.append((i, heading, 1))
+        contents = sum(bool(_TOC_ENTRY.match(line.text)) for line in lines) >= TOC_LINES
+        marks: list[tuple[int, str, int]] = []
+        current = None  # the tagged block the previous line is set in
+        for i, line in enumerate(lines):
+            covered = reading is not None and reading.block_of(line) is not None
+            block = reading.block_of(line) if paragraphs else None
+            ends = bool(marks) and marks[-1][0] + marks[-1][2] == i  # the previous line ends a heading
+            inferred = (
+                None
+                if contents
+                else _heading(line, body, title if n == 0 else None, weighted=weighted, face=face, headed=headed)
+            )
+            # A line goes on its tagged block -- unless the tags state no heading and this line heads by the rules.
+            if (stated or inferred is None) and block is not None and block is current:
+                if ends:
+                    at, heading, span = marks[-1]
+                    text = f'{heading} {line.text}' if heading.startswith('# ') else _joined(heading, line.text)
+                    marks[-1] = (at, text, span + 1)
+                continue
+            current = block
+            level = reading.level(line) if covered and stated else None
+            if level:
+                # The tags state the line heads. Where the rules make it a heading too, theirs is its level (a tag's
+                # follows a word processor's styles); else the tag's, at most one below the heading before it.
+                level = inferred.index(' ') if inferred else min(level, max(2, last + 1))
+                heading = f'{"#" * level} {line.text}'
+            elif covered and stated:
+                titled = reading.titled or inferred is None or not inferred.startswith('# ')
+                heading = None if titled else inferred  # the tags state no title: the title is inferred
+            else:
+                heading = inferred
+            if heading and (number := _NUMBERED.match(line.text)):
+                headed.add(number.group(1))
+            if heading:
+                if not level:
+                    current = None  # a heading inferred heads no tagged block: the block's next line starts afresh
+                marks.append((i, heading, 1))
+                last = heading.index(' ')
+            elif (
+                not (covered and stated)
+                and ends
+                and marks[-1][1].startswith('## ')
+                and _continues_heading(lines[i - 1], line)
+            ):
+                at, heading, span = marks[-1]
+                marks[-1] = (at, f'{heading} {line.text}', span + 1)
         out.append(tuple(marks))
     return tuple(out)
 
@@ -384,18 +514,23 @@ def back_matter(text: str) -> bool:
     return bool(_STANDALONE.match(text.upper())) and text in {text.upper(), text.capitalize()}
 
 
-def _rejoin(blocks: list[str]) -> list[str]:
+def _rejoin(blocks: list[_Block]) -> list[str]:
     """Paragraphs cut by a column or page break, joined again.
 
-    A block starting lower-case continues the nearest earlier paragraph (within :data:`REJOIN_REACH` blocks,
-    skipping page furniture between them) that ends unterminated; a heading or a placed block (a region's link
-    leads it) stops the search.
+    A block set from a tagged element continues the nearest earlier block of that same element, within
+    :data:`REJOIN_REACH` blocks (a paragraph the tags state over a page break). Any other block starting lower-case
+    continues the nearest earlier paragraph (within :data:`REJOIN_REACH` blocks, skipping page furniture between
+    them) that ends unterminated; a heading or a placed block (a region's link leads it) stops the search.
     """
     out: list[str] = []
-    for block in blocks:
+    owners: list[Element | None] = []
+    for block, owner in blocks:
         target = None
-        if block[:1].islower():
-            for i in range(len(out) - 1, max(-1, len(out) - 1 - REJOIN_REACH), -1):
+        reach = range(len(out) - 1, max(-1, len(out) - 1 - REJOIN_REACH), -1)
+        if owner is not None:
+            target = next((i for i in reach if owners[i] is owner), None)
+        elif block[:1].islower():
+            for i in reach:
                 if out[i].startswith(('#', '![')):
                     break
                 if not out[i].rstrip().endswith(('.', ':', '?', '!')):
@@ -403,6 +538,7 @@ def _rejoin(blocks: list[str]) -> list[str]:
                     break
         if target is None:
             out.append(block)
+            owners.append(owner)
             continue
         head = out[target].rstrip()
         out[target] = head[:-1] + block if head.endswith('-') else f'{head} {block}'
@@ -474,44 +610,61 @@ def _continues(number: str, line: layout.Line, face: tuple[str, float], headed: 
     return bool(dot) and parent in headed and other
 
 
-def _page_blocks(
-    page: Page, marks: tuple, placed: Sequence[Placed] = (), *, weighted: bool, inferred: bool
-) -> list[str]:
-    """The page's blocks: its ``marks`` (index, heading, lines it wraps over) heading, its other lines in paragraphs.
+def _joined(text: str, line: str) -> str:
+    """``line`` set after ``text`` in one paragraph: a hyphen at the end of ``text`` joins the word."""
+    return text[:-1] + line if text.endswith('-') and line[:1].islower() else f'{text} {line}'
 
-    The marks index the page's lines in reading order; a placed block takes the lines inside its box out of them. An
-    upper-case line under an ``inferred`` heading continues it (the rules judge a heading line by line).
+
+def _page_blocks(
+    page: Page,
+    marks: _Marks,
+    placed: Sequence[Placed] = (),
+    *,
+    weighted: bool,
+    reading: tags.Reading | None,
+    uses: frozenset[str],
+) -> list[_Block]:
+    """The page's blocks: its ``marks`` (index, heading, lines it spans) heading, its other lines in paragraphs.
+
+    Each block comes with the tagged element it is set from (None: inferred, or a placed block). The marks index the
+    page's lines in reading order; a placed block takes the lines inside its box out of them.
     """
     blocks: list[str] = []
+    owners: list[Element | None] = []  # the tagged element each block is set from
     paragraph: list[str] = []
-    previous: layout.Line | None = None
     title: list[str] = []
     beside: list[str] = []  # placed blocks met while a title wraps on: they follow it, not cut it
+    began: dict[str, Element | None] = {'paragraph': None, 'title': None}  # the element each began in
+    previous: layout.Line | None = None
+    current = None  # the tagged block the previous line is set in
+
+    def put(text: str, owner: Element | None) -> None:
+        blocks.append(text)
+        owners.append(owner)
 
     def end_paragraph() -> None:
         if paragraph:
-            blocks.append(' '.join(paragraph))
+            put(' '.join(paragraph), began['paragraph'])
             paragraph.clear()
 
     def end_title() -> None:
-        end_paragraph()
-        blocks.append('# ' + ' '.join(title))
-        blocks.extend(beside)
-        title.clear()
-        beside.clear()
+        if title:
+            end_paragraph()
+            put('# ' + ' '.join(title), began['title'])
+            for text in beside:
+                put(text, None)
+            title.clear()
+            beside.clear()
 
-    found = layout.ordered(layout.lines(page, weighted=weighted))
+    found = _ordered(layout.lines(page, weighted=weighted), reading, uses)
     heads = {id(found[i]): heading for i, heading, _ in marks}
-    wrapped = {id(found[i + k]) for i, _, span in marks for k in range(1, span)}  # a heading's wrapped lines
+    wrapped = {id(found[i + k]) for i, _, span in marks for k in range(1, span)}  # a heading's further lines
     held = _with_placed(page, found, placed)
-    lines = layout.ordered(found)
+    lines = _ordered(found, reading, uses)
+    stated = _tag_heads(reading, uses)
+    paragraphs = reading is not None and 'paragraphs' in uses
     for line in lines:
         if id(line) in wrapped:
-            previous = line
-            continue
-        heading = heads.get(id(line))
-        if heading and heading.startswith('# '):
-            title.append(heading[2:])  # a title wraps over several lines
             previous = line
             continue
         if id(line) in held:
@@ -519,22 +672,38 @@ def _page_blocks(
                 beside.append(held[id(line)])
             else:
                 end_paragraph()
-                blocks.append(held[id(line)])
+                put(held[id(line)], None)
                 previous = None
+            current = None
             continue
-        if title:
-            end_title()
+        heading = heads.get(id(line))
+        block = reading.block_of(line) if paragraphs else None
+        if heading is None and block is not None and block is current and paragraph:
+            paragraph[-1] = _joined(paragraph[-1], line.text)  # the tagged block's further line
+            previous = line
+            continue
         if heading:
+            # A heading the tags state is set from its block: the block's part past a break rejoins it.
+            owner = block if stated and reading.level(line) else None
+            current = None
+            if heading.startswith('# '):
+                if not title:
+                    began['title'] = owner
+                title.append(heading[2:])  # a title wraps over several lines
+                previous = line
+                continue
+            end_title()
             end_paragraph()
-            blocks.append(heading)
+            put(heading, owner)
             previous = line
             continue
-        if inferred and _continues_heading(blocks, previous, line):
-            blocks[-1] = f'{blocks[-1]} {line.text}'
-            previous = line
-            continue
+        end_title()
+        before = reading.block_of(previous) if paragraphs and previous is not None else None
+        current = block
         joined = (
-            previous is not None
+            block is None
+            and before is None
+            and previous is not None
             and previous.column == line.column
             and previous.way == line.way  # measured down their own frame: a turned line's next line stands beside it
             and -OVERLAP * line.size <= line.frame.y0 - previous.frame.y1 <= PARAGRAPH_GAP * line.size
@@ -544,17 +713,18 @@ def _page_blocks(
         if joined and paragraph and paragraph[-1].endswith('-') and line.text[:1].islower():
             paragraph[-1] = paragraph[-1][:-1] + line.text
         else:
+            if not paragraph:
+                began['paragraph'] = block
             paragraph.append(ESCAPE + line.text if line.text.startswith('#') else line.text)
         previous = line
-    if title:
-        end_title()
+    end_title()
     end_paragraph()
-    return blocks
+    return list(zip(blocks, owners, strict=True))
 
 
-def _continues_heading(blocks: list[str], previous: layout.Line | None, line: layout.Line) -> bool:
-    """An upper-case line right under a section heading, in its column, is the heading's wrapped second line."""
-    if not blocks or not blocks[-1].startswith('## ') or previous is None or previous.column != line.column:
+def _continues_heading(previous: layout.Line, line: layout.Line) -> bool:
+    """Is ``line``, upper-case right under the section heading line ``previous`` in its column, its wrapped line?"""
+    if previous.column != line.column:
         return False
     text = line.text
     close = -OVERLAP * line.size <= line.y0 - previous.y1 <= PARAGRAPH_GAP * line.size

@@ -34,9 +34,14 @@
 //! content the default view hides ([`crate::optional`]) draws -- in a sequence marked `/OC`, or in a Form, image
 //! or annotation whose own `/OC` is hidden -- is still an event, its [`Layer::hidden`] set: the reader reports
 //! what the page holds and its caller chooses what to keep. An `/ActualText` (14.9.4) replaces the text of the
-//! glyphs its sequence shows: the first glyph seen in it carries the replacement, every later one the empty text,
-//! each keeping its own box; the outermost replacement governs a nested one, and one whose glyphs are all unseen is
-//! lost with them.
+//! glyphs its sequence shows: the first glyph seen in it carries the replacement ([`Glyph::actual_text`]), every
+//! later one the empty text, each keeping its own box and the text its font gives it; the outermost replacement
+//! governs a nested one, and one whose glyphs are all unseen is lost with them.
+//!
+//! Each event carries the marked content it is drawn in as a tagged PDF's structure tree refers to it ([`Marked`],
+//! 14.7.5): the `/MCID` of the innermost sequence with one and the content stream holding that sequence -- the
+//! page's, or a Form `XObject`'s -- so content a Form draws inside a page's sequence belongs to the page's; and
+//! whether an `/Artifact` sequence (14.8.2.2) holds it.
 //!
 //! Annotations are drawn when asked, after the page's content: each one's normal appearance (`/AP /N`, its `/AS`
 //! state's when it has states) mapped onto its `/Rect` (12.5.5), from the page's initial state, its events in the
@@ -347,10 +352,24 @@ pub struct PathEvent {
     pub fill: Option<Fill>,
     /// The layer it is drawn in.
     pub layer: Layer,
+    /// The marked content it is drawn in.
+    pub marked: Marked,
     /// The clip in force; None: the page's alone.
     pub clip: Option<Rc<Clip>>,
     /// How it is composited.
     pub compositing: Compositing,
+}
+
+/// The marked content an event is drawn in (14.6), as a tagged PDF's structure tree refers to it (14.7.5).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Marked {
+    /// The marked-content identifier (`/MCID`) of the innermost open sequence that has one; None outside them all.
+    pub mcid: Option<i64>,
+    /// The Form `XObject` (by object number) whose content stream holds that sequence; None for the page's content,
+    /// and for an `XObject` written directly in a resource dictionary (it has no number to be referred to by).
+    pub stream: Option<u32>,
+    /// An `/Artifact` sequence holds it: pagination, layout or decoration, not the document's content (14.8.2.2).
+    pub artifact: bool,
 }
 
 /// Where an event is drawn beyond the page's own visible content: in optional content the default view hides, in
@@ -385,6 +404,8 @@ pub struct ImageEvent {
     pub fill: Color,
     /// The layer it is drawn in.
     pub layer: Layer,
+    /// The marked content it is drawn in.
+    pub marked: Marked,
     /// The clip in force; None: the page's alone.
     pub clip: Option<Rc<Clip>>,
     /// How it is composited.
@@ -407,9 +428,11 @@ pub struct Inline {
 pub struct Glyph {
     /// Its character code in the font.
     pub code: u32,
-    /// Its text: the font's for it, when the font says; inside an `/ActualText` sequence, the replacement on the
-    /// sequence's first glyph seen and the empty text on every later one.
+    /// Its text, as its font gives it; None when the font says nothing.
     pub text: Option<String>,
+    /// Inside an `/ActualText` sequence, the text stated in place of the glyphs': the replacement on the sequence's
+    /// first glyph seen, the empty text on every later one; None outside one.
+    pub actual_text: Option<String>,
     /// Where it starts along its line, in page space: its origin on the baseline, or its vertical origin (the top
     /// of its place in a column) when its font writes vertically.
     pub origin: Point,
@@ -444,6 +467,8 @@ pub struct TextEvent {
     pub glyphs: Vec<Glyph>,
     /// The layer it is drawn in.
     pub layer: Layer,
+    /// The marked content it is drawn in.
+    pub marked: Marked,
     /// The clip in force; None: the page's alone.
     pub clip: Option<Rc<Clip>>,
     /// How it is composited.
@@ -489,6 +514,8 @@ pub struct ShadingEvent {
     pub intent: Intent,
     /// The layer it is drawn in.
     pub layer: Layer,
+    /// The marked content it is drawn in.
+    pub marked: Marked,
     /// The clip in force; None: the page's alone.
     pub clip: Option<Rc<Clip>>,
     /// How it is composited.
@@ -496,10 +523,14 @@ pub struct ShadingEvent {
 }
 
 /// An open marked-content sequence (`BMC`/`BDC` ... `EMC`).
-#[derive(Debug, Clone, Copy)]
-struct Marked {
+#[derive(Debug, Clone, Copy, Default)]
+struct Sequence {
     /// Its optional content is hidden.
     hides: bool,
+    /// Its `/MCID`, and the Form `XObject` whose stream it is in (None: the page's).
+    mcid: Option<(i64, Option<u32>)>,
+    /// Its tag is `/Artifact`.
+    artifact: bool,
 }
 
 /// The `/ActualText` replacing the text of the glyphs shown in the sequence at `depth` of the marked stack.
@@ -618,7 +649,9 @@ struct Interpreter<'a> {
     /// The default view of the file's optional content.
     optional: OptionalContent,
     /// The open marked-content sequences, outermost first.
-    marked: Vec<Marked>,
+    marked: Vec<Sequence>,
+    /// The Form `XObject` (by object number) whose content stream is running; None for the page's.
+    stream: Option<u32>,
     /// How many of them the running Form found open: its `EMC`s may not end those.
     marked_floor: usize,
     /// The outermost open `/ActualText`.
@@ -727,6 +760,7 @@ impl File {
             uncolored: false,
             optional: self.optional_content()?,
             marked: Vec::new(),
+            stream: None,
             marked_floor: 0,
             actual: None,
             hiding_entries: 0,
@@ -753,7 +787,7 @@ impl File {
         place: &dyn Fn(Matrix) -> Matrix,
     ) -> Result<Content> {
         let mut interpreter = self.interpreter(State::new(ctm, clip), Some(place))?;
-        interpreter.form(form, resources, 0)?;
+        interpreter.form(form, None, resources, 0)?;
         Ok(interpreter.out)
     }
 
@@ -790,7 +824,7 @@ impl File {
         }
         let mut interpreter = self.interpreter(initial, Some(place))?;
         interpreter.uncolored = tint.is_some();
-        interpreter.form_under(cell, Matrix::IDENTITY, &Dict::new(), 0)?;
+        interpreter.form_under(cell, None, Matrix::IDENTITY, &Dict::new(), 0)?;
         Ok(interpreter.out)
     }
 }
@@ -895,7 +929,10 @@ impl Interpreter<'_> {
             b"W*" => self.clipping = Some(true),
             b"sh" => self.shading(operands, resources)?,
             b"d1" if self.in_procedure => self.uncolored = true,
-            b"BMC" => self.marked.push(Marked { hides: false }),
+            b"BMC" => self.marked.push(Sequence {
+                artifact: operands.first().and_then(Object::as_name) == Some(b"Artifact"),
+                ..Sequence::default()
+            }),
             b"BDC" => self.begin_marked(operands, resources),
             b"EMC" => self.end_marked()?,
             _ => {} // marked-content points and compatibility operators draw nothing
@@ -904,7 +941,8 @@ impl Interpreter<'_> {
     }
 
     /// `BDC`: a sequence opens, hiding its content when its optional content is hidden, replacing its text when it
-    /// has an `/ActualText`. Properties that cannot be read are a warning; the sequence opens all the same.
+    /// has an `/ActualText`, identifying its content when it has an `/MCID`. Properties that cannot be read are a
+    /// warning; the sequence opens all the same.
     fn begin_marked(&mut self, operands: &[Object], resources: &Dict) {
         let properties = match operands.get(1) {
             Some(Object::Name(name)) => match self.file.get(resources, b"Properties") {
@@ -918,13 +956,21 @@ impl Interpreter<'_> {
             _ => Err(Error::malformed("needs a tag and properties")),
         };
         let tag = operands.first().and_then(Object::as_name);
-        let mut hides = false;
+        let mut sequence = Sequence {
+            artifact: tag == Some(b"Artifact"),
+            ..Sequence::default()
+        };
         let read = properties.and_then(|properties| {
             if tag == Some(b"OC") {
-                hides = !self.optional.shows(self.file, &properties)?;
+                sequence.hides = !self.optional.shows(self.file, &properties)?;
+            }
+            let Object::Dict(dict) = self.file.resolve(&properties)? else {
+                return Ok(());
+            };
+            if let Some(mcid) = self.file.get(&dict, b"MCID")?.and_then(|m| m.as_integer()) {
+                sequence.mcid = Some((mcid, self.stream));
             }
             if self.actual.is_none()
-                && let Object::Dict(dict) = self.file.resolve(&properties)?
                 && let Some(Object::String(text)) = self.file.get(&dict, b"ActualText")?
             {
                 self.actual = Some(ActualText {
@@ -940,7 +986,7 @@ impl Interpreter<'_> {
                 .warnings
                 .push(format!("`BDC` read as plain marked content: {e}"));
         }
-        self.marked.push(Marked { hides });
+        self.marked.push(sequence);
     }
 
     /// `EMC`: the innermost open sequence ends.
@@ -974,6 +1020,21 @@ impl Interpreter<'_> {
             {
                 self.actual = None;
             }
+        }
+    }
+
+    /// The marked content what is painted now is drawn in.
+    fn marked(&self) -> Marked {
+        let (mcid, stream) = self
+            .marked
+            .iter()
+            .rev()
+            .find_map(|s| s.mcid)
+            .map_or((None, None), |(mcid, stream)| (Some(mcid), stream));
+        Marked {
+            mcid,
+            stream,
+            artifact: self.marked.iter().any(|s| s.artifact),
         }
     }
 
@@ -1036,12 +1097,14 @@ impl Interpreter<'_> {
                 ..self.layer()
             };
             let matrix = self.state.ctm;
+            let marked = self.marked();
             self.out.events.push(Event::Shading(ShadingEvent {
                 bbox,
                 shading: Rc::new(shading),
                 matrix,
                 intent: self.state.intent,
                 layer,
+                marked,
                 clip: self.state.clips.clone(),
                 compositing: self.state.compositing.clone(),
             }));
@@ -1393,6 +1456,7 @@ impl Interpreter<'_> {
             out.push(Glyph {
                 code: code.code,
                 text: code.text,
+                actual_text: None,
                 origin: at((0.0, 0.0)),
                 end: at(end),
                 bbox: Rect::around(&corners.map(at)).expect("four corners"),
@@ -1417,7 +1481,7 @@ impl Interpreter<'_> {
         }
         if let Some(actual) = &mut self.actual {
             for glyph in &mut glyphs {
-                glyph.text = Some(if actual.given {
+                glyph.actual_text = Some(if actual.given {
                     String::new()
                 } else {
                     actual.given = true;
@@ -1437,6 +1501,7 @@ impl Interpreter<'_> {
             vertical: font.vertical(),
             glyphs,
             layer: self.layer(),
+            marked: self.marked(),
             clip: self.state.clips.clone(),
             compositing: self.state.compositing.clone(),
         };
@@ -1799,6 +1864,7 @@ impl Interpreter<'_> {
                 inkless,
                 ..self.layer()
             },
+            marked: self.marked(),
             clip: state.clips.clone(),
             compositing: state.compositing.clone(),
         };
@@ -1945,18 +2011,24 @@ impl Interpreter<'_> {
                 );
                 Ok(())
             }
-            b"Form" => self.form(&stream, resources, depth),
+            b"Form" => self.form(
+                &stream,
+                reference.as_reference().map(|r| r.num),
+                resources,
+                depth,
+            ),
             _ => Ok(()), // PostScript XObjects draw nothing a reader sees
         };
         self.hiding_entries -= hides;
         drawn
     }
 
-    /// The Form `stream` drawn in the current state (8.10): through its `/Matrix`, clipped to its `/BBox`, with its
-    /// own resources (else `resources`, its caller's); the state, the path and its marked content end with it.
-    fn form(&mut self, stream: &Stream, resources: &Dict, depth: usize) -> Result<()> {
+    /// The Form `stream` (object `number`) drawn in the current state (8.10): through its `/Matrix`, clipped to its
+    /// `/BBox`, with its own resources (else `resources`, its caller's); the state, the path and its marked content
+    /// end with it.
+    fn form(&mut self, stream: &Stream, number: Option<u32>, resources: &Dict, depth: usize) -> Result<()> {
         let matrix = self.form_matrix(&stream.dict)?;
-        self.form_under(stream, matrix, resources, depth)
+        self.form_under(stream, number, matrix, resources, depth)
     }
 
     /// The Form (or tiling cell) `stream` drawn as [`Self::form`] draws it, through `matrix` rather than its
@@ -1964,6 +2036,7 @@ impl Interpreter<'_> {
     fn form_under(
         &mut self,
         stream: &Stream,
+        number: Option<u32>,
         matrix: Matrix,
         resources: &Dict,
         depth: usize,
@@ -2016,8 +2089,10 @@ impl Interpreter<'_> {
             };
         }
         let floor = std::mem::replace(&mut self.marked_floor, self.marked.len());
+        let caller = std::mem::replace(&mut self.stream, number);
         self.run(&data, &own, depth + 1);
         self.close_marked("a Form XObject");
+        self.stream = caller;
         self.marked_floor = floor;
         self.state = saved.0;
         self.stack.truncate(saved.1);
@@ -2096,16 +2171,15 @@ impl Interpreter<'_> {
         let Some(Object::Dict(appearances)) = self.file.get(&annotation, b"AP")? else {
             return Ok(()); // no appearance: nothing drawn
         };
-        let stream = match self.file.get(&appearances, b"N")? {
-            Some(Object::Stream(s)) => s,
+        let normal = appearances.get(b"N");
+        let (stream, number) = match self.file.get(&appearances, b"N")? {
+            Some(Object::Stream(s)) => (s, normal.and_then(Object::as_reference)),
             Some(Object::Dict(states)) => {
                 let state = self.file.get(&annotation, b"AS")?;
                 let state = state.as_ref().and_then(Object::as_name);
-                match state
-                    .and_then(|s| states.get(s))
-                    .map(|s| self.file.resolve(s))
-                {
-                    Some(Ok(Object::Stream(s))) => s,
+                let chosen = state.and_then(|s| states.get(s));
+                match chosen.map(|s| self.file.resolve(s)) {
+                    Some(Ok(Object::Stream(s))) => (s, chosen.and_then(Object::as_reference)),
                     Some(Err(e)) => return Err(e),
                     _ => return Ok(()), // no appearance for its state
                 }
@@ -2152,7 +2226,7 @@ impl Interpreter<'_> {
         self.annotation = Some(String::from_utf8_lossy(subtype).into_owned());
         self.hiding_entries += hides;
         let defaults = self.form_resources.clone();
-        let drawn = self.form(&stream, &defaults, 0);
+        let drawn = self.form(&stream, number.map(|r| r.num), &defaults, 0);
         self.hiding_entries -= hides;
         drawn
     }
@@ -2204,6 +2278,7 @@ impl Interpreter<'_> {
                 inkless,
                 ..self.layer()
             },
+            marked: self.marked(),
             clip: self.state.clips.clone(),
             compositing: self.state.compositing.clone(),
         }));

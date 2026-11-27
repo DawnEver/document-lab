@@ -16,14 +16,17 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from document_lab import formula, png
+from document_lab.agreement import compare
 from document_lab.ir import BBox
 from document_lab.paper.convert import convert
 from document_lab.paper.output import write_paper_output
 from document_lab.paper.sections import clean_sections, split_sections
 from document_lab.paper.text import slug
 from document_lab.pdf import read_pdf, read_raster
+from document_lab.tags import DEFAULT_USES
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
     from pathlib import Path
 
     from document_lab.formula import Formulas, Model
@@ -52,6 +55,9 @@ class Ingested:
     tables: int
     appended: tuple[Path, ...]
     structure: Headings | None
+    #: Where a tagged PDF's tags and layout's inference disagree, in words (`document_lab.agreement`); empty for an
+    #: untagged PDF or marker's conversion.
+    disagreements: tuple[str, ...] = ()
 
 
 #: Render resolution of a scanned page: 3x (216 dpi) keeps a catalogue's 6 pt table digits legible.
@@ -95,6 +101,7 @@ def ingest(
     tool: Tool | None = None,
     renderer: Renderer = 'pymupdf',
     outline: bool = True,
+    tagged: Collection[str] = DEFAULT_USES,
     formulas: Formulas | None = None,
     formula_model: Model = 'texteller',
     include_hidden: bool = False,
@@ -103,13 +110,14 @@ def ingest(
     """Convert ``pdf`` (with ``tool``, else the IR path) and write its paper layout into ``out_dir``.
 
     Its figures, equations and scanned pages are rendered by ``renderer`` (`document_lab.pdf.read_raster`).
-    ``outline``: the PDF's stated outline names the sections when it matches the pages; False infers them all the
-    same (`document_lab.paper.convert.convert`). ``formulas``: ``latex`` writes each equation crop's LaTeX under its
-    image, read by ``formula_model`` (`document_lab.formula`); refused by
-    :class:`document_lab.formula.FormulaUnavailable` before anything is written when that model cannot run.
-    Every step reading text reads the paper as its default view shows it (`document_lab.ir.Page.shown`): its
-    markdown and running heads, its captions and equations; ``include_hidden``: what hidden layers draw is read
-    too, ``include_in_background_color``: the text filled in the color under it.
+    ``outline``: the PDF's stated outline names the sections when it matches the pages; False keeps to its tags and
+    the rules. ``tagged``: what a tagged PDF's tags give its markdown, and so its sections
+    (`document_lab.paper.convert.convert`). ``formulas``: ``latex`` writes each equation crop's LaTeX under its image,
+    read by ``formula_model`` (`document_lab.formula`); refused by :class:`document_lab.formula.FormulaUnavailable`
+    before anything is written when that model cannot run. Every step reading text reads the paper as its default
+    view shows it (`document_lab.ir.Page.shown`): its markdown and running heads, its tags and how they agree with
+    layout (`document_lab.agreement`), its captions and equations; ``include_hidden``: what hidden layers draw is
+    read too, ``include_in_background_color``: the text filled in the color under it.
     """
     transcribe = None if formulas is None else formula.transcriber(formulas, model=formula_model)
     pdf = pdf.resolve()
@@ -119,9 +127,16 @@ def ingest(
         out_dir,
         tool=tool,
         outline=outline,
+        tagged=tagged,
         include_hidden=include_hidden,
         include_in_background_color=include_in_background_color,
     )
+    compared = (
+        compare(read_pdf(pdf), include_hidden=include_hidden, include_in_background_color=include_in_background_color)
+        if choice.tool == 'ir'
+        else None
+    )
+    disagreements = compared.disagreements if compared is not None else ()
     stated = frozenset(structure.named) if structure is not None else frozenset()
     main, appended = clean_sections(split_sections(md_text), stated=stated)
     if not main and md_text.strip():
@@ -131,7 +146,7 @@ def ingest(
     if not main:
         scanned = _scanned_pages(pdf, out_dir, renderer)
         if scanned:
-            return Ingested(choice, scanned, scanned, 0, (), structure)
+            return Ingested(choice, scanned, scanned, 0, (), structure, disagreements)
         msg = f'{pdf.name}: the converted markdown has no section'
         raise NoSections(msg)
     n_sec, n_fig, n_tbl = write_paper_output(
@@ -170,4 +185,4 @@ def ingest(
         written.append(target)
 
     shutil.rmtree(out_dir / 'img' / 'flat', ignore_errors=True)
-    return Ingested(choice, n_sec, n_fig, n_tbl, tuple(written), structure)
+    return Ingested(choice, n_sec, n_fig, n_tbl, tuple(written), structure, disagreements)

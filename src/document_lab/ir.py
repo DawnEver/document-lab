@@ -20,6 +20,11 @@ its form fields' values, the files it embeds, and each page's links -- each as s
 absent (None, or an empty tuple), never made up. An outline item and a link lead to a :class:`Destination`, or do
 an :class:`Action`.
 
+A tagged PDF states its logical structure (ISO 32000-2 14.7): :attr:`Document.structure` is that tree of
+:class:`Element` s in the order the document states, each covering the values it names -- the spans, paths and
+figures drawn in its marked content (each value cites the :class:`Mark` it is drawn under), annotations and
+images it refers to. It is None for an untagged file: a structure is never made up.
+
 A span's text is what its document states, a replacement (``/ActualText``) too: a no-break or zero-width space
 stays one. A module that joins, splits or matches text reads it through :func:`spaced`.
 """
@@ -44,19 +49,25 @@ if TYPE_CHECKING:
 __all__ = [
     'Action',
     'Attachment',
+    'Attribute',
     'BBox',
     'Cell',
     'Destination',
     'Document',
+    'Element',
     'Field',
     'Figure',
     'Info',
     'Link',
+    'Mark',
+    'MarkedContent',
     'Metadata',
+    'ObjectReference',
     'OutlineItem',
     'Page',
     'Provenance',
     'Raster',
+    'Structure',
     'Table',
     'TextSpan',
     'VectorPath',
@@ -146,6 +157,17 @@ def file_uri(path: Path) -> str:
     return 'file:' + drive + root + quote(tail, encoding=encoding, errors=errors)
 
 
+class Mark(NamedTuple):
+    """The marked-content sequence a value is drawn under, as a tagged PDF's structure refers to it.
+
+    ``mcid`` is the sequence's marked-content identifier; ``stream`` the object number of the Form XObject whose
+    content holds it, None for the page's own content.
+    """
+
+    mcid: int
+    stream: int | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class Provenance:
     """Where a value came from: the source's content hash and URI, then a page and box, or a locator."""
@@ -206,6 +228,13 @@ class TextSpan:
     #: The color its glyphs are filled with; None when they are not filled (stroked or invisible text) or the source
     #: states no fill.
     fill: tuple[float, ...] | None = None
+    #: The text its glyphs draw, when an ``/ActualText`` stated ``text`` in its place (a ligature spelled out, a
+    #: line-end hyphen taken out); None when ``text`` is what they draw.
+    drawn: str | None = None
+    #: The marked content it is drawn under; None outside any with an identifier.
+    mark: Mark | None = None
+    #: An ``/Artifact`` holds it: pagination, layout or decoration the document states is not its content.
+    artifact: bool = False
     #: It continues the run of the span before it on its page: its source set them as one run, which it split where
     #: the fill changes (a scan's glyphs each a grey of their own, a colored digit). False: it starts a run, or its
     #: source states no runs.
@@ -269,6 +298,10 @@ class VectorPath:
     inkless: bool = False
     #: The subtype of the annotation whose appearance draws it; None for the page's content.
     annotation: str | None = None
+    #: The marked content it is drawn under; None outside any with an identifier.
+    mark: Mark | None = None
+    #: An ``/Artifact`` holds it (see :class:`TextSpan`).
+    artifact: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,12 +316,17 @@ class Cell:
 class Table:
     """A grid of cell strings, and ``cell_bboxes`` of the same shape when the source has geometry.
 
-    A cell with no box of its own holds ``None`` there and cites the table's box.
+    A cell with no box of its own holds ``None`` there and cites the table's box. A cell spanning several slots
+    of the grid is named in ``merged``; its text and box stand in its first slot, the others empty.
     """
 
     rows: tuple[tuple[str, ...], ...]
     cell_bboxes: tuple[tuple[BBox | None, ...], ...] | None
     provenance: Provenance
+    #: Each cell spanning more than one slot: ``(row, column, rows, columns)``, its first slot and its extent.
+    merged: tuple[tuple[int, int, int, int], ...] = ()
+    #: The slots ``(row, column)`` of the cells the source states are headers.
+    heads: tuple[tuple[int, int], ...] = ()
 
     def __post_init__(self) -> None:
         """Refuse a box grid whose shape differs from the text grid."""
@@ -320,6 +358,10 @@ class Figure:
     inkless: bool = False
     #: The subtype of the annotation whose appearance draws it; None for the page's content.
     annotation: str | None = None
+    #: The marked content it is drawn under; None outside any with an identifier.
+    mark: Mark | None = None
+    #: An ``/Artifact`` holds it (see :class:`TextSpan`).
+    artifact: bool = False
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -565,6 +607,148 @@ class Page:
         )
 
 
+#: An attribute's value: a name or text, a number, a boolean, an array of values, or a dictionary as its pairs.
+type AttributeValue = bool | int | float | str | tuple[AttributeValue, ...] | tuple[tuple[str, AttributeValue], ...]
+
+
+class Attribute(NamedTuple):
+    """A structure element's attribute: its ``owner`` (``Layout``, ``Table``, ``List``, ...), name and value."""
+
+    owner: str
+    name: str
+    value: AttributeValue
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class MarkedContent:
+    """A marked-content sequence a structure element covers: its page and mark, and what it draws, in drawing order."""
+
+    page: int
+    mark: Mark
+    spans: tuple[TextSpan, ...] = ()
+    paths: tuple[VectorPath, ...] = ()
+    figures: tuple[Figure, ...] = ()
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class ObjectReference:
+    """An object a structure element covers: an annotation by its rectangle, an image by its placements."""
+
+    #: Its object number.
+    object: int
+    #: The page it is on, when the structure names one.
+    page: int | None = None
+    #: An annotation's rectangle in page space; None for any other object.
+    bbox: BBox | None = None
+    #: The figures that place it, when it is an image.
+    figures: tuple[Figure, ...] = ()
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class Element:
+    """A structure element: its roles, what it says of itself, and its kids in the order the document states.
+
+    Its role as stated is kept beside the standard role it maps to. Compared by identity: one element of a
+    document is not another however alike.
+    """
+
+    #: Its role as stated (``/S``): a standard one, or the document's own.
+    role: str
+    #: The standard role it is or maps to through the document's role map (``H1``, ``P``, ``Table``); None when it
+    #: maps to none.
+    standard: str | None
+    kids: tuple[Element | MarkedContent | ObjectReference, ...] = ()
+    #: Its title (``/T``).
+    title: str | None = None
+    #: Its language (``/Lang``).
+    lang: str | None = None
+    #: Its alternate description (``/Alt``): what a figure shows, in words.
+    alt: str | None = None
+    #: The text stated in place of what it covers (``/ActualText``); the spans it covers state it too, keeping the
+    #: text they draw (:attr:`TextSpan.drawn`).
+    actual_text: str | None = None
+    #: The expansion of the abbreviation it is (``/E``).
+    expansion: str | None = None
+    #: Its attributes: its own, then its classes'.
+    attributes: tuple[Attribute, ...] = ()
+    #: The page it names, else the nearest element's above it; None when none names one.
+    page: int | None = None
+
+    def elements(self) -> Iterator[Element]:
+        """Itself and every element below it, in tree order."""
+        yield self
+        for kid in self.kids:
+            if isinstance(kid, Element):
+                yield from kid.elements()
+
+    def content(self) -> Iterator[MarkedContent | ObjectReference]:
+        """What it and the elements below it cover, in order."""
+        for kid in self.kids:
+            if isinstance(kid, Element):
+                yield from kid.content()
+            else:
+                yield kid
+
+    def spans(self) -> Iterator[TextSpan]:
+        """The spans it covers, in order."""
+        for item in self.content():
+            if isinstance(item, MarkedContent):
+                yield from item.spans
+
+    def figures(self) -> Iterator[Figure]:
+        """The figures it covers, in order."""
+        for item in self.content():
+            yield from item.figures
+
+    def paths(self) -> Iterator[VectorPath]:
+        """The paths it covers, in order."""
+        for item in self.content():
+            if isinstance(item, MarkedContent):
+                yield from item.paths
+
+    def attribute(self, name: str, owner: str | None = None) -> AttributeValue | None:
+        """The value of its attribute ``name`` (of ``owner``, when given); None when it states none."""
+        return next((a.value for a in self.attributes if a.name == name and owner in {None, a.owner}), None)
+
+    @property
+    def text(self) -> str:
+        """The text it states: its ``/ActualText``, else that of what it covers, a space between two pieces."""
+        if self.actual_text is not None:
+            return self.actual_text
+        pieces = [
+            kid.text if isinstance(kid, Element) else ' '.join(s.text for s in kid.spans)
+            for kid in self.kids
+            if not isinstance(kid, ObjectReference)
+        ]
+        return ' '.join(' '.join(pieces).split())
+
+    def bbox(self, page: int) -> BBox | None:
+        """The box round what it covers on ``page``; None when it covers nothing there."""
+        boxes = []
+        for item in self.content():
+            if item.page != page:
+                continue
+            values = (*item.spans, *item.paths, *item.figures) if isinstance(item, MarkedContent) else item.figures
+            boxes += [v.provenance.bbox for v in values if v.provenance.bbox is not None]
+            if isinstance(item, ObjectReference) and item.bbox is not None:
+                boxes.append(item.bbox)
+        return union(boxes) if boxes else None
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class Structure:
+    """A tagged PDF's logical structure: the elements under its root, and what its reader left out, in words."""
+
+    roots: tuple[Element, ...]
+    #: Cycles, broken references and disagreements with the parent tree the reader found, in words.
+    warnings: tuple[str, ...] = ()
+
+    def elements(self) -> Iterator[Element]:
+        """Every element, in tree order."""
+        for root in self.roots:
+            yield from root.elements()
+
+
 @dataclass(frozen=True, slots=True)
 class Document:
     """A source document by content hash and URI, its pages, and what it states beside them.
@@ -578,6 +762,8 @@ class Document:
     #: What the reader repaired to read the file (a rebuilt cross-reference table, ...), in words: a reader reading
     #: pages when asked for adds what it repairs to read one as it reads it.
     repairs: Sequence[str] = ()
+    #: The logical structure a tagged PDF states; None for an untagged file.
+    structure: Structure | None = None
     #: Its outline's top-level items; empty when it has none.
     outline: tuple[OutlineItem, ...] = ()
     #: Each page's label (``iv``, ``A-3``), in page order, None for a page no range labels; empty when it states

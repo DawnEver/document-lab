@@ -64,7 +64,7 @@ class _Capture:
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        self.reader = _pdf.open(path.read_bytes(), b'')
+        self.reader = _pdf.open(path, b'')
         self.count = len(self.reader.pages)
         self._images: dict[int, _Image] = {}
 

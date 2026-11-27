@@ -280,7 +280,12 @@ def fetch_into(source: Source, cache: Path) -> Path:
         cache.mkdir(parents=True, exist_ok=True)
         part = cache / f'{source.sha256}.{os.getpid()}.part'  # this process's own; renamed whole, never read half
         part.write_bytes(data)
-        part.replace(path)
+        try:
+            part.replace(path)
+        except PermissionError:  # Windows: a sibling worker renamed its copy in first and holds it open
+            if not path.is_file() or _digest(path.read_bytes()) != source.sha256:
+                raise
+            part.unlink()
         return path
     msg = (
         f'FETCH FAILED, not a reader regression: {source.name} is pinned to {source.size} bytes, sha256 '

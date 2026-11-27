@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Kind, Result};
 use crate::file::File;
 use crate::geometry::Rect;
 use crate::object::{Dict, ObjRef, Object};
@@ -79,20 +79,20 @@ impl<W: Write> Writer<W> {
     /// Refuses a color space or bit depth no image may have, a size that is not positive, and a failed write.
     pub fn image_page(&mut self, image: &Image, size: (f64, f64)) -> Result<()> {
         if !matches!(image.space, b"DeviceGray" | b"DeviceRGB" | b"DeviceCMYK") {
-            return Err(Error::new(format!(
+            return Err(Error::invalid(format!(
                 "an image page is DeviceGray, DeviceRGB or DeviceCMYK, not {}",
                 String::from_utf8_lossy(image.space)
             )));
         }
         if !matches!(image.bits, 1 | 2 | 4 | 8 | 16) {
-            return Err(Error::new(format!(
+            return Err(Error::invalid(format!(
                 "an image has 1, 2, 4, 8 or 16 bits a component, not {}",
                 image.bits
             )));
         }
         let (width, height) = size;
         if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
-            return Err(Error::new(format!(
+            return Err(Error::invalid(format!(
                 "a page is a positive size, not {width} x {height}"
             )));
         }
@@ -273,7 +273,7 @@ impl Copy<'_> {
         depth: usize,
     ) -> Result<Object> {
         if depth > 256 {
-            return Err(Error::new("objects nested too deep"));
+            return Err(Error::malformed("objects nested too deep"));
         }
         Ok(match value {
             Object::Reference(r) => self.target(writer, r)?,
@@ -331,7 +331,7 @@ impl Copy<'_> {
 }
 
 fn failed(e: &io::Error) -> Error {
-    Error::new(format!("writing the PDF: {e}"))
+    Error::new(Kind::Io, format!("writing the PDF: {e}"))
 }
 
 fn name(n: &[u8]) -> Object {

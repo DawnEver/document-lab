@@ -8,11 +8,15 @@ A value from a format without geometry (an HTML table) cites a ``locator`` inste
 from __future__ import annotations
 
 import dataclasses
+import os
+import sys
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
+from urllib.parse import quote
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
+    from pathlib import Path
 
     import numpy as np
 
@@ -27,6 +31,7 @@ __all__ = [
     'Table',
     'TextSpan',
     'VectorPath',
+    'file_uri',
     'union',
 ]
 
@@ -58,6 +63,36 @@ def union(boxes: Iterable[BBox]) -> BBox:
     """The smallest box covering every box given (at least one)."""
     xs0, ys0, xs1, ys1 = zip(*boxes, strict=True)
     return BBox(min(xs0), min(ys0), max(xs1), max(ys1))
+
+
+def file_uri(path: Path) -> str:
+    """The ``file:`` URI of the absolute ``path``, a :class:`Provenance`'s ``uri`` for a local file: ``path.as_uri()``.
+
+    Made here because ``as_uri`` imports ``urllib.request`` (``http.client``, ``email``, ``tempfile``) the first
+    time a process calls it, about 0.1 s (Python 3.15) -- more than reading a short PDF takes. The steps are
+    ``urllib.request.pathname2url``'s, which ``tests/unit/test_ir.py`` holds this to.
+
+    Raises:
+        ValueError: ``path`` is relative.
+
+    """
+    if not path.is_absolute():
+        msg = f"{path}: relative paths can't be expressed as file URIs"
+        raise ValueError(msg)
+    encoding, errors = sys.getfilesystemencoding(), sys.getfilesystemencodeerrors()
+    text = str(path).replace('\\', '/') if os.name == 'nt' else str(path)
+    drive, root, tail = os.path.splitroot(text)
+    if drive:
+        if drive[:4] == '//?/':  # a verbatim path: its drive, or its share
+            drive = drive[4:]
+            if drive[:4].upper() == 'UNC/':
+                drive = '//' + drive[4:]
+        if drive[1:] == ':':  # a drive letter: an empty authority, then the path
+            drive = '///' + drive
+        drive = quote(drive, encoding=encoding, errors=errors, safe='/:')
+    elif root:
+        root = '//' + root  # an empty authority, so a path starting // is no authority
+    return 'file:' + drive + root + quote(tail, encoding=encoding, errors=errors)
 
 
 @dataclass(frozen=True, slots=True)

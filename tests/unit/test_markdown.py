@@ -148,6 +148,18 @@ def test_a_table_row_led_by_a_year_heads_nothing(tmp_path):
     assert heads == ['### 4.2 Duty types', '## 12 Tests']
 
 
+def test_a_table_s_merged_cells_are_written_once_given_its_cells_boxes():
+    rows = (('Parameter', 'Limits', 'Limits'), ('Parameter', 'min', 'max'), ('a|b', '1', '2'))
+    merged, wide = BBox(0, 0, 10, 20), BBox(10, 0, 30, 10)
+    boxes = (
+        (merged, wide, wide),
+        (merged, BBox(10, 10, 20, 20), BBox(20, 10, 30, 20)),
+        (BBox(0, 20, 10, 30), BBox(10, 20, 20, 30), BBox(20, 20, 30, 30)),
+    )
+    assert table(rows, boxes) == '| Parameter | Limits |  |\n| --- | --- | --- |\n|  | min | max |\n| a\\|b | 1 | 2 |'
+    assert table(rows).count('Limits') == 2  # without boxes no merge is known
+
+
 def test_a_placed_block_stands_where_its_box_is_in_place_of_the_lines_inside_it(tmp_path):
     doc = pymupdf.open()
     page = doc.new_page(width=612, height=792)

@@ -20,6 +20,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from pathlib import Path
 
+    from document_lab.ir import Table
+
 FRAME = pymupdf.Rect(100, 100, 400, 300)
 RED = (1, 0, 0)
 BLUE = (0, 0, 1)
@@ -534,3 +536,129 @@ def mixed_pdf(path: Path) -> Path:
     doc.save(path)
     doc.close()
     return path
+
+
+#: The page a synthetic scan is of (Letter, as the tables above draw on); it is turned about its center.
+SCAN_PAGE = pymupdf.Rect(0, 0, 612, 792)
+
+
+def turned(x: float, y: float, degrees: float) -> tuple[float, float]:
+    """The point of :data:`SCAN_PAGE` turned ``degrees`` clockwise as seen (y down) about its center."""
+    cx, cy = SCAN_PAGE.width / 2, SCAN_PAGE.height / 2
+    a = math.radians(degrees)
+    return cx + (x - cx) * math.cos(a) - (y - cy) * math.sin(a), cy + (x - cx) * math.sin(a) + (y - cy) * math.cos(a)
+
+
+def scan_image(
+    *draws: Callable[[pymupdf.Page], object], dpi: float = 300, angle: float = 0.0, noise: float = 0.0, seed: int = 0
+) -> np.ndarray:
+    """:data:`SCAN_PAGE` with each of ``draws`` drawn on it, as a scanner gives it: grey rows at ``dpi``.
+
+    The page is turned ``angle`` degrees clockwise (:func:`turned`), as a sheet fed askew; ``noise`` scales the
+    scanner's grain (Gaussian, 25 grey levels at 1), black specks (0.2 %) and white dropouts (3 %), from ``seed``.
+    Rules broken on paper are drawn by ``draws`` (white boxes over them), so they turn with the page.
+    """
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=SCAN_PAGE.width, height=SCAN_PAGE.height)
+        for draw in draws:
+            draw(page)
+        matrix = pymupdf.Matrix(dpi / 72, dpi / 72).prerotate(angle)
+        pix = page.get_pixmap(matrix=matrix, colorspace=pymupdf.csGRAY, alpha=False)
+    whole = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.stride)[:, : pix.width]
+    rows, columns = round(SCAN_PAGE.height * dpi / 72), round(SCAN_PAGE.width * dpi / 72)
+    top, left = (whole.shape[0] - rows) // 2, (whole.shape[1] - columns) // 2  # the turned page's center kept
+    grey = whole[top : top + rows, left : left + columns].astype(np.float64)
+    if noise:
+        rng = np.random.default_rng(seed)
+        grey += rng.normal(0, 25 * noise, grey.shape)
+        grey[rng.random(grey.shape) < 0.002 * noise] = 0
+        grey[rng.random(grey.shape) < 0.03 * noise] = 255
+    return np.clip(grey, 0, 255).astype(np.uint8)
+
+
+def scan_pdf(path: Path, grey: np.ndarray) -> Path:
+    """A page of :data:`SCAN_PAGE`'s size that is the one 8-bit grey image ``grey`` (:func:`scan_image`)."""
+    rows, columns = grey.shape
+    image = f'/Width {columns} /Height {rows} /ColorSpace /DeviceGray /BitsPerComponent 8'
+    return image_pdf(path, grey.tobytes(), image, size=(SCAN_PAGE.width, SCAN_PAGE.height))
+
+
+def broken_rules(page: pymupdf.Page, cut: float = 1.5) -> None:
+    """White cuts ``cut`` points long across :func:`draw_ruled_table`'s rules, away from where rules cross."""
+    x0, y0 = TABLE_ORIGIN
+    for r in range(len(TABLE_ROWS) + 1):
+        for x in (13, 58, 88, 158, 198, 268, 308, 338):
+            page.draw_rect(
+                pymupdf.Rect(x0 + x, y0 + 20 * r - 1, x0 + x + cut, y0 + 20 * r + 1), color=None, fill=(1, 1, 1)
+            )
+    for c in range(len(TABLE_ROWS[0]) + 1):
+        for y in (5, 28, 51, 70):
+            page.draw_rect(
+                pymupdf.Rect(x0 + 120 * c - 1, y0 + y, x0 + 120 * c + 1, y0 + y + cut), color=None, fill=(1, 1, 1)
+            )
+
+
+def double_border(page: pymupdf.Page, apart: float = 2.5) -> None:
+    """A second rule ``apart`` points round :func:`draw_ruled_table`'s outline: a double rule."""
+    outline = table_cell_rect(0, 0) | table_cell_rect(len(TABLE_ROWS) - 1, len(TABLE_ROWS[0]) - 1)
+    page.draw_rect(
+        pymupdf.Rect(outline.x0 - apart, outline.y0 - apart, outline.x1 + apart, outline.y1 + apart),
+        color=(0, 0, 0),
+        width=0.5,
+    )
+
+
+def table_differences(
+    table: Table,
+    rows: Sequence[Sequence[str]],
+    *,
+    merged: Sequence[tuple[int, int, int, int]] = (),
+    angle: float = 0.0,
+    within: float = 0.5,
+) -> tuple[list[str], list[str]]:
+    """How a table found on a scan differs from the one :func:`draw_ruled_table` drew: ``(structure, text)``.
+
+    Structure: its shape, which slots share a cell (``merged``), and each cell's box -- its center where
+    :func:`turned` by ``angle`` puts the drawn cell's and its size the drawn cell's, each ``within`` points. Text:
+    each cell whose text is not the drawn one's.
+    """
+    structure: list[str] = []
+    if [len(r) for r in table.rows] != [len(r) for r in rows]:
+        return [f'shape {[len(r) for r in table.rows]}, drawn {[len(r) for r in rows]}'], []
+    boxes = table.cell_bboxes or ()
+    for r, row in enumerate(rows):
+        for c in range(len(row)):
+            r0, c0, r1, c1 = _merged_block(merged, r, c)
+            drawn = table_cell_rect(r0, c0) | table_cell_rect(r1, c1)
+            x, y = turned((drawn.x0 + drawn.x1) / 2, (drawn.y0 + drawn.y1) / 2, angle)
+            box = boxes[r][c]
+            if box is None:
+                structure.append(f'cell ({r}, {c}) has no box')
+                continue
+            off = max(abs((box.x0 + box.x1) / 2 - x), abs((box.y0 + box.y1) / 2 - y))
+            size = max(abs(box.width - drawn.width), abs(box.height - drawn.height))
+            if off > within or size > within:
+                structure.append(f'cell ({r}, {c}) box {tuple(round(v, 1) for v in box)} off by {off:.1f} pt')
+    text = [
+        f'cell ({r}, {c}) reads {table.rows[r][c]!r}, drawn {row[c]!r}'
+        for r, row in enumerate(rows)
+        for c in range(len(row))
+        if table.rows[r][c] != row[c]
+    ]
+    return structure, text
+
+
+def draw_sideways_table(page: pymupdf.Page, rows: Sequence[Sequence[str]] = TABLE_ROWS, turn: int = -90) -> None:
+    """:func:`draw_ruled_table`'s grid turned ``turn`` degrees clockwise about :data:`SCAN_PAGE`'s center, its text
+    with it: a landscape table printed sideways on a portrait page (-90: read bottom to top, as standards set them)."""
+    n_rows, n_cols = len(rows), len(rows[0])
+    outline = table_cell_rect(0, 0) | table_cell_rect(n_rows - 1, n_cols - 1)
+    for y in [outline.y0 + TABLE_CELL[1] * r for r in range(n_rows + 1)]:
+        page.draw_line(turned(outline.x0, y, turn), turned(outline.x1, y, turn), color=(0, 0, 0), width=0.5)
+    for x in [outline.x0 + TABLE_CELL[0] * c for c in range(n_cols + 1)]:
+        page.draw_line(turned(x, outline.y0, turn), turned(x, outline.y1, turn), color=(0, 0, 0), width=0.5)
+    for r, row in enumerate(rows):
+        for c, text in enumerate(row):
+            rect = table_cell_rect(r, c)
+            at = turned(rect.x0 + 4, rect.y1 - 6, turn)
+            page.insert_text(at, text, fontname='helv', fontsize=9, rotate=-turn % 360)

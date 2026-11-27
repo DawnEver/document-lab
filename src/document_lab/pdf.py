@@ -22,7 +22,7 @@ import pymupdf
 
 from document_lab import _pdf
 from document_lab._pdf import Locked, Malformed, NotPdf, Refused, Unsupported
-from document_lab.ir import BBox, Document, Figure, Page, Provenance, Raster, TextSpan, VectorPath
+from document_lab.ir import BBox, Document, Figure, Page, Provenance, Raster, TextSpan, VectorPath, file_uri
 
 __all__ = [
     'CURVE_SAMPLES',
@@ -91,7 +91,7 @@ def read_pdf(
     path = Path(path)
     data = path.read_bytes()
     sha = hashlib.sha256(data).hexdigest()
-    uri = path.resolve().as_uri()
+    uri = file_uri(path.resolve())
     reader = _pdf.open(data, password.encode())
     return Document(sha256=sha, uri=uri, pages=_Pages(reader, sha, uri, flattening), repairs=_Repairs(reader))
 
@@ -252,7 +252,7 @@ def read_raster(path: Path | str, page: int, bbox: BBox, *, dpi: float | None = 
     pixels = _samples(reader, under, bbox, dpi) if _alone(spans, paths, bbox) else None
     if pixels is None:
         pixels = _rendered(data, page, bbox, dpi, password)
-    here = Provenance(hashlib.sha256(data).hexdigest(), path.resolve().as_uri(), page=page, bbox=bbox)
+    here = Provenance(hashlib.sha256(data).hexdigest(), file_uri(path.resolve()), page=page, bbox=bbox)
     return Raster(pixels, here)
 
 

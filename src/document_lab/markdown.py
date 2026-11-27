@@ -99,10 +99,24 @@ def page_markdowns(doc: Document, placed: Sequence[Sequence[Placed]] = ()) -> li
     return ['\n\n'.join(_rejoin(page)) + '\n' if page else '' for page in _blocks(doc, placed)]
 
 
-def table(rows: Sequence[Sequence[str]]) -> str:
-    """``rows`` as a markdown table, the first its header; a ``|`` in a cell escaped, a short row padded."""
+def table(rows: Sequence[Sequence[str]], boxes: Sequence[Sequence[BBox | None]] | None = None) -> str:
+    """``rows`` as a markdown table, the first its header; a ``|`` in a cell escaped, a short row padded.
+
+    ``boxes``: each slot's cell box (`document_lab.ir.Table.cell_bboxes`), when known: a cell merged over several
+    slots repeats its box, and is written once, in its first slot -- the leftmost of its top row -- its other slots
+    left empty, as a reader sees a merged cell.
+    """
     width = max(len(row) for row in rows)
-    cells = [[c.replace('|', ESCAPE + '|') for c in row] + [''] * (width - len(row)) for row in rows]
+
+    def merged(r: int, c: int) -> bool:
+        box = None if boxes is None else boxes[r][c]
+        return box is not None and ((c > 0 and boxes[r][c - 1] == box) or (r > 0 and boxes[r - 1][c] == box))  # type: ignore[index]
+
+    cells = [
+        ['' if merged(r, c) else ' '.join(text.split()).replace('|', ESCAPE + '|') for c, text in enumerate(row)]
+        + [''] * (width - len(row))
+        for r, row in enumerate(rows)
+    ]
     lines = [f'| {" | ".join(row)} |' for row in cells]
     return '\n'.join([lines[0], '|' + ' --- |' * width, *lines[1:]])
 

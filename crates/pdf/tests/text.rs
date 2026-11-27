@@ -273,3 +273,181 @@ fn a_predefined_cmap_names_its_own_collection() {
     assert_eq!(text, "\u{3042}\u{2000B}\u{3042}");
     assert_eq!(x, [0.0, 5.0, 15.0]);
 }
+
+// --- vertical writing (ISO 32000-2 9.7.4.3, 9.4.4) ------------------------------------------------------------------
+
+/// An `Identity-V` composite font whose descendant is object 6 and `ToUnicode` object 7: CIDs 1, 2, 3 read U+4E00, U+4E8C,
+/// 1.
+const VERTICAL: &str =
+    "<< /Type /Font /Subtype /Type0 /BaseFont /Song-Identity-V /Encoding /Identity-V
+    /DescendantFonts [6 0 R] /ToUnicode 7 0 R >>";
+/// Its descendant: CID 3 is half an em wide and half an em tall (`/W2`'s w1y -500); CIDs 1 and 2 are the default.
+const VERTICAL_CID: &str =
+    "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /Song /W [1 [1000 1000 500]]
+    /W2 [3 [-500 250 880]] >>";
+
+fn vertical_to_unicode() -> String {
+    common::stream(
+        "",
+        "1 begincodespacerange <0000> <FFFF> endcodespacerange 3 beginbfchar <0001> <4E00> <0002> <4E8C> <0003> <0031> endbfchar",
+    )
+}
+
+fn vertical(content: &str) -> TextEvent {
+    let (mut events, warnings) = texts(content, VERTICAL, &[VERTICAL_CID, &vertical_to_unicode()]);
+    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(events.len(), 1);
+    events.remove(0)
+}
+
+/// Each glyph's (origin x, origin y, end y) in page space (y down).
+fn stops(event: &TextEvent) -> Vec<(f64, f64, f64)> {
+    event
+        .glyphs
+        .iter()
+        .map(|g| (g.origin.x, g.origin.y, g.end.y))
+        .collect()
+}
+
+fn all_close(found: &[(f64, f64, f64)], want: &[(f64, f64, f64)]) -> bool {
+    found.len() == want.len()
+        && found
+            .iter()
+            .zip(want)
+            .all(|(a, b)| close(a.0, b.0) && close(a.1, b.1) && close(a.2, b.2))
+}
+
+#[test]
+fn identity_v_glyphs_advance_down_by_their_vertical_displacement() {
+    // From the vertical origin (100, 10): CIDs 1 and 2 by /DW2's default -1000, CID 3 by its /W2 -500.
+    let event = vertical("BT /F1 10 Tf 1 0 0 1 100 90 Tm <000100020003> Tj ET");
+    assert!(event.vertical);
+    assert_eq!(text(&event), "\u{4E00}\u{4E8C}1");
+    let found = stops(&event);
+    let want = [
+        (100.0, 10.0, 20.0),
+        (100.0, 20.0, 30.0),
+        (100.0, 30.0, 35.0),
+    ];
+    assert!(all_close(&found, &want), "{found:?}");
+}
+
+#[test]
+fn a_vertical_glyph_box_is_an_em_across_its_column_and_its_advance_along_it() {
+    let event = vertical("BT /F1 10 Tf 1 0 0 1 100 90 Tm <00010003> Tj ET");
+    let boxes: Vec<_> = event
+        .glyphs
+        .iter()
+        .map(|g| (g.bbox.x0, g.bbox.y0, g.bbox.x1, g.bbox.y1))
+        .collect();
+    let want = [(95.0, 10.0, 105.0, 20.0), (95.0, 20.0, 105.0, 25.0)];
+    assert!(
+        boxes
+            .iter()
+            .zip(&want)
+            .all(|(a, b)| close(a.0, b.0) && close(a.1, b.1) && close(a.2, b.2) && close(a.3, b.3)),
+        "{boxes:?}"
+    );
+}
+
+#[test]
+fn dw2_states_the_default_vertical_displacement() {
+    let cid = "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /Song /DW2 [880 -800] /W2 [3 3 -500 250 880] >>";
+    let (events, _) = texts(
+        "BT /F1 10 Tf 1 0 0 1 100 90 Tm <000100030002> Tj ET",
+        VERTICAL,
+        &[cid, &vertical_to_unicode()],
+    );
+    // CID 1 by /DW2's -800, CID 3 by /W2's range form, CID 2 by /DW2 again.
+    let want = [
+        (100.0, 10.0, 18.0),
+        (100.0, 18.0, 23.0),
+        (100.0, 23.0, 31.0),
+    ];
+    assert!(
+        all_close(&stops(&events[0]), &want),
+        "{:?}",
+        stops(&events[0])
+    );
+}
+
+#[test]
+fn character_spacing_and_tj_numbers_move_vertically_and_horizontal_scaling_does_not() {
+    // ty = (w1 - Tj/1000) * Tfs + Tc: Tc 1 shortens each step down by 1; Tz scales across only.
+    let event = vertical("BT /F1 10 Tf 1 Tc 50 Tz 1 0 0 1 100 90 Tm <00010002> Tj ET");
+    let want = [(100.0, 10.0, 20.0), (100.0, 19.0, 29.0)];
+    assert!(all_close(&stops(&event), &want), "{:?}", stops(&event));
+    let across = event.glyphs[0].bbox;
+    assert!(
+        close(across.x0, 97.5) && close(across.x1, 102.5),
+        "{across:?}"
+    );
+    // A positive TJ number moves the next glyph down.
+    let event = vertical("BT /F1 10 Tf 1 0 0 1 100 90 Tm [<0001> 500 <0002>] TJ ET");
+    let want = [(100.0, 10.0, 20.0), (100.0, 25.0, 35.0)];
+    assert!(all_close(&stops(&event), &want), "{:?}", stops(&event));
+}
+
+/// A one-byte embedded `CMap` (codes 0x20-0x7E are CIDs 1-95) whose dictionary has `dict` and whose program has
+/// `program` before its mappings.
+fn one_byte_cmap(dict: &str, program: &str) -> String {
+    common::stream(
+        &format!("/Type /CMap {dict}"),
+        &format!(
+            "{program} 1 begincodespacerange <00> <FF> endcodespacerange 1 begincidrange <20> <7E> 1 endcidrange"
+        ),
+    )
+}
+
+fn embedded_cmap_event(cmap: &str, content: &str) -> TextEvent {
+    let font =
+        "<< /Type /Font /Subtype /Type0 /BaseFont /Song /Encoding 6 0 R /DescendantFonts [7 0 R]
+        /ToUnicode 8 0 R >>";
+    let to_unicode = common::stream(
+        "",
+        "1 begincodespacerange <00> <FF> endcodespacerange 1 beginbfrange <20> <7E> <0020> endbfrange",
+    );
+    let (mut events, _) = texts(content, font, &[cmap, VERTICAL_CID, &to_unicode]);
+    events.remove(0)
+}
+
+#[test]
+fn an_embedded_cmap_is_vertical_by_its_wmode_and_word_spacing_moves_down_too() {
+    let content = "BT /F1 10 Tf 2 Tw 1 0 0 1 100 90 Tm (a b) Tj ET";
+    for cmap in [
+        one_byte_cmap("/WMode 1", ""),
+        one_byte_cmap("", "/WMode 1 def"),
+    ] {
+        let event = embedded_cmap_event(&cmap, content);
+        assert!(event.vertical, "{cmap}");
+        // Every CID by the default -1000; Tw shortens the step after the one-byte code 32 only.
+        let want = [
+            (100.0, 10.0, 20.0),
+            (100.0, 20.0, 30.0),
+            (100.0, 28.0, 38.0),
+        ];
+        assert!(all_close(&stops(&event), &want), "{:?}", stops(&event));
+    }
+    let event = embedded_cmap_event(&one_byte_cmap("", ""), content);
+    assert!(!event.vertical);
+}
+
+#[test]
+fn a_predefined_v_cmap_writes_vertically() {
+    let font = "<< /Type /Font /Subtype /Type0 /BaseFont /STSong-Light /Encoding /UniGB-UCS2-V
+        /DescendantFonts [6 0 R] >>";
+    let cid = "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /STSong-Light >>";
+    let (events, _) = texts(
+        "BT /F1 10 Tf 1 0 0 1 100 90 Tm <4E004E8C> Tj ET",
+        font,
+        &[cid],
+    );
+    assert!(events[0].vertical);
+    assert_eq!(text(&events[0]), "\u{4E00}\u{4E8C}");
+    let want = [(100.0, 10.0, 20.0), (100.0, 20.0, 30.0)];
+    assert!(
+        all_close(&stops(&events[0]), &want),
+        "{:?}",
+        stops(&events[0])
+    );
+}

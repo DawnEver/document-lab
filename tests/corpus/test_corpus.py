@@ -111,7 +111,7 @@ def jpx_images(pdf: Path, page: int, objects: frozenset[int]) -> list[str]:
     reader = _pdf.open(pdf.read_bytes(), b'')
 
     def codec(image: int) -> str | None:
-        _width, _height, _space, _components, _bits, _data, still_in = reader.image(image)
+        _width, _height, _space, _components, _bits, _data, still_in, _decode, _masked = reader.image(image)
         return still_in
 
     placed = {figure.image for figure in _read(pdf).page(page).figures if figure.image is not None}
@@ -124,17 +124,21 @@ VERTICAL_MIN_WIDTH = 0.5
 
 
 def vertical_run(pdf: Path, page: int, area: tuple[float, float, float, float], text: str) -> list[str]:
-    """The Identity-V glyphs centered in ``area`` (x0, y0, x1, y1), read top to bottom, state ``text``."""
+    """The spans of Identity-V fonts centered in ``area`` (x0, y0, x1, y1) are stated vertical and, read top to
+    bottom (a space between spans), state ``text``.
+    """
     column = BBox(*area)
-    glyphs = sorted(
-        (span.provenance.bbox.y0, span.text, span.provenance.bbox.width, span.size)
+    spans = sorted(
+        (span.provenance.bbox.y0, span.text, span.provenance.bbox.width, span.size, span.vertical)
         for span in _read(pdf).page(page).spans
         if span.font.endswith('-Identity-V') and column.contains(*span.center)
     )
-    found = ''.join(t for _y, t, _w, _s in glyphs)
+    found = ' '.join(t for _y, t, _w, _s, _v in spans)
     out = [] if found == text else [f'page {page} states {found!r} down the column, not {text!r}']
-    narrow = [t for _y, t, width, size in glyphs if width < VERTICAL_MIN_WIDTH * size]
-    return out + ([f'page {page}: vertical glyphs {narrow!r} under half an em wide'] if narrow else [])
+    flat = [t for _y, t, _w, _s, vertical in spans if not vertical]
+    out += [f'page {page}: Identity-V spans {flat!r} not stated vertical'] if flat else []
+    narrow = [t for _y, t, width, size, _v in spans if width < VERTICAL_MIN_WIDTH * size]
+    return out + ([f'page {page}: vertical spans {narrow!r} under half an em wide'] if narrow else [])
 
 
 @dataclasses.dataclass(frozen=True)
@@ -183,15 +187,12 @@ FEATURES = {
     'vertical-cjk-reads-top-to-bottom': Feature(
         'cjk-zh-vertical-arxiv-2301.01621v3',
         vertical_run,
-        # Page 3's contents: the page numbers of its first eleven entries, each set in an Identity-V font, down
-        # the right-hand column as the page renders them (x 499-513 pt, y 182-408 pt).
-        (3, (495.0, 170.0, 520.0, 410.0), '12233566889'),
-        (3, (495.0, 170.0, 520.0, 410.0), '98866533221'),
-        known=(
-            'the reader writes Identity-V text horizontally (crates/pdf/src/font.rs: `vertical` is read as '
-            "horizontal): it states '1262l' down that column, the run's other glyphs off it to the left, every "
-            'box 0 pt wide'
-        ),
+        # Page 3's contents: the page numbers of its fifteen entries, set in an Identity-V font down the right-hand
+        # column (x 499-506 pt of ink, y 174-488 pt), as the page renders them: 1, 2, 2, 3, 3, 5, 6, 6, 8, 8, 9,
+        # then the units of 12, 14, 16, 17 (their tens are glyphs set beside them, x 494-499 pt, which the font's
+        # ToUnicode names U+006C 'l').
+        (3, (499.0, 170.0, 520.0, 500.0), '1 2 2 3 3 5 6 6 8 8 9 2 4 6 7'),
+        (3, (499.0, 170.0, 520.0, 500.0), '7 6 4 2 9 8 8 6 6 5 3 3 2 2 1'),
     ),
     'japanese-in-an-embedded-cid-font': Feature(
         'cjk-ja-euc-h-arxiv-2608.20674v1',

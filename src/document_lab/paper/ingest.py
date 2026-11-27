@@ -79,7 +79,7 @@ def _scanned_pages(pdf: Path, out_dir: Path) -> int:
 
 
 def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> Ingested:
-    """Convert ``pdf`` (with ``tool``, else the best available) and write its paper layout into ``out_dir``."""
+    """Convert ``pdf`` (with ``tool``, else the IR path) and write its paper layout into ``out_dir``."""
     pdf = pdf.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     md_text, choice = convert(pdf, out_dir, tool=tool)

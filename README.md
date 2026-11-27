@@ -20,7 +20,7 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 | `regions` | `regions(page, body, drawings=())`: a page's figures, tables and equations from its text -- a caption and the prose around it, an equation number and the noise beside it, rows of cells -- so an OCR'd capture has them too; with the page's drawings (`ink`), a ruled table, a figure without a caption and an equation without a number as well |
 | `ink` | `drawings(pixels, scale, text, reach)`: the drawn ink of a page's picture, its text left out -- each drawing's box, its rules, the ink off them and its longest stroke |
 | `per_page` | `document-lab pages <pdf> <out>`: a PDF as `page-NNN.md` (its text) and `page-NNN.png` (the page as seen, a captured page's own pixels) per page, each region cut out (`page-NNN-figure-2.png`, `-table-1`, `-equation-a-1`) and linked where its caption or number is, and `INDEX.md`, with the PDF itself -- into a directory, or one archive when `out` ends `.zip` -- for standards, manuals and data sheets, cited by clause on their page. OCR'd text is for finding; a formula's or a table's values are read off its picture |
-| `paper` | `document-lab paper <pdf> <out>`: a paper as per-section markdown (written from the IR, or marker-pdf on a GPU) plus cropped figures/tables/equations; a table-of-contents page opens no sections, and on a page that is one picture (a screen-captured or scanned PDF, OCR'd) a figure, table or equation is cut out where its text locates it (`regions`), else the page is linked whole, once |
+| `paper` | `document-lab paper <pdf> <out>`: a paper as per-section markdown (written from the IR; marker-pdf only on request, `--tool marker`) plus cropped figures/tables/equations; a table-of-contents page opens no sections, and on a page that is one picture (a screen-captured or scanned PDF, OCR'd) a figure, table or equation is cut out where its text locates it (`regions`), else the page is linked whole, once |
 | `capture` | `document-lab capture <out.pdf>`: any window or screen region, scrolled to its end and stitched losslessly, to a PDF of page images -- the stage before `ocr` (Windows, `[capture]` extra; `--ocr LANGS` runs `ocr` on the result); `--resume` and `capture-merge` join captures where they overlap; `capture-files` takes each PDF of a directory or list page by page as its viewer (Acrobat) shows it, one PDF each |
 
 A screen-captured standard, end to end: `capture std.pdf` -> `ocr std.pdf` -> `pages std.pdf std.zip`.
@@ -149,6 +149,6 @@ Everything runs in one thread, in order -- grab, scroll, stitch, write -- so not
 
 ## Install
 
-`pip install "document_lab @ git+https://github.com/DawnEver/document-lab.git"`; extras: `gpu` (marker-pdf;
-its OCR model, surya, is served by Docker's `vllm/vllm-openai` on an NVIDIA GPU, or by a `llama-server` with
-`SURYA_INFERENCE_BACKEND=llamacpp`), `ai` (ai-lab), `capture` (no packages beyond the base). Domain schemas live in the consumers.
+`pip install "document_lab @ git+https://github.com/DawnEver/document-lab.git"`; extras: `gpu` (marker-pdf for
+`paper --tool marker`, never chosen by default: its OCR model, surya, needs a server -- Docker's `vllm/vllm-openai` on
+an NVIDIA GPU, else a `llama-server` -- and the command refuses naming the one missing), `ai` (ai-lab), `capture` (no packages beyond the base). Domain schemas live in the consumers.

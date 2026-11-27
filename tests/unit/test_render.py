@@ -17,7 +17,7 @@ import pymupdf
 import pytest
 
 from document_lab.ir import BBox
-from document_lab.pdf import Unsupported, read_raster
+from document_lab.pdf import Unsupported, read_pdf, read_raster
 from tests.rendering import agrees, disagreement, own, page_pdf, reference
 from tests.synthetic import icc_profile
 
@@ -443,6 +443,24 @@ def test_the_own_renderer_refuses_a_region_holding_a_glyph_it_has_no_program_for
     )
     with pytest.raises(Unsupported, match=r'font MSMincho is not embedded and has no substitute x2'):
         read_raster(path, 1, BBox(0, 0, 200, 150), dpi=DPI, renderer='own')
+
+
+def test_the_own_renderer_draws_a_region_whose_only_text_shows_nothing(tmp_path):
+    whole = BBox(0, 0, 200, 150)
+    doc = pymupdf.open()
+    page = doc.new_page(width=200, height=150)
+    page.draw_rect(pymupdf.Rect(10, 20, 190, 60), color=None, fill=(0, 0, 0))
+    page.insert_text((20, 45), 'black on black', fontsize=12, color=(0, 0, 0))
+    page.insert_text((20, 100), 'white on white', fontsize=12, color=(1, 1, 1))
+    doc.save(tmp_path / 'unseen.pdf')
+    assert all(s.in_background_color for s in read_pdf(tmp_path / 'unseen.pdf').spans())  # the premise
+    drawn = read_raster(tmp_path / 'unseen.pdf', 1, whole, dpi=DPI, renderer='own').pixels
+    assert agrees(*disagreement(drawn, read_raster(tmp_path / 'unseen.pdf', 1, whole, dpi=DPI).pixels))
+    # The planted control: one span the page shows beside them is drawn, and the region is not the same.
+    page.insert_text((20, 130), 'shown', fontsize=12)
+    doc.save(tmp_path / 'shown.pdf')
+    shown = read_raster(tmp_path / 'shown.pdf', 1, whole, dpi=DPI, renderer='own').pixels
+    assert not agrees(*disagreement(shown[240:, :], drawn[240:, :]))
 
 
 def test_the_own_renderer_refuses_a_region_holding_what_it_cannot_draw_by_name(tmp_path):

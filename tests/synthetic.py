@@ -837,6 +837,11 @@ def hidden_layer(page: Page) -> Page:
     )
 
 
+def in_background_color(page: Page) -> Page:
+    """``page`` with every span filled in the color under it: what text drawn white on the white page reads as."""
+    return replace(page, spans=tuple(replace(s, in_background_color=True) for s in page.spans))
+
+
 #: The XMP packet :func:`document_data_pdf` embeds: modified a day after the ``/Info`` dates.
 XMP_PACKET = """<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">

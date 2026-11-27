@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pymupdf
 import pytest
 
+from document_lab.__main__ import main
 from document_lab.paper.ingest import NoSections, ingest
 
 if TYPE_CHECKING:
@@ -80,3 +81,21 @@ def test_a_stated_outline_names_the_sections_and_inferring_is_the_option(tmp_pat
     inferred = ingest(pdf, tmp_path / 'inferred', tool='ir', outline=False)
     assert inferred.structure.source == 'inferred'
     assert inferred.sections < done.sections  # the planted control: the rules alone miss the plain-word headings
+
+
+@pytest.mark.parametrize('kind', ['hidden', 'in_background_color'])
+def test_text_the_page_does_not_show_is_written_only_when_its_own_flag_asks(tmp_path: Path, kind: str) -> None:
+    doc = pymupdf.open(_outlined_paper(tmp_path / 'outlined.pdf'))
+    words = 'Words set where a reader of the printed paper never sees them, on its first page.'
+    if kind == 'hidden':
+        doc[0].insert_text((72, 172), words, fontsize=8, oc=doc.add_ocg('Off', on=False))
+    else:
+        doc[0].insert_text((72, 172), words, fontsize=8, color=(1, 1, 1))
+    doc.save(tmp_path / 'unshown.pdf')
+    own, other = ('--include-hidden', '--include-in-background-color')[:: 1 if kind == 'hidden' else -1]
+    for flags, read in (([], False), ([other], False), ([own], True)):  # the other flag: the planted control
+        out = tmp_path / '-'.join(['out', *flags])
+        assert main(['paper', str(tmp_path / 'unshown.pdf'), str(out), *flags]) == 0
+        body = ''.join(p.read_text(encoding='utf-8') for p in (out / 'md').glob('*.md'))
+        assert 'This paragraph carries enough words' in body
+        assert ('never sees them' in body) is read, flags

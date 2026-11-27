@@ -305,6 +305,8 @@ def write_pages(
     outline: bool = True,
     formulas: formula.Formulas | None = None,
     formula_model: formula.Model = 'texteller',
+    include_hidden: bool = False,
+    include_in_background_color: bool = False,
 ) -> Paged:
     """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive.
 
@@ -312,10 +314,13 @@ def write_pages(
     outline names the clause headings when it matches the pages; False infers them all the same
     (`document_lab.markdown.headings`). ``formulas``: ``latex`` writes each equation's LaTeX after its link, read by
     ``formula_model`` (`document_lab.formula`); refused by :class:`document_lab.formula.FormulaUnavailable` before
-    anything is written when that model cannot run.
+    anything is written when that model cannot run. Every step reads the page as its default view shows it
+    (`document_lab.ir.Page.shown`): its pictures, ruled tables, regions, running heads, headings and markdown;
+    ``include_hidden``: what hidden layers draw is read too, ``include_in_background_color``: the text filled in
+    the color under it.
     """
     transcribe = None if formulas is None else formula.transcriber(formulas, model=formula_model)
-    read = read_pdf(pdf)
+    read = read_pdf(pdf).shown(include_hidden=include_hidden, include_in_background_color=include_in_background_color)
     face = layout.body_face(read)
     body = face[1]
     width = max(3, len(str(len(read.pages))))
@@ -326,13 +331,26 @@ def write_pages(
         drawn.append(_drawings(pixels, scale, page, body))
         ruled.append(_tables(page, pixels, scale))
     drawn = _without_furniture(drawn, body)
-    found = [regions(page, face, drawings) for page, drawings in zip(read.pages, drawn, strict=True)]
+    found = [
+        regions(
+            page, face, drawings, include_hidden=include_hidden, include_in_background_color=include_in_background_color
+        )
+        for page, drawings in zip(read.pages, drawn, strict=True)
+    ]
     furniture = layout.running(read)
     text = layout.without_running(read, furniture)
     latex = {} if transcribe is None else _latex(pdf, read, found, transcribe, renderer)
     placed = [_placed(*part, latex) for part in zip(names, text.pages, found, ruled, strict=True)]
-    structure = headings(text, outline=outline)
-    texts = page_markdowns(text, placed, sections=structure)
+    structure = headings(
+        text, outline=outline, include_hidden=include_hidden, include_in_background_color=include_in_background_color
+    )
+    texts = page_markdowns(
+        text,
+        placed,
+        sections=structure,
+        include_hidden=include_hidden,
+        include_in_background_color=include_in_background_color,
+    )
     index = [f'# {pdf.stem}', '']
     textless, unread = [], []
     with _files(out) as put:

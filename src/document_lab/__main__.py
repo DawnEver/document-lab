@@ -24,6 +24,12 @@ if TYPE_CHECKING:
 __all__ = ['main']
 
 _NO_OUTLINE = "infer the section headings even where the PDF's outline names them on its pages"
+#: `--include-in-background-color`: the text filled in the color under it is read too (`document_lab.ir`).
+_IN_BACKGROUND_COLOR = (
+    'read the text filled in the color under it too (white on the white page), which shows nothing; left out by default'
+)
+#: `--include-hidden`: what a layer turned off in the default view draws is read too (`document_lab.ir`).
+_HIDDEN = "read what the PDF's layers turned off in its default view draw too; left out by default"
 
 #: `--renderer`: what draws a page or region's pixels (`document_lab.pdf.read_raster`).
 _RENDERER = {
@@ -68,6 +74,8 @@ def _parser() -> argparse.ArgumentParser:
     pages.add_argument('--renderer', **_RENDERER)
     pages.add_argument('--no-outline', action='store_true', help=_NO_OUTLINE)
     _formulas_option(pages)
+    pages.add_argument('--include-hidden', action='store_true', help=_HIDDEN)
+    pages.add_argument('--include-in-background-color', action='store_true', help=_IN_BACKGROUND_COLOR)
     paper = sub.add_parser('paper', help='a paper PDF to per-section markdown and cropped figures')
     paper.add_argument('pdf', type=Path)
     paper.add_argument('out', type=Path, help='the directory to write the paper layout into')
@@ -79,6 +87,8 @@ def _parser() -> argparse.ArgumentParser:
     paper.add_argument('--renderer', **_RENDERER)
     paper.add_argument('--no-outline', action='store_true', help=_NO_OUTLINE)
     _formulas_option(paper)
+    paper.add_argument('--include-hidden', action='store_true', help=_HIDDEN)
+    paper.add_argument('--include-in-background-color', action='store_true', help=_IN_BACKGROUND_COLOR)
     return parser
 
 
@@ -131,7 +141,15 @@ def _pages(args: argparse.Namespace) -> int:
     from document_lab.per_page import write_pages  # noqa: PLC0415
 
     try:
-        done = write_pages(args.pdf, args.out, renderer=args.renderer, outline=not args.no_outline, **_formulas(args))
+        done = write_pages(
+            args.pdf,
+            args.out,
+            renderer=args.renderer,
+            outline=not args.no_outline,
+            include_hidden=args.include_hidden,
+            include_in_background_color=args.include_in_background_color,
+            **_formulas(args),
+        )
     except FormulaUnavailable as refused:
         return _refused(refused)
     emit(f'{done.out}: {done.pages} page(s)')
@@ -158,6 +176,8 @@ def _paper(args: argparse.Namespace) -> int:
             tool=args.tool,
             renderer=args.renderer,
             outline=not args.no_outline,
+            include_hidden=args.include_hidden,
+            include_in_background_color=args.include_in_background_color,
             **_formulas(args),
         )
     except (MarkerUnavailable, FormulaUnavailable) as refused:

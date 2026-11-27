@@ -23,13 +23,16 @@
 //!
 //! Text filled in the color painted under it shows nothing ([`Span::in_background_color`]): a white word on the
 //! white page, a black one on a black box. What is under a span is what was drawn before it, top down: every
-//! mark overlapping its box must be in its fill, down to one covering its box whole -- one opaque color in an
-//! axis-aligned rectangle inside every clip -- or, when none covers it, the page, white. The colors are compared
-//! exactly, as sRGB. Any other mark overlapping its box (an image, a shading, a pattern, a translucent paint, a
-//! glyph or a path in a color of its own: a black `!` on a white triangle glyph on a black box) shows the text; a
-//! glyph covers no box for sure, its outline not read. What hidden or inkless layers draw is under nothing.
+//! mark overlapping its box must be in its fill, down to one covering its box whole -- a path filled in one opaque
+//! color whose region, by its fill rule, holds the box, and so does every clip in force: a rectangle, a polygon, a
+//! rounded box, a clip intersected in (`covers`: it never covers wrongly, a curve covering only where the box
+//! of its control points stays clear of the span's) -- or, when none covers it, the page, white. The colors are
+//! compared exactly, as sRGB. Any other mark overlapping its box (an image, a shading, a pattern, a translucent
+//! paint, a glyph or a path in a color of its own: a black `!` on a white triangle glyph on a black box) shows the
+//! text; a glyph covers no box for sure, its outline not read. What hidden or inkless layers draw is under nothing.
 
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::rc::Rc;
 
 use crate::accents;
@@ -310,9 +313,11 @@ fn in_background_color(open: &Open, below: &[Event], marks: &[Option<Rect>]) -> 
                 if !(stroke && filled) {
                     return false;
                 }
-                if path.fill.is_some()
-                    && rectangle(&path.segments).is_some_and(|r| holds(r, bbox))
-                    && path.clip.as_deref().is_none_or(|c| clip_holds(c, bbox))
+                if path
+                    .fill
+                    .as_ref()
+                    .is_some_and(|f| covers(&path.segments, f.even_odd, bbox))
+                    && path.clip.as_deref().is_none_or(|c| clip_covers(c, bbox))
                 {
                     return true;
                 }
@@ -370,51 +375,132 @@ fn points(segments: &[Segment]) -> Vec<Point> {
         .collect()
 }
 
-/// The box `segments` fill when they are one axis-aligned rectangle (a `re`, or its four sides drawn); None
-/// otherwise.
-fn rectangle(segments: &[Segment]) -> Option<Rect> {
-    let drawn = segments.iter().rposition(|s| *s != Segment::Close)? + 1; // closed once or more (`re h`)
-    let mut corners = Vec::with_capacity(5);
-    for (i, segment) in segments[..drawn].iter().enumerate() {
-        match (i, *segment) {
-            (0, Segment::MoveTo(p)) | (1.., Segment::LineTo(p)) => corners.push(p),
-            _ => return None,
-        }
-    }
-    if corners.len() == 5 && corners[4] == corners[0] {
-        corners.pop();
-    }
-    // Four corners, each side along an axis, the sides turning a corner each time.
-    #[expect(clippy::float_cmp, reason = "a side runs along an axis only exactly")]
-    let along = |i: usize| {
-        let (a, b) = (corners[i], corners[(i + 1) % 4]);
-        match (a.x == b.x, a.y == b.y) {
-            (true, false) => Some(true),
-            (false, true) => Some(false),
-            _ => None,
-        }
+/// Whether the region `segments` fill -- by the even-odd rule or the nonzero winding one (8.5.3.3) -- holds `bbox`
+/// whole, never wrongly. A box no edge reaches inside lies in one piece of the plane the edges cut, filled or not as
+/// its center winds round them: exact there. A region an edge reaches inside the box (a seam where two subpaths
+/// overlap), a side no exact sign settles, or a curve whose control points' box reaches inside the box, covers
+/// nothing.
+fn covers(segments: &[Segment], even_odd: bool, bbox: Rect) -> bool {
+    let Some(edges) = edges(segments, bbox) else {
+        return false;
     };
-    let square = corners.len() == 4
-        && (0..4).all(|i| {
-            along(i)
-                .zip(along((i + 1) % 4))
-                .is_some_and(|(a, b)| a != b)
-        });
-    square.then(|| Rect::around(&corners)).flatten()
+    if edges.iter().any(|&(p, q)| crosses(p, q, bbox)) {
+        return false;
+    }
+    let center = Point {
+        x: f64::midpoint(bbox.x0, bbox.x1),
+        y: f64::midpoint(bbox.y0, bbox.y1),
+    };
+    // The edges crossing the ray from the center along x, each counted by its direction (Sunday's winding number).
+    let mut winding = 0_i64;
+    for &(p, q) in &edges {
+        let up = p.y <= center.y && center.y < q.y;
+        let down = q.y <= center.y && center.y < p.y;
+        if up || down {
+            match orientation(p, q, center) {
+                Some(Ordering::Greater) if up => winding += 1,
+                Some(Ordering::Less) if down => winding -= 1,
+                Some(Ordering::Greater | Ordering::Less) => {}
+                None | Some(Ordering::Equal) => return false,
+            }
+        }
+    }
+    if even_odd {
+        winding % 2 != 0
+    } else {
+        winding != 0
+    }
 }
 
-/// Whether `outer` holds `inner` whole.
-fn holds(outer: Rect, inner: Rect) -> bool {
-    outer.x0 <= inner.x0 && outer.y0 <= inner.y0 && inner.x1 <= outer.x1 && inner.y1 <= outer.y1
+/// The straight edges bounding the region `segments` fill, every subpath closed back to its start as a fill closes
+/// it; a curve by its chord, when its control points' box -- which holds the curve -- stays clear of `bbox`'s inside,
+/// so the curve and its chord wind alike round any point in the box. None when a curve's box reaches inside it.
+fn edges(segments: &[Segment], bbox: Rect) -> Option<Vec<(Point, Point)>> {
+    let mut out = Vec::new();
+    let (mut start, mut at): (Option<Point>, Option<Point>) = (None, None);
+    for segment in segments {
+        match *segment {
+            Segment::MoveTo(p) => {
+                out.extend(at.zip(start));
+                (start, at) = (Some(p), Some(p));
+            }
+            Segment::LineTo(p) => {
+                out.extend(at.map(|a| (a, p)));
+                start = start.or(Some(p));
+                at = Some(p);
+            }
+            Segment::CurveTo(b, c, d) => {
+                let a = at.unwrap_or(b);
+                if overlaps(Rect::around(&[a, b, c, d])?, bbox) {
+                    return None;
+                }
+                out.push((a, d));
+                start = start.or(Some(a));
+                at = Some(d);
+            }
+            Segment::Close => {
+                out.extend(at.zip(start));
+                at = start;
+            }
+        }
+    }
+    out.extend(at.zip(start));
+    Some(out)
 }
 
-/// Whether `clip`, and every clip it narrows, holds `bbox` whole: each an axis-aligned rectangle around it.
-fn clip_holds(clip: &Clip, bbox: Rect) -> bool {
+/// Whether the segment from `p` to `q` reaches inside `bbox` (along an edge of it does not): unless an axis or the
+/// segment's normal parts them -- every corner of the box on one side of its line, or on it. A corner no exact sign
+/// places counts as on both sides.
+fn crosses(p: Point, q: Point, bbox: Rect) -> bool {
+    if !overlaps(Rect::spanning(p, q), bbox) {
+        return false;
+    }
+    let corners = [
+        Point {
+            x: bbox.x0,
+            y: bbox.y0,
+        },
+        Point {
+            x: bbox.x1,
+            y: bbox.y0,
+        },
+        Point {
+            x: bbox.x1,
+            y: bbox.y1,
+        },
+        Point {
+            x: bbox.x0,
+            y: bbox.y1,
+        },
+    ]
+    .map(|c| orientation(p, q, c));
+    let none_on = |side: Ordering| corners.iter().all(|c| c.is_some_and(|c| c != side));
+    !(none_on(Ordering::Less) || none_on(Ordering::Greater))
+}
+
+/// The side of the line from `a` to `b` that `c` lies on -- the sign of their cross product -- when the floating
+/// point product settles it: within Shewchuk's first error bound of zero (Adaptive Precision Floating-Point
+/// Arithmetic and Fast Robust Geometric Predicates, 1997: `ccwerrboundA`) rounding could flip it, and None says so.
+fn orientation(a: Point, b: Point, c: Point) -> Option<Ordering> {
+    const HALF_ULP: f64 = f64::EPSILON / 2.0;
+    const BOUND: f64 = (3.0 + 16.0 * HALF_ULP) * HALF_ULP;
+    let left = (b.x - a.x) * (c.y - a.y);
+    let right = (b.y - a.y) * (c.x - a.x);
+    let det = left - right;
+    let bound = BOUND * (left.abs() + right.abs());
+    (det.abs() > bound || bound <= 0.0)
+        .then(|| det.partial_cmp(&0.0))
+        .flatten()
+}
+
+/// Whether `clip`, and every clip it narrows, [covers](covers) `bbox` whole: a clip of glyphs covers nothing, their
+/// outlines not read here.
+fn clip_covers(clip: &Clip, bbox: Rect) -> bool {
     let here = match &clip.outline {
-        Outline::Path { segments, .. } => rectangle(segments).is_some_and(|r| holds(r, bbox)),
+        Outline::Path { segments, even_odd } => covers(segments, *even_odd, bbox),
         Outline::Glyphs { .. } => false,
     };
-    here && clip.within.as_deref().is_none_or(|c| clip_holds(c, bbox))
+    here && clip.within.as_deref().is_none_or(|c| clip_covers(c, bbox))
 }
 
 /// Each span's [`Span::unspaced`] number: the lowest index among the spans linked to it by continuing one

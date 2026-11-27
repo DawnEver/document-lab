@@ -6,9 +6,10 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pymupdf
 
-from document_lab import layout
+from document_lab import formula, layout
 from document_lab.paper.crop import crop_equation, crop_figure, get_equation_context
 from document_lab.paper.pagemap import (
     FIG_TABLE_RE,
@@ -22,6 +23,7 @@ from document_lab.pdf import read_pdf
 from document_lab.regions import regions
 
 if TYPE_CHECKING:
+    from document_lab.formula import Transcribe
     from document_lab.ir import BBox, Document, Page
 
 _CAPTION_RE = re.compile(rf'(?P<label>Figure\s+\d+|Fig\.\s*\d+|Table\s+(?:\d+|{_RN}))\.(?P<rest>.+)', re.IGNORECASE)
@@ -72,6 +74,12 @@ def _render(pdf: pymupdf.Document, page_num: int, img_path: Path, crop: BBox | N
     pix = page.get_pixmap(matrix=mat, clip=pymupdf.Rect(*crop)) if crop else page.get_pixmap(matrix=mat)
     img_path.parent.mkdir(parents=True, exist_ok=True)
     pix.save(str(img_path))
+
+
+def _pixels(img_path: Path) -> np.ndarray:
+    """The RGB pixels of a rendered crop, as written."""
+    pix = pymupdf.Pixmap(str(img_path))
+    return np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)[..., :3]
 
 
 def _render_one_equation(
@@ -142,6 +150,7 @@ def _insert_equations_inline(
     figure_images: dict[str, str],
     page_section_map: dict[int, int],
     eq_context: dict[str, tuple[str | None, str | None]] | None = None,
+    latex: dict[str, str] | None = None,
 ) -> None:
     content = section_file.read_text(encoding='utf-8')
     changed = False
@@ -168,6 +177,7 @@ def _insert_equations_inline(
         if img_name in content:
             seen.add(eq_label)
             continue
+        block = f'\n\n{latex[eq_label]}' if latex and eq_label in latex else ''  # beside the image it reads
 
         seen.add(eq_label)
 
@@ -188,7 +198,7 @@ def _insert_equations_inline(
             if not is_cross_ref:
                 preceding = content[max(0, m.start() - 200) : m.start()]
                 if not re.search(rf'!\[.*?[Ee]equation.*?{eq_num}.*?\]', preceding):
-                    insertion = f'\n\n![{eq_label}]({img_path})\n\n'
+                    insertion = f'\n\n![{eq_label}]({img_path}){block}\n\n'
                     insert_at = max(m.start(), min_insert_pos)
                     content = content[:insert_at] + insertion + content[insert_at:]
                     min_insert_pos = insert_at + len(insertion)
@@ -237,7 +247,7 @@ def _insert_equations_inline(
                 continue
             preceding = content[max(0, m2.start() - 200) : m2.start()]
             if not re.search(rf'!\[.*?[Ee]equation.*?{eq_num}.*?\]', preceding):
-                insertion = f'\n\n![{eq_label}]({img_path})\n\n'
+                insertion = f'\n\n![{eq_label}]({img_path}){block}\n\n'
                 insert_at = max(m2.start(), min_insert_pos)
                 content = content[:insert_at] + insertion + content[insert_at:]
                 # Advance min_insert_pos so later lead-in equations don't precede
@@ -258,7 +268,7 @@ def _insert_equations_inline(
         insert_pos = search_from + gap_m.start() + 1 if gap_m else search_from + 1
 
         formula_part = f'\n*{formula_text}*' if formula_text else ''
-        insertion = f'\n![{eq_label}]({img_path}){formula_part}\n({eq_num})\n'
+        insertion = f'\n![{eq_label}]({img_path}){block}{formula_part}\n({eq_num})\n'
         content = content[:insert_pos] + insertion + content[insert_pos:]
         min_insert_pos = insert_pos + len(insertion)
         changed = True
@@ -377,10 +387,12 @@ def render_equation_images(
     body_sections: list[tuple[str, str]],
     figure_images: dict[str, str],
     page_section_map: dict[int, int],
+    transcribe: Transcribe | None = None,
 ) -> dict[str, str]:
     """Render equation images and insert them at equation number positions.
 
-    Returns updated figure_images dict with equation entries added.
+    ``transcribe`` (`document_lab.formula.transcriber`): each rendered crop's LaTeX follows its image as a display
+    block. Returns updated figure_images dict with equation entries added.
     """
     read = read_pdf(pdf_path)
     eq_page_map = build_equation_page_map(read)
@@ -389,6 +401,7 @@ def render_equation_images(
 
     pdf = pymupdf.open(str(pdf_path))
     located = _Located(read) if any(is_full_page_image(read.pages[p]) for p in eq_page_map.values()) else None
+    latex: dict[str, str] = {}
 
     for eq_label, page_num in eq_page_map.items():
         eq_num = eq_label.split()[-1]
@@ -410,6 +423,8 @@ def render_equation_images(
         img_path = out_dir / 'img' / f'sec{owning:02d}' / img_name
         _render_one_equation(pdf, read, page_num, eq_num, img_path, located)
         figure_images[eq_label] = f'img/sec{owning:02d}/{img_name}'
+        if transcribe is not None and img_path.exists():
+            latex[eq_label] = formula.beside(transcribe(_pixels(img_path)), eq_num)
 
     # Build context (lead-in + formula text) for equations that may lack (N) in markdown
     eq_context: dict[str, tuple[str | None, str | None]] = {}
@@ -424,6 +439,6 @@ def render_equation_images(
         sec_slug = slug(heading) or 'body'
         sec_file = out_dir / 'md' / f'{idx:02d}-{sec_slug}.md'
         if sec_file.exists():
-            _insert_equations_inline(sec_file, idx, eq_page_map, figure_images, page_section_map, eq_context)
+            _insert_equations_inline(sec_file, idx, eq_page_map, figure_images, page_section_map, eq_context, latex)
 
     return figure_images

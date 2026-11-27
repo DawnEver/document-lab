@@ -33,6 +33,8 @@ ai = ["ai_lab @ git+https://github.com/DawnEver/ai-lab.git"]
 # only, and it needs nothing beyond the base: ctypes drives the desktop, tkinter draws the region overlay, the
 # package's own writer (`document_lab._pdf`) writes the PDF. The extra names the capability so a consumer can depend on it explicitly.
 capture = []
+# `--formulas latex` on `paper` / `pages`: each equation crop transcribed to LaTeX in-process (`document_lab.formula`).
+formula = ["torch", "transformers"]
 # The family's development kit: rules registry, rendered configs, shared test bodies, verify entry.
 dev = [
     # The build backend: this repo's own tool, not the test kit's.
@@ -54,6 +56,16 @@ override-dependencies = ["pillow>=13", "filelock>=4.2.1"]
 # uv keys a path build on pyproject.toml's mtime alone; the mixed wheel must rebuild for a Rust OR a Python edit.
 cache-keys = [{ file = "pyproject.toml" }, { file = "Cargo.toml" }, { file = "crates/**/*.rs" }, { file = "src/**/*.py" }]
 
+# PyPI's Windows torch is CPU-only; Windows takes torch from PyTorch's CUDA 13.2 index (sm_120 Blackwell included).
+# Linux's PyPI torch is already a CUDA build.
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu132", marker = "sys_platform == 'win32'" }]
+
 [tool.maturin]
 python-source = "src"
 module-name = "document_lab._pdf"
@@ -69,6 +81,7 @@ markers = [
     "reference: reads the real PDFs DOCUMENT_LAB_REFERENCE_PDFS names, against PyMuPDF: its own part (tests/reference), never tests/base",
     "windows: drives a real window on the Windows desktop: its own part (tests/windows), never tests/base",
     "ocr: lays a Tesseract text layer over a capture: its own part (tests/ocr), never tests/base",
+    "formula: reads an equation as LaTeX with the formula extra's model and its weights: its own part (tests/formula), never tests/base",
     "corpus: reads real public PDFs fetched from their original URLs, pinned by sha256 (tests/corpus/sources.py): its own part (tests/corpus), never tests/base",
 ]
 
@@ -109,22 +122,24 @@ max_idle = "24 h"  # a branch idle 24 h is pruned when merged, alarmed when not
 output = "output/logs"
 # No resource exists on a hosted runner: `gpu` needs a CUDA GPU and the gpu extra, `vendor` a vendor PDF and
 # `papers` the real papers and `reference` a corpus of real PDFs, none of which may be committed (the repo is
-# public), `ocr` Tesseract with English data. This repo's tests run on GitHub Actions alone (user ruling 2026-11-11),
-# so no part here produces them: they stay marked, and a consumer's unified run selects them by marker.
-unproduced = ["gpu", "vendor", "papers", "reference", "ocr"]
+# public), `ocr` Tesseract with English data, `formula` the formula extra (torch) and its model's weights (1.2 GB).
+# This repo's tests run on GitHub Actions alone (user ruling 2026-11-11), so no part here produces them: they stay
+# marked, and a consumer's unified run selects them by marker.
+unproduced = ["gpu", "vendor", "papers", "reference", "ocr", "formula"]
 # `corpus` needs the network a hosted runner has: its setup fetches every source (tests/corpus/sources.py), so a
 # source down or changed fails the job before any test runs -- posted `class=environment`, never the code's red.
 hosted = { corpus = { setup = "uv run --no-sync python -m tests.corpus.sources" } }
 
 # The extras every environment carries: `dev` (the kit, pytest, ruff; it carries `ai`). `gpu` (marker-pdf -> torch)
-# is installed only for an environment whose need-set holds the `gpu` resource marker; `capture` is empty.
+# and `formula` (torch, transformers) are installed only for an environment whose need-set holds their resource
+# marker; `capture` is empty.
 [tool.dev_lab.dep]
 extras = ["dev"]
-needs = { gpu = "gpu" }
+needs = { gpu = "gpu", formula = "formula" }
 
 [tool.lab_commons.tests]
 produce = ["-m", "dev_lab.dev.verify", "--part", "{part}"]
-resources = ["gpu", "vendor", "papers", "reference", "ocr", "windows", "corpus"]
+resources = ["gpu", "vendor", "papers", "reference", "ocr", "formula", "windows", "corpus"]
 
 # The family branch flow: integrate/main coordinates; main moves only by `integrate promote` (fast-forward).
 [tool.dev_lab.integrator]

@@ -34,11 +34,27 @@ def _parser() -> argparse.ArgumentParser:
     )
     pages.add_argument('pdf', type=Path)
     pages.add_argument('out', type=Path, help='the directory to write the pages into, or a .zip archive')
+    _formulas_option(pages)
     paper = sub.add_parser('paper', help='a paper PDF to per-section markdown and cropped figures')
     paper.add_argument('pdf', type=Path)
     paper.add_argument('out', type=Path, help='the directory to write the paper layout into')
     paper.add_argument('--tool', choices=('marker', 'ir'), help='force a converter (default: best available)')
+    _formulas_option(paper)
     return parser
+
+
+def _formulas_option(command: argparse.ArgumentParser) -> None:
+    command.add_argument(
+        '--formulas',
+        choices=('latex',),
+        help="write each equation crop's LaTeX beside it, read in-process by TexTeller (the 'formula' extra; "
+        'default: the crop alone)',
+    )
+
+
+def _refused(error: Exception) -> int:
+    emit(f'refused: {error}')
+    return 2
 
 
 def _ocr(args: argparse.Namespace) -> int:
@@ -50,9 +66,13 @@ def _ocr(args: argparse.Namespace) -> int:
 
 
 def _pages(args: argparse.Namespace) -> int:
+    from document_lab.formula import FormulaUnavailable  # noqa: PLC0415
     from document_lab.per_page import write_pages  # noqa: PLC0415
 
-    done = write_pages(args.pdf, args.out)
+    try:
+        done = write_pages(args.pdf, args.out, formulas=args.formulas)
+    except FormulaUnavailable as refused:
+        return _refused(refused)
     emit(f'{done.out}: {done.pages} page(s)')
     if len(done.textless) == done.pages:
         emit('no page has text: a capture needs `document-lab ocr` first')
@@ -63,9 +83,13 @@ def _pages(args: argparse.Namespace) -> int:
 
 
 def _paper(args: argparse.Namespace) -> int:
+    from document_lab.formula import FormulaUnavailable  # noqa: PLC0415
     from document_lab.paper.ingest import ingest  # noqa: PLC0415
 
-    done = ingest(args.pdf, args.out, tool=args.tool)
+    try:
+        done = ingest(args.pdf, args.out, tool=args.tool, formulas=args.formulas)
+    except FormulaUnavailable as refused:
+        return _refused(refused)
     emit(
         f'{args.out}: {done.sections} sections, {done.figures} figures, {done.tables} tables '
         f'({done.tool}); {len(done.appended)} appended paper(s)'

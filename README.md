@@ -21,8 +21,9 @@ file (by sha256), page and box -- or HTML locator -- it was read from.
 | `tables` | `tables(page)`: a PDF page's ruled tables from its rules and text alone, each cell its text and its box (rules stroked or drawn as thin filled bars; a merged cell repeats its text and box in every slot it covers, as `html` does), ready for `extract`; `grids(page)` also names each grid of rules that is no table and why (`NotATable`: a single box, a plot's frame, a rule stopping inside a cell, text across a rule) |
 | `ink` | `drawings(pixels, scale, text, reach)`: the drawn ink of a page's picture, its text left out -- each drawing's box, its rules, the ink off them and its longest stroke |
 | `png` | `encode(image)`: 8-bit gray or RGB pixels as a PNG file's bytes; its parts (`header`, `scanlines`, `chunk`) let a writer stream rows (`capture.export.PngWriter`) |
-| `per_page` | `document-lab pages <pdf> <out>`: a PDF as `page-NNN.md` (its text) and `page-NNN.png` (the page as seen, a captured page's own pixels) per page, each region cut out (`page-NNN-figure-2.png`, `-table-1`, `-equation-a-1`) and linked where its caption or number is, and `INDEX.md`, with the PDF itself -- into a directory, or one archive when `out` ends `.zip` -- for standards, manuals and data sheets, cited by clause on their page. OCR'd text is for finding; a formula's or a table's values are read off its picture |
-| `paper` | `document-lab paper <pdf> <out>`: a paper as per-section markdown (written from the IR, or marker-pdf on a GPU) plus cropped figures/tables/equations; a table-of-contents page opens no sections, and on a page that is one picture (a screen-captured or scanned PDF, OCR'd) a figure, table or equation is cut out where its text locates it (`regions`), else the page is linked whole, once |
+| `per_page` | `document-lab pages <pdf> <out>`: a PDF as `page-NNN.md` (its text) and `page-NNN.png` (the page as seen, a captured page's own pixels) per page, each region cut out (`page-NNN-figure-2.png`, `-table-1`, `-equation-a-1`) and linked where its caption or number is, and `INDEX.md`, with the PDF itself -- into a directory, or one archive when `out` ends `.zip` -- for standards, manuals and data sheets, cited by clause on their page. OCR'd text is for finding; a formula's or a table's values are read off its picture; `--formulas latex` also writes each equation's LaTeX under its crop (`formula`) |
+| `paper` | `document-lab paper <pdf> <out>`: a paper as per-section markdown (written from the IR, or marker-pdf on a GPU) plus cropped figures/tables/equations; a table-of-contents page opens no sections, and on a page that is one picture (a screen-captured or scanned PDF, OCR'd) a figure, table or equation is cut out where its text locates it (`regions`), else the page is linked whole, once; `--formulas latex` writes each equation's LaTeX under its crop (`formula`) |
+| `formula` | `transcriber('latex')`: an equation crop's pixels to LaTeX in-process -- TexTeller (Apache-2.0 code and weights) through torch and transformers, on a CUDA GPU when one answers, else the CPU (`[formula]` extra; weights in the Hugging Face cache); refused by name (`FormulaUnavailable`) where the extra or the weights are missing |
 | `capture` | `document-lab capture <out.pdf>`: any window or screen region, scrolled to its end and stitched losslessly, to a PDF of page images -- the stage before `ocr` (Windows, `[capture]` extra; `--ocr LANGS` runs `ocr` on the result); `--resume` and `capture-merge` join captures where they overlap; `capture-files` takes each PDF of a directory or list page by page as its viewer (Acrobat) shows it, one PDF each |
 
 A screen-captured standard, end to end: `capture std.pdf` -> `ocr std.pdf` -> `pages std.pdf std.zip`.
@@ -152,7 +153,8 @@ Everything runs in one thread, in order -- grab, scroll, stitch, write -- so not
 ## Install
 
 `pip install "document_lab @ git+https://github.com/DawnEver/document-lab.git"`; extras: `gpu` (marker-pdf),
-`ai` (ai-lab), `capture` (no packages beyond the base). Domain schemas live in the consumers.
+`ai` (ai-lab), `capture` (no packages beyond the base), `formula` (torch, transformers: `--formulas latex`; Windows
+takes torch from PyTorch's CUDA index). Domain schemas live in the consumers.
 
 ## Tests
 

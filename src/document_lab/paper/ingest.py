@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 import pymupdf
 
+from document_lab import formula
 from document_lab.paper.convert import convert
 from document_lab.paper.output import write_paper_output
 from document_lab.paper.sections import clean_sections, split_sections
@@ -26,6 +27,7 @@ from document_lab.pdf import read_pdf
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from document_lab.formula import Formulas
     from document_lab.paper.convert import Tool
 
 __all__ = ['Ingested', 'NoSections', 'ingest']
@@ -78,8 +80,13 @@ def _scanned_pages(pdf: Path, out_dir: Path) -> int:
     return len(inked)
 
 
-def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> Ingested:
-    """Convert ``pdf`` (with ``tool``, else the best available) and write its paper layout into ``out_dir``."""
+def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None, formulas: Formulas | None = None) -> Ingested:
+    """Convert ``pdf`` (with ``tool``, else the best available) and write its paper layout into ``out_dir``.
+
+    ``formulas``: ``latex`` writes each equation crop's LaTeX under its image (`document_lab.formula`); refused by
+    :class:`document_lab.formula.FormulaUnavailable` before anything is written when its model cannot run.
+    """
+    transcribe = None if formulas is None else formula.transcriber(formulas)
     pdf = pdf.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     md_text, used = convert(pdf, out_dir, tool=tool)
@@ -94,7 +101,7 @@ def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> Ingested:
             return Ingested(used, scanned, scanned, 0, ())
         msg = f'{pdf.name}: the converted markdown has no section'
         raise NoSections(msg)
-    n_sec, n_fig, n_tbl = write_paper_output(main, out_dir, md_text, pdf_path=pdf)
+    n_sec, n_fig, n_tbl = write_paper_output(main, out_dir, md_text, pdf_path=pdf, transcribe=transcribe)
 
     appended_root = out_dir / 'appended'
     shutil.rmtree(appended_root, ignore_errors=True)
@@ -106,7 +113,7 @@ def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> Ingested:
         for img in (out_dir / 'img' / 'flat').iterdir():
             if img.is_file():
                 shutil.copy2(img, flat / img.name)
-        write_paper_output(sections, target, sections[0][1], title_override=title, pdf_path=pdf)
+        write_paper_output(sections, target, sections[0][1], title_override=title, pdf_path=pdf, transcribe=transcribe)
         shutil.rmtree(flat, ignore_errors=True)
         written.append(target)
 

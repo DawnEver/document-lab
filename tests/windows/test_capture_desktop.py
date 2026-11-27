@@ -17,7 +17,6 @@ import numpy as np
 import pymupdf
 import pytest
 
-from document_lab.__main__ import main
 from document_lab.capture import desktop
 from document_lab.capture.session import Limits, Rows, capture
 from tests.windows.viewer import HEIGHT, VIEW, WIDTH, picture
@@ -139,6 +138,8 @@ def test_a_region_is_the_screen_under_it(viewer):
 
 
 def test_the_cli_writes_the_pdf(viewer, tmp_path):
+    """Run as a script runs it: ``--now`` starts without the panel's Start, in a child with a timeout, so a wait for a
+    click nobody gives is a failure, never a hang."""
     window, image = viewer
     out = tmp_path / 'capture.pdf'
     argv = [
@@ -146,6 +147,7 @@ def test_the_cli_writes_the_pdf(viewer, tmp_path):
         str(out),
         '--hwnd',
         hex(window.hwnd),
+        '--now',
         '--auto',
         '--notches',
         '3',
@@ -154,7 +156,10 @@ def test_the_cli_writes_the_pdf(viewer, tmp_path):
         '--page-height',
         '0',
     ]
-    assert main(argv) == 0
+    done = subprocess.run(
+        [sys.executable, '-m', 'document_lab', *argv], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
     with pymupdf.open(out) as doc:
         assert doc.page_count == 1
         ((xref, *_),) = doc[0].get_images()

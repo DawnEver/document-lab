@@ -455,3 +455,15 @@ def test_resume_with_an_area_a_few_pixels_narrower_makes_it_as_wide_and_goes_on(
     assert main([*argv, '--auto', '--delay', '0', '--settle', '0', '--end-wait', '0', '--page-height', '0']) == 0
     assert f'it is made {WIDTH} px wide' in capsys.readouterr().out
     assert np.array_equal(pdf_pixels(tmp_path / 'c.pdf')[0], fake.IMAGE)
+
+
+def test_now_starts_on_the_named_area_without_waiting_for_the_panel(tmp_path, fake):
+    FakeHud.answers = ['cancel']  # what the panel would answer, were it asked
+    assert auto(tmp_path, '--now') == 0
+    assert 'ready' not in FakeHud.shown
+    assert (tmp_path / 'c.pdf').exists()
+
+
+def test_now_without_a_named_area_is_refused(tmp_path, fake):
+    with pytest.raises(ValueError, match='--window, --hwnd or --rect'):
+        main(['capture', str(tmp_path / 'c.pdf'), '--now'])

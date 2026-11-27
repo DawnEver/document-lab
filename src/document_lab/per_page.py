@@ -33,7 +33,7 @@ import pymupdf
 from document_lab import layout
 from document_lab.ink import Drawing, drawings
 from document_lab.ir import BBox
-from document_lab.markdown import page_markdowns
+from document_lab.markdown import Headings, headings, page_markdowns
 from document_lab.pdf import read_pdf
 from document_lab.regions import Region, regions
 
@@ -55,11 +55,16 @@ FURNITURE_SHARE: Final = 0.5  # points from the page's foot within which a regio
 
 @dataclass(frozen=True)
 class Paged:
-    """What :func:`write_pages` wrote: ``pages`` pages to ``out``; ``textless`` the 1-based numbers without text."""
+    """What :func:`write_pages` wrote: ``pages`` pages to ``out``; ``textless`` the 1-based numbers without text.
+
+    ``structure``: how the clause headings were found -- by the PDF's outline or inferred, and where the two
+    disagree (`document_lab.markdown.Headings`).
+    """
 
     out: Path
     pages: int
     textless: tuple[int, ...]
+    structure: Headings
 
 
 def _picture(pdf: pymupdf.Document, page: Page) -> tuple[pymupdf.Pixmap, float]:
@@ -156,11 +161,16 @@ def _clauses(markdown: str) -> str:
     return '; '.join(line.lstrip('#').strip() for line in markdown.splitlines() if line.startswith('##'))
 
 
-def write_pages(pdf: Path, out: Path) -> Paged:
-    """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive."""
+def write_pages(pdf: Path, out: Path, *, outline: bool = True) -> Paged:
+    """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive.
+
+    ``outline``: the PDF's stated outline names the clause headings when it matches the pages; False infers them all
+    the same (`document_lab.markdown.headings`).
+    """
     read = read_pdf(pdf)
     body = layout.body_size(read)
-    texts = page_markdowns(read)
+    structure = headings(read, outline=outline)
+    texts = page_markdowns(read, sections=structure)
     width = max(3, len(str(len(texts))))
     index = [f'# {pdf.stem}', '']
     textless = []
@@ -186,4 +196,4 @@ def write_pages(pdf: Path, out: Path) -> Paged:
             notes = [part for part in (_clauses(text), ', '.join(r.label for r in found)) if part]
             index.append(f'- [page {number}]({name}.md)' + (f' -- {" | ".join(notes)}' if notes else ''))
         put('INDEX.md', ('\n'.join(index) + '\n').encode())
-    return Paged(out, len(texts), tuple(textless))
+    return Paged(out, len(texts), tuple(textless), structure)

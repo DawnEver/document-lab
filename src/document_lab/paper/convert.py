@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Final, Literal
 
-from document_lab.markdown import to_markdown
+from document_lab.markdown import Headings, headings, to_markdown
 from document_lab.pdf import read_pdf
 
 __all__ = [
@@ -64,15 +64,23 @@ def choose_tool() -> Tool:
     return 'ir'
 
 
-def convert(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> tuple[str, Tool]:
-    """The markdown of ``pdf`` and the tool used (``tool``, else :func:`choose_tool`).
+def convert(
+    pdf: Path, out_dir: Path, *, tool: Tool | None = None, outline: bool = True
+) -> tuple[str, Tool, Headings | None]:
+    """The markdown of ``pdf``, the tool used (``tool``, else :func:`choose_tool`), and how its sections were headed.
 
-    marker's images land in ``out_dir/img/flat``; the IR path writes none (figures are cropped later).
+    On the IR path the PDF's stated outline names the sections when it matches the pages and ``outline`` asks for it,
+    else the rules infer them (`document_lab.markdown.headings`, returned for the caller to report); marker heads
+    its own (None). marker's images land in ``out_dir/img/flat``; the IR path writes none (figures are cropped later).
     """
     used = tool or choose_tool()
     flat = out_dir / 'img' / 'flat'
     flat.mkdir(parents=True, exist_ok=True)
-    return (_run_marker(pdf, out_dir) if used == 'marker' else to_markdown(read_pdf(pdf))), used
+    if used == 'marker':
+        return _run_marker(pdf, out_dir), used, None
+    doc = read_pdf(pdf)
+    sections = headings(doc, outline=outline)
+    return to_markdown(doc, sections=sections), used, sections
 
 
 def _run_marker(pdf: Path, out_dir: Path) -> str:

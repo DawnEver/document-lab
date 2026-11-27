@@ -26,6 +26,7 @@ from document_lab.pdf import read_pdf
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from document_lab.markdown import Headings
     from document_lab.paper.convert import Tool
 
 __all__ = ['Ingested', 'NoSections', 'ingest']
@@ -37,13 +38,18 @@ class NoSections(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class Ingested:
-    """What one ingest wrote: the tool, the counts of the main paper, and one directory per appended paper."""
+    """What one ingest wrote: the tool, the counts of the main paper, and one directory per appended paper.
+
+    ``structure``: how the sections were headed -- by the PDF's outline or inferred, and where the two disagree
+    (`document_lab.markdown.Headings`); None when marker headed them.
+    """
 
     tool: Tool
     sections: int
     figures: int
     tables: int
     appended: tuple[Path, ...]
+    structure: Headings | None
 
 
 #: Render scale of a scanned page: 3x (216 dpi) keeps a catalogue's 6 pt table digits legible.
@@ -78,12 +84,17 @@ def _scanned_pages(pdf: Path, out_dir: Path) -> int:
     return len(inked)
 
 
-def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> Ingested:
-    """Convert ``pdf`` (with ``tool``, else the best available) and write its paper layout into ``out_dir``."""
+def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None, outline: bool = True) -> Ingested:
+    """Convert ``pdf`` (with ``tool``, else the best available) and write its paper layout into ``out_dir``.
+
+    ``outline``: the PDF's stated outline names the sections when it matches the pages; False infers them all the
+    same (`document_lab.paper.convert.convert`).
+    """
     pdf = pdf.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    md_text, used = convert(pdf, out_dir, tool=tool)
-    main, appended = clean_sections(split_sections(md_text))
+    md_text, used, structure = convert(pdf, out_dir, tool=tool, outline=outline)
+    stated = frozenset(structure.named) if structure is not None else frozenset()
+    main, appended = clean_sections(split_sections(md_text), stated=stated)
     if not main and md_text.strip():
         # A drawing or data sheet, not a paper: every fragment is too short for the paper filters, so the
         # whole text is its one section rather than nothing.
@@ -91,7 +102,7 @@ def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> Ingested:
     if not main:
         scanned = _scanned_pages(pdf, out_dir)
         if scanned:
-            return Ingested(used, scanned, scanned, 0, ())
+            return Ingested(used, scanned, scanned, 0, (), structure)
         msg = f'{pdf.name}: the converted markdown has no section'
         raise NoSections(msg)
     n_sec, n_fig, n_tbl = write_paper_output(main, out_dir, md_text, pdf_path=pdf)
@@ -111,4 +122,4 @@ def ingest(pdf: Path, out_dir: Path, *, tool: Tool | None = None) -> Ingested:
         written.append(target)
 
     shutil.rmtree(out_dir / 'img' / 'flat', ignore_errors=True)
-    return Ingested(used, n_sec, n_fig, n_tbl, tuple(written))
+    return Ingested(used, n_sec, n_fig, n_tbl, tuple(written), structure)

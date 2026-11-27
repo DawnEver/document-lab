@@ -26,9 +26,10 @@ PyMuPDF gives a path filled and stroked as one drawing or as two, so each fill a
 of PyMuPDF's taken once. One of ours whose fill or stroke no drawing matches is ``unmatched``; a fill or stroke of
 PyMuPDF's no path of ours takes is ``unreported`` when it can show -- its box meets the page and its clip as PyMuPDF
 bounds them (the reader leaves out a path its clip box misses, `pdf::interpret`) -- and is no Type 3 glyph's ink
-(:class:`_Theirs`). A pattern's paint is not compared: ours states it with no components, PyMuPDF draws a clip and a
-shading. A color is compared when both state RGB (ours keeps a separation's tint), PyMuPDF's color management off:
-both then convert a device color by ISO 32000's formulas, while with it on PyMuPDF converts through ICC profiles.
+(:class:`_Theirs`). A fill painted with a pattern (``VectorPath.pattern``) is not compared: PyMuPDF draws a clip and
+the pattern's shading or cells, never one solid fill -- an uncolored tiling's tint (a TikZ hatch) included. A color
+is compared when both state RGB (ours keeps a separation's tint), PyMuPDF's color management off: both then convert
+a device color by ISO 32000's formulas, while with it on PyMuPDF converts through ICC profiles.
 
 Images are compared by where they are placed. PyMuPDF lists every placement, seen or not; the reader leaves out what
 its clip hides, and its clip is a box holding the true one (`pdf::interpret`), so it leaves out only what cannot show.
@@ -331,18 +332,19 @@ class _Drawn(NamedTuple):
 
 
 def _ours(paths: Sequence[VectorPath]) -> list[_Drawn]:
-    """Our painted paths, each its subpaths' box; one painted with a pattern alone left out (PyMuPDF draws none)."""
+    """Our painted paths, each its subpaths' box; a pattern's fill is none to compare (PyMuPDF draws no solid fill)."""
     groups: dict[int, list[VectorPath]] = {}
     for path in paths:
         groups.setdefault(path.group, []).append(path)
     out = []
     for subpaths in groups.values():
         first = subpaths[0]
-        if not (first.fill or first.stroke):
+        fill = None if first.pattern is not None else first.fill
+        if not (fill or first.stroke):
             continue
         boxes = [p.provenance.bbox for p in subpaths]
         box = (min(b.x0 for b in boxes), min(b.y0 for b in boxes), max(b.x1 for b in boxes), max(b.y1 for b in boxes))
-        out.append(_Drawn(box, first.stroke, first.width, first.dashes, first.fill, first.even_odd))
+        out.append(_Drawn(box, first.stroke, first.width, first.dashes, fill, first.even_odd))
     return out
 
 
@@ -469,7 +471,7 @@ def _paths(ours: list[_Drawn], theirs: _Theirs) -> tuple[int, int]:
         candidates = sorted(
             k for cell in _cells(x - DRAWN, y - DRAWN, x + DRAWN, y + DRAWN, _DRAWING_CELL) for k in grid.get(cell, ())
         )
-        # A pattern's paint (no components) PyMuPDF gives as a clip and its shading, not as a drawing.
+        # A stroke painted with a pattern (no components) PyMuPDF gives as a clip and its cells, not as a drawing.
         roles = [role for role, paint in enumerate((path.fill, path.stroke)) if paint]
         takes = [
             next((k for k in candidates if free[k][role] and _paints(path, theirs.drawn[k], role)), None)

@@ -588,6 +588,27 @@ def actual_text_pdf(path: Path) -> Path:
     return path
 
 
+def hatch_pdf(path: Path) -> Path:
+    """A 200 x 100 page: a blue 5 x 5 solid fill, then a 50 x 50 hatch -- an uncolored tiling pattern (a diagonal
+    stroke, as TikZ's ``north east lines``) tinted red through ``[/Pattern /DeviceRGB]``: a pattern, not a solid fill.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=200, height=100)
+    pattern = doc.get_new_xref()
+    doc.update_object(pattern, '<< /PatternType 1 /PaintType 2 /TilingType 1 /BBox [0 0 4 4] /XStep 4 /YStep 4 >>')
+    doc.update_stream(pattern, b'0 0 m 4 4 l S')
+    doc.xref_set_key(
+        page.xref, 'Resources', f'<< /ColorSpace << /C [/Pattern /DeviceRGB] >> /Pattern << /H {pattern} 0 R >> >>'
+    )
+    stream = doc.get_new_xref()
+    doc.update_object(stream, '<< >>')
+    doc.update_stream(stream, b'0 0 1 rg 0 0 5 5 re f /C cs 1 0 0 /H scn 10 10 50 50 re f')
+    doc.xref_set_key(page.xref, 'Contents', f'{stream} 0 R')
+    doc.save(path)
+    doc.close()
+    return path
+
+
 def hidden_layer(page: Page) -> Page:
     """``page`` with everything it draws in a hidden layer: what a layer turned off in the default view reads as."""
     return replace(

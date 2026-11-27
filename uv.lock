@@ -593,8 +593,8 @@ nvtx = [
 
 [[package]]
 name = "dev-lab"
-version = "0.0.1.dev5260+g7956b0968"
-source = { git = "https://github.com/DawnEver/dev-lab.git#7956b0968797b563400ef4da9892384100602f97" }
+version = "0.0.1.dev5264+g360477877"
+source = { git = "https://github.com/DawnEver/dev-lab.git#360477877783134f5be6fa70a493c6199bcbb24e" }
 dependencies = [
     { name = "cryptography" },
     { name = "lab-commons", extra = ["io", "paths", "structured", "units"] },

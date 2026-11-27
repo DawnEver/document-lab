@@ -42,3 +42,10 @@ def test_a_drawn_equation_reads_as_its_latex(device):
 
 def test_a_blank_crop_states_nothing():
     assert transcriber('cpu')(np.full((40, 120, 3), 255, dtype=np.uint8)) is None
+
+
+def test_a_gray_crop_reads_as_its_rgb_one():
+    """A crop is read as written, and `document_lab.png` writes a gray picture's crop gray: rows and columns alone."""
+    rgb = drawn()
+    gray = np.round(rgb.astype(np.float64) @ [0.2989, 0.587, 0.114]).astype(np.uint8)
+    assert transcriber(None)(gray) == transcriber(None)(rgb)

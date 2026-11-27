@@ -1,14 +1,16 @@
 """``--formulas latex``: each equation crop's LaTeX written beside it, the crop kept; the model is the ``formula``
 extra's, loaded only when asked, and refused by name without it -- never a silent fallback."""
 
+import struct
 import subprocess
 import sys
+import zlib
 
 import numpy as np
 import pymupdf
 import pytest
 
-from document_lab import formula
+from document_lab import formula, png
 from document_lab.paper.ingest import ingest
 from document_lab.per_page import write_pages
 from tests.paper.support import LONG_BODY
@@ -40,6 +42,25 @@ def stand_in(monkeypatch):
     return model
 
 
+def _decoded(path):
+    """The pixels of a PNG `document_lab.png` wrote (8-bit gray or RGB, every row filter 0), read with zlib alone."""
+    data = path.read_bytes()
+    assert data.startswith(png.SIGNATURE)
+    at, header, idat = len(png.SIGNATURE), b'', b''
+    while at < len(data):
+        (length,), kind = struct.unpack('>I', data[at : at + 4]), data[at + 4 : at + 8]
+        body = data[at + 8 : at + 8 + length]
+        header, idat = (body, idat) if kind == b'IHDR' else (header, idat + body if kind == b'IDAT' else idat)
+        at += 12 + length
+    width, height, depth, color = struct.unpack('>IIBB', header[:10])
+    assert depth == 8
+    channels = {0: 1, 2: 3}[color]
+    rows = np.frombuffer(zlib.decompress(idat), dtype=np.uint8).reshape(height, 1 + width * channels)
+    assert not rows[:, 0].any()  # filter 0: each row as it is
+    pixels = rows[:, 1:].reshape(height, width, channels)
+    return pixels[..., 0] if channels == 1 else pixels
+
+
 def _standard(path):
     prose = 'The rated output is the mechanical power available at the shaft and shall be expressed in watts.'
     with pymupdf.open() as doc:
@@ -59,8 +80,7 @@ def test_the_latex_is_written_beside_the_equation_crop_which_is_kept(tmp_path, s
     assert '![(3)](page-001-equation-3.png)\n\n$$\nU = R I\n$$' in md
     assert stand_in.asked == [('latex', {})]  # loaded once for the document
     (shown,) = stand_in.shown
-    pix = pymupdf.Pixmap(str(crop))
-    assert shown.shape == (pix.height, pix.width, 3)  # the model reads the very pixels the crop holds
+    assert np.array_equal(shown, _decoded(crop))  # the model reads the very pixels the crop holds
 
 
 def test_without_the_option_no_model_is_asked(tmp_path, stand_in):
@@ -69,8 +89,7 @@ def test_without_the_option_no_model_is_asked(tmp_path, stand_in):
     assert stand_in.asked == []
 
 
-def test_a_paper_s_equation_carries_its_latex_under_its_image(tmp_path, stand_in):
-    stand_in.latex = r'\[ U = R I \qquad (1) \]'
+def _paper(path):
     with pymupdf.open() as doc:
         page = doc.new_page(width=612, height=792)
         page.insert_text((72, 80), 'I. INTRODUCTION', fontsize=12)
@@ -84,11 +103,32 @@ def test_a_paper_s_equation_carries_its_latex_under_its_image(tmp_path, stand_in
         for line in (LONG_BODY[i : i + 90] for i in range(0, 450, 90)):
             page.insert_text((72, y), line, fontsize=10)
             y += 14
-        doc.save(tmp_path / 'paper.pdf')
-    ingest(tmp_path / 'paper.pdf', tmp_path / 'out', tool='ir', formulas='latex')
+        doc.save(path)
+    return path
+
+
+def test_a_paper_s_equation_carries_its_latex_under_its_image(tmp_path, stand_in):
+    stand_in.latex = r'\[ U = R I \qquad (1) \]'
+    ingest(_paper(tmp_path / 'paper.pdf'), tmp_path / 'out', tool='ir', formulas='latex')
     body = '\n'.join(p.read_text(encoding='utf-8') for p in (tmp_path / 'out' / 'md').glob('*.md'))
     assert '-equation-1.png)\n\n$$\nU = R I\n$$' in body
     assert stand_in.shown
+
+
+def test_a_paper_s_equation_is_read_from_the_very_array_its_crop_was_encoded_from(tmp_path, stand_in, monkeypatch):
+    encoded = []
+
+    def encode(image):
+        encoded.append(image)
+        return png_encode(image)
+
+    png_encode = png.encode
+    monkeypatch.setattr(png, 'encode', encode)
+    ingest(_paper(tmp_path / 'paper.pdf'), tmp_path / 'out', tool='ir', formulas='latex')
+    (shown,) = stand_in.shown
+    assert any(shown is image for image in encoded)  # the array handed to the PNG writer, not a reading of it
+    (crop,) = (tmp_path / 'out' / 'img').rglob('*-equation-1.png')
+    assert np.array_equal(shown, _decoded(crop))  # and the file holds exactly it
 
 
 def test_the_block_drops_the_display_delimiters_and_the_equation_s_own_number_only():

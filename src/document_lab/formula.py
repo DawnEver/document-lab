@@ -28,8 +28,9 @@ __all__ = ['MODEL', 'REVISION', 'UNREAD', 'FormulaUnavailable', 'Formulas', 'Tra
 
 #: What an equation crop is written as beside its image: ``latex``.
 Formulas = Literal['latex']
-#: An equation crop's RGB pixels (rows, columns, 3; uint8) to its LaTeX; None where the model gives no reading: a
-#: blank crop, or a reading that never ends (it repeats until the token budget runs out, measured on 2% of crops).
+#: An equation crop's pixels as written (`document_lab.png`: rows, columns and 3 RGB channels, or rows and columns
+#: of gray; uint8) to its LaTeX; None where the model gives no reading: a blank crop, or a reading that never ends
+#: (it repeats until the token budget runs out, measured on 2% of crops).
 Transcribe = Callable[[np.ndarray], str | None]
 #: What stands beside a crop the model gave no reading of: never silently nothing.
 UNREAD: Final = '<!-- formulas: no LaTeX read from this crop (blank, or the reading never ended) -->'
@@ -46,6 +47,7 @@ _STD: Final = 0.15394445
 _BORDER: Final = 15  # gray levels from the background color a pixel must differ by to be ink
 _MAX_TOKENS: Final = 1024
 _GRAY: Final = np.array([0.2989, 0.587, 0.114])  # ITU-R 601-2, as torchvision's Grayscale
+_GRAY_AXES: Final = 2  # a gray crop's: rows and columns, no channel axis
 
 
 class FormulaUnavailable(RuntimeError):
@@ -97,7 +99,9 @@ def transcriber(formulas: Formulas, *, device: str | None = None) -> Transcribe:
         return tokenizer.batch_decode(ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0].strip()
 
     def _square(pixels: np.ndarray) -> torch.Tensor | None:
-        gray = pixels[..., :3].astype(np.float64) @ _GRAY
+        gray = pixels.astype(np.float64)
+        if gray.ndim != _GRAY_AXES:
+            gray = gray[..., :3] @ _GRAY
         corners = (gray[0, 0], gray[0, -1], gray[-1, 0], gray[-1, -1])
         background = Counter(np.round(corners)).most_common(1)[0][0]
         rows, cols = np.nonzero(np.abs(gray - background) > _BORDER)

@@ -68,7 +68,7 @@ def _paper(args: argparse.Namespace) -> int:
     done = ingest(args.pdf, args.out, tool=args.tool)
     emit(
         f'{args.out}: {done.sections} sections, {done.figures} figures, {done.tables} tables '
-        f'({done.tool}); {len(done.appended)} appended paper(s)'
+        f'({done.choice.tool}: {done.choice.why}); {len(done.appended)} appended paper(s)'
     )
     return 0
 

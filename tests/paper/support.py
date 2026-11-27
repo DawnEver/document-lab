@@ -21,6 +21,6 @@ def ingested(pdf: Path, tool: str, factory: pytest.TempPathFactory) -> Path:
     if key not in _cache:
         out = factory.mktemp(f'{pdf.stem}_{tool}')
         done = ingest(pdf, out, tool=tool)
-        assert done.tool == tool
+        assert done.choice.tool == tool
         _cache[key] = out
     return _cache[key]

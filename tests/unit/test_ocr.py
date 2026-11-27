@@ -568,6 +568,26 @@ def test_a_turn_osd_is_sure_of_is_read_as_well_as_placed_and_the_surer_line_kept
 
 
 @pytest.mark.parametrize(
+    ('across', 'kept'), [(('OAl', 262, 220, 16, 80), 'IEC 60404'), (('OAl', 200, 220, 90, 40), 'OAl')]
+)
+def test_a_line_read_across_a_line_of_the_other_reading_is_that_line_misread_however_sure(
+    tmp_path, tesseract, across, kept
+):
+    """A landscape page's upright head, read again with the sideways table: the turned reading takes its glyphs for a
+    line 16 pixels long and 80 high across the head, surer than the head itself (logo noise in it). A line no longer
+    along its baseline than the other is thick is that line read across: dropped. The planted wrong truth: a turned
+    line longer than the head is thick (90) is a line of its own, and the surer one wins as before."""
+    pdf, _ = capture(tmp_path)
+    as_placed = page(('IEC', 200, 20, 40, 20), ('60404', 250, 20, 100, 20), confidence=0.2)
+    turned = document(region(('sideways', 40, 100, 120, 30), confidence=0.9), region(across, confidence=0.6))
+    tesseract(as_placed, turned, orientation=osd(90, 15.0))
+    text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES)
+    lines = {s.text for s in read_pdf(tmp_path / 'ocr.pdf').pages[0].spans}
+    assert 'sideways' in lines
+    assert kept in lines and {'IEC 60404', 'OAl'} - {kept} - lines == {'IEC 60404', 'OAl'} - {kept}
+
+
+@pytest.mark.parametrize(
     ('orientation', 'note'),
     [
         (osd(90, 3.0), 'page 1: OSD proposed turning 90 degrees at confidence 3.00, too unsure: read as placed'),

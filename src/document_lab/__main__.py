@@ -9,6 +9,7 @@ sections with its figures.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from lab_commons.log import emit
@@ -58,10 +59,11 @@ def _refused(error: Exception) -> int:
 
 
 def _ocr(args: argparse.Namespace) -> int:
-    from document_lab.ocr import text_layer  # noqa: PLC0415 -- a subcommand loads only what it runs
+    from document_lab.ocr import TesseractPlaces, text_layer  # noqa: PLC0415 -- a subcommand loads only what it runs
 
     out = args.out or args.pdf
-    emit(f'{out}: text layer on {text_layer(args.pdf, out, args.lang)} page(s)')
+    laid = text_layer(args.pdf, out, args.lang, places=TesseractPlaces.of(os.environ))
+    emit(f'{out}: text layer on {laid} page(s)')
     return 0
 
 

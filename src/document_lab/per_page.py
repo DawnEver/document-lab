@@ -10,11 +10,17 @@ at :data:`RENDER_DPI`. Every PNG is written by `document_lab.png`.
 Each figure, table and equation the page's text and drawn ink locate (`document_lab.regions`, told the picture's
 drawings by `document_lab.ink`, less those half the pages repeat: a logo, a running frame) is cut out of that
 picture as ``page-NNN-<kind>-<label>.png`` and linked in the markdown after the paragraph holding its caption or
-number -- where OCR'd text cannot be trusted (a formula, a table's numbers), the picture beside it can. A region
+number -- where OCR'd text cannot be trusted (a formula, a table's numbers), the picture beside it can. A table whose
+text makes rows and columns is written where it stands as a markdown table, its link above it; an untitled drawing's
+link stands where the drawing does, the text drawn in it after the link, not in the body (:func:`_placed`). A region
 reaching the page's foot is marked as continuing on the next page. Asked for ``formulas='latex'``, each equation's
 LaTeX, read from its crop by `document_lab.formula` (the ``formula`` extra), follows its link as a display block.
 ``INDEX.md`` lists the pages with the clause headings each opens and the regions it holds. A page without text is
 written all the same, its markdown empty, and named in :attr:`Paged.textless` -- never silently dropped.
+
+A document's running heads and feet (`document_lab.layout.running`: a title, a part number, a page number repeated
+at a page's edge) are no body text: each page's are listed in its front matter (``header:``, ``footer:``) and left
+out of its markdown.
 
 The PDF itself goes with them, so the layout stands alone. ``out`` is a directory, or -- ending ``.zip`` -- one
 archive holding the same files (written beside as ``<out>.part`` and moved into place when whole): a document is
@@ -23,10 +29,11 @@ one file to keep, send or index.
 
 from __future__ import annotations
 
+import json
 import re
 import zipfile
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final
 
 import numpy as np
@@ -35,6 +42,7 @@ from document_lab import formula, layout, png
 from document_lab.ink import Drawing, drawings
 from document_lab.ir import BBox
 from document_lab.markdown import page_markdowns
+from document_lab.markdown import table as markdown_table
 from document_lab.pdf import read_pdf, read_raster
 from document_lab.regions import Region, regions
 
@@ -42,7 +50,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from pathlib import Path
 
-    from document_lab.ir import Page
+    from document_lab.ir import Document, Page
+    from document_lab.markdown import Placed
 
 __all__ = ['RENDER_DPI', 'Paged', 'write_pages']
 
@@ -168,6 +177,67 @@ def _clauses(markdown: str) -> str:
     return '; '.join(line.lstrip('#').strip() for line in markdown.splitlines() if line.startswith('##'))
 
 
+def _body(doc: Document, furniture: list[layout.Running]) -> Document:
+    """``doc`` without its pages' running heads and feet: the text its markdown is written from."""
+    pages = []
+    for page, run in zip(doc.pages, furniture, strict=True):
+        out = {id(span) for line in (*run.head, *run.foot) for span in line.spans}
+        pages.append(replace(page, spans=tuple(s for s in page.spans if id(s) not in out)))
+    return replace(doc, pages=tuple(pages))
+
+
+def _front_matter(run: layout.Running) -> str:
+    """The page's running head and foot as YAML front matter (``header:``, ``footer:``); none without them."""
+    named = (('header', run.head), ('footer', run.foot))
+    fields = [f'{key}: {json.dumps([ln.text for ln in found], ensure_ascii=False)}' for key, found in named if found]
+    return '---\n' + '\n'.join(fields) + '\n---\n\n' if fields else ''
+
+
+def _link(name: str, page: Page, region: Region, latex: dict[int, str]) -> str:
+    """The markdown link to ``region``'s picture, marked when it runs on to the next page.
+
+    An equation's ``latex`` (:func:`_latex`, by the region's id) follows it.
+    """
+    more = ' (continues on the next page)' if region.bbox.y1 >= page.height - _FOOT else ''
+    beside = f'\n\n{latex[id(region)]}' if id(region) in latex else ''
+    return f'![{region.label}]({_file(name, region)}){more}{beside}'
+
+
+def _latex(pdf: Path, read: Document, found: list[list[Region]], transcribe: formula.Transcribe) -> dict[int, str]:
+    """What stands beside each equation's link (`document_lab.formula.beside`), by the region's id."""
+    latex = {}
+    for page, held in zip(read.pages, found, strict=True):
+        if equations := [r for r in held if r.kind == 'equation']:
+            pixels, scale = _picture(pdf, page)
+            for region in equations:
+                latex[id(region)] = formula.beside(transcribe(_cut(pixels, scale, region)), _number(region.label))
+    return latex
+
+
+def _placed(name: str, page: Page, found: list[Region], latex: dict[int, str]) -> list[Placed]:
+    """The regions written where they stand on ``page`` (its text, running lines left out), each with its link.
+
+    A table its text reads (:attr:`Region.table`) is its cells as a markdown table, in place of its lines; a region
+    with no caption to be linked after (an untitled drawing) takes its lines with it, the text drawn in it.
+    """
+    out: list[Placed] = []
+    every = layout.lines(page, weighted=True)
+    for region in found:
+        link = _link(name, page, region, latex)
+        if region.table is not None:
+            out.append((region.table.provenance.bbox, f'{link}\n\n{markdown_table(region.table.rows)}'))
+        elif not region.captioned:
+            box = region.bbox
+            inside = [
+                ln
+                for ln in every
+                if box.x0 <= (ln.x0 + ln.x1) / 2 <= box.x1 and box.y0 <= (ln.y0 + ln.y1) / 2 <= box.y1
+            ]
+            text = ' '.join(ln.text for ln in layout.ordered(inside))
+            out.append((box, f'{link}\n\n*Text in the {region.kind}:* {text}' if text else link))
+    return out
+
+
 def write_pages(pdf: Path, out: Path, *, formulas: formula.Formulas | None = None) -> Paged:
     """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive.
 
@@ -177,32 +247,31 @@ def write_pages(pdf: Path, out: Path, *, formulas: formula.Formulas | None = Non
     transcribe = None if formulas is None else formula.transcriber(formulas)
     read = read_pdf(pdf)
     body = layout.body_size(read)
-    texts = page_markdowns(read)
-    width = max(3, len(str(len(texts))))
+    width = max(3, len(str(len(read.pages))))
+    names = [f'page-{number:0{width}d}' for number in range(1, len(read.pages) + 1)]
+    drawn = _without_furniture([_drawings(*_picture(pdf, page), page, body) for page in read.pages], body)
+    found = [regions(page, body, drawings) for page, drawings in zip(read.pages, drawn, strict=True)]
+    furniture = layout.running(read)
+    text = _body(read, furniture)
+    latex = {} if transcribe is None else _latex(pdf, read, found, transcribe)
+    placed = [_placed(*part, latex) for part in zip(names, text.pages, found, strict=True)]
+    texts = page_markdowns(text, placed)
     index = [f'# {pdf.stem}', '']
     textless = []
-    drawn = _without_furniture([_drawings(*_picture(pdf, page), page, body) for page in read.pages], body)
     with _files(out) as put:
         if out / pdf.name != pdf:  # the layout stands alone; a PDF already where it goes is not copied onto itself
             put(pdf.name, pdf.read_bytes())
-        for number, (text, page) in enumerate(zip(texts, read.pages, strict=True), start=1):
-            name = f'page-{number:0{width}d}'
+        for number, (name, md, page, held) in enumerate(zip(names, texts, read.pages, found, strict=True), start=1):
             pixels, scale = _picture(pdf, page)
             put(f'{name}.png', png.encode(pixels))
-            links = []
-            for region in (found := regions(page, body, drawn[number - 1])):
-                file = _file(name, region)
-                cut = _cut(pixels, scale, region)
-                put(file, png.encode(cut))
-                more = ' (continues on the next page)' if region.bbox.y1 >= page.height - _FOOT else ''
-                link = f'![{region.label}]({file}){more}'
-                if transcribe is not None and region.kind == 'equation':
-                    link += '\n\n' + formula.beside(transcribe(cut), _number(region.label))
-                links.append((region.label, link))
-            put(f'{name}.md', f'[{pdf.name}, page {number}]({name}.png)\n\n{_linked(text, links)}'.encode())
-            if not text.strip():
+            for region in held:
+                put(_file(name, region), png.encode(_cut(pixels, scale, region)))
+            links = [(r.label, _link(name, page, r, latex)) for r in held if r.table is None and r.captioned]
+            head = _front_matter(furniture[number - 1])
+            put(f'{name}.md', f'{head}[{pdf.name}, page {number}]({name}.png)\n\n{_linked(md, links)}'.encode())
+            if not any(s.text.strip() for s in page.spans):
                 textless.append(number)
-            notes = [part for part in (_clauses(text), ', '.join(r.label for r in found)) if part]
+            notes = [part for part in (_clauses(md), ', '.join(r.label for r in held)) if part]
             index.append(f'- [page {number}]({name}.md)' + (f' -- {" | ".join(notes)}' if notes else ''))
         put('INDEX.md', ('\n'.join(index) + '\n').encode())
-    return Paged(out, len(texts), tuple(textless))
+    return Paged(out, len(read.pages), tuple(textless))

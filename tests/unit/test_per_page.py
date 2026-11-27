@@ -4,6 +4,7 @@ import zipfile
 
 import numpy as np
 import pymupdf
+import pytest
 
 from document_lab.capture.export import to_pdf
 from document_lab.per_page import RENDER_DPI, write_pages
@@ -139,3 +140,68 @@ def test_a_drawing_every_page_repeats_is_furniture_and_one_page_s_table_is_still
     with zipfile.ZipFile(tmp_path / 'out.zip') as archive:
         cut = sorted(n for n in archive.namelist() if '-table-' in n)
     assert cut == ['page-001-table-untitled-1.png']
+
+
+def _one_image_page(path, colorspace, samples, *, extra=None):
+    """A 200 x 150 pt page that is one 8 x 6 image in ``colorspace`` (a PDF object), every sample ``samples``."""
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=200, height=150)
+        if extra is not None:  # an object the color space refers to (an ICC profile's stream)
+            ref = doc.get_new_xref()
+            doc.update_object(ref, extra[0])
+            doc.update_stream(ref, extra[1])
+            colorspace = colorspace.replace('REF', f'{ref} 0 R')
+        image = doc.get_new_xref()
+        doc.update_object(
+            image,
+            f'<< /Type /XObject /Subtype /Image /Width 8 /Height 6 /ColorSpace {colorspace} /BitsPerComponent 8 >>',
+        )
+        doc.update_stream(image, bytes(samples) * 48)
+        doc.xref_set_key(page.xref, 'Resources', f'<< /XObject << /Im0 {image} 0 R >> >>')
+        content = doc.get_new_xref()
+        doc.update_object(content, '<< >>')
+        doc.update_stream(content, b'q 200 0 0 150 0 0 cm /Im0 Do Q')
+        doc.xref_set_key(page.xref, 'Contents', f'{content} 0 R')
+        doc.save(path)
+    return path
+
+
+@pytest.mark.parametrize(
+    ('colorspace', 'samples', 'extra', 'seen'),
+    [
+        ('/DeviceCMYK', (0, 255, 255, 0), None, 'red'),  # magenta and yellow ink
+        ('[/Indexed /DeviceRGB 1 <FF000000C000>]', (1,), None, 'green'),  # palette entry 1
+        ('[/Lab << /WhitePoint [0.9505 1 1.089] >>]', (128, 128, 128), None, 'gray'),  # L* 50, neutral
+        # a CMYK ICC profile no reader can use: its /Alternate, DeviceCMYK, stands for it
+        ('[/ICCBased REF]', (0, 255, 255, 0), ('<< /N 4 /Alternate /DeviceCMYK >>', b'not a profile'), 'red'),
+    ],
+)
+def test_a_page_that_is_one_image_in_any_color_space_is_written_in_its_colors(
+    tmp_path, colorspace, samples, extra, seen
+):
+    """JMAG manuals and data sheets: a page that is one CMYK picture once crashed the PNG writer."""
+    pdf = _one_image_page(tmp_path / 'scan.pdf', colorspace, samples, extra=extra)
+    write_pages(pdf, tmp_path / 'out')
+    pix = pymupdf.Pixmap(str(tmp_path / 'out' / 'page-001.png'))
+    assert pix.n == 3
+    r, g, b = (
+        int(v) for v in np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)[pix.h // 2, pix.w // 2]
+    )
+    if seen == 'red':
+        assert r > 180 and g < 90 and b < 90, (r, g, b)
+    elif seen == 'green':
+        assert g > 150 and r < 60 and b < 60, (r, g, b)
+    else:
+        assert 90 < r < 150 and abs(r - g) < 12 and abs(r - b) < 12, (r, g, b)
+
+
+def test_a_caption_across_the_page_foot_cuts_no_empty_region(tmp_path):
+    """A caption the page's foot cuts, prose right above it: its figure has no room on the page, and is no region."""
+    prose = 'The rated output is the mechanical power available at the shaft and shall be expressed in watts.'
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=600, height=300)
+        page.insert_text((50, 296), prose, fontsize=10)
+        page.insert_text((50, 307), 'Figure 3 - At the foot', fontsize=10)
+        doc.save(tmp_path / 'foot.pdf')
+    write_pages(tmp_path / 'foot.pdf', tmp_path / 'out')
+    assert not list((tmp_path / 'out').glob('page-001-figure-*.png'))

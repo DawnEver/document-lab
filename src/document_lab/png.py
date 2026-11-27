@@ -27,6 +27,9 @@ def chunk(kind: bytes, data: bytes) -> bytes:
 
 def header(width: int, height: int, channels: int) -> bytes:
     """The ``IHDR`` chunk of an 8-bit image of ``channels`` (1 gray, 3 RGB), ``width`` x ``height``."""
+    if width < 1 or height < 1:  # ISO/IEC 15948 11.2.2: zero is an invalid width or height
+        msg = f'a PNG holds at least one pixel: {width} x {height}'
+        raise ValueError(msg)
     if channels not in _COLOR_TYPE:
         msg = f'a PNG here is gray or RGB: {channels} channels'
         raise ValueError(msg)

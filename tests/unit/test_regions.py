@@ -237,3 +237,66 @@ def test_a_short_drawing_with_no_word_in_it_is_an_equation_without_a_number(tmp_
     page, body = _page(tmp_path, draw)
     found = regions(page, body, [_drawn((180, 145, 420, 175), stroke=60)])  # three lines high, under four
     assert [(r.kind, r.label) for r in found] == [('equation', 'Untitled equation 1')]
+
+
+def test_a_region_the_page_edge_leaves_no_room_for_is_none(tmp_path):
+    """A caption across the page's foot, prose right above it: clamped to the page, its figure's top falls below its
+    bottom -- once a crop of negative height. A region is never a box without area."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=600, height=300)
+    _text(page, 296, PROSE)
+    _text(page, 307, 'Figure 3 - At the foot')
+    doc.save(tmp_path / 'r.pdf')
+    read = read_pdf(tmp_path / 'r.pdf')
+    assert regions(read.pages[0], layout.body_size(read)) == []
+
+
+def test_a_short_drawing_without_math_in_it_is_a_figure_not_an_equation(tmp_path):
+    """A cover's logo: drawn, a few body sizes high, no text in it (or only its brand's): nothing says formula."""
+
+    def draw(page):
+        _text(page, 100, PROSE)
+        _text(page, 300, PROSE)
+        _text(page, 470, 'TDK', x=330, size=14)  # brand text set inside the second logo
+        _text(page, 600, PROSE)
+
+    page, body = _page(tmp_path, draw)
+    logo, branded = _drawn((300, 150, 420, 176), stroke=30), _drawn((300, 450, 420, 480), stroke=30)
+    found = regions(page, body, [logo, branded])
+    assert [(r.kind, r.label) for r in found] == [('figure', 'Untitled figure 1'), ('figure', 'Untitled figure 2')]
+
+
+def _data_sheet_drawings(page):
+    """A data sheet's drawings page: each drawing under its own title, two of them in two parts."""
+    _text(page, 60, 'Data and Signal Line Chokes', x=42, size=11)
+    _text(page, 60, 'ACT1210', x=499, size=11)
+    _text(page, 110, 'Dimensional drawing and pin configuration', x=37, size=11)
+    _text(page, 110, 'Layout recommendation', x=313, size=11)
+    _text(page, 278, 'Dimensions in mm', x=37, size=11)
+    _text(page, 306, 'Circuit diagram', x=37, size=11)
+    _text(page, 410, 'Taping and packing', x=37, size=11)
+    _text(page, 436, 'Blister tape', x=37, size=11)
+    _text(page, 436, 'Reel', x=356, size=11)
+    _text(page, 624, 'Dimensions in mm', x=37, size=11)
+
+
+def test_drawings_under_their_own_titles_and_apart_are_separate_figures(tmp_path):
+    """ACT1210 page 3: a dimensional drawing (two views touching), a layout beside it under its own title, a circuit
+    below, a blister tape (two parts close together) and a reel (two views) under theirs -- once one figure."""
+    page, body = _page(tmp_path, _data_sheet_drawings)
+    views = [_drawn((36.9, 119.0, 159.8, 263.4)), _drawn((139.6, 119.0, 229.8, 213.0))]
+    layout_, circuit = _drawn((313.3, 119.0, 419.9, 212.6)), _drawn((42.7, 315.3, 122.4, 382.4))
+    tape = [_drawn((124.3, 442.4, 293.7, 610.8)), _drawn((45.6, 490.4, 105.1, 571.5))]
+    reel = [_drawn((434.3, 442.9, 514.9, 586.4)), _drawn((359.9, 447.2, 416.0, 573.4))]
+    found = regions(page, body, [*views, layout_, circuit, *tape, *reel])
+    assert [r.kind for r in found] == ['figure'] * 5
+
+    def holding(*parts):
+        return [
+            r.label
+            for r in found
+            if all(r.bbox.x0 <= p.box.x0 and p.box.x1 <= r.bbox.x1 for p in parts)
+            and all(r.bbox.y0 <= p.box.y0 and p.box.y1 <= r.bbox.y1 for p in parts)
+        ]
+
+    assert len({*holding(*views), *holding(layout_), *holding(circuit), *holding(*tape), *holding(*reel)}) == 5

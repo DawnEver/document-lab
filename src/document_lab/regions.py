@@ -20,12 +20,16 @@ be told by here, and is not found.
 The caller that holds the page's picture may also hand over its drawings (`document_lab.ink`): a drawing no caption,
 number or row of cells told is a region too -- a ruled table of two columns, a figure without a caption
 (``Untitled figure N``), an equation without a number (``Untitled equation N``). Regions still read no pixels: a
-drawing is its box and what it is drawn with.
+drawing is its box and what it is drawn with. Drawings are one figure unless prose runs between them or, set apart by
+white space, each stands under its own title (a data sheet's dimensional drawing, circuit and reel); a short drawing
+is an equation only when its text reads as math (a sign, a Greek letter, a math font) -- a logo is a figure. A region
+the page's edge leaves without area (its text set across the edge) shows nothing and is none.
 """
 
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal
 
@@ -75,8 +79,22 @@ DRAWN_STROKE: Final = 2.0
 #: A drawing in a text line's band at most this many times the line's height frames its words (a link, a header).
 FRAME_LINES: Final = 3.0
 FRAME_FILL: Final = 0.8
-#: A drawing at most this many body sizes high whose text reads as no word is an equation without a number.
+#: A drawing at most this many body sizes high whose text reads as no word, and as math, is an equation without a
+#: number.
 EQUATION_HEIGHT: Final = 4.0
+#: Math: a relation or operator sign, a Greek letter, or a math font (TeX's, a Unicode math font).
+_MATH_SIGNS: Final = frozenset(
+    '=<>+'
+    '\N{MINUS SIGN}\N{PLUS-MINUS SIGN}\N{MULTIPLICATION SIGN}\N{DIVISION SIGN}\N{N-ARY SUMMATION}'
+    '\N{N-ARY PRODUCT}\N{INTEGRAL}\N{SQUARE ROOT}\N{PARTIAL DIFFERENTIAL}\N{NABLA}\N{INFINITY}'
+    '\N{ALMOST EQUAL TO}\N{NOT EQUAL TO}\N{IDENTICAL TO}\N{LESS-THAN OR EQUAL TO}'
+    '\N{GREATER-THAN OR EQUAL TO}\N{PROPORTIONAL TO}'
+)
+_MATH_FONT: Final = re.compile(r'(?i)math|cmmi|cmsy|cmex|stix')
+#: Drawings further apart than this many body sizes, each under its own title, are separate figures.
+JOIN_GAP: Final = 3.0
+#: A drawing's title: the nearest line of words above it, across it, within this many body sizes.
+TITLE_REACH: Final = 3.0
 _HEADING: Final = re.compile(r'^\d+(?:\.\d+)*\.?\s+[A-Z]')
 
 Kind = Literal['figure', 'table', 'equation']
@@ -238,8 +256,9 @@ def _drawn(page: _Page, drawings: Sequence[Drawing], held: list[Region]) -> list
     draw none), crosses no prose (a box round a note, links over lines do) and lies in no region found.
     A drawing ruled with a frame and a rule inside it, nothing off its rules larger than a body size (words, which
     may be too small for OCR to read), is a table; a bare rectangle round words (a link's frame) is no region. Other
-    drawings no prose runs between are one; at most :data:`EQUATION_HEIGHT` body sizes
-    high with no word in it (a formula OCR read as noise, its fraction bars drawn) it is an equation, else a figure.
+    drawings are joined into figures (:func:`_joined`); one at most :data:`EQUATION_HEIGHT` body sizes high whose text
+    reads as no word and as math (:func:`_math`: a formula, OCR'd or set, its fraction bars drawn) is an equation,
+    else a figure -- a cover's logo, drawn without text or round its brand's, is no formula.
     """
     found: list[Region] = []
     tables = sum(r.label.startswith('Untitled table') for r in held)
@@ -272,7 +291,8 @@ def _drawn(page: _Page, drawings: Sequence[Drawing], held: list[Region]) -> list
     equations = figures = 0
     for box in _joined(page, pieces):
         words = [ln for ln in page.lines if box.x0 <= ln.x0 and ln.x1 <= box.x1 and box.y0 <= ln.y0 and ln.y1 <= box.y1]
-        if box.height <= EQUATION_HEIGHT * page.body and not any(layout.wordy(ln.text) for ln in words):
+        formula = not any(layout.wordy(ln.text) for ln in words) and _math(words)
+        if box.height <= EQUATION_HEIGHT * page.body and formula:
             equations += 1
             found.append(Region('equation', f'Untitled equation {equations}', box))
         else:
@@ -281,29 +301,58 @@ def _drawn(page: _Page, drawings: Sequence[Drawing], held: list[Region]) -> list
     return found
 
 
+def _math(lines: list[layout.Line]) -> bool:
+    """Does the text of ``lines`` read as math: a relation or operator sign, a Greek letter, or set in a math font?"""
+    text = ''.join(ln.text for ln in lines)
+    signs = any(c in _MATH_SIGNS or unicodedata.name(c, '').startswith('GREEK') for c in text)
+    return signs or any(_MATH_FONT.search(s.font) for ln in lines for s in ln.spans)
+
+
 def _joined(page: _Page, boxes: list[BBox]) -> list[BBox]:
-    """``boxes`` with any two no prose line runs between made one, until none are: a drawing's parts, one figure.
+    """``boxes`` joined into figures, the closest two first, until no two may be: a drawing's parts, one figure.
 
-    Between is in the gap down the page between them; two side by side (a drawing's views) have none.
+    Two are apart when prose runs in the gap down the page between them, or when they stand more than
+    :data:`JOIN_GAP` body sizes apart and each has its own title (:func:`_title`): a data sheet's drawings, each under
+    its heading. A drawing's views side by side under one title, or none, are one figure; parts close together are
+    one whatever their titles, and being joined first, they meet another drawing as one.
     """
-    out = list(boxes)
+    out = [(box, _title(page, box)) for box in boxes]
 
-    def apart(a: BBox, b: BBox) -> bool:
-        top, bottom = (a, b) if a.y0 <= b.y0 else (b, a)
-        return any(page.prose(ln) and top.y1 <= ln.y0 and ln.y1 <= bottom.y0 for ln in page.lines)
+    def gap(a: BBox, b: BBox) -> float:
+        return max(a.x0 - b.x1, b.x0 - a.x1, a.y0 - b.y1, b.y0 - a.y1, 0.0)
 
-    merged = True
-    while merged:
-        merged = False
-        pairs = [(i, j) for i in range(len(out)) for j in range(i + 1, len(out))]
-        for i, j in pairs:
-            if not apart(out[i], out[j]):
-                a, b = out[i], out[j]
-                out[i] = BBox(min(a.x0, b.x0), min(a.y0, b.y0), max(a.x1, b.x1), max(a.y1, b.y1))
-                del out[j]
-                merged = True
-                break
-    return sorted(out, key=lambda b: (b.y0, b.x0))
+    def apart(a: tuple[BBox, frozenset[int]], b: tuple[BBox, frozenset[int]]) -> bool:
+        top, bottom = (a[0], b[0]) if a[0].y0 <= b[0].y0 else (b[0], a[0])
+        if any(page.prose(ln) and top.y1 <= ln.y0 and ln.y1 <= bottom.y0 for ln in page.lines):
+            return True
+        return gap(a[0], b[0]) > JOIN_GAP * page.body and bool(a[1]) and bool(b[1]) and a[1].isdisjoint(b[1])
+
+    while True:
+        pairs = sorted((gap(out[i][0], out[j][0]), i, j) for i in range(len(out)) for j in range(i + 1, len(out)))
+        pair = next(((i, j) for _, i, j in pairs if not apart(out[i], out[j])), None)
+        if pair is None:
+            break
+        (a, ta), (b, tb) = out[pair[0]], out[pair[1]]
+        out[pair[0]] = (BBox(min(a.x0, b.x0), min(a.y0, b.y0), max(a.x1, b.x1), max(a.y1, b.y1)), ta | tb)
+        del out[pair[1]]
+    return sorted((box for box, _ in out), key=lambda b: (b.y0, b.x0))
+
+
+def _title(page: _Page, box: BBox) -> frozenset[int]:
+    """The title of the drawing in ``box`` (its line's index), or none.
+
+    The nearest line of words above it and across it, within :data:`TITLE_REACH` body sizes.
+    """
+    above = [
+        (ln.y1, i)
+        for i, ln in enumerate(page.lines)
+        if ln.y1 <= box.y0
+        and box.y0 - ln.y1 <= TITLE_REACH * page.body
+        and ln.x0 < box.x1
+        and box.x0 < ln.x1
+        and layout.wordy(ln.text)
+    ]
+    return frozenset({max(above)[1]}) if above else frozenset()
 
 
 def _round_words(box: BBox, line: layout.Line) -> bool:
@@ -352,4 +401,6 @@ def regions(page: Page, body: float, drawings: Sequence[Drawing] = ()) -> list[R
             found.append(_equation(judged, line, f'({number.group(1)})'))
     found += _untitled_tables(judged, found)
     found += _drawn(judged, drawings, found)
-    return sorted(found, key=lambda r: r.bbox.y0)
+    # Clamped to the page, a region its text sets across the page's edge can be left without area (a caption the foot
+    # cuts, prose right above it: its figure's top falls below the foot); it shows nothing and is none.
+    return sorted((r for r in found if r.bbox.x1 > r.bbox.x0 and r.bbox.y1 > r.bbox.y0), key=lambda r: r.bbox.y0)

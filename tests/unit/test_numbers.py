@@ -65,6 +65,13 @@ def test_text_that_states_no_bound_is_none(text):
     assert bound(text) is None
 
 
+@pytest.mark.parametrize('selector', [chr(0xFE0E), chr(0xFE0F), chr(0xFE00), chr(0xE0100), chr(0xE01EF)])
+def test_variation_selectors_the_reader_keeps_do_not_stop_a_number(selector):
+    assert parse_number('1' + selector + '2.5' + selector) == 12.5
+    assert first_number('x ' + chr(0x2212) + selector + '4' + selector + ' V') == -4.0
+    assert bound('12' + selector + ' min.') == ('min', 12.0)
+
+
 def test_a_stated_space_is_a_space_and_a_word_joiner_none_but_a_thin_space_groups_digits():
     assert parse_number('\u200b80\u00a0') == 80.0  # a zero-width space and a no-break space round it
     assert parse_number('80\u200bV') is None  # a number, then a word: no number alone

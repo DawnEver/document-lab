@@ -55,7 +55,11 @@ def _parser() -> argparse.ArgumentParser:
     paper = sub.add_parser('paper', help='a paper PDF to per-section markdown and cropped figures')
     paper.add_argument('pdf', type=Path)
     paper.add_argument('out', type=Path, help='the directory to write the paper layout into')
-    paper.add_argument('--tool', choices=('marker', 'ir'), help='force a converter (default: best available)')
+    paper.add_argument(
+        '--tool',
+        choices=('marker', 'ir'),
+        help="the converter (default: ir; marker needs the gpu extra and surya's model server, and refuses without)",
+    )
     _formulas_option(paper)
     return parser
 
@@ -112,15 +116,16 @@ def _pages(args: argparse.Namespace) -> int:
 
 def _paper(args: argparse.Namespace) -> int:
     from document_lab.formula import FormulaUnavailable  # noqa: PLC0415
+    from document_lab.paper.convert import MarkerUnavailable  # noqa: PLC0415
     from document_lab.paper.ingest import ingest  # noqa: PLC0415
 
     try:
         done = ingest(args.pdf, args.out, tool=args.tool, formulas=args.formulas)
-    except FormulaUnavailable as refused:
+    except (MarkerUnavailable, FormulaUnavailable) as refused:
         return _refused(refused)
     emit(
         f'{args.out}: {done.sections} sections, {done.figures} figures, {done.tables} tables '
-        f'({done.tool}); {len(done.appended)} appended paper(s)'
+        f'({done.choice.tool}: {done.choice.why}); {len(done.appended)} appended paper(s)'
     )
     return 0
 

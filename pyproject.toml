@@ -25,8 +25,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# `document-lab paper` through marker-pdf when a GPU with >= 4 GB VRAM is present (else the base package's IR path).
-gpu = ["marker-pdf"]
+# `document-lab paper --tool marker` through marker-pdf, only when asked (the default is the base package's IR path).
+# Below 2.2: marker-pdf 2.2.0 requires indra-ocr, which requires onnxruntime, and onnxruntime has no cp315 wheel
+# (measured 2026-11-26 on 1.32.0). torch and torchvision (marker's and surya's) are named so `[tool.uv.sources]`,
+# which applies to direct requirements only, gives them their CUDA build on Windows. six: marker-pdf 2.1.0's
+# markdown renderer imports it without declaring it (measured 2026-11-26).
+gpu = ["marker-pdf<2.2", "six", "torch", "torchvision"]
 # Values a model reads out of a document (`document_lab.ai`), through the family's one model interface.
 ai = ["ai_lab @ git+https://github.com/DawnEver/ai-lab.git"]
 # `document_lab.capture` / `document-lab capture`: a window or screen region, scrolled and stitched, to a PDF, on
@@ -57,8 +61,9 @@ override-dependencies = ["pillow>=13", "filelock>=4.2.1"]
 # uv keys a path build on pyproject.toml's mtime alone; the mixed wheel must rebuild for a Rust OR a Python edit.
 cache-keys = [{ file = "pyproject.toml" }, { file = "Cargo.toml" }, { file = "crates/**/*.rs" }, { file = "src/**/*.py" }]
 
-# PyPI's Windows torch is CPU-only; Windows takes torch from PyTorch's CUDA 13.2 index (sm_120 Blackwell included).
-# Linux's PyPI torch is already a CUDA build.
+# PyPI's Windows torch is CPU-only, so the `gpu` extra would run marker, and the `formula` extra its models, on the
+# CPU; Windows takes torch and torchvision from PyTorch's CUDA 13.2 index (sm_120 Blackwell included), one index
+# and one source each for both extras. Linux's PyPI torch is already a CUDA build.
 [[tool.uv.index]]
 name = "pytorch-cu132"
 url = "https://download.pytorch.org/whl/cu132"
@@ -66,6 +71,7 @@ explicit = true
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu132", marker = "sys_platform == 'win32'" }]
+torchvision = [{ index = "pytorch-cu132", marker = "sys_platform == 'win32'" }]
 
 [tool.maturin]
 python-source = "src"
@@ -76,7 +82,7 @@ features = ["pyo3/extension-module"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "gpu: converts with marker-pdf on a CUDA GPU: its own part (tests/gpu), never tests/base",
+    "gpu: converts with marker-pdf and surya's model server: its own part (tests/gpu), never tests/base",
     "vendor: reads the real document DOCUMENT_LAB_VENDOR_PDF names: its own part (tests/vendor), never tests/base",
     "papers: ingests the real papers in the directory DOCUMENT_LAB_PAPERS names: its own part (tests/paper/e2e), never tests/base",
     "reference: reads the real PDFs DOCUMENT_LAB_REFERENCE_PDFS names, against PyMuPDF: its own part (tests/reference), never tests/base",

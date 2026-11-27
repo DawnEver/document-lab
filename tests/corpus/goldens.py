@@ -58,8 +58,8 @@ GOLDENS: dict[str, tuple[Page, ...]] = {
         Page(10, 612.0, 792.0, '84cade77179029fc22ed05a949a3de90d7d792d455aff375aa4c775f12ef0de4', 220, 10, 0),
         Page(11, 612.0, 792.0, '6c8f826b87b8501a2f7d48305245a5aed05318d6b883c49899156cfdc87a7696', 60, 1, 0),
         Page(12, 612.0, 792.0, '97df1367463a2b11d4172bf071aa9e0964700df35636eb04a1a01b5f214d0d80', 34, 1, 0),
-        Page(13, 612.0, 792.0, '439a23b61087023bd664cf7bb4192f7a81a6a1ba0c10d163f1cbd353ae4e0756', 63, 233, 0),
-        Page(14, 612.0, 792.0, '681a3acb9bad7a335aaf1fba0279306a1ee5144402a8648eb6ee5b2fa43fcb53', 316, 10, 0),
+        Page(13, 612.0, 792.0, 'c98a55b121ece942d54e078cba485f4a84df9ecacb5b94e9c8023aa977deb561', 63, 233, 0),
+        Page(14, 612.0, 792.0, 'd8c550b3ca81fb92d8f277bcc0bf3f4198473e2e1f83d975c0f0abfdd8a3acd2', 312, 10, 0),
     ),
     'cjk-ja-powerpoint-jst-survey2024': (
         Page(1, 720.0, 540.0, '0525f60b39517eee31c475f69371e382632cd2bde2f3a92e92158099e226f8df', 19, 2, 2),

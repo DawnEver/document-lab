@@ -1010,7 +1010,8 @@ impl Interpreter<'_> {
                     b"RG" | b"rg" => Space::Rgb,
                     _ => Space::Cmyk,
                 };
-                let color = self.converted(operator, &space, numbers(operands, space.components())?);
+                let color =
+                    self.converted(operator, &space, numbers(operands, space.components())?);
                 (space, color)
             }
             _ => return Ok(false),

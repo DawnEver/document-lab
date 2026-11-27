@@ -411,18 +411,24 @@ def _drawn(page: _Page, drawings: Sequence[Drawing], held: list[Region]) -> list
     a bare rectangle round words (a link's frame) is no region. Other drawings are joined into figures
     (:func:`_joined`). A formula drawn is an equation's (:func:`equations` finds it first); a cover's logo, drawn
     without text or round its brand's, is a figure.
+
+    All of it is judged in ``page``'s frame (the page's way, `document_lab.layout.reading_way`): each drawing's box
+    and its rules turned with it -- on a landscape page a sideways table's rows are ruled down the page.
     """
-    found: list[Region] = []
+    found: list[BBox] = []
     pieces: list[BBox] = []
+    turned = page.way[0] == 0  # a quarter turn: the page's level rules run down the frame, and its upright across
+    taken = [layout.framed(r.bbox, page.way) for r in held]
     for drawing in drawings:
-        box = drawing.box
+        box = layout.framed(drawing.box, page.way)
+        rules = drawing.rules[::-1] if turned else drawing.rules
         cx, cy = (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2
         words_only = drawing.loose <= page.body  # off its rules, only words
         # rows ruled apart, text between the rules (an icon's stripes hold none): a table, its lines however long
         held_lines = sum(
             box.x0 <= ln.x0 and ln.x1 <= box.x1 and box.y0 <= ln.y0 and ln.y1 <= box.y1 for ln in page.lines
         )
-        rowed = drawing.rules[0] >= RULED_ROWS and words_only and held_lines >= TABLE_ROWS
+        rowed = rules[0] >= RULED_ROWS and words_only and held_lines >= TABLE_ROWS
         if (
             box.x0 < page.left - page.body
             or box.x1 > page.right + page.body
@@ -435,20 +441,21 @@ def _drawn(page: _Page, drawings: Sequence[Drawing], held: list[Region]) -> list
                     for ln in page.lines
                 )
             )
-            or any(r.bbox.x0 <= cx <= r.bbox.x1 and r.bbox.y0 <= cy <= r.bbox.y1 for r in [*held, *found])
-            or (drawing.rules == (2, 2) and drawing.loose <= page.body)  # a bare rectangle, words at most
+            or any(r.x0 <= cx <= r.x1 and r.y0 <= cy <= r.y1 for r in [*taken, *found])
+            or (rules == (2, 2) and drawing.loose <= page.body)  # a bare rectangle, words at most
             or drawing.stroke < DRAWN_STROKE * page.body  # words OCR missed: glyphs, no drawn line
         ):
             continue
         pad = PAD * page.body
-        grown = BBox(max(box.x0 - pad, 0.0), max(box.y0 - pad, 0.0), box.x1 + pad, box.y1 + pad)
-        ruled = min(drawing.rules) >= 2 and max(drawing.rules) >= 3  # noqa: PLR2004 -- a frame and a rule in it
+        grown = BBox(max(box.x0 - pad, page.bounds.x0), max(box.y0 - pad, page.bounds.y0), box.x1 + pad, box.y1 + pad)
+        ruled = min(rules) >= 2 and max(rules) >= 3  # noqa: PLR2004 -- a frame and a rule in it
         if (ruled and words_only) or rowed:
-            found.append(Region('table', _UNTITLED + 'table', grown))
+            found.append(grown)
         else:
             pieces.append(grown)
-    found += [Region('figure', _UNTITLED + 'figure', box) for box in _joined(page, pieces)]
-    return found
+    tables = [Region('table', _UNTITLED + 'table', layout.unframed(box, page.way)) for box in found]
+    figures = [Region('figure', _UNTITLED + 'figure', layout.unframed(box, page.way)) for box in _joined(page, pieces)]
+    return tables + figures
 
 
 def _math(lines: list[_Seen]) -> bool:
@@ -1281,7 +1288,7 @@ def regions(
     if not page.spans or face[1] <= 0:
         return []
     every = layout.lines(page, weighted=False)
-    whole = _Page(page, face[1], every, layout.UP)  # drawings are judged against all the page's text as it stands
+    whole = _Page(page, face[1], every, layout.reading_way(page.spans) or layout.UP)  # all its text, in its way
     found, judged = _told(page, face, every, drawings, unnumbered)
     found += _drawn(whole, drawings, found)
     if structure is not None and uses & {'tables', 'figures'} and tags.covers(structure, page.number):

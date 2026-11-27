@@ -463,11 +463,14 @@ def test_the_own_renderer_draws_a_region_whose_only_text_shows_nothing(tmp_path)
     assert not agrees(*disagreement(shown[240:, :], drawn[240:, :]))
 
 
-def test_the_own_renderer_refuses_a_region_holding_what_it_does_not_draw_by_name(tmp_path):
+def test_the_own_renderer_refuses_a_region_holding_what_it_cannot_draw_by_name(tmp_path):
     path = tmp_path / 's.pdf'
-    path.write_bytes(page_pdf('q 0 0 100 150 re W n /Sh1 sh Q', resources=f'/Shading << /Sh1 {SHADING} >>'))
-    with pytest.raises(Unsupported, match=r'shading \(stage 3\) x1'):
+    unread = SHADING.replace('/ShadingType 2', '/ShadingType 9')
+    path.write_bytes(page_pdf('q 0 0 100 150 re W n /Sh1 sh Q', resources=f'/Shading << /Sh1 {unread} >>'))
+    with pytest.raises(Unsupported, match=r'shading not drawn: .*no known /ShadingType.* x1'):
         read_raster(path, 1, BBox(0, 0, 200, 150), dpi=DPI, renderer='own')
+    # Off the region, it is not counted.
+    read_raster(path, 1, BBox(120, 0, 200, 150), dpi=DPI, renderer='own')
 
 
 def test_an_unknown_renderer_is_refused(tmp_path):

@@ -19,7 +19,7 @@ use std::fs;
 use std::io::{self, BufWriter};
 use std::path::PathBuf;
 
-use pdf::color::Pattern;
+use pdf::color::PatternKind;
 use pdf::destination::{Action, Destination, Targets};
 use pdf::error::Kind;
 use pdf::forms::{Field, Value};
@@ -431,7 +431,7 @@ impl Reader {
                         0.0,
                         Some(Vec::new()),
                         false,
-                        Some(pattern(Pattern::Shading)),
+                        Some(pattern(PatternKind::Shading)),
                         layer(&shading.layer),
                         marked(shading.marked),
                     ));
@@ -880,10 +880,10 @@ fn value(v: &StructureValue) -> AttributeValue {
 }
 
 /// A pattern's kind, by name.
-fn pattern(p: Pattern) -> &'static str {
-    match p {
-        Pattern::Tiling { .. } => "tiling",
-        Pattern::Shading => "shading",
+fn pattern(kind: PatternKind) -> &'static str {
+    match kind {
+        PatternKind::Tiling { .. } => "tiling",
+        PatternKind::Shading => "shading",
     }
 }
 
@@ -899,8 +899,8 @@ fn style(path: &PathEvent) -> StyleRow {
         path.fill.as_ref().is_some_and(|f| f.even_odd),
         path.fill
             .as_ref()
-            .and_then(|f| f.color.pattern)
-            .map(pattern),
+            .and_then(|f| f.color.pattern.as_ref())
+            .map(|p| pattern(p.kind)),
         layer(&path.layer),
         marked(path.marked),
     )

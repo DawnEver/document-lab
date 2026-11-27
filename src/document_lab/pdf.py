@@ -5,9 +5,9 @@ links beside them; what the document states beside its pages -- outline, page la
 files -- on the :class:`Document`. Pixels are the reader's only as an image's own samples (no codec is decoded):
 :func:`read_raster` takes a region that is one image whole from them, and draws any other with a renderer -- PyMuPDF
 (the reference, the default) or document-lab's own (``renderer='own'``: the ``render`` crate, drawing from this
-reader's interpreter, text from its fonts' outlines; it refuses a region holding what it does not draw yet, by
-name -- D37 of task document-lab-pdf-reader; what text a region shows is `document_lab.ir.Page.shown`'s);
-an embedded file's bytes are :func:`read_attachment`'s.
+reader's interpreter, text from its fonts' outlines; it refuses a region holding what it cannot draw, by name
+-- D37 of task document-lab-pdf-reader; what text a region shows is `document_lab.ir.Page.shown`'s); an
+embedded file's bytes are :func:`read_attachment`'s.
 
 A tagged file's structure tree comes back as :attr:`~document_lab.ir.Document.structure`, each element holding the
 very values it covers: the spans, paths and figures drawn under its marked content, the annotations and images it
@@ -576,8 +576,8 @@ def read_raster(
     drawn by ``renderer``: PyMuPDF, or the own renderer (:func:`_drawn`).
 
     Raises:
-        Unsupported: ``renderer='own'`` and the region holds what it does not draw yet (a shading, a glyph of a font
-            it has no program for, ...).
+        Unsupported: ``renderer='own'`` and the region holds what it cannot draw (a glyph of a font it has no
+            program for, a JPX or JBIG2 image, a shading that does not read, ...).
 
     """
     if renderer not in ('pymupdf', 'own'):
@@ -644,7 +644,7 @@ def _texts(spans: Sequence[TextSpan], bbox: BBox) -> int:
 
 
 def _drawn(reader: _pdf.Reader, page: int, bbox: BBox, dpi: float) -> np.ndarray:
-    """``bbox`` drawn by the own renderer, refusing a region holding what it does not draw yet, by name and count."""
+    """``bbox`` drawn by the own renderer, refusing a region holding what it cannot draw, by name and count."""
     width, height, channels, pixels, undrawn = reader.render(
         page, tuple(bbox), dpi / 72, text=True, annotations=True, alpha=False
     )

@@ -63,12 +63,13 @@ impl Pixels {
     }
 }
 
-/// The pixels of the image `event` places, in the fill color it is placed in when it is a stencil mask.
+/// The pixels of the image `event` places, in the fill color it is placed in when it is a stencil mask (white when
+/// that is a pattern: the renderer paints the pattern through it).
 ///
 /// # Errors
 ///
 /// Refuses what cannot be drawn, in words that name it: a codec not decoded here, data that does not decode, a
-/// stencil mask painting a pattern, samples whose space gives no RGB.
+/// stencil mask in a color with no RGB, samples whose space gives no RGB.
 pub fn decode(file: &File, event: &ImageEvent) -> Result<Decoded, String> {
     let image = Image::of(file, event)?;
     let mut notes = Vec::new();
@@ -331,10 +332,11 @@ impl Image {
     }
 }
 
-/// A stencil mask's pixels: the fill color where its samples paint (0, unless `/Decode [1 0]`).
+/// A stencil mask's pixels: the fill color where its samples paint (0, unless `/Decode [1 0]`); white when the
+/// fill is a pattern, which the renderer paints through the stencil.
 fn stencil(image: &Image, event: &ImageEvent) -> Result<Vec<u8>, String> {
-    let rgb = match (event.fill.pattern, event.fill.rgb) {
-        (Some(_), _) => return Err("stencil mask painting a pattern (stage 3)".to_string()),
+    let rgb = match (&event.fill.pattern, event.fill.rgb) {
+        (Some(_), _) => [1.0; 3], // what a pattern paints through it is the renderer's
         (None, Some(rgb)) => rgb,
         (None, None) => {
             return Err(format!(

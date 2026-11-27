@@ -48,6 +48,7 @@ pub mod outline;
 pub mod page;
 pub mod parser;
 pub mod paths;
+pub mod shading;
 pub mod shape;
 pub mod spans;
 pub mod structure;

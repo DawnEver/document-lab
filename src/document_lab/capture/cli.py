@@ -9,7 +9,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal
 
 from lab_commons.log import emit
 
@@ -73,6 +73,12 @@ def add_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     target.add_argument('--hwnd', type=lambda v: int(v, 0), help='the window with this handle (see --list)')
     target.add_argument('--rect', type=_rect, metavar='L,T,W,H', help='a screen rectangle in physical pixels')
     target.add_argument('--list', action='store_true', help='print the capturable windows and exit')
+    capture.add_argument(
+        '--now',
+        action='store_true',
+        help='start at once on the area --window, --hwnd or --rect names, without waiting for Start on the panel '
+        '(a script, a test: nobody is there to click); a start --resume refuses ends the run with its reason',
+    )
     scroll = capture.add_argument_group(
         'scrolling', 'By default you scroll (wheel, scrollbar, keys) at your own pace and it follows; Finish ends it.'
     )
@@ -540,16 +546,31 @@ def _no_reason(_target: Window | Region, _area: Region) -> str | Region | None:
 
 
 def _started(
-    target: Window | Region, refuse: Callable[[Window | Region, Region], str | Region | None] = _no_reason
+    target: Window | Region,
+    refuse: Callable[[Window | Region, Region], str | Region | None] = _no_reason,
+    *,
+    now: Literal['start', 'auto'] | None = None,
 ) -> tuple[Window | Region, Region, Hud, bool] | None:
     """The area set, its HUD and whether to scroll for the user (Auto scroll) once a start is clicked; None on Cancel.
 
     The desktop is free and nothing is grabbed until then; Adjust reopens the selection on the area. A start that
     ``refuse`` gives a reason for is not one: the reason is shown, and the panel waits again. One it answers with an
-    area starts there instead (moved sideways to line up with the earlier capture).
+    area starts there instead (moved sideways to line up with the earlier capture). ``now`` (``--now``) starts at
+    once as that answer, none awaited from the panel; a start ``refuse`` gives a reason for is then refused
+    (ValueError), nobody being there to move the view.
     """
     from document_lab.capture import desktop  # noqa: PLC0415
 
+    if now:
+        area = target.client() if isinstance(target, desktop.Window) else target
+        verdict = refuse(target, area)
+        if isinstance(verdict, str):
+            raise ValueError(verdict)
+        if verdict is not None:
+            target = area = verdict
+        hud = desktop.Hud(area)
+        hud.begin(now)
+        return target, area, hud, now == 'auto'
     while True:
         area = target.client() if isinstance(target, desktop.Window) else target
         hud = desktop.Hud(area)
@@ -598,6 +619,9 @@ def _prepare(args: argparse.Namespace) -> str | None:
         if path is not None:
             check_name(path)
     _refuse_existing(args)
+    if args.now and args.window is None and args.hwnd is None and args.rect is None:
+        msg = '--now starts on a named area: give --window, --hwnd or --rect'
+        raise ValueError(msg)
 
     return desktop.tk_problem(
         tuple(sys.version_info[:3]), sys.prefix, sys.base_prefix, os.environ
@@ -709,7 +733,7 @@ def run(args: argparse.Namespace) -> int:
         emit(problem)
         return 1
     target = _target(args)
-    started = _started(target, _resumable(args))
+    started = _started(target, _resumable(args), now=('auto' if args.auto else 'start') if args.now else None)
     if started is None:
         emit('cancelled')
         return 1

@@ -406,6 +406,63 @@ def draw_table(page: pymupdf.Page, rows: Sequence[Sequence[str]] = TABLE_ROWS) -
             page.insert_text((rect.x0 + 4, rect.y1 - 6), text, fontname='helv', fontsize=9)
 
 
+#: A table with merged cells: ``Parameter`` spans rows 0-1, ``Limits`` columns 1-2 -- each slot it covers repeats it.
+MERGED_ROWS = (
+    ('Parameter', 'Limits', 'Limits'),
+    ('Parameter', 'min', 'max'),
+    ('alpha', '1.0', '2.5'),
+    ('beta', '-3', '4'),
+)
+#: ``MERGED_ROWS``' merged blocks: (first row, first column, last row, last column).
+MERGED = ((0, 0, 1, 0), (0, 1, 0, 2))
+
+
+def _merged_block(merged: Sequence[tuple[int, int, int, int]], r: int, c: int) -> tuple[int, int, int, int]:
+    return next((b for b in merged if b[0] <= r <= b[2] and b[1] <= c <= b[3]), (r, c, r, c))
+
+
+def _rule(page: pymupdf.Page, a: pymupdf.Point, b: pymupdf.Point, *, filled: bool, width: float) -> None:
+    if filled:
+        half = width / 2
+        box = pymupdf.Rect(min(a.x, b.x) - half, min(a.y, b.y) - half, max(a.x, b.x) + half, max(a.y, b.y) + half)
+        page.draw_rect(box, color=None, fill=(0, 0, 0), width=0)
+    else:
+        page.draw_line(a, b, color=(0, 0, 0), width=width)
+
+
+def draw_ruled_table(
+    page: pymupdf.Page,
+    rows: Sequence[Sequence[str]] = TABLE_ROWS,
+    *,
+    merged: Sequence[tuple[int, int, int, int]] = (),
+    filled: bool = False,
+    width: float = 0.5,
+) -> None:
+    """``rows`` as one grid of rules, each cell side drawn once: a stroked line or (``filled``) a thin filled bar.
+
+    No rule is drawn inside a ``merged`` block (first row, first column, last row, last column); its text is set once,
+    in its top-left slot.
+    """
+    n_rows, n_cols = len(rows), len(rows[0])
+    for r in range(n_rows + 1):
+        for c in range(n_cols):
+            if r in {0, n_rows} or _merged_block(merged, r - 1, c) != _merged_block(merged, r, c):
+                cell = table_cell_rect(min(r, n_rows - 1), c)
+                y = cell.y1 if r == n_rows else cell.y0
+                _rule(page, pymupdf.Point(cell.x0, y), pymupdf.Point(cell.x1, y), filled=filled, width=width)
+    for r in range(n_rows):
+        for c in range(n_cols + 1):
+            if c in {0, n_cols} or _merged_block(merged, r, c - 1) != _merged_block(merged, r, c):
+                cell = table_cell_rect(r, min(c, n_cols - 1))
+                x = cell.x1 if c == n_cols else cell.x0
+                _rule(page, pymupdf.Point(x, cell.y0), pymupdf.Point(x, cell.y1), filled=filled, width=width)
+    for r, row in enumerate(rows):
+        for c, text in enumerate(row):
+            if _merged_block(merged, r, c)[:2] == (r, c) and text:
+                rect = table_cell_rect(r, c)
+                page.insert_text((rect.x0 + 4, rect.y1 - 6), text, fontname='helv', fontsize=9)
+
+
 def mixed_pdf(path: Path) -> Path:
     """Page 1: a heading, a table and a raster image with a caption; page 2: one red polyline."""
     doc = pymupdf.open()

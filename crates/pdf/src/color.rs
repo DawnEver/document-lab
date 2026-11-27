@@ -1,7 +1,8 @@
 //! Color spaces and colors (ISO 32000-2 section 8.6): the components as the file states them and, where the
-//! space defines one without a color profile or a function, their RGB.
+//! space defines one without a color profile or a function, their RGB; for a `Pattern` color, which kind of pattern
+//! it paints (8.7).
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::file::File;
 use crate::object::{Dict, Object};
 
@@ -29,10 +30,21 @@ pub enum Space {
 pub struct Color {
     /// The color space family (`DeviceRGB`, `ICCBased`, `Separation`, ...).
     pub space: Vec<u8>,
-    /// The components, as set.
+    /// The components, as set (an uncolored tiling pattern's tint; none for a colored pattern).
     pub components: Vec<f64>,
     /// Red, green and blue in 0..=1, when the space defines them.
     pub rgb: Option<[f64; 3]>,
+    /// The pattern painted with, when the space is `Pattern`: no one color then.
+    pub pattern: Option<Pattern>,
+}
+
+/// What a `Pattern` color paints an area with (8.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pattern {
+    /// A tiling pattern (`PatternType` 1): a cell repeated across the area; the cell is not interpreted.
+    Tiling,
+    /// A shading pattern (`PatternType` 2): a gradient across the area.
+    Shading,
 }
 
 impl Color {
@@ -90,6 +102,7 @@ impl Space {
             space: self.family(),
             rgb: self.rgb(&components),
             components,
+            pattern: None,
         }
     }
 
@@ -132,6 +145,37 @@ impl File {
     /// Refuses a reference that does not resolve.
     pub fn color_space(&self, value: &Object, resources: &Dict) -> Result<Space> {
         self.space_at_depth(value, resources, 0)
+    }
+
+    /// The pattern `/name` in `resources`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a name `resources` has no pattern for, and a pattern of no known `/PatternType`.
+    pub fn pattern(&self, name: &[u8], resources: &Dict) -> Result<Pattern> {
+        let named = || String::from_utf8_lossy(name).into_owned();
+        let Some(Object::Dict(patterns)) = self.get(resources, b"Pattern")? else {
+            return Err(Error::malformed(format!(
+                "no /Pattern resources for /{}",
+                named()
+            )));
+        };
+        let pattern = match patterns.get(name) {
+            Some(p) => self.resolve(p)?,
+            None => return Err(Error::malformed(format!("no pattern /{}", named()))),
+        };
+        let kind = match pattern.as_dict() {
+            Some(d) => self.get(d, b"PatternType")?.and_then(|t| t.as_integer()),
+            None => None,
+        };
+        match kind {
+            Some(1) => Ok(Pattern::Tiling),
+            Some(2) => Ok(Pattern::Shading),
+            _ => Err(Error::malformed(format!(
+                "pattern /{} has no known /PatternType",
+                named()
+            ))),
+        }
     }
 
     fn space_at_depth(&self, value: &Object, resources: &Dict, depth: usize) -> Result<Space> {

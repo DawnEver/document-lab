@@ -121,6 +121,17 @@ impl Rect {
         }
     }
 
+    /// The smallest box covering both.
+    #[must_use]
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            x0: self.x0.min(other.x0),
+            y0: self.y0.min(other.y0),
+            x1: self.x1.max(other.x1),
+            y1: self.y1.max(other.y1),
+        }
+    }
+
     /// Whether the boxes share a point (touching edges do).
     #[must_use]
     pub fn meets(self, other: Self) -> bool {

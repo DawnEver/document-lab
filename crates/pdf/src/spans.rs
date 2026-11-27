@@ -4,7 +4,8 @@
 //! Consecutive glyphs join while their font, size, writing mode and direction hold and each starts where the last
 //! ended: on its baseline (within [`BASELINE`] sizes) and no further on than [`BREAK`] sizes. A gap wider than
 //! [`SPACE`] sizes with no space glyph in it reads as a space, as the eye reads it. Text events are taken in
-//! drawing order, so a span never joins glyphs drawn apart, and a vertical span's text reads top to bottom.
+//! drawing order, so a span never joins glyphs drawn apart, nor glyphs of two layers (hidden, an annotation's), and
+//! a vertical span's text reads top to bottom.
 //!
 //! Where a word gap is, is this module's alone. A span continues the word of another that ends at most [`SPACE`]
 //! sizes before its start, raised or lowered by no more than [`RISE`] sizes, no space glyph between -- a change
@@ -16,7 +17,7 @@ use std::rc::Rc;
 
 use crate::font::FontInfo;
 use crate::geometry::{Point, Rect};
-use crate::interpret::{Event, TextEvent};
+use crate::interpret::{Event, Layer, TextEvent};
 
 /// A gap wider than this many font sizes between two glyphs is a space.
 pub const SPACE: f64 = 0.15;
@@ -41,6 +42,8 @@ pub struct Span {
     pub bbox: Rect,
     /// The text rendering mode it was shown in (3: invisible, as an OCR text layer is).
     pub render_mode: i64,
+    /// The layer its glyphs are drawn in: a span never joins glyphs of two.
+    pub layer: Layer,
     /// Whether it is written vertically (its font's writing mode): its glyphs stand upright and step down its
     /// column, its text reading top to bottom.
     pub vertical: bool,
@@ -93,10 +96,10 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
                     o.span.text.push(' ');
                 }
                 o.span.text.push_str(piece);
-                let ink = !piece.trim().is_empty();
+                let ink = inks(piece);
                 if ink {
                     o.span.bbox = if o.inked {
-                        union(o.span.bbox, glyph.bbox)
+                        o.span.bbox.union(glyph.bbox)
                     } else {
                         glyph.bbox
                     };
@@ -113,13 +116,14 @@ pub fn spans(events: &[Event]) -> Vec<Span> {
                     size: text.size,
                     bbox: glyph.bbox,
                     render_mode: text.render_mode,
+                    layer: text.layer.clone(),
                     vertical: text.vertical,
                     direction,
                     unspaced: None,
                 },
                 origin: glyph.origin,
                 end: glyph.end,
-                inked: !piece.trim().is_empty(),
+                inked: inks(piece),
             });
         }
     }
@@ -171,6 +175,7 @@ fn join(open: &Open, text: &TextEvent, origin: Point, direction: (f64, f64)) -> 
     if open.span.font != text.font
         || (open.span.size - text.size).abs() > 0.01 * size
         || open.span.render_mode != text.render_mode
+        || open.span.layer != text.layer
         || open.span.vertical != text.vertical
         || (open.span.direction.0 - direction.0).abs() + (open.span.direction.1 - direction.1).abs()
             > 0.01
@@ -186,13 +191,20 @@ fn join(open: &Open, text: &TextEvent, origin: Point, direction: (f64, f64)) -> 
     Some(along > SPACE * size)
 }
 
+/// Whether a glyph whose text is `piece` makes its span's box: it shows ink -- its text is not white-space, or is
+/// empty because an `/ActualText` before it in its sequence carries its text.
+fn inks(piece: &str) -> bool {
+    piece.is_empty() || !piece.trim().is_empty()
+}
+
 /// Whether `next` continues the word `before` ends in: no space glyph between them, both written the same way (one
-/// writing mode, one direction), `next` starting on from `before`'s end by no more than a word gap (back by no more
-/// than half a size), raised or lowered by no more than [`RISE`] sizes.
+/// writing mode, one direction) in one layer, `next` starting on from `before`'s end by no more than a word gap
+/// (back by no more than half a size), raised or lowered by no more than [`RISE`] sizes.
 fn continues_word(before: &Open, next: &Open) -> bool {
     if before.span.vertical != next.span.vertical
         || before.span.text.ends_with(char::is_whitespace)
         || next.span.text.starts_with(char::is_whitespace)
+        || before.span.layer != next.span.layer
     {
         return false;
     }
@@ -203,13 +215,4 @@ fn continues_word(before: &Open, next: &Open) -> bool {
     (dx - next.span.direction.0).abs() + (dy - next.span.direction.1).abs() <= 0.01
         && (-0.5 * size..=SPACE * size).contains(&along(before.end))
         && across.abs() <= RISE * size
-}
-
-fn union(a: Rect, b: Rect) -> Rect {
-    Rect {
-        x0: a.x0.min(b.x0),
-        y0: a.y0.min(b.y0),
-        x1: a.x1.max(b.x1),
-        y1: a.y1.max(b.y1),
-    }
 }

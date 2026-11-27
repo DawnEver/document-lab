@@ -12,6 +12,7 @@ from document_lab.paper.text import RN_PATTERN as _RN
 from document_lab.paper.text import extract_title_from_preamble, slug
 
 if TYPE_CHECKING:
+    from document_lab.formula import Transcribe
     from document_lab.pdf import Renderer
 
 #: The head of a heading-less preamble paper.md keeps as the abstract when the paper states none.
@@ -300,10 +301,12 @@ def write_paper_output(
     title_override: str | None = None,
     pdf_path: Path | None = None,
     renderer: Renderer = 'pymupdf',
+    transcribe: Transcribe | None = None,
     include_in_background_color: bool = False,
 ) -> tuple[int, int, int]:
     """Write per-section files, paper.md, images (rendered by ``renderer``), INDEX.md for one paper.
 
+    ``transcribe``: each equation crop's LaTeX follows its image (:func:`render_equation_images`).
     ``include_in_background_color``: the text filled in the color under it locates figures and equations too
     (`document_lab.paper.render`).
 
@@ -342,6 +345,7 @@ def write_paper_output(
             figure_images,
             page_section_map,
             renderer=renderer,
+            transcribe=transcribe,
             include_in_background_color=include_in_background_color,
         )
 

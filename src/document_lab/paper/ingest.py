@@ -15,7 +15,7 @@ import shutil
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from document_lab import png
+from document_lab import formula, png
 from document_lab.ir import BBox
 from document_lab.paper.convert import convert
 from document_lab.paper.output import write_paper_output
@@ -26,6 +26,7 @@ from document_lab.pdf import read_pdf, read_raster
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from document_lab.formula import Formulas, Model
     from document_lab.markdown import Headings
     from document_lab.paper.convert import Tool, ToolChoice
     from document_lab.pdf import Renderer
@@ -94,15 +95,21 @@ def ingest(
     tool: Tool | None = None,
     renderer: Renderer = 'pymupdf',
     outline: bool = True,
+    formulas: Formulas | None = None,
+    formula_model: Model = 'texteller',
     include_in_background_color: bool = False,
 ) -> Ingested:
     """Convert ``pdf`` (with ``tool``, else the IR path) and write its paper layout into ``out_dir``.
 
     Its figures, equations and scanned pages are rendered by ``renderer`` (`document_lab.pdf.read_raster`).
     ``outline``: the PDF's stated outline names the sections when it matches the pages; False infers them all the
-    same (`document_lab.paper.convert.convert`). ``include_in_background_color``: the text filled in the color under
-    it is read too, by the markdown and the regions a picture page's text locates (see `document_lab.ir`).
+    same (`document_lab.paper.convert.convert`). ``formulas``: ``latex`` writes each equation crop's LaTeX under its
+    image, read by ``formula_model`` (`document_lab.formula`); refused by
+    :class:`document_lab.formula.FormulaUnavailable` before anything is written when that model cannot run.
+    ``include_in_background_color``: the text filled in the color under it is read too, by the markdown and the
+    regions a picture page's text locates (see `document_lab.ir`).
     """
+    transcribe = None if formulas is None else formula.transcriber(formulas, model=formula_model)
     pdf = pdf.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     md_text, choice, structure = convert(
@@ -121,7 +128,13 @@ def ingest(
         msg = f'{pdf.name}: the converted markdown has no section'
         raise NoSections(msg)
     n_sec, n_fig, n_tbl = write_paper_output(
-        main, out_dir, md_text, pdf_path=pdf, renderer=renderer, include_in_background_color=include_in_background_color
+        main,
+        out_dir,
+        md_text,
+        pdf_path=pdf,
+        renderer=renderer,
+        transcribe=transcribe,
+        include_in_background_color=include_in_background_color,
     )
 
     appended_root = out_dir / 'appended'
@@ -142,6 +155,7 @@ def ingest(
             pdf_path=pdf,
             renderer=renderer,
             include_in_background_color=include_in_background_color,
+            transcribe=transcribe,
         )
         shutil.rmtree(flat, ignore_errors=True)
         written.append(target)

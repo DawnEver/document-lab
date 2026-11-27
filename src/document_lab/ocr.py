@@ -112,7 +112,10 @@ def _image_file(samples: tuple, folder: Path, name: str) -> Path:
     Its codec's data as stored, or its samples as an 8-bit PGM/PPM; refused, by name, when Tesseract could not read
     it.
     """
-    width, height, space, components, bits, data, codec = samples
+    width, height, space, components, bits, data, codec, decode, _masked = samples
+    if decode is not None and list(decode) != [0.0, 1.0] * components:
+        msg = f'{name} states /Decode {list(decode)}: its samples are not what it shows'
+        raise ValueError(msg)
     if codec is not None:
         if codec not in _CODEC_FILES:
             msg = f'{name} is in {codec}, which Tesseract does not read'
@@ -154,17 +157,17 @@ def _words(tsv: str, box: Box, width: int, height: int) -> Words:
     return out
 
 
-def _image(reader: _pdf.Reader, number: int) -> tuple[Box, int, int, int] | None:
-    """Page ``number``'s one image -- box, samples across and down, object -- or None: text, or not one image."""
+def _image(reader: _pdf.Reader, number: int) -> tuple[Box, int, int, int, tuple] | None:
+    """Page ``number``'s one image (box, across, down, object, matrix), or None: text, or not one image."""
     spans, _, images, _ = reader.page(number, _CURVE_SAMPLES)
     if len(images) != 1 or images[0][3] is None or any(span[0].strip() for span in spans):
         return None
     return images[0]
 
 
-def _recognize(reader: _pdf.Reader, image: tuple[Box, int, int, int], tesseract: list[str], name: str) -> Words:
+def _recognize(reader: _pdf.Reader, image: tuple[Box, int, int, int, tuple], tesseract: list[str], name: str) -> Words:
     """The words ``tesseract`` (its command, but for the image) reads on ``image``, in page space."""
-    box, width, height, obj = image
+    box, width, height, obj, _matrix = image
     dpi = round(width * 72 / (box[2] - box[0]))
     with tempfile.TemporaryDirectory(prefix=TEMP_PREFIX) as folder:
         path = _image_file(reader.image(obj), Path(folder), name)

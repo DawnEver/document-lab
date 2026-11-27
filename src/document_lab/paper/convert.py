@@ -140,6 +140,7 @@ def convert(
     tool: Tool | None = None,
     outline: bool = True,
     tagged: Collection[str] = DEFAULT_USES,
+    include_in_background_color: bool = False,
 ) -> tuple[str, ToolChoice, Headings | None]:
     """The markdown of ``pdf``, its :func:`choose_tool` choice of ``tool``, and how its sections were headed.
 
@@ -147,7 +148,8 @@ def convert(
     else its tags and the rules head them (`document_lab.markdown.headings`, returned for the caller to report);
     marker heads its own (None). ``tagged``: on the IR path, what a tagged PDF's tags give its markdown
     (`document_lab.markdown`; none infers it all). marker's images land in ``out_dir/img/flat``; the IR path writes
-    none (figures are cropped later).
+    none (figures are cropped later). ``include_in_background_color``: the IR path writes the text filled in the color
+    under it too (see `document_lab.ir`).
 
     Raises:
         MarkerUnavailable: ``tool='marker'`` and something marker needs is missing.
@@ -159,8 +161,12 @@ def convert(
     if choice.tool == 'marker':
         return _run_marker(pdf, out_dir), choice, None
     doc = layout.without_running(read_pdf(pdf))
-    sections = headings(doc, outline=outline, tagged=tagged)
-    return to_markdown(doc, tagged=tagged, sections=sections), choice, sections
+    sections = headings(doc, outline=outline, tagged=tagged, include_in_background_color=include_in_background_color)
+    return (
+        to_markdown(doc, tagged=tagged, sections=sections, include_in_background_color=include_in_background_color),
+        choice,
+        sections,
+    )
 
 
 def _run_marker(pdf: Path, out_dir: Path) -> str:

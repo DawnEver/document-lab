@@ -5,7 +5,8 @@ links beside them; what the document states beside its pages -- outline, page la
 files -- on the :class:`Document`. Pixels are the reader's only as an image's own samples (no codec is decoded):
 :func:`read_raster` takes a region that is one image whole from them, and draws any other with a renderer -- PyMuPDF
 (the reference, the default) or document-lab's own (``renderer='own'``: the ``render`` crate, drawing from this
-reader's interpreter; it draws no text until its stage 2, so it refuses a region holding text -- D37 of task
+reader's interpreter; it draws no text until its stage 2, so it refuses a region holding text the page shows
+(`document_lab.ir.Page.shown`: text filled in the color under it shows nothing) -- D37 of task
 document-lab-pdf-reader); an embedded file's bytes are :func:`read_attachment`'s.
 
 A tagged file's structure tree comes back as :attr:`~document_lab.ir.Document.structure`, each element holding the
@@ -85,8 +86,7 @@ CURVE_SAMPLES: Final = 8
 VECTOR_DPI: Final = 300.0
 #: How far (in pixels) a placed image's edges and sides may miss a region's and the region still be the image whole.
 WHOLE_IMAGE_SLACK: Final = 0.25
-#: Where a span row and an image row (``Reader.page``) hold their layer.
-_SPAN_LAYER: Final = 9
+#: Where an image row (``Reader.page``) holds its layer.
 _IMAGE_LAYER: Final = 6
 #: The text rendering mode that neither fills nor strokes (an OCR layer): text that shows nothing.
 INVISIBLE_TEXT: Final = 3
@@ -585,8 +585,12 @@ def read_raster(
     path = Path(path)
     data = path.read_bytes()  # rendered and cited alike: the pixels are those of the bytes hashed
     reader = _pdf.open(data, password.encode())
-    spans, paths, images, _ = reader.page(page, annotations=True, curve_samples=1)
-    spans = [row for row in spans if not row[_SPAN_LAYER][0]]  # text is text whatever its color: hidden only
+    rows, paths, images, _ = reader.page(page, annotations=True, curve_samples=1)
+    here = Provenance(reader.sha256, file_uri(path.resolve()), page=page, bbox=bbox)
+    _, width, height = reader.pages[page - 1]
+    cite = partial(Provenance, here.sha256, here.uri, page)
+    # The text the page shows (`Page.shown`): what draws the region without it draws the same pixels.
+    spans = Page(page, width, height, spans=tuple(_span(row, cite) for row in rows)).shown().spans
     under = [row for row in images if not any(row[_IMAGE_LAYER][:2]) and _meets(row[0], bbox)]
     if dpi is None:
         dpi = max(filter(None, map(_native, under)), default=VECTOR_DPI)
@@ -595,7 +599,6 @@ def read_raster(
         pixels = _drawn(reader, page, bbox, dpi, spans)
     if pixels is None:
         pixels = _rendered(data, page, bbox, dpi, password)
-    here = Provenance(reader.sha256, file_uri(path.resolve()), page=page, bbox=bbox)
     return Raster(pixels, here)
 
 
@@ -610,8 +613,8 @@ def _native(image: tuple) -> float:
     return 72 * max(width / across, height / down) if across and down else 0.0
 
 
-def _alone(spans: list, paths: tuple, bbox: BBox) -> bool:
-    """Whether no path that shows and no visible text (an OCR layer is invisible) is drawn on ``bbox``.
+def _alone(spans: Sequence[TextSpan], paths: tuple, bbox: BBox) -> bool:
+    """Whether no path that shows and none of the visible text of ``spans`` (an OCR layer is not) is drawn on ``bbox``.
 
     ``paths`` are the reader's columns (``PathColumns`` in ``crates/pybind``): each subpath's box, its stroke's
     width and its layer its painted path's. A path a hidden layer draws, or the colorant ``None`` paints, does not
@@ -631,12 +634,15 @@ def _alone(spans: list, paths: tuple, bbox: BBox) -> bool:
     return not _texts(spans, bbox)
 
 
-def _texts(spans: list, bbox: BBox) -> int:
-    """How many of ``spans`` (none hidden) are visible text (an OCR layer is invisible) drawn on ``bbox``."""
-    return sum(mode != INVISIBLE_TEXT and _meets(box, bbox) for _, _, _, _, box, mode, *_ in spans)
+def _texts(spans: Sequence[TextSpan], bbox: BBox) -> int:
+    """How many of ``spans`` (the page's shown ones) are visible text (an OCR layer is not) drawn on ``bbox``."""
+    return sum(
+        s.render_mode != INVISIBLE_TEXT and s.provenance.bbox is not None and _meets(s.provenance.bbox, bbox)
+        for s in spans
+    )
 
 
-def _drawn(reader: _pdf.Reader, page: int, bbox: BBox, dpi: float, spans: list) -> np.ndarray:
+def _drawn(reader: _pdf.Reader, page: int, bbox: BBox, dpi: float, spans: Sequence[TextSpan]) -> np.ndarray:
     """``bbox`` drawn by the own renderer, refusing a region holding what it does not draw yet, by name and count."""
     texts = _texts(spans, bbox)
     if texts:

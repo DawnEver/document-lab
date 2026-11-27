@@ -149,6 +149,8 @@ class Headings:
     uses: frozenset[str] = frozenset()
     #: Whether the text hidden layers draw was judged too.
     include_hidden: bool = False
+    #: Whether the text filled in the color under it was judged too.
+    include_in_background_color: bool = False
 
     @property
     def written(self) -> tuple[tuple[int, str], ...]:
@@ -183,21 +185,27 @@ def headings(
     *,
     outline: bool = True,
     include_hidden: bool = False,
+    include_in_background_color: bool = False,
     tagged: Collection[str] = tags.DEFAULT_USES,
 ) -> Headings:
     """Which lines of ``doc`` head its sections: its stated outline, else its tags and the rules (the module says how).
 
     ``outline``: the outline is used when the document states one that matches its pages (the module says when);
-    False keeps to the tags and rules. ``include_hidden``, ``tagged``: as for :func:`to_markdown`.
+    False keeps to the tags and rules. ``include_hidden``, ``include_in_background_color``, ``tagged``: as for
+    :func:`to_markdown`.
     """
     uses = tags.checked(tagged) & MARKDOWN_USES
     reading = tags.reading(doc) if uses else None
-    shown = doc.shown(include_hidden=include_hidden)
+    shown = doc.shown(include_hidden=include_hidden, include_in_background_color=include_in_background_color)
     weighted = any(span.bold for span in shown.spans())
     pages = [_ordered(layout.lines(page, weighted=weighted), reading, uses) for page in shown.pages]
     judged = _judged(shown, pages, weighted=weighted, reading=reading, uses=uses)
     base: Literal['tags', 'inferred'] = 'tags' if _tag_heads(reading, uses) else 'inferred'
-    options = {'uses': uses, 'include_hidden': include_hidden}
+    options = {
+        'uses': uses,
+        'include_hidden': include_hidden,
+        'include_in_background_color': include_in_background_color,
+    }
     items = list(_flatten(doc.outline)) if outline else []
     if not items:
         return Headings(base, judged, **options)
@@ -232,17 +240,20 @@ def to_markdown(
     doc: Document,
     *,
     include_hidden: bool = False,
+    include_in_background_color: bool = False,
     tagged: Collection[str] = tags.DEFAULT_USES,
     sections: Headings | None = None,
 ) -> str:
     """The document as markdown, page after page: a paragraph a page break cut is joined again.
 
-    ``include_hidden``: the text hidden layers draw is written too (see `document_lab.ir`). ``tagged``: what a tagged
-    PDF's tags give (``order``, ``headings``, ``paragraphs``; see the module); none infers it all from layout.
-    ``sections``: which lines head sections, as :func:`headings` judged them with the same ``include_hidden`` and
+    ``include_hidden``: the text hidden layers draw is written too; ``include_in_background_color``: the text filled
+    in the color under it too (see `document_lab.ir`). ``tagged``: what a tagged PDF's tags give (``order``,
+    ``headings``, ``paragraphs``; see the module); none infers it all from layout. ``sections``: which lines head
+    sections, as :func:`headings` judged them with the same ``include_hidden``, ``include_in_background_color`` and
     ``tagged`` (None: judged here, a stated outline first).
     """
-    blocks = _blocks(doc, _sections(doc, sections, include_hidden=include_hidden, tagged=tagged))
+    shown = _Shown(include_hidden, include_in_background_color)
+    blocks = _blocks(doc, _sections(doc, sections, shown, tagged=tagged))
     return '\n\n'.join(_rejoin([block for page in blocks for block in page])) + '\n'
 
 
@@ -251,16 +262,17 @@ def page_markdowns(
     placed: Sequence[Sequence[Placed]] = (),
     *,
     include_hidden: bool = False,
+    include_in_background_color: bool = False,
     tagged: Collection[str] = tags.DEFAULT_USES,
     sections: Headings | None = None,
 ) -> list[str]:
     """Each page's own markdown, in order (empty for a page without text).
 
     Body size and title are judged over the whole document; nothing is joined across a page break: a page stands alone.
-    ``placed``: each page's placed blocks (none for a page past its end). ``include_hidden``, ``tagged`` and
-    ``sections``: as for :func:`to_markdown`.
+    ``placed``: each page's placed blocks (none for a page past its end). ``include_hidden``,
+    ``include_in_background_color``, ``tagged`` and ``sections``: as for :func:`to_markdown`.
     """
-    sections = _sections(doc, sections, include_hidden=include_hidden, tagged=tagged)
+    sections = _sections(doc, sections, _Shown(include_hidden, include_in_background_color), tagged=tagged)
     return ['\n\n'.join(_rejoin(page)) + '\n' if page else '' for page in _blocks(doc, sections, placed)]
 
 
@@ -286,16 +298,32 @@ def table(rows: Sequence[Sequence[str]], boxes: Sequence[Sequence[BBox | None]] 
     return '\n'.join([lines[0], '|' + ' --- |' * width, *lines[1:]])
 
 
-def _sections(doc: Document, sections: Headings | None, *, include_hidden: bool, tagged: Collection[str]) -> Headings:
+@dataclass(frozen=True, slots=True)
+class _Shown:
+    """What :meth:`~document_lab.ir.Document.shown` keeps beside what a document shows: the options it is asked with."""
+
+    include_hidden: bool
+    include_in_background_color: bool
+
+
+def _sections(doc: Document, sections: Headings | None, shown: _Shown, *, tagged: Collection[str]) -> Headings:
     """``sections``, else judged here; refused when judged with other options: its marks index other lines."""
     if sections is None:
-        return headings(doc, include_hidden=include_hidden, tagged=tagged)
+        return headings(
+            doc,
+            include_hidden=shown.include_hidden,
+            include_in_background_color=shown.include_in_background_color,
+            tagged=tagged,
+        )
     uses = tags.checked(tagged) & MARKDOWN_USES
-    if (sections.uses, sections.include_hidden) != (uses, include_hidden):
+    judged = (sections.uses, sections.include_hidden, sections.include_in_background_color)
+    if judged != (uses, shown.include_hidden, shown.include_in_background_color):
         msg = (
             f'the sections were judged with tagged={sorted(sections.uses)}, include_hidden={sections.include_hidden}, '
-            f'the markdown is asked with tagged={sorted(uses)}, include_hidden={include_hidden}: judge them with the '
-            "markdown's own (headings(doc, include_hidden=..., tagged=...))"
+            f'include_in_background_color={sections.include_in_background_color}; the markdown is asked with '
+            f'tagged={sorted(uses)}, include_hidden={shown.include_hidden}, '
+            f"include_in_background_color={shown.include_in_background_color}: judge them with the markdown's own "
+            '(headings(doc, include_hidden=..., include_in_background_color=..., tagged=...))'
         )
         raise ValueError(msg)
     return sections
@@ -303,7 +331,9 @@ def _sections(doc: Document, sections: Headings | None, *, include_hidden: bool,
 
 def _blocks(doc: Document, sections: Headings, placed: Sequence[Sequence[Placed]] = ()) -> list[list[_Block]]:
     reading = tags.reading(doc) if sections.uses else None
-    shown = doc.shown(include_hidden=sections.include_hidden)
+    shown = doc.shown(
+        include_hidden=sections.include_hidden, include_in_background_color=sections.include_in_background_color
+    )
     weighted = any(span.bold for span in shown.spans())
     return [
         _page_blocks(

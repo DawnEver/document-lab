@@ -302,10 +302,13 @@ def write_paper_output(
     pdf_path: Path | None = None,
     renderer: Renderer = 'pymupdf',
     transcribe: Transcribe | None = None,
+    include_in_background_color: bool = False,
 ) -> tuple[int, int, int]:
     """Write per-section files, paper.md, images (rendered by ``renderer``), INDEX.md for one paper.
 
     ``transcribe``: each equation crop's LaTeX follows its image (:func:`render_equation_images`).
+    ``include_in_background_color``: the text filled in the color under it locates figures and equations too
+    (`document_lab.paper.render`).
 
     Returns (n_sections, n_figures, n_tables).
     """
@@ -331,10 +334,19 @@ def write_paper_output(
     # Render cropped figure/table images and insert inline
     figure_images: dict[str, str] = {}
     if pdf_path and pdf_path.exists():
-        figure_images, page_section_map = render_figure_pages(pdf_path, out_dir, body_sections, renderer=renderer)
+        figure_images, page_section_map = render_figure_pages(
+            pdf_path, out_dir, body_sections, renderer=renderer, include_in_background_color=include_in_background_color
+        )
 
         figure_images = render_equation_images(
-            pdf_path, out_dir, body_sections, figure_images, page_section_map, renderer=renderer, transcribe=transcribe
+            pdf_path,
+            out_dir,
+            body_sections,
+            figure_images,
+            page_section_map,
+            renderer=renderer,
+            transcribe=transcribe,
+            include_in_background_color=include_in_background_color,
         )
 
     # Clean up raw converter clutter (raw images, picture-text blocks)

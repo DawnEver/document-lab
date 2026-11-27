@@ -717,18 +717,20 @@ def regions(
     include_hidden: bool = False,
     structure: Structure | None = None,
     tagged: Collection[str] = tags.DEFAULT_USES,
+    include_in_background_color: bool = False,
 ) -> list[Region]:
     """The figures, tables and equations of ``page``, top to bottom.
 
     ``face``: the font and size the document's prose is set in (`document_lab.layout.body_face`), its size the body
     size every measure here is in. ``drawings``: the page's drawn ink (`document_lab.ink`), when the caller holds its
-    picture; without them a region is told by its words alone. ``include_hidden``: what hidden layers draw counts too
-    (see `document_lab.ir`). ``structure``: a tagged document's (:attr:`~document_lab.ir.Document.structure`), whose
-    tables and figures -- as ``tagged`` names (``tables``, ``figures``) -- stand in for the inferred ones on a page it
-    covers (see the module); None infers them all.
+    picture; without them a region is told by its words alone. ``include_hidden``: what hidden layers draw counts too;
+    ``include_in_background_color``: the text filled in the color under it too (see `document_lab.ir`).
+    ``structure``: a tagged document's (:attr:`~document_lab.ir.Document.structure`), whose tables and figures -- as
+    ``tagged`` names (``tables``, ``figures``) -- stand in for the inferred ones on a page it covers (see the module);
+    None infers them all.
     """
     uses = tags.checked(tagged)
-    page = page.shown(include_hidden=include_hidden)
+    page = page.shown(include_hidden=include_hidden, include_in_background_color=include_in_background_color)
     if not page.spans or face[1] <= 0:
         return []
     judged = _Page(page, face[1])

@@ -104,6 +104,7 @@ def ingest(
     tagged: Collection[str] = DEFAULT_USES,
     formulas: Formulas | None = None,
     formula_model: Model = 'texteller',
+    include_in_background_color: bool = False,
 ) -> Ingested:
     """Convert ``pdf`` (with ``tool``, else the IR path) and write its paper layout into ``out_dir``.
 
@@ -112,12 +113,20 @@ def ingest(
     the rules. ``tagged``: what a tagged PDF's tags give its markdown, and so its sections
     (`document_lab.paper.convert.convert`). ``formulas``: ``latex`` writes each equation crop's LaTeX under its image,
     read by ``formula_model`` (`document_lab.formula`); refused by :class:`document_lab.formula.FormulaUnavailable`
-    before anything is written when that model cannot run.
+    before anything is written when that model cannot run. ``include_in_background_color``: the text filled in the
+    color under it is read too, by the markdown and the regions a picture page's text locates (see `document_lab.ir`).
     """
     transcribe = None if formulas is None else formula.transcriber(formulas, model=formula_model)
     pdf = pdf.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    md_text, choice, structure = convert(pdf, out_dir, tool=tool, outline=outline, tagged=tagged)
+    md_text, choice, structure = convert(
+        pdf,
+        out_dir,
+        tool=tool,
+        outline=outline,
+        tagged=tagged,
+        include_in_background_color=include_in_background_color,
+    )
     compared = compare(read_pdf(pdf)) if choice.tool == 'ir' else None
     disagreements = compared.disagreements if compared is not None else ()
     stated = frozenset(structure.named) if structure is not None else frozenset()
@@ -133,7 +142,13 @@ def ingest(
         msg = f'{pdf.name}: the converted markdown has no section'
         raise NoSections(msg)
     n_sec, n_fig, n_tbl = write_paper_output(
-        main, out_dir, md_text, pdf_path=pdf, renderer=renderer, transcribe=transcribe
+        main,
+        out_dir,
+        md_text,
+        pdf_path=pdf,
+        renderer=renderer,
+        transcribe=transcribe,
+        include_in_background_color=include_in_background_color,
     )
 
     appended_root = out_dir / 'appended'
@@ -153,6 +168,7 @@ def ingest(
             title_override=title,
             pdf_path=pdf,
             renderer=renderer,
+            include_in_background_color=include_in_background_color,
             transcribe=transcribe,
         )
         shutil.rmtree(flat, ignore_errors=True)

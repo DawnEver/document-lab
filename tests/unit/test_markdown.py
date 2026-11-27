@@ -309,7 +309,7 @@ def test_a_cover_sheet_set_large_throughout_has_no_title_and_a_url_is_never_one(
     ):
         _write(cover, 57, 120 + 14 * i, text, size=12)
     for i in range(6):
-        _write(cover, 57, 600 + 12 * i, f'This article is distributed under the terms of the licence, line {i} of it.')
+        _write(cover, 57, 600 + 12 * i, f'This article is distributed under the terms of the license, line {i} of it.')
     paper = doc.new_page(width=595, height=842)
     _write(paper, 57, 80, 'Advances in Dual-Three-Phase Machines', size=18)
     _write(paper, 57, 120, 'https://www.example.org/a-url-set-as-large-as-a-title', size=18)

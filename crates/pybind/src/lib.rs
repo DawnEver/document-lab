@@ -56,7 +56,7 @@ type Box4 = (f64, f64, f64, f64);
 /// The layer an event is drawn in: hidden by optional content, and the subtype of the annotation drawing it.
 type LayerRow = (bool, Option<String>);
 /// A span: text, font name (no subset tag), size, bold, box, render mode, the number it shares with the spans its
-/// words run on into with no space between (None: none), and its layer.
+/// words run on into with no space between (None: none), whether it is written vertically, and its layer.
 type SpanRow = (
     String,
     String,
@@ -65,6 +65,7 @@ type SpanRow = (
     Box4,
     i64,
     Option<usize>,
+    bool,
     LayerRow,
 );
 /// A path (one subpath): points, closed, stroke color, line width, dashes, dash phase, fill color, even-odd, the
@@ -83,12 +84,14 @@ type PathRow = (
     usize,
     LayerRow,
 );
-/// An image: box, sample width and height, object number (None inline), layer.
-type ImageRow = (Box4, i64, i64, Option<u32>, LayerRow);
+/// An image: box, sample width and height, object number (None inline), the matrix `(a, b, c, d, e, f)` from its
+/// unit square to page space, and its layer.
+type ImageRow = (Box4, i64, i64, Option<u32>, [f64; 6], LayerRow);
 /// What a page draws: spans, paths, images, warnings.
 type PageRows = (Vec<SpanRow>, Vec<PathRow>, Vec<ImageRow>, Vec<String>);
 /// An image's samples: width, height, color space family (None: a stencil mask), components, bits per component,
-/// the data after every lossless filter, and the image codec it is still in (None: raw samples).
+/// the data after every lossless filter, the image codec it is still in (None: raw samples), its `/Decode` array
+/// (None: not stated) and whether it states a mask.
 type SamplesRow = (
     i64,
     i64,
@@ -97,6 +100,8 @@ type SamplesRow = (
     i64,
     Vec<u8>,
     Option<String>,
+    Option<Vec<f64>>,
+    bool,
 );
 
 /// A PDF opened.
@@ -151,6 +156,7 @@ impl Reader {
                     box4(s.bbox),
                     s.render_mode,
                     s.unspaced,
+                    s.vertical,
                     layer(&s.layer),
                 )
             })
@@ -170,6 +176,7 @@ impl Reader {
                         image.width,
                         image.height,
                         image.object,
+                        image.matrix.0,
                         layer(&image.layer),
                     ));
                 }
@@ -212,6 +219,8 @@ impl Reader {
             samples.bits,
             samples.data,
             samples.codec.map(|c| text(&c.name)),
+            samples.decode,
+            samples.masked,
         ))
     }
 }

@@ -1,7 +1,8 @@
 """A PDF read into the IR by document-lab's own reader (``document_lab._pdf``, Rust).
 
 What a page draws comes back as text spans, vector paths and image figures, each with its box in page space. Pixels
-are not the reader's: :func:`read_raster` renders a region with PyMuPDF (D4 of task document-lab-pdf-reader).
+are the reader's only as an image's own samples (no codec is decoded): :func:`read_raster` takes a region that is
+one image whole from them, and renders any other with PyMuPDF (D4 of task document-lab-pdf-reader).
 
 What the reader refuses raises a :class:`Refused` of its kind -- :class:`NotPdf`, :class:`Locked` (the password
 opens no access), :class:`Unsupported`, :class:`Malformed` -- each a ``ValueError``.
@@ -10,6 +11,7 @@ opens no access), :class:`Unsupported`, :class:`Malformed` -- each a ``ValueErro
 from __future__ import annotations
 
 import hashlib
+import math
 from pathlib import Path
 from typing import Final
 
@@ -35,6 +37,18 @@ __all__ = [
 CURVE_SAMPLES: Final = 8
 #: The resolution (dpi) a region holding no image renders at.
 VECTOR_DPI: Final = 300.0
+#: How far (in pixels) a placed image's edges and sides may miss a region's and the region still be the image whole.
+WHOLE_IMAGE_SLACK: Final = 0.25
+#: The text rendering mode that neither fills nor strokes (an OCR layer): text that shows nothing.
+INVISIBLE_TEXT: Final = 3
+#: A matrix entry at most this (points) is zero: the image is square to the page.
+_SQUARE: Final = 1e-6
+#: Gray depths whose levels spread over 0..255 exactly (255 is a multiple of each level count less one).
+_GRAY_BITS: Final = frozenset({1, 2, 4, 8})
+#: Families whose samples are gray or RGB as they stand. An ``ICCBased`` one is the gray or RGB of its component
+#: count, its profile not applied: the crate's color model (``pdf::color::Space::Icc``) reads it so, and this follows.
+#: Exact for an sRGB profile (the IEC scans measured); a wider-gamut profile would show otherwise once rendered.
+_GRAY_OR_RGB: Final = frozenset({'DeviceGray', 'DeviceRGB', 'ICCBased'})
 
 
 def read_pdf(
@@ -85,15 +99,16 @@ def _page(
         paths=tuple(_path(row, here) for row in paths),
         figures=tuple(
             Figure(here.at(bbox=BBox(*box)), w, h, image, hidden=hidden, annotation=annotation)
-            for box, w, h, image, (hidden, annotation) in images
+            for box, w, h, image, _, (hidden, annotation) in images
         ),
         warnings=tuple(warnings),
     )
 
 
 def _span(row: tuple, here: Provenance) -> TextSpan:
-    text, font, size, bold, box, _mode, unspaced, (hidden, annotation) = row
-    return TextSpan(text, size, font, here.at(bbox=BBox(*box)), bold, unspaced, hidden=hidden, annotation=annotation)
+    text, font, size, bold, box, mode, unspaced, vertical, (hidden, annotation) = row
+    where = here.at(bbox=BBox(*box))
+    return TextSpan(text, size, font, where, bold, unspaced, mode, vertical, hidden=hidden, annotation=annotation)
 
 
 def _path(row: tuple, here: Provenance) -> VectorPath:
@@ -119,30 +134,112 @@ def _path(row: tuple, here: Provenance) -> VectorPath:
 def read_raster(path: Path | str, page: int, bbox: BBox, *, dpi: float | None = None, password: str = '') -> Raster:
     """The region ``bbox`` of 1-based ``page`` as pixels, everything drawn there composited.
 
-    ``dpi`` defaults to the finest native resolution among the images shown (an annotation's too, not one hidden) the
-    region overlaps, so a pixel is a source pixel and none is invented; a region holding no image renders at
-    ``VECTOR_DPI``.
+    What is drawn there is what the page shows: its annotations' appearances too, nothing a hidden layer draws.
+    ``dpi`` defaults to the finest native resolution among the images shown the region overlaps, so a pixel is a
+    source pixel and none is invented; a region holding no image renders at ``VECTOR_DPI``. A region that is one image
+    whole at its native resolution, nothing else visible on it, is that image's own samples where the reader holds
+    them as the page shows them (:func:`_samples`); any other region is rendered by PyMuPDF.
     """
     path = Path(path)
     data = path.read_bytes()
+    reader = _pdf.open(data, password.encode())
+    spans, paths, images = map(_shown, reader.page(page, 1, annotations=True)[:3])
+    under = [row for row in images if _meets(row[0], bbox)]
     if dpi is None:
-        _, _, images, _ = _pdf.open(data, password.encode()).page(page, 1, annotations=True)
-        native = [
-            72 * w / (box[2] - box[0])
-            for box, w, _, _, (hidden, _) in images
-            if not hidden
-            and box[2] > box[0]
-            and box[0] < bbox.x1
-            and box[2] > bbox.x0
-            and box[1] < bbox.y1
-            and box[3] > bbox.y0
-        ]
-        dpi = max(native, default=VECTOR_DPI)
+        dpi = max(filter(None, map(_native, under)), default=VECTOR_DPI)
+    pixels = _samples(reader, under, bbox, dpi) if _alone(spans, paths, bbox) else None
+    if pixels is None:
+        pixels = _rendered(data, page, bbox, dpi, password)
+    here = Provenance(hashlib.sha256(data).hexdigest(), path.resolve().as_uri(), page=page, bbox=bbox)
+    return Raster(pixels, here)
+
+
+def _shown(rows: list) -> list:
+    """The rows (spans, paths or images, each ending in its layer) no hidden layer draws."""
+    return [row for row in rows if not row[-1][0]]
+
+
+def _meets(box: tuple[float, float, float, float], bbox: BBox) -> bool:
+    return box[0] < bbox.x1 and box[2] > bbox.x0 and box[1] < bbox.y1 and box[3] > bbox.y0
+
+
+def _native(image: tuple) -> float:
+    """An image row's finest resolution (dpi): its samples over its placed sides' lengths; 0 when it has no area."""
+    _, width, height, _, (a, b, c, d, _, _), _ = image
+    across, down = math.hypot(a, b), math.hypot(c, d)
+    return 72 * max(width / across, height / down) if across and down else 0.0
+
+
+def _alone(spans: list, paths: list, bbox: BBox) -> bool:
+    """Whether no path and no visible text (an OCR layer is invisible) is drawn on ``bbox``."""
+    for points, _, _, width, *_ in paths:
+        xs, ys = [x for x, _ in points], [y for _, y in points]
+        reach = width / 2
+        if _meets((min(xs) - reach, min(ys) - reach, max(xs) + reach, max(ys) + reach), bbox):
+            return False
+    return not any(mode != INVISIBLE_TEXT and _meets(box, bbox) for _, _, _, _, box, mode, *_ in spans)
+
+
+def _samples(reader: _pdf.Reader, under: list, bbox: BBox, dpi: float) -> np.ndarray | None:
+    """The one image under ``bbox`` as RGB rows from its own samples; None unless they are what the page shows.
+
+    They are when it is placed square to the page -- turned or mirrored by quarter turns, its samples turned alike --
+    edge to edge on ``bbox`` within :data:`WHOLE_IMAGE_SLACK` of a pixel, a sample a pixel at ``dpi``, and its samples
+    are what :func:`_rgb` takes. Anything else -- skewed, part of it, resampled, an inline image -- is the renderer's.
+    """
+    if len(under) != 1:
+        return None
+    box, width, height, number, (a, b, c, d, _, _), _ = under[0]
+    turned = abs(a) <= _SQUARE and abs(d) <= _SQUARE  # its rows run down the page, its columns across
+    if number is None or not (turned or (abs(b) <= _SQUARE and abs(c) <= _SQUARE)):
+        return None
+    across, down = (height, width) if turned else (width, height)
+    slack = WHOLE_IMAGE_SLACK * 72 / dpi
+    sides = (across * 72 / dpi - (bbox.x1 - bbox.x0), down * 72 / dpi - (bbox.y1 - bbox.y0))
+    edges = (box[0] - bbox.x0, box[1] - bbox.y0, box[2] - bbox.x1, box[3] - bbox.y1)
+    if any(abs(gap) > slack for gap in (*sides, *edges)):
+        return None
+    rows = _rgb(reader.image(number))
+    if rows is None:
+        return None
+    # A sample (row i, column j) sits at u = (j + 1/2) / width, v = 1 - (i + 1/2) / height of the image's unit
+    # square, mapped to the page (y down) by x = a u + c v + e, y = b u + d v + f.
+    if turned:
+        rows, down_flipped, across_flipped = rows.transpose(1, 0, 2), b < 0, c > 0
+    else:
+        down_flipped, across_flipped = d > 0, a < 0
+    return np.array(rows[:: -1 if down_flipped else 1, :: -1 if across_flipped else 1])
+
+
+def _rgb(samples: tuple) -> np.ndarray | None:
+    """An image's samples as RGB rows; None unless the reader holds them as they show.
+
+    It does for lossless gray of 1, 2, 4 or 8 bits (its levels spread over 0..255) and 8-bit RGB (:data:`_GRAY_OR_RGB`),
+    unmasked, mapped as stated by default (no ``/Decode``, or ``[0 1]`` for each component), holding every row. A
+    codec, Indexed, CMYK, 16 bits, another ``/Decode`` or a mask is the renderer's.
+    """
+    width, height, space, components, bits, data, codec, decode, masked = samples
+    remapped = decode is not None and decode != [0.0, 1.0] * components
+    if codec is not None or masked or remapped or space not in _GRAY_OR_RGB:
+        return None
+    if not ((components == 1 and bits in _GRAY_BITS) or (components == 3 and bits == 8)):  # noqa: PLR2004 -- RGB
+        return None
+    stride = (width * components * bits + 7) // 8  # each row ends on a whole byte
+    if len(data) < stride * height:
+        return None
+    rows = np.frombuffer(data, dtype=np.uint8, count=stride * height).reshape(height, stride)
+    if bits < 8:  # noqa: PLR2004 -- whole bytes
+        places = np.unpackbits(rows, axis=1).reshape(height, -1, bits)
+        weights = (1 << np.arange(bits - 1, -1, -1)).astype(np.uint8)
+        rows = (places * weights).sum(axis=2, dtype=np.uint8)[:, :width] * np.uint8(255 // (2**bits - 1))
+    pixels = rows[:, : width * components].reshape(height, width, components)
+    return np.repeat(pixels, 3, axis=2) if components == 1 else pixels
+
+
+def _rendered(data: bytes, page: int, bbox: BBox, dpi: float, password: str) -> np.ndarray:
     with pymupdf.open(stream=data, filetype='pdf') as pdf:
         if password:
             pdf.authenticate(password)
         zoom = pymupdf.Matrix(dpi / 72, dpi / 72)
         pix = pdf[page - 1].get_pixmap(matrix=zoom, clip=pymupdf.Rect(*bbox), colorspace=pymupdf.csRGB, alpha=False)
-        pixels = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3).copy()
-    here = Provenance(hashlib.sha256(data).hexdigest(), path.resolve().as_uri(), page=page, bbox=bbox)
-    return Raster(pixels, here)
+        return np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3).copy()

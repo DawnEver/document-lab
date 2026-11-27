@@ -393,6 +393,75 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
         assert_eq!((cmap.cid(0x0105), cmap.cid(0x0001)), (505, 0));
         assert_eq!(CMap::identity().cid(0x1234), 0x1234);
     }
+
+    #[test]
+    fn a_collection_is_named_by_adobe_and_an_ordering_it_has_a_table_of() {
+        for ordering in ["Japan1", "GB1", "CNS1", "Korea1", "KR"] {
+            let named = Collection::named(b"Adobe", ordering.as_bytes()).map(|c| c.ordering);
+            assert_eq!(named, Some(ordering));
+        }
+        // Planted: another registry, an ordering without a table, an ordering's name in other case.
+        assert!(Collection::named(b"Acme", b"Japan1").is_none());
+        assert!(Collection::named(b"Adobe", b"Identity").is_none());
+        assert!(Collection::named(b"Adobe", b"japan1").is_none());
+    }
+
+    /// Adobe-Japan1's text of `cid`.
+    fn japan1(cid: u32) -> Option<String> {
+        Collection::named(b"Adobe", b"Japan1").unwrap().text(cid)
+    }
+
+    #[test]
+    fn a_collection_gives_each_cid_the_text_adobe_names() {
+        // Adobe-Japan1-UCS2: one code unit, a character past U+FFFF, a variation sequence.
+        for (cid, text) in [
+            (34, "A"),
+            (843, "\u{3042}"),
+            (3284, "\u{65E5}"),
+            (13839, "\u{2000B}"),
+            (230, "0\u{FE00}"),
+        ] {
+            assert_eq!(japan1(cid).as_deref(), Some(text), "CID {cid}");
+        }
+        // Planted: the same CIDs are other characters in another collection (Adobe-GB1-UCS2).
+        let gb1 = Collection::named(b"Adobe", b"GB1").unwrap();
+        assert_eq!(gb1.text(843).as_deref(), Some(">"));
+        assert_ne!(gb1.text(3284), japan1(3284));
+    }
+
+    #[test]
+    fn a_cid_the_table_does_not_map_has_no_text() {
+        // `.notdef`, the first CID past Adobe-Japan1-7's last (23059), past a u16, and the largest.
+        assert_eq!(japan1(23059).as_deref(), Some("\u{32FF}")); // planted: the last one is mapped (Reiwa)
+        for cid in [0, 23060, 70_000, u32::MAX] {
+            assert_eq!(japan1(cid), None, "CID {cid}");
+        }
+    }
+
+    #[test]
+    fn every_table_is_as_its_reader_assumes() {
+        for collection in &COLLECTIONS {
+            let single = collection.single;
+            assert_eq!(single.len() % 2, 0, "{}", collection.ordering);
+            // A unit is never half of a surrogate pair: those characters are in `long`.
+            assert!(
+                single
+                    .chunks(2)
+                    .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                    .all(|u| !(0xD800..0xE000).contains(&u)),
+                "{}",
+                collection.ordering
+            );
+            // `long` is sorted by CID (binary search), each CID absent from `single`, each text longer than a unit.
+            assert!(collection.long.windows(2).all(|w| w[0].0 < w[1].0));
+            for &(cid, text) in collection.long {
+                let at = usize::from(cid) * 2;
+                assert!(single.get(at..at + 2).is_none_or(|b| b == [0, 0]));
+                assert!(text.encode_utf16().count() > 1, "CID {cid}");
+            }
+        }
+    }
+
     /// A predefined `CMap`'s `CID`s of `codes`.
     fn predefined_cids(name: &str, codes: &[u32]) -> Vec<u32> {
         let (cmap, ..) = CMap::predefined(name).unwrap();

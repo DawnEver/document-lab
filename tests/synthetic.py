@@ -810,6 +810,56 @@ def actual_text_pdf(path: Path) -> Path:
     return path
 
 
+def cid_font_pdf(
+    path: Path,
+    cids: Sequence[int],
+    *,
+    registry: str = 'Adobe',
+    ordering: str = 'Japan1',
+    to_unicode: Mapping[int, str] | None = None,
+) -> Path:
+    """One page showing ``cids`` in one line, in Ryumin-Light on ``/Identity-H`` (each two-byte code its own CID).
+
+    The font is a CID font on the collection ``registry``-``ordering`` that embeds no program, as a Japanese PDF sets
+    text in a printer's resident font; it states no ``/ToUnicode`` unless ``to_unicode`` gives one (text by code).
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=100)
+    font, descendant = doc.get_new_xref(), doc.get_new_xref()
+    doc.update_object(
+        descendant,
+        f'<< /Type /Font /Subtype /CIDFontType0 /BaseFont /Ryumin-Light /CIDSystemInfo << /Registry ({registry}) '
+        f'/Ordering ({ordering}) /Supplement 7 >> /DW 1000 /FontDescriptor << /Type /FontDescriptor '
+        '/FontName /Ryumin-Light /Flags 6 /FontBBox [-170 -331 1024 903] /ItalicAngle 0 /Ascent 723 /Descent -241 '
+        '/CapHeight 709 /StemV 69 >> >>',
+    )
+    stated = ''
+    if to_unicode is not None:
+        cmap = doc.get_new_xref()
+        doc.update_object(cmap, '<< >>')
+        pairs = ' '.join(f'<{code:04X}> <{text.encode("utf-16-be").hex()}>' for code, text in to_unicode.items())
+        doc.update_stream(
+            cmap,
+            '/CIDInit /ProcSet findresource begin 12 dict begin begincmap 1 begincodespacerange <0000> <FFFF> '
+            f'endcodespacerange {len(to_unicode)} beginbfchar {pairs} endbfchar endcmap CMapName currentdict /CMap '
+            'defineresource pop end end'.encode('ascii'),
+        )
+        stated = f' /ToUnicode {cmap} 0 R'
+    doc.update_object(
+        font,
+        '<< /Type /Font /Subtype /Type0 /BaseFont /Ryumin-Light-Identity-H /Encoding /Identity-H '
+        f'/DescendantFonts [{descendant} 0 R]{stated} >>',
+    )
+    doc.xref_set_key(page.xref, 'Resources', f'<< /Font << /F1 {font} 0 R >> >>')
+    stream = doc.get_new_xref()
+    doc.update_object(stream, '<< >>')
+    doc.update_stream(stream, f'BT /F1 12 Tf 20 50 Td <{"".join(f"{c:04X}" for c in cids)}> Tj ET'.encode('ascii'))
+    doc.xref_set_key(page.xref, 'Contents', f'{stream} 0 R')
+    doc.save(path)
+    doc.close()
+    return path
+
+
 def hatch_pdf(path: Path) -> Path:
     """A 200 x 100 page: a blue 5 x 5 solid fill, then a 50 x 50 hatch -- an uncolored tiling pattern (a diagonal
     stroke, as TikZ's ``north east lines``) tinted red through ``[/Pattern /DeviceRGB]``: a pattern, not a solid fill.

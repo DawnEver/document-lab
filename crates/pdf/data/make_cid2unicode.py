@@ -1,7 +1,8 @@
 """Write ``src/cid2unicode.rs`` and ``src/cid2unicode/``: Adobe's text of each CID of its CJK character collections.
 
 The source is Adobe's CID-to-Unicode CMaps ``pdf2unicode/Adobe-<Ordering>-UCS2`` of ``mapping-resources-pdf``, the
-tables ISO 32000-2 section 9.10.2 names for the text of a font on a registry collection, pinned at ``REVISION``. They
+tables ISO 32000-2 section 9.10.2 names for the text of a font on a registry collection, pinned at ``REVISION`` and
+each file by its SHA-256 (``SHA256``): a file that is not the pinned bytes is refused, nothing written. They
 are Adobe's own choice of each CID's text: one character, a character past U+FFFF, or a sequence (an ideographic
 variation sequence, a decomposed form). ``cmap-resources``' ``cid2code.txt`` is the inverse (each encoding's code to its
 CID), so read backward it leaves the CIDs no encoding reaches -- a third of Adobe-Japan1, its vertical, proportional and
@@ -14,10 +15,11 @@ What is written, per collection (``ORDERINGS``):
 - ``src/cid2unicode/LICENSE.txt``: Adobe's BSD-3-Clause notice of the source, which a redistribution must carry.
 
 A CID mapped to U+0000 or U+FFFD (``.notdef``, a glyph Adobe gives no text) is left out: no text, never a guess. The
-downloads are kept under the repository's ``output/cid2unicode/<REVISION>/``. Run from anywhere:
+downloads are kept under the repository's ``output/cache/cid2unicode/``, each named by its SHA-256. Run from anywhere:
 ``python crates/pdf/data/make_cid2unicode.py``; the output is a function of the pinned files alone.
 """
 
+import hashlib
 import re
 import urllib.request
 from pathlib import Path
@@ -27,9 +29,18 @@ REPOSITORY = 'adobe-type-tools/mapping-resources-pdf'
 REVISION = '2dd5e53fb74a01718b9dfd448a0d1cce6fff2aa5'
 #: The collections with a table, by ``/Ordering`` (``/Registry (Adobe)``).
 ORDERINGS = ('Japan1', 'GB1', 'CNS1', 'Korea1', 'KR')
+#: Each file read at ``REVISION``, by its SHA-256.
+SHA256 = {
+    'pdf2unicode/Adobe-Japan1-UCS2': '6a9693361647a37996312cc57071bb79f8c06411207be7c730a83fda1254cd82',
+    'pdf2unicode/Adobe-GB1-UCS2': '368b40ec05568faf323cfbbddf23c60d566bbc88e366981eb6541b026381a3b8',
+    'pdf2unicode/Adobe-CNS1-UCS2': '8375afd535e153a7e3bcf448be93e5012b26229547a20d52520e46e3c386351f',
+    'pdf2unicode/Adobe-Korea1-UCS2': '45bcf869acdcec2507f75836919e589e7137b9f9dbaa8e4975747035024248ef',
+    'pdf2unicode/Adobe-KR-UCS2': '6861a3208f331ecd73369c5d51eacf3b72c820fe3c87524f79c9ac1bb16830ec',
+    'LICENSE.txt': 'feb8b068a417681821823ef2e8995072aa111121fa11f8664038f78717f4497c',
+}
 
 CRATE = Path(__file__).resolve().parent.parent
-CACHE = CRATE.parent.parent / 'output' / 'cid2unicode' / REVISION
+CACHE = CRATE.parent.parent / 'output' / 'cache' / 'cid2unicode'
 HEX = r'<([0-9a-fA-F]+)>'
 #: Texts that are none: U+0000 and U+FFFD, a glyph Adobe gives no text.
 NO_TEXT = frozenset({'\0', '\N{REPLACEMENT CHARACTER}'})
@@ -40,15 +51,25 @@ CALL_WIDTH = 60
 
 
 def fetch(name: str) -> str:
-    """The pinned revision's file ``name``, downloaded once into the cache."""
-    path = CACHE / name
-    if not path.exists():
-        url = f'https://raw.githubusercontent.com/{REPOSITORY}/{REVISION}/{name}'
+    """The pinned revision's file ``name``, downloaded once and kept by its SHA-256; refused unless it is the pinned."""
+    sha = SHA256[name]
+    path = CACHE / sha
+    url = f'https://raw.githubusercontent.com/{REPOSITORY}/{REVISION}/{name}'
+    if path.exists():
+        data = path.read_bytes()
+        door = f'delete {path} to fetch it again'
+    else:
         with urllib.request.urlopen(url, timeout=60) as response:
             data = response.read()
-        path.parent.mkdir(parents=True, exist_ok=True)
+        door = 're-pin it only with a new REVISION'
+    got = hashlib.sha256(data).hexdigest()
+    if got != sha:
+        msg = f'{url}: SHA-256 {got}, pinned {sha}; {door}'
+        raise ValueError(msg)
+    if not path.exists():
+        CACHE.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
-    return path.read_text(encoding='latin-1')
+    return data.decode('latin-1')
 
 
 def units(hex_text: str) -> list[int]:
@@ -140,6 +161,9 @@ pub struct Collection {{
 """
 
 if __name__ == '__main__':
+    # Every source is fetched and checked before anything is written.
+    for name in SHA256:
+        fetch(name)
     (CRATE / 'src' / 'cid2unicode').mkdir(exist_ok=True)
     body = ''.join(collection(o) for o in ORDERINGS)
     notice = fetch('LICENSE.txt')

@@ -1,4 +1,5 @@
 import hashlib
+import itertools
 
 import numpy as np
 import pymupdf
@@ -7,7 +8,7 @@ import pytest
 from document_lab import _pdf
 from document_lab.ir import BBox
 from document_lab.pdf import CURVE_SAMPLES, Locked, Malformed, NotPdf, Refused, Unsupported, read_pdf, read_raster
-from tests.synthetic import RED, icc_profile, image_pdf, mixed_pdf, rgb_in_srgb, table_cell_rect
+from tests.synthetic import RED, cid_font_pdf, icc_profile, image_pdf, mixed_pdf, rgb_in_srgb, table_cell_rect
 
 
 @pytest.fixture
@@ -568,3 +569,44 @@ def test_vertical_writing_is_a_vertical_span_read_top_to_bottom_in_its_column(tm
     assert not spans['side'].vertical
     # From the vertical origin (100, 40): an em across, centered on it; three ems (the default advance) down.
     assert tuple(column.provenance.bbox) == pytest.approx((95, 40, 105, 70), abs=1e-6)
+
+
+#: CIDs of Adobe-Japan1 and the text Adobe-Japan1-UCS2 names for each: a code unit, a character past U+FFFF, and a
+#: variation sequence (a slashed zero).
+JAPAN1_CIDS = (34, 843, 3284, 3722, 13839, 230)
+JAPAN1_TEXT = 'A\u3042\u65e5\u672c\U0002000b0\ufe00'
+#: The text Adobe-GB1-UCS2 names for the same CIDs: what reading them in the wrong collection gives.
+GB1_TEXT = 'A>\u816e\u553e\u687d\u2460'
+
+
+def misread(path, truth):
+    """Where the text ``path`` reads differs from ``truth``, character by character; empty when it reads as truth."""
+    read = ''.join(s.text for s in read_pdf(path).spans())
+    return [(i, r, t) for i, (r, t) in enumerate(itertools.zip_longest(read, truth)) if r != t]
+
+
+def test_a_font_not_embedded_on_an_adobe_collection_reads_the_text_adobe_names_for_its_cids(tmp_path):
+    japan1 = cid_font_pdf(tmp_path / 'japan1.pdf', JAPAN1_CIDS)
+    gb1 = cid_font_pdf(tmp_path / 'gb1.pdf', JAPAN1_CIDS, ordering='GB1')
+    assert misread(japan1, JAPAN1_TEXT) == []
+    assert misread(gb1, GB1_TEXT) == []
+    # Planted: each collection's text is the other's wrong truth.
+    assert misread(japan1, GB1_TEXT)
+    assert misread(gb1, JAPAN1_TEXT)
+
+
+def test_a_cid_no_table_maps_reads_as_unknown_never_a_guess(tmp_path):
+    # `.notdef` and the first CID past Adobe-Japan1-7's last (23059) around one it maps; then a registry not Adobe's.
+    beyond = cid_font_pdf(tmp_path / 'beyond.pdf', (0, 34, 23060))
+    other = cid_font_pdf(tmp_path / 'other.pdf', (843,), registry='Acme')
+    assert misread(beyond, '\ufffdA\ufffd') == []
+    assert misread(other, '\ufffd') == []
+    # Planted: a guess -- the code as its code point, the collection's text under another registry.
+    assert misread(beyond, '\0A\u5a14')
+    assert misread(other, '\u3042')
+
+
+def test_the_to_unicode_a_font_states_wins_over_its_collection(tmp_path):
+    stated = cid_font_pdf(tmp_path / 'stated.pdf', (843, 3284), to_unicode={843: 'X'})
+    assert misread(stated, 'X\u65e5') == []  # the code ToUnicode does not map falls to the collection
+    assert misread(stated, '\u3042\u65e5')  # planted: the collection's text of the code ToUnicode maps

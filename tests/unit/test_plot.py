@@ -1090,3 +1090,16 @@ def test_markers_a_hidden_layer_draws_are_read_only_when_asked(tmp_path):
     assert plot.markers == ()
     (shown,) = plots(page, include_hidden=True)
     assert sorted(len(m.x) for m in shown.markers) == [len(TRIANGLES), len(DOTS)]
+
+
+def test_markers_filled_in_the_color_under_them_are_read_only_when_asked(tmp_path):
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', _marker_spec())).page(1)
+    marks = {'●', '▲'}
+    page = dataclasses.replace(
+        page,
+        spans=tuple(dataclasses.replace(s, in_background_color=True) if s.text in marks else s for s in page.spans),
+    )
+    (plot,) = plots(page)
+    assert plot.markers == ()
+    (shown,) = plots(page, include_in_background_color=True)
+    assert sorted(len(m.x) for m in shown.markers) == [len(TRIANGLES), len(DOTS)]

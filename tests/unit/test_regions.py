@@ -8,7 +8,7 @@ from document_lab.ink import Drawing
 from document_lab.ir import BBox
 from document_lab.pdf import read_pdf
 from document_lab.regions import regions
-from tests.synthetic import hidden_layer
+from tests.synthetic import hidden_layer, in_background_color
 
 PROSE = 'The rated output is the mechanical power available at the shaft and shall be expressed in watts.'
 
@@ -241,18 +241,26 @@ def test_a_short_drawing_with_no_word_in_it_is_an_equation_without_a_number(tmp_
     assert [(r.kind, r.label) for r in found] == [('equation', 'Untitled equation 1')]
 
 
-def test_what_a_hidden_layer_draws_is_no_region_unless_asked(tmp_path):
-    def draw(page):
-        _text(page, 100, PROSE)
-        for y, size in ((180, 22), (230, 6), (260, 31)):
-            _text(page, y, 'i)|\\', x=250, size=size)
-        _text(page, 360, 'Figure 2 - Short-time duty', x=200)
-        _text(page, 420, PROSE)
+def _captioned_figure(page):
+    _text(page, 100, PROSE)
+    for y, size in ((180, 22), (230, 6), (260, 31)):
+        _text(page, y, 'i)|\\', x=250, size=size)
+    _text(page, 360, 'Figure 2 - Short-time duty', x=200)
+    _text(page, 420, PROSE)
 
-    page, face = _page(tmp_path, draw)
+
+def test_what_a_hidden_layer_draws_is_no_region_unless_asked(tmp_path):
+    page, face = _page(tmp_path, _captioned_figure)
     hidden = hidden_layer(page)
     assert regions(hidden, face) == []
     assert regions(hidden, face, include_hidden=True) == regions(page, face) != []
+
+
+def test_text_filled_in_the_color_under_it_is_no_region_unless_asked(tmp_path):
+    page, face = _page(tmp_path, _captioned_figure)
+    unseen = in_background_color(page)
+    assert regions(unseen, face) == []
+    assert regions(unseen, face, include_in_background_color=True) == regions(page, face) != []
 
 
 def test_a_region_the_page_edge_leaves_no_room_for_is_none(tmp_path):

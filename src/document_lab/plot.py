@@ -345,13 +345,18 @@ def plots(
     y_scale: Scale | None = None,
     include_hidden: bool = False,
     include_inkless: bool = False,
+    include_in_background_color: bool = False,
 ) -> list[Plot]:
     """Every vector plot on ``page``; ``x_scale``/``y_scale`` force an axis scale instead of inferring it.
 
-    ``include_hidden``: what hidden layers draw is read too; ``include_inkless``: what the colorant ``None`` paints
-    (see `document_lab.ir`).
+    ``include_hidden``: what hidden layers draw is read too; ``include_inkless``: what the colorant ``None`` paints;
+    ``include_in_background_color``: the text filled in the color under it (see `document_lab.ir`).
     """
-    page = page.shown(include_hidden=include_hidden, include_inkless=include_inkless)
+    page = page.shown(
+        include_hidden=include_hidden,
+        include_inkless=include_inkless,
+        include_in_background_color=include_in_background_color,
+    )
     edges = _edges(page.paths)
     dashes = _dashes(page.paths)
     labels = _labels(page.spans, dashes)

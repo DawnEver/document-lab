@@ -1,4 +1,4 @@
-"""A JBIG2 image whose generic region is MMR-coded, drawn by the own renderer (``read_raster(renderer='own')``).
+"""A JBIG2 image whose generic region is MMR-coded, drawn by the own renderer (``read_raster``).
 
 The truth is known pixels, coded at test time by an encoder independent of the renderer's decoder (hayro-jbig2):
 an MMR generic region's data is T.6 (T.88 6.2.6), here MuPDF's Group 4 coding (``tests.synthetic.jbig2_mmr``), so
@@ -27,7 +27,7 @@ def _drawn(tmp_path, entries: str, data: bytes) -> np.ndarray:
     image = f'<< /Type /XObject /Subtype /Image /Width 80 /Height 48 {entries} /Filter /JBIG2Decode >>'
     path = tmp_path / 'jbig2.pdf'
     path.write_bytes(page_pdf('q 80 0 0 48 0 102 cm /Im1 Do Q', {'Im1': (image, data)}))
-    pixels = read_raster(path, 1, BBox(0, 0, 80, 48), dpi=72, renderer='own').pixels
+    pixels = read_raster(path, 1, BBox(0, 0, 80, 48), dpi=72).pixels
     assert (pixels == pixels[..., :1]).all()  # gray
     return pixels[..., 0]
 

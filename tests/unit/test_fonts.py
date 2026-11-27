@@ -201,7 +201,7 @@ def test_a_font_not_embedded_is_drawn_with_the_fallback_fetched_on_first_use(ser
     _pin(monkeypatch, 'noto-sans-symbols-2', (f'{server}/symbols-2.ttf',), SANS)
     _pin(monkeypatch, 'noto-sans-symbols', (f'{server}/symbols.ttf',), SYMBOL)
     _pin(monkeypatch, 'noto-sans-math', (f'{server}/math.ttf',))
-    pixels = read_raster(_wingdings(tmp_path), 1, BBox(0, 0, 200, 150), dpi=72, renderer='own').pixels
+    pixels = read_raster(_wingdings(tmp_path), 1, BBox(0, 0, 200, 150), dpi=72).pixels
     assert (pixels.min(axis=2) < 128).sum() > 20  # the dot operator, inked
     assert _Served.hits == ['/symbols-2.ttf', '/symbols.ttf']
 
@@ -210,13 +210,13 @@ def test_a_fallback_that_cannot_be_had_or_read_is_refused_by_name(server, monkey
     _pin(monkeypatch, 'noto-sans-symbols-2', (f'{server}/symbols-2.ttf',))
     page = _wingdings(tmp_path)
     with pytest.raises(Unsupported) as refused:
-        read_raster(page, 1, BBox(0, 0, 200, 150), dpi=72, renderer='own')
+        read_raster(page, 1, BBox(0, 0, 200, 150), dpi=72)
     assert 'font Wingdings2 is not embedded and its fallback noto-sans-symbols-2 cannot be had' in str(refused.value)
     assert 'symbols-2.ttf: failed: HTTP 404' in str(refused.value)
     _Served.routes['/symbols-2.ttf'] = (200, NO_FONT)  # the pinned bytes, but no font program
     _pin(monkeypatch, 'noto-sans-symbols-2', (f'{server}/symbols-2.ttf',), NO_FONT)
     with pytest.raises(Unsupported, match='its fallback noto-sans-symbols-2 was fetched but does not read'):
-        read_raster(page, 1, BBox(0, 0, 200, 150), dpi=72, renderer='own')
+        read_raster(page, 1, BBox(0, 0, 200, 150), dpi=72)
 
 
 # --- the pins ------------------------------------------------------------------------------------------------------

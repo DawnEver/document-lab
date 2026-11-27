@@ -1,4 +1,4 @@
-"""``document-lab capture``: its arguments and its run. Only the run loads the desktop, numpy and PyMuPDF."""
+"""``document-lab capture``: its arguments and its run. Only the run loads the desktop and numpy."""
 
 from __future__ import annotations
 

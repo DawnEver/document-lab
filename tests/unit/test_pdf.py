@@ -5,9 +5,11 @@ import numpy as np
 import pymupdf
 import pytest
 
+import document_lab.pdf
 from document_lab import _pdf
 from document_lab.ir import BBox
 from document_lab.pdf import CURVE_SAMPLES, Locked, Malformed, NotPdf, Refused, Unsupported, read_pdf, read_raster
+from tests.rendering import agrees, disagreement
 from tests.synthetic import (
     PAGE,
     RED,
@@ -304,11 +306,23 @@ RGB = '/Width 60 /Height 40 /ColorSpace /DeviceRGB /BitsPerComponent 8'
 GRAY = '/Width 60 /Height 40 /ColorSpace /DeviceGray /BitsPerComponent 8'
 
 
-def _shown(path, clip=None, zoom=1.0):
-    """What the page shows, rendered by PyMuPDF at ``zoom`` pixels a point: the truth a raster is held to."""
-    with pymupdf.open(path) as doc:
-        pix = doc[0].get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), clip=clip, colorspace=pymupdf.csRGB, alpha=False)
+def _shown(path, clip=None, zoom=1.0, *, managed=True):
+    """What the page shows, rendered by PyMuPDF at ``zoom`` pixels a point: the reference a raster is held to; color
+    management off unless ``managed`` (``DeviceCMYK`` is the standard's formula, as PyMuPDF converts it so:
+    ``tests/unit/test_render.py``)."""
+    pymupdf.TOOLS.set_icc(managed)
+    try:
+        with pymupdf.open(path) as doc:
+            matrix = pymupdf.Matrix(zoom, zoom)
+            pix = doc[0].get_pixmap(matrix=matrix, clip=clip, colorspace=pymupdf.csRGB, alpha=False)
+    finally:
+        pymupdf.TOOLS.set_icc(True)
     return np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3).copy()
+
+
+def _agrees(drawn, reference):
+    """Whether ``drawn`` agrees with ``reference`` as the own renderer is held to PyMuPDF (``tests/rendering.py``)."""
+    return drawn.shape == reference.shape and agrees(*disagreement(drawn, reference))
 
 
 def _refuse_rendering(monkeypatch):
@@ -316,7 +330,7 @@ def _refuse_rendering(monkeypatch):
         msg = 'rendered: the samples were not taken'
         raise AssertionError(msg)
 
-    monkeypatch.setattr(pymupdf.Page, 'get_pixmap', rendered)
+    monkeypatch.setattr(document_lab.pdf, '_drawn', rendered)
 
 
 def _whole_page(path, **kwargs):
@@ -448,18 +462,19 @@ UNSEEN = {
 def test_what_the_samples_alone_do_not_show_is_rendered(case, tmp_path):
     made, truth = UNSEEN[case]
     path = image_pdf(tmp_path / 'unseen.pdf', size=(60, 40), **made)
-    shown = _shown(path)
+    shown = _shown(path, managed=case != 'cmyk')
     assert not np.array_equal(shown, SAMPLES)  # the planted premise: the samples are not what shows
     if truth is not None:
         assert np.array_equal(shown, truth)
-    assert np.array_equal(_whole_page(path), shown)
+        assert _agrees(_whole_page(path), truth)
+    assert _agrees(_whole_page(path), shown)
 
 
 def test_part_of_an_image_or_another_resolution_is_rendered(tmp_path):
     path = image_pdf(tmp_path / 'one.pdf', SAMPLES.tobytes(), RGB, size=(60, 40))
     half = BBox(0, 0, 30, 40)
-    assert np.array_equal(read_raster(path, 1, half).pixels, _shown(path, pymupdf.Rect(*half)))
-    assert np.array_equal(_whole_page(path, dpi=144), _shown(path, zoom=2))
+    assert _agrees(read_raster(path, 1, half).pixels, _shown(path, pymupdf.Rect(*half)))
+    assert _agrees(_whole_page(path, dpi=144), _shown(path, zoom=2))
 
 
 def test_a_missing_file_raises_naming_it(tmp_path):

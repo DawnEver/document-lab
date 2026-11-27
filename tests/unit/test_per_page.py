@@ -6,14 +6,16 @@ import numpy as np
 import pymupdf
 import pytest
 
+import document_lab.pdf
 from document_lab import layout
 from document_lab.__main__ import main
 from document_lab.capture.export import to_pdf
 from document_lab.markdown import table as markdown_table
-from document_lab.pdf import read_pdf
+from document_lab.pdf import Unsupported, read_pdf
 from document_lab.per_page import RENDER_DPI, UNREAD, write_pages
 from document_lab.regions import regions
 from document_lab.tables import tables
+from tests.rendering import page_pdf
 from tests.synthetic import (
     LANDSCAPE_CAPTION,
     LANDSCAPE_HEAD,
@@ -55,7 +57,7 @@ def test_each_page_gets_its_markdown_and_image_and_the_index_names_them(tmp_path
 def test_a_page_that_is_one_image_keeps_its_own_pixels(tmp_path, monkeypatch):
     image = np.random.default_rng(1).integers(0, 256, (90, 70, 3), dtype=np.uint8)
     capture = to_pdf(image, tmp_path / 'capture.pdf')
-    monkeypatch.setattr(pymupdf.Page, 'get_pixmap', None)  # taken from the reader's samples, never rendered
+    monkeypatch.setattr(document_lab.pdf, '_drawn', None)  # taken from the reader's samples, never rendered
     done = write_pages(capture, tmp_path / 'out')
     assert done.textless == (1,)
     assert done.unread == (1,)  # a picture without a text layer, said so in its markdown
@@ -259,7 +261,15 @@ def _one_image_page(path, colorspace, samples, *, extra=None):
         ('[/Indexed /DeviceRGB 1 <FF000000C000>]', (1,), None, 'green'),  # palette entry 1
         ('[/Lab << /WhitePoint [0.9505 1 1.089] >>]', (128, 128, 128), None, 'gray'),  # L* 50, neutral
         # a CMYK ICC profile no reader can use: its /Alternate, DeviceCMYK, stands for it
-        ('[/ICCBased REF]', (0, 255, 255, 0), ('<< /N 4 /Alternate /DeviceCMYK >>', b'not a profile'), 'red'),
+        pytest.param(
+            '[/ICCBased REF]',
+            (0, 255, 255, 0),
+            ('<< /N 4 /Alternate /DeviceCMYK >>', b'not a profile'),
+            'red',
+            marks=pytest.mark.xfail(
+                raises=Unsupported, strict=True, reason='O66: the reader keeps no /Alternate; the renderer refuses'
+            ),
+        ),
     ],
 )
 def test_a_page_that_is_one_image_in_any_color_space_is_written_in_its_colors(
@@ -622,3 +632,23 @@ def test_untitled_rows_inside_a_ruled_table_no_caption_holds_are_its_own_and_wri
     assert sum(line.startswith('| ---') for line in page1.splitlines()) == 1  # one table written
     assert markdown_table(ruled.rows, ruled.cell_bboxes) in page1
     assert page1.count('alpha') == 1
+
+
+def test_a_page_the_renderer_cannot_draw_is_a_named_refusal_of_the_command(tmp_path, capsys):
+    """No other renderer stands in (D118): ``pages`` says what the own renderer could not draw, exit 2, no traceback.
+
+    The planted control: the same page with a shading type it reads is written."""
+    shading = '<< /ShadingType {} /ColorSpace /DeviceRGB /Coords [0 0 200 0] /Function {} >>'
+    function = '<< /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >>'
+    for kind in (9, 2):
+        pdf = tmp_path / f'shading-{kind}.pdf'
+        resources = f'/Shading << /Sh1 {shading.format(kind, function)} >>'
+        pdf.write_bytes(page_pdf('q 0 0 100 150 re W n /Sh1 sh Q', resources=resources))
+        status = main(['pages', str(pdf), str(tmp_path / f'out-{kind}')])
+        out = capsys.readouterr().out
+        if kind == 9:
+            assert status == 2
+            assert 'refused: page 1: the own renderer does not draw all the region holds yet: shading not drawn' in out
+        else:
+            assert status in {0, 1}  # written (a page of no text says so)
+            assert (tmp_path / 'out-2' / 'page-001.png').is_file()

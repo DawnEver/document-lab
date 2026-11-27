@@ -13,15 +13,12 @@ description = "Documents (PDF, HTML tables) to typed data that carries its prove
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "Mingyang Bao" }]
-# The package's own Rust crate (`document_lab._pdf`) reads PDFs and writes captures; PyMuPDF renders a region to
-# pixels and lays the OCR layer; numpy carries the digitised curves.
+# The package's own Rust crates (`document_lab._pdf`) read PDFs, render them to pixels and write captures and OCR
+# layers; numpy carries pixels and the digitised curves. No PyMuPDF at run time (D118): it is the dev extra's.
 # lab-commons supplies what the family already owns: the output location and logging.
 dependencies = [
     "lab-commons[paths] @ git+https://github.com/DawnEver/lab-commons.git",
     "numpy",
-    # Below 2: PyMuPDF 2.x requires pymupdf4llm, pymupdf-layout and onnxruntime, and onnxruntime has no cp315
-    # wheel (measured 2026-11-05 on 2.1). 1.x is the whole reader this package needs.
-    "pymupdf<2",
 ]
 
 [project.optional-dependencies]
@@ -51,6 +48,11 @@ dev = [
     # The truth of the JPEG 2000 tests: OpenJPEG, through Pillow's JPEG 2000 plugin, encodes known pixels at test
     # time -- an encoder independent of the renderer's decoder (hayro-jpeg2000).
     "pillow",
+    # The tests' independent reference, never the package's (D118; tests/architecture proves the base imports none):
+    # it writes the synthetic PDFs (tests/synthetic.py) and renders and extracts what the reader and the own renderer
+    # are held to (tests/rendering.py, the reference part). Below 2: PyMuPDF 2.x requires pymupdf4llm,
+    # pymupdf-layout and onnxruntime, and onnxruntime has no cp315 wheel (measured 2026-11-05 on 2.1).
+    "pymupdf<2",
     "pytest",
     "ruff",
 ]

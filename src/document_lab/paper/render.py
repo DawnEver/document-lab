@@ -21,7 +21,6 @@ if TYPE_CHECKING:
 
     from document_lab.formula import Transcribe
     from document_lab.ir import Document, Page
-    from document_lab.pdf import Renderer
 
 _CAPTION_RE = re.compile(rf'(?P<label>Figure\s+\d+|Fig\.\s*\d+|Table\s+(?:\d+|{_RN}))\.(?P<rest>.+)', re.IGNORECASE)
 
@@ -79,17 +78,15 @@ class _Located:
 RENDER_DPI = 144.0
 
 
-def _render(
-    pdf: Path, read: Document, page_num: int, img_path: Path, crop: BBox | None, renderer: Renderer
-) -> np.ndarray:
-    """The page, or its ``crop``, rendered by ``renderer`` at :data:`RENDER_DPI` to ``img_path``.
+def _render(pdf: Path, read: Document, page_num: int, img_path: Path, crop: BBox | None) -> np.ndarray:
+    """The page, or its ``crop``, rendered (`document_lab.pdf.read_raster`) at :data:`RENDER_DPI` to ``img_path``.
 
     Always rendered and written, a file already there replaced (the render is deterministic, so a rerun writes the
     same bytes): returns the pixels written -- a PNG is lossless, so they are the file's.
     """
     page = read.pages[page_num]
     region = crop or BBox(0.0, 0.0, page.width, page.height)
-    pixels = read_raster(pdf, page_num + 1, region, dpi=RENDER_DPI, renderer=renderer).pixels
+    pixels = read_raster(pdf, page_num + 1, region, dpi=RENDER_DPI).pixels
     img_path.parent.mkdir(parents=True, exist_ok=True)
     img_path.write_bytes(png.encode(pixels))
     return pixels
@@ -347,13 +344,10 @@ def render_figure_pages(
     out_dir: Path,
     body_sections: list[tuple[str, str]],
     *,
-    renderer: Renderer = 'pymupdf',
     include_hidden: bool = False,
     include_in_background_color: bool = False,
 ) -> tuple[dict[str, str], dict[int, int]]:
-    """Render cropped figure images and insert them inline at caption positions.
-
-    ``renderer`` draws them (`document_lab.pdf.read_raster`).
+    """Render cropped figure images (`document_lab.pdf.read_raster`) and insert them inline at caption positions.
 
     A label on a page that is one picture (:func:`is_full_page_image`: a screen capture, a scan) has no drawn
     content to crop by: it is cut out where the page's text locates it (`document_lab.regions`: an OCR layer's
@@ -411,7 +405,7 @@ def render_figure_pages(
             crop, img_name = None, f'page-{page_num + 1:02d}.png'
         img_path = out_dir / 'img' / f'sec{owning:02d}' / img_name
         if img_path not in rendered:  # a whole page several labels share is rendered once a run
-            _render(pdf_path, read, page_num, img_path, crop, renderer)
+            _render(pdf_path, read, page_num, img_path, crop)
             rendered.add(img_path)
         figure_images[normalized] = f'img/sec{owning:02d}/{img_name}'
 
@@ -433,13 +427,12 @@ def render_equation_images(
     figure_images: dict[str, str],
     page_section_map: dict[int, int],
     *,
-    renderer: Renderer = 'pymupdf',
     transcribe: Transcribe | None = None,
     unnumbered: Unnumbered = 'strict',
     include_hidden: bool = False,
     include_in_background_color: bool = False,
 ) -> dict[str, str]:
-    """Render every display equation of the paper, numbered or not (by ``renderer``), and link each in its section.
+    """Render every display equation of the paper, numbered or not, and link each in its section.
 
     ``transcribe`` (`document_lab.formula.transcriber`): each rendered crop's LaTeX follows its image as a display
     block. ``unnumbered``: how displays without a number are found (`document_lab.regions.Unnumbered`).
@@ -467,7 +460,7 @@ def render_equation_images(
     )
     latex: dict[int, str] = {}
     for eq in found:
-        written = _render(pdf_path, read, eq.page, out_dir / eq.image, eq.region.bbox, renderer)
+        written = _render(pdf_path, read, eq.page, out_dir / eq.image, eq.region.bbox)
         key = eq.alt if eq.number is not None else f'{eq.alt}, page {eq.page + 1}'
         figure_images[key] = eq.image
         if transcribe is not None:

@@ -1,4 +1,4 @@
-"""JPEG 2000 images drawn by the own renderer (``read_raster(renderer='own')``), against known pixels.
+"""JPEG 2000 images drawn by the own renderer (``read_raster``), against known pixels.
 
 The truth is the pixels themselves: each image is known samples coded losslessly by OpenJPEG at test time
 (``tests.synthetic.jpx``, Pillow's plugin) -- an encoder independent of the renderer's decoder, hayro-jpeg2000 -- drawn
@@ -111,7 +111,7 @@ def _drawn(tmp_path, entries: str, data: bytes, extra: dict[str, tuple[str, byte
     image = f'<< /Type /XObject /Subtype /Image /Width 60 /Height 40 {entries} /Filter /JPXDecode >>'
     path = tmp_path / 'jpx.pdf'
     path.write_bytes(page_pdf('q 60 0 0 40 0 110 cm /Im1 Do Q', {'Im1': (image, data), **(extra or {})}))
-    return read_raster(path, 1, BBox(0, 0, 60, 40), dpi=72, renderer='own').pixels
+    return read_raster(path, 1, BBox(0, 0, 60, 40), dpi=72).pixels
 
 
 def _off(drawn: np.ndarray, truth: np.ndarray) -> int:
@@ -140,7 +140,7 @@ def test_a_jpx_soft_mask_gives_its_samples_their_alpha(tmp_path):
     path.write_bytes(
         page_pdf('q 60 0 0 40 0 110 cm /Im1 Do Q', {'Im1': (image, RGB.tobytes()), 'S': (mask, jpx(ALPHA))})
     )
-    drawn = read_raster(path, 1, BBox(0, 0, 60, 40), dpi=72, renderer='own').pixels
+    drawn = read_raster(path, 1, BBox(0, 0, 60, 40), dpi=72).pixels
     assert _off(drawn, _over_white(RGB, ALPHA)) <= LEVELS
     # Planted wrong decode: the mask ignored.
     assert _off(drawn, RGB) > 8 * LEVELS

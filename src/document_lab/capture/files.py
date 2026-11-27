@@ -184,7 +184,7 @@ def page_shapes(pdf: Path) -> list[float] | None:
     from document_lab import _pdf  # noqa: PLC0415
 
     try:
-        reader = _pdf.open(pdf.read_bytes(), b'')
+        reader = _pdf.open(pdf, b'')
     except _pdf.Refused:
         return None
     return [height / width for _, width, height in reader.pages]

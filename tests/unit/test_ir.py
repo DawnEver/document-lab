@@ -1,8 +1,10 @@
 import dataclasses
+import os
+from pathlib import Path
 
 import pytest
 
-from document_lab.ir import BBox, Document, Page, Provenance, Table, TextSpan, union
+from document_lab.ir import BBox, Document, Page, Provenance, Table, TextSpan, file_uri, spaced, union
 
 
 def _prov(page=1, bbox=(0.0, 0.0, 10.0, 10.0)):
@@ -60,5 +62,45 @@ def test_a_document_walks_its_pages_in_order():
     assert doc.page(2).spans == (span,)
 
 
+#: Every space separator (Unicode category Zs) but the plain space itself.
+SEPARATORS = ['\u00a0', '\u1680', *map(chr, range(0x2000, 0x200B)), '\u202f', '\u205f', '\u3000']
+
+
+@pytest.mark.parametrize('space', [*SEPARATORS, '\u200b'])
+def test_every_space_separator_and_the_zero_width_space_is_a_plain_space(space):
+    assert spaced(f'80{space}V') == '80 V'
+
+
+@pytest.mark.parametrize('joiner', ['\u2060', '\ufeff'])
+def test_a_word_joiner_forbids_a_break_and_is_dropped(joiner):
+    assert spaced(f'80{joiner}V') == '80V'
+
+
+def test_spaces_in_a_run_are_one_and_all_else_is_untouched():
+    assert spaced(' 80 \u00a0\u200b V\u2060 ') == ' 80 V '
+    assert spaced('\ufb01nal\ta\nb') == '\ufb01nal\ta\nb'  # a ligature, a tab and a newline are no Zs
+
+
 def test_union_is_the_smallest_box_covering_all():
     assert union([BBox(0, 0, 1, 1), BBox(2, -1, 3, 0.5)]) == BBox(0, -1, 3, 1)
+
+
+#: Where an absolute path starts past the host's own root (``tmp_path``'s), in every form the host's paths take: its
+#: verbatim (``//?/``) form, a share and a verbatim share on Windows; a leading double slash (an authority's place)
+#: elsewhere.
+OTHER_ROOTS = ['own verbatim', '//server/share/', '//?/UNC/server/share/'] if os.name == 'nt' else ['//double/']
+
+
+@pytest.mark.parametrize('root', ['own', *OTHER_ROOTS])
+@pytest.mark.parametrize('name', ['plain.pdf', 'a space, a #hash, 100% and \u00fc.pdf', 'dir/\u4e2d\u6587 name.pdf'])
+def test_a_file_uri_is_the_paths_uri(tmp_path, root, name):
+    """A verbatim (``//?/``) path names the file its plain form names (3.15's ``as_uri``; older ones keep ``%3F``)."""
+    anchor = tmp_path.anchor.replace(os.sep, '/')
+    start = {'own': anchor, 'own verbatim': '//?/' + anchor}.get(root, root)
+    plain = {'own verbatim': anchor, '//?/UNC/server/share/': '//server/share/'}.get(root, start)
+    assert file_uri(Path(start + name)) == Path(plain + name).as_uri()
+
+
+def test_a_relative_path_has_no_file_uri():
+    with pytest.raises(ValueError, match='relative'):
+        file_uri(Path('x.pdf'))

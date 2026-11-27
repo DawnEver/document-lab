@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 
-from document_lab.ir import Provenance, Table
+from document_lab.ir import Provenance, Table, file_uri
 
 __all__ = ['read_html', 'tables_from_html']
 
@@ -22,7 +22,9 @@ def read_html(path: Path | str, *, encoding: str = 'utf-8') -> tuple[Table, ...]
     """Every table in the HTML file at ``path``, citing the file's content hash and URI."""
     path = Path(path)
     data = path.read_bytes()
-    return tables_from_html(data.decode(encoding), sha256=hashlib.sha256(data).hexdigest(), uri=path.resolve().as_uri())
+    return tables_from_html(
+        data.decode(encoding), sha256=hashlib.sha256(data).hexdigest(), uri=file_uri(path.resolve())
+    )
 
 
 def tables_from_html(text: str, *, sha256: str, uri: str) -> tuple[Table, ...]:

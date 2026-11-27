@@ -170,19 +170,22 @@ def _split_titles(sections: list[tuple[str, str]]) -> list[tuple[str, str]]:
 # ── Section classification ──────────────────────────────────────────────────
 
 
-def classify_section(heading: str, body: str) -> str:
+def classify_section(heading: str, body: str, *, stated: frozenset[str] = frozenset()) -> str:
     """Classify a section as 'keep', 'discard', or 'merge-up'.
 
     'merge-up': heading is a diagram label (e.g. (a), (b)) — discard
     the heading but merge its body into the previous section.
     'discard':  pure OCR noise — discard heading and body.
     'keep':     legitimate section.
+
+    ``stated``: the headings the PDF's own outline names (`document_lab.markdown.Headings.named`): sections whatever
+    they hold.
     """
     clean_body = strip_formatting(body)
     clean_heading = re.sub(r'[*#]', '', heading).strip()
 
     # A recognized section heading is a section however short its body (a one-line acknowledgment).
-    if _ROMAN_HEADING_RE.match(clean_heading) or back_matter(clean_heading):
+    if _ROMAN_HEADING_RE.match(clean_heading) or back_matter(clean_heading) or clean_heading in stated:
         return 'keep'
 
     # diagram sub-labels: (a), (b), (c), (d) — never real sections
@@ -252,9 +255,9 @@ def _paper_title_from_sections(sections_list: list[tuple[str, str]]) -> str:
 
 
 def clean_sections(
-    sections: list[tuple[str, str]],
+    sections: list[tuple[str, str]], *, stated: frozenset[str] = frozenset()
 ) -> tuple[list[tuple[str, str]], list[tuple[str, list[tuple[str, str]]]]]:
-    """Filter noise sections and detect appended-paper boundaries.
+    """Filter noise sections and detect appended-paper boundaries; a heading in ``stated`` is kept.
 
     Returns:
       main_sections  — sections belonging to the primary paper
@@ -263,7 +266,7 @@ def clean_sections(
     """
     cleaned: list[tuple[str, str]] = []
     for heading, body in sections:
-        action = classify_section(heading, body)
+        action = classify_section(heading, body, stated=stated)
         if action == 'discard':
             continue
         if action == 'merge-up':

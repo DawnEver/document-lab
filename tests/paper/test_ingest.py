@@ -51,3 +51,32 @@ def test_a_scanned_sheet_with_no_text_layer_exports_its_pages_as_images(tmp_path
     assert [p.name for p in pages] == ['page-001.png', 'page-002.png']
     body = (tmp_path / 'out' / 'md' / '01-page-1.md').read_text(encoding='utf-8')
     assert '../img/pages/page-001.png' in body and 'no text layer' in body
+
+
+def _outlined_paper(path: Path) -> Path:
+    """A paper whose section headings are plain words the rules cannot tell from text; its outline names them."""
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 60), 'A Paper Headed By Its Outline', fontsize=20)
+    body = 'This paragraph carries enough words to be a section body and not a stray fragment of a figure label.'
+    toc = []
+    for i, title in enumerate(('Background', 'Approach', 'Findings')):
+        y = 120 + 120 * i
+        page.insert_text((72, y), title, fontsize=11)
+        page.insert_text((72, y + 20), body, fontsize=8)
+        page.insert_text((72, y + 32), body, fontsize=8)
+        toc.append([1, title, 1, {'kind': pymupdf.LINK_GOTO, 'page': 0, 'to': pymupdf.Point(72, y - 12)}])
+    doc.set_toc(toc)
+    doc.save(path)
+    return path
+
+
+def test_a_stated_outline_names_the_sections_and_inferring_is_the_option(tmp_path: Path) -> None:
+    pdf = _outlined_paper(tmp_path / 'outlined.pdf')
+    done = ingest(pdf, tmp_path / 'outline', tool='ir')
+    assert (done.structure.source, done.structure.disagreements) == ('outline', ())
+    names = sorted(p.name for p in (tmp_path / 'outline' / 'md').glob('*.md'))
+    assert [n.split('-', 1)[1] for n in names] == ['background.md', 'approach.md', 'findings.md']
+    inferred = ingest(pdf, tmp_path / 'inferred', tool='ir', outline=False)
+    assert inferred.structure.source == 'inferred'
+    assert inferred.sections < done.sections  # the planted control: the rules alone miss the plain-word headings

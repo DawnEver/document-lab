@@ -72,13 +72,12 @@ RENDER_DPI = 144.0
 
 def _render(
     pdf: Path, read: Document, page_num: int, img_path: Path, crop: BBox | None, renderer: Renderer
-) -> np.ndarray | None:
-    """The page, or its ``crop``, rendered by ``renderer`` at :data:`RENDER_DPI` to ``img_path`` (once).
+) -> np.ndarray:
+    """The page, or its ``crop``, rendered by ``renderer`` at :data:`RENDER_DPI` to ``img_path``.
 
-    Returns the pixels written -- a PNG is lossless, so they are the file's -- or None when ``img_path`` was there.
+    Always rendered and written, a file already there replaced (the render is deterministic, so a rerun writes the
+    same bytes): returns the pixels written -- a PNG is lossless, so they are the file's.
     """
-    if img_path.exists():
-        return None
     page = read.pages[page_num]
     region = crop or BBox(0.0, 0.0, page.width, page.height)
     pixels = read_raster(pdf, page_num + 1, region, dpi=RENDER_DPI, renderer=renderer).pixels
@@ -99,10 +98,8 @@ def _render_one_equation(
 ) -> np.ndarray | None:
     """Equation ``(eq_num)`` of page ``page_num`` of ``paper`` (read without its running lines) to ``img_path``.
 
-    Returns the pixels written (:func:`_render`); None when none were: the file was there, or the equation not found.
+    Returns the pixels written (:func:`_render`); None when the equation is not found.
     """
-    if img_path.exists():
-        return None
     page = paper.pages[page_num]
     if is_full_page_image(page):  # a picture page: where its text locates the number, if it does
         crop = located.crop(page_num, f'({eq_num})') if located is not None else None
@@ -342,7 +339,7 @@ def render_figure_pages(
 
     A label on a page that is one picture (:func:`is_full_page_image`: a screen capture, a scan) has no drawn
     content to crop by: it is cut out where the page's text locates it (`document_lab.regions`: an OCR layer's
-    caption and the prose around it), and else links the whole page, rendered once as ``page-NN.png`` however many
+    caption and the prose around it), and else links the whole page, rendered once a run as ``page-NN.png`` however many
     such labels the page holds.
 
     Captions are found, and figures cropped, on the paper without its running heads and feet
@@ -377,6 +374,7 @@ def render_figure_pages(
             unique_entries.append((label, normalized, page_num, owning))
 
     located = _Located(read) if any(is_full_page_image(read.pages[e[2]]) for e in unique_entries) else None
+    rendered: set[Path] = set()
     for label, normalized, page_num, owning in unique_entries:
         page = paper.pages[page_num]
         own = f'page-{page_num + 1:02d}-{normalized.lower().replace(" ", "-")}.png'
@@ -387,7 +385,9 @@ def render_figure_pages(
         else:  # nothing locates it: the page itself, once, shared by every such label on it
             crop, img_name = None, f'page-{page_num + 1:02d}.png'
         img_path = out_dir / 'img' / f'sec{owning:02d}' / img_name
-        _render(pdf_path, read, page_num, img_path, crop, renderer)
+        if img_path not in rendered:  # a whole page several labels share is rendered once a run
+            _render(pdf_path, read, page_num, img_path, crop, renderer)
+            rendered.add(img_path)
         figure_images[normalized] = f'img/sec{owning:02d}/{img_name}'
 
     _fix_cross_section_image_refs(out_dir, body_sections, page_section_map)

@@ -434,6 +434,30 @@ def test_a_page_two_ways_read_equally_has_no_way_none_of_its_text_furniture_and_
     assert _furniture(more) == ['ABCDEFGHIJ KLMNOPQRST']
 
 
+def test_a_one_line_stamp_outnumbering_a_sparse_page_s_lines_reads_no_way_and_makes_none_of_them_furniture(tmp_path):
+    """A figure's page: two upright lines and a publisher's stamp up the margin holding more characters than they do.
+    Counted by characters the page read the stamp's way and its upright lines, outside the stamp's box, were furniture:
+    one line against lines is no sure count, so the page has no way and keeps them all. The planted controls: the
+    stamp set in two lines outnumbering them still reads its way, and one upright line still outweighs a shorter
+    one-line stamp (as two lines of one way are no surer than one line of each)."""
+    stamp = 'Downloaded from the publisher library on 1 January 2026 by a reader; see the terms of use for rules'
+    upright = [(72, 600, 'Figure 2: the measured loss.', 0), (72, 614, 'Source: the authors.', 0)]
+    path = turned_text_pdf(tmp_path / 'sparse.pdf', [*upright, (580, 60, stamp, 270)])
+    page = read_pdf(path).page(1)
+    assert sum(len(s.text.replace(' ', '')) for s in page.spans if s.direction == (1.0, 0.0)) < len(stamp) / 2
+    assert layout.reading_way(page.spans) is None
+    assert layout.furniture(page) == []
+    assert {ln.text for ln in layout.lines(page, weighted=False)} >= {text for _, _, text, _ in upright}
+    halves = [(580, 60, stamp[:50], 270), (568, 60, stamp[50:], 270)]
+    two = read_pdf(turned_text_pdf(tmp_path / 'two.pdf', [*upright, *halves])).page(1)
+    assert layout.reading_way(two.spans) == (0.0, 1.0)
+    assert sorted(s.text for s in layout.furniture(two)) == sorted(text for _, _, text, _ in upright)
+    short = (580, 60, stamp[:30], 270)
+    one = turned_text_pdf(tmp_path / 'one.pdf', [(72, 600, 'Figure 2: the measured loss at full load.', 0), short])
+    assert layout.reading_way(read_pdf(one).page(1).spans) == layout.UP
+    assert _furniture(one) == [stamp[:30].strip()]
+
+
 def test_a_landscape_table_s_cells_at_the_page_top_on_every_page_are_no_running_head(tmp_path):
     """A table continued sideways over pages sets its cells at the same place on each, its last column at the page's
     top: a line turned sideways only ends at the top and runs along no edge, so it is never a running line."""

@@ -850,3 +850,28 @@ def test_prose_regions_tell_within_a_stacks_rules_makes_it_no_table(tmp_path):
     assert [t.rows for t in tables(page, told=told)] == [rows]
     # the planted wrong truth: unaided, the paragraph heads the table
     assert [t.rows for t in tables(page)] != [rows]
+
+
+def test_numbers_under_numbers_with_no_first_cell_are_a_sub_row_but_wrapped_words_carry_on(tmp_path):
+    """W2947585286 p3: an RMS and a peak line of values under one quantity were joined into one row by the carry
+    rule, as a wrapped line is. A number never wraps: a line of numbers under numbers is a row of its own, its first
+    cell empty as set. Words on a line with no first cell still carry on the row above."""
+    rows = (
+        ('Quantity', 'Kind', 'Base', 'Top'),
+        ('back EMF, V', 'RMS', '33.53', '159.65'),
+        ('', 'peak', '48.93', '233.18'),
+        ('torque, N m', 'mean', '283.01', '75.15'),
+        ('ripple, %', 'ratio of', 'measured', 'at load'),
+        ('', 'peak', 'and mean', 'and speed'),
+    )
+    (table,) = tables(_page(tmp_path, lambda p: _booktabs(p, rows)))
+    read = (
+        rows[0],
+        rows[1],
+        rows[2],
+        rows[3],
+        ('ripple, %', 'ratio of peak', 'measured and mean', 'at load and speed'),
+    )
+    assert _cell_differences(table, read) == []
+    joined = (rows[0], ('back EMF, V', 'RMS peak', '33.53 48.93', '159.65 233.18'), *read[3:])
+    assert _cell_differences(table, joined)  # the planted wrong truth: the sub-row carried on as a wrapped line

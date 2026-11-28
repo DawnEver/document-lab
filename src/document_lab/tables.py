@@ -132,6 +132,8 @@ STACK_LENGTH: Final = 6.0
 SHORT_CELL: Final = 3
 #: A list's marker before each item: a bullet or a dash, or an enumerator closed by its stop (``1.``, ``a)``, ``(iv)``,
 #: ``2:``); a bare number is a table's index.
+#: A cell's line that is a number alone: a sign, digits and their separators, a percent (``-3``, ``1,881.76``, ``92%``).
+_NUMBER: Final = re.compile(r'[-+\u2212]?\d+(?:[.,]\d+)*%?')
 _MARKER: Final = re.compile(
     r'^(?:[\N{BULLET}\N{TRIANGULAR BULLET}\N{WHITE BULLET}\N{EN DASH}\N{EM DASH}*-]'
     r'|\(?(?:\d+|[A-Za-z]|[ivxIVX]+)[.):])$'
@@ -1080,18 +1082,37 @@ def _on_levels(lines: list[list[list[TextSpan]]], size: float) -> list[_Row] | N
 
 
 def _carried(spans: list[TextSpan], columns: list[tuple[float, float]], size: float) -> list[_Row]:
-    """A band's rows by baseline: a row with nothing in the first column carries on the row above (in the band)."""
+    """A band's rows by baseline: a row with nothing in the first column carries on the row above (in the band).
+
+    But for one that sets a number in two columns or more under a number of the row above's: a number never wraps,
+    so it is a row of its own: a sub-row under that row's label (RMS and peak values under one quantity) or a row the
+    first column leaves unnamed (a weighted average under its cases) -- its first cell empty, as set.
+    """
     rows: list[_Row] = []
     for band in _baselines(spans, size / 2):
         row: list[list[TextSpan]] = [[] for _ in columns]
         for s in band:
             row[_column(s.provenance.bbox, columns)].append(s)
-        if rows and not row[0]:  # no first cell: the row above, carried on
+        if rows and not row[0] and _under_numbers(row, rows[-1]):
+            rows.append([[cell] for cell in row])
+        elif rows and not row[0]:  # no first cell: the row above, carried on
             for cell, more in zip(rows[-1], row, strict=True):
                 cell.append(more)
         else:
             rows.append([[cell] for cell in row])
     return rows
+
+
+def _under_numbers(row: list[list[TextSpan]], above: _Row) -> bool:
+    """Does ``row`` set a number alone in two of its cells or more, each under a number?
+
+    Under a number: the cell of ``above`` in that column ends in a line that is a number alone.
+    """
+
+    def number(spans: list[TextSpan]) -> bool:
+        return bool(spans) and _NUMBER.fullmatch(spaced(Line(spans, '', UP).text).strip()) is not None
+
+    return sum(number(cell) and bool(lines) and number(lines[-1]) for cell, lines in zip(row, above, strict=True)) >= 2  # noqa: PLR2004
 
 
 def _column(box: BBox, columns: list[tuple[float, float]]) -> int:

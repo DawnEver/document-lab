@@ -11,7 +11,7 @@ from document_lab import layout
 from document_lab.__main__ import main
 from document_lab.capture.export import to_pdf
 from document_lab.markdown import table as markdown_table
-from document_lab.pdf import Unsupported, read_pdf
+from document_lab.pdf import read_pdf
 from document_lab.per_page import RENDER_DPI, UNREAD, write_pages
 from document_lab.regions import regions
 from document_lab.tables import tables
@@ -261,15 +261,7 @@ def _one_image_page(path, colorspace, samples, *, extra=None):
         ('[/Indexed /DeviceRGB 1 <FF000000C000>]', (1,), None, 'green'),  # palette entry 1
         ('[/Lab << /WhitePoint [0.9505 1 1.089] >>]', (128, 128, 128), None, 'gray'),  # L* 50, neutral
         # a CMYK ICC profile no reader can use: its /Alternate, DeviceCMYK, stands for it
-        pytest.param(
-            '[/ICCBased REF]',
-            (0, 255, 255, 0),
-            ('<< /N 4 /Alternate /DeviceCMYK >>', b'not a profile'),
-            'red',
-            marks=pytest.mark.xfail(
-                raises=Unsupported, strict=True, reason='O66: the reader keeps no /Alternate; the renderer refuses'
-            ),
-        ),
+        ('[/ICCBased REF]', (0, 255, 255, 0), ('<< /N 4 /Alternate /DeviceCMYK >>', b'not a profile'), 'red'),
     ],
 )
 def test_a_page_that_is_one_image_in_any_color_space_is_written_in_its_colors(

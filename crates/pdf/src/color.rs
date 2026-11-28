@@ -7,7 +7,9 @@
 //!   for them (a renderer with color management off converts them so): gray is each of red, green and blue; CMYK is
 //!   `red = 1 - min(1, cyan + black)` and alike.
 //! - `ICCBased` (8.6.5.5) through its embedded profile, at the rendering intent in force ([`crate::icc`]). A
-//!   profile that does not read keeps its colors' components with no RGB, and says why ([`Space::unread`]).
+//!   profile that does not read converts through the space's `/Alternate` when it states one (as 8.6.5.5 bids a
+//!   reader that cannot use the profile); else its colors keep their components with no RGB, and say why
+//!   ([`Space::unread`]).
 //! - `CalGray`, `CalRGB` (8.6.5.2, 8.6.5.3) and `Lab` (8.6.5.4) by the CIE formulas, to CIE XYZ under the space's
 //!   `/WhitePoint` -- `CalGray` its gray raised to its `/Gamma`, `CalRGB` its components each raised to its `/Gamma`
 //!   then through its `/Matrix`, `Lab` L\*a\*b\* by CIE 15 -- adapted to sRGB's D65 white by the Bradford
@@ -42,8 +44,9 @@ pub enum Space {
     Rgb,
     /// `DeviceCMYK`.
     Cmyk,
-    /// `ICCBased`: its profile, read once per profile object.
-    Icc(Rc<Icc>),
+    /// `ICCBased`: its profile, read once per profile object, and its `/Alternate` when the profile does not read
+    /// and the space states one: its colors then convert through that space.
+    Icc(Rc<Icc>, Option<Box<Space>>),
     /// `CalGray` or `CalRGB`.
     Cal(Cal),
     /// `Lab`.
@@ -259,7 +262,7 @@ impl Space {
             Self::Gray | Self::Indexed(..) | Self::Cal(Cal { gray: true, .. }) => 1,
             Self::Rgb | Self::Lab(_) | Self::Cal(_) => 3,
             Self::Cmyk => 4,
-            Self::Icc(icc) => icc.components,
+            Self::Icc(icc, _) => icc.components,
             Self::Other(_, n) => *n,
             Self::Tint(t) => t.colorants.len(),
             Self::Pattern(base) => base.as_ref().map_or(0, |b| b.components()),
@@ -273,7 +276,7 @@ impl Space {
             Self::Gray => b"DeviceGray".to_vec(),
             Self::Rgb => b"DeviceRGB".to_vec(),
             Self::Cmyk => b"DeviceCMYK".to_vec(),
-            Self::Icc(_) => b"ICCBased".to_vec(),
+            Self::Icc(..) => b"ICCBased".to_vec(),
             Self::Cal(Cal { gray: true, .. }) => b"CalGray".to_vec(),
             Self::Cal(_) => b"CalRGB".to_vec(),
             Self::Lab(_) => b"Lab".to_vec(),
@@ -290,7 +293,8 @@ impl Space {
     #[must_use]
     pub fn unread(&self) -> Option<&str> {
         match self {
-            Self::Icc(icc) => icc.profile.as_ref().err().map(String::as_str),
+            Self::Icc(_, Some(alternate)) => alternate.unread(),
+            Self::Icc(icc, None) => icc.profile.as_ref().err().map(String::as_str),
             Self::Indexed(base, _) | Self::Pattern(Some(base)) => base.unread(),
             Self::Tint(t) => t.alternate.unread(),
             _ => None,
@@ -312,7 +316,7 @@ impl Space {
     pub fn initial_components(&self) -> Vec<f64> {
         match self {
             Self::Cmyk => vec![0.0, 0.0, 0.0, 1.0],
-            Self::Icc(icc) if icc.components == 4 => vec![0.0, 0.0, 0.0, 1.0],
+            Self::Icc(icc, _) if icc.components == 4 => vec![0.0, 0.0, 0.0, 1.0],
             Self::Pattern(_) => Vec::new(), // no pattern yet: it paints nothing
             Self::Tint(t) => vec![1.0; t.colorants.len()],
             Self::Lab(lab) => vec![
@@ -355,7 +359,10 @@ impl Space {
             (Self::Cmyk, [cy, m, y, k]) => {
                 Some([1.0 - unit(cy + k), 1.0 - unit(m + k), 1.0 - unit(y + k)])
             }
-            (Self::Icc(icc), _) => icc.rgb(c, intent).map_err(Error::malformed)?,
+            (Self::Icc(icc, Some(alternate)), _) if icc.profile.is_err() => {
+                alternate.rgb(c, intent)?
+            }
+            (Self::Icc(icc, _), _) => icc.rgb(c, intent).map_err(Error::malformed)?,
             (Self::Cal(cal), _) => cal.rgb(c),
             (Self::Lab(lab), [l, a, b]) => Some(lab.rgb([*l, *a, *b])),
             (Self::Pattern(Some(base)), _) if !c.is_empty() => base.rgb(c, intent)?,
@@ -533,7 +540,14 @@ impl File {
                     b"CalGray" | b"CalRGB" => {
                         Space::Cal(self.cal(items.get(1), family == b"CalGray")?)
                     }
-                    b"ICCBased" => Space::Icc(self.icc(items.get(1))?),
+                    b"ICCBased" => {
+                        let icc = self.icc(items.get(1))?;
+                        let alternate = match icc.profile {
+                            Ok(_) => None,
+                            Err(_) => self.icc_alternate(items.get(1), &icc, resources, depth)?,
+                        };
+                        Space::Icc(icc, alternate.map(Box::new))
+                    }
                     b"Indexed" | b"I" => {
                         let base = match items.get(1) {
                             Some(b) => self.space_at_depth(b, resources, depth + 1)?,
@@ -563,6 +577,36 @@ impl File {
             Some(r) => self.read_once(r.num, || self.icc_read(stream)),
             None => self.icc_read(stream).map(Rc::new),
         }
+    }
+
+    /// An `ICCBased` space's `/Alternate` (8.6.5.5), read when its profile `icc` does not: None when it states
+    /// none.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an alternate that does not read, or whose components are not the space's.
+    fn icc_alternate(
+        &self,
+        stream: Option<&Object>,
+        icc: &Icc,
+        resources: &Dict,
+        depth: usize,
+    ) -> Result<Option<Space>> {
+        let Some(Object::Stream(s)) = stream.map(|s| self.resolve(s)).transpose()? else {
+            return Ok(None);
+        };
+        let Some(value) = s.dict.get(b"Alternate") else {
+            return Ok(None);
+        };
+        let alternate = self.space_at_depth(value, resources, depth + 1)?;
+        if alternate.components() != icc.components {
+            return Err(Error::malformed(format!(
+                "an ICCBased space of {} components states an /Alternate of {}",
+                icc.components,
+                alternate.components()
+            )));
+        }
+        Ok(Some(alternate))
     }
 
     fn icc_read(&self, stream: Option<&Object>) -> Result<Icc> {

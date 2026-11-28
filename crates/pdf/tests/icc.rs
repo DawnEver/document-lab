@@ -216,11 +216,12 @@ fn a_profile_is_read_once_per_profile_object() {
         file.color_space(&pdf::Object::Name(name.to_vec()), &resources)
             .unwrap()
     };
-    let (pdf::color::Space::Icc(a), pdf::color::Space::Indexed(base, _)) = (read(b"A"), read(b"B"))
+    let (pdf::color::Space::Icc(a, _), pdf::color::Space::Indexed(base, _)) =
+        (read(b"A"), read(b"B"))
     else {
         panic!("not read as ICCBased");
     };
-    let pdf::color::Space::Icc(b) = *base else {
+    let pdf::color::Space::Icc(b, _) = *base else {
         panic!("not read as ICCBased");
     };
     assert!(std::rc::Rc::ptr_eq(&a, &b));
@@ -285,4 +286,49 @@ fn cal_rgb_and_cal_gray_convert_through_their_parameters() {
     // which is sRGB's linear 0.5.
     assert_near(found[4].1, [encoded(0.5); 3], 1e-3);
     assert!(content.warnings.is_empty(), "{:?}", content.warnings);
+}
+
+#[test]
+fn a_profile_that_does_not_read_converts_through_the_alternate_the_space_states() {
+    // Profile 7 states /Alternate /DeviceCMYK; profile 8 states none; profile 9's alternate has 3 components, not 4.
+    let content = painted(
+        "[/ICCBased 7 0 R]",
+        "Perceptual",
+        "/CS0 cs 0 1 1 0 sc 0 0 1 1 re f [/ICCBased 8 0 R] cs 0 1 1 0 sc 0 0 1 1 re f",
+        &[
+            &common::stream("/N 4 /Alternate /DeviceCMYK", "not a profile"),
+            &common::stream("/N 4", "not a profile"),
+        ],
+    );
+    let found = fills(&content);
+    assert_eq!(
+        found[0].1,
+        Some([1.0, 0.0, 0.0]),
+        "magenta and yellow ink is red"
+    );
+    assert_ne!(
+        found[0].1,
+        Some([0.0, 1.0, 1.0]),
+        "a planted wrong truth: cyan"
+    );
+    assert_eq!(found[1].1, None, "no alternate: no RGB");
+    assert_eq!(content.warnings.len(), 1, "{:?}", content.warnings);
+
+    let pdf = common::one_page(
+        "/Resources << /ColorSpace << /A 5 0 R >> >>",
+        "",
+        &[
+            "[/ICCBased 6 0 R]",
+            &common::stream("/N 4 /Alternate /DeviceRGB", "not a profile"),
+        ],
+    );
+    let file = File::open(pdf, b"").unwrap();
+    let resources = file.pages().unwrap().remove(0).resources;
+    let refused = file
+        .color_space(&pdf::Object::Name(b"A".to_vec()), &resources)
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("an /Alternate of 3"),
+        "{refused}"
+    );
 }

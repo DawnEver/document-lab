@@ -771,9 +771,10 @@ fn rgb(
             .iter()
             .flat_map(|&[c, m, y, k]| [c, m, y].map(|v| 255 - v.saturating_add(k)))
             .collect(),
-        Space::Icc(icc) => match &icc.profile {
-            Ok(profile) => profile.rgb8(levels, intent)?,
-            Err(why) => {
+        Space::Icc(icc, alternate) => match (&icc.profile, alternate) {
+            (Ok(profile), _) => profile.rgb8(levels, intent)?,
+            (Err(_), Some(alternate)) => return rgb(alternate, levels, intent, notes),
+            (Err(why), None) => {
                 notes.push(format!(
                     "image in an ICCBased space drawn as its device space ({why})"
                 ));

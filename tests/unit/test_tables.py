@@ -875,3 +875,20 @@ def test_numbers_under_numbers_with_no_first_cell_are_a_sub_row_but_wrapped_word
     assert _cell_differences(table, read) == []
     joined = (rows[0], ('back EMF, V', 'RMS peak', '33.53 48.93', '159.65 233.18'), *read[3:])
     assert _cell_differences(table, joined)  # the planted wrong truth: the sub-row carried on as a wrapped line
+
+
+def test_a_first_cell_broken_at_a_hyphen_carries_its_word_onto_the_next_line(tmp_path):
+    """1-s2.0-S2215098626002211 p14: ``CMV-`` / ``dominant``, a first cell wrapped in a booktabs body at the row pitch,
+    split its row. A word broken at a hyphen continues below: a first cell alone under one ending so is its word."""
+    rows = (
+        ('Case', 'weight', 'PWM'),
+        ('Base', '0.40', 'PWM5'),
+        ('CMV-', '0.80', 'PWM5'),
+        ('dominant', '', ''),
+        ('Loss', '0.10', 'PWM6'),
+        ('focus', '', ''),
+    )
+    (table,) = tables(_page(tmp_path, lambda p: _booktabs(p, rows)))
+    joined = (*rows[:2], ('CMV- dominant', '0.80', 'PWM5'), *rows[4:])
+    assert _cell_differences(table, joined) == []  # a first cell alone under one ending in no hyphen is a row
+    assert _cell_differences(table, rows)  # the planted wrong truth: the broken word a row of its own

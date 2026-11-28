@@ -911,7 +911,7 @@ def aligned(
     columns = _runs([w for s in _parting(parting, gap, size) for w in _words(s)], gap)
     spans = [part for s in spans for part in _parted(s, columns, gap)]
     bands = _bands(spans, rules)
-    read = [_Band.of(band, columns, size) for band in bands]
+    read = [_Band.of(band, columns, size, ruled=bool(rules)) for band in bands]
     ruled = len(read) > 2 and any(band.wraps for band in read[1:])  # noqa: PLR2004 -- a header and two bands
     rows = [row for band in read for row in ((band.whole,) if ruled else band.rows)]
     if len(rows) < 2 or len(columns) < 2:  # noqa: PLR2004 -- a label and its value
@@ -996,7 +996,7 @@ class _Band:
     wraps: bool
 
     @classmethod
-    def of(cls, spans: list[TextSpan], columns: list[tuple[float, float]], size: float) -> _Band:
+    def of(cls, spans: list[TextSpan], columns: list[tuple[float, float]], size: float, *, ruled: bool) -> _Band:
         cells: list[list[TextSpan]] = [[] for _ in columns]
         for s in spans:
             cells[_column(s.provenance.bbox, columns)].append(s)
@@ -1009,7 +1009,7 @@ class _Band:
             return cls(rows, whole, wraps=False)
         if len(lines[0]) <= 1 and _staggered(lines, size):  # one first cell at most, centered: one row
             return cls([whole], whole, wraps=True)
-        return cls(_carried(spans, columns, size), whole, wraps=False)
+        return cls(_carried(spans, columns, size, ruled=ruled), whole, wraps=False)
 
 
 def _cell_lines(spans: list[TextSpan], size: float) -> list[list[TextSpan]]:
@@ -1081,12 +1081,14 @@ def _on_levels(lines: list[list[list[TextSpan]]], size: float) -> list[_Row] | N
     return rows
 
 
-def _carried(spans: list[TextSpan], columns: list[tuple[float, float]], size: float) -> list[_Row]:
+def _carried(spans: list[TextSpan], columns: list[tuple[float, float]], size: float, *, ruled: bool) -> list[_Row]:
     """A band's rows by baseline: a row with nothing in the first column carries on the row above (in the band).
 
     But for one that sets a number in two columns or more under a number of the row above's: a number never wraps,
     so it is a row of its own: a sub-row under that row's label (RMS and peak values under one quantity) or a row the
-    first column leaves unnamed (a weighted average under its cases) -- its first cell empty, as set.
+    first column leaves unnamed (a weighted average under its cases) -- its first cell empty, as set. In a table
+    ``ruled`` by its rows, a first cell alone under one ending in a hyphen carries it on too: a word broken there
+    (``CMV-`` / ``dominant``) -- a paragraph a table without rules takes in hyphenates so.
     """
     rows: list[_Row] = []
     for band in _baselines(spans, size / 2):
@@ -1095,12 +1097,20 @@ def _carried(spans: list[TextSpan], columns: list[tuple[float, float]], size: fl
             row[_column(s.provenance.bbox, columns)].append(s)
         if rows and not row[0] and _under_numbers(row, rows[-1]):
             rows.append([[cell] for cell in row])
-        elif rows and not row[0]:  # no first cell: the row above, carried on
+        elif rows and (
+            not row[0] or (ruled and not any(row[1:]) and _broken(rows[-1][0]))
+        ):  # the row above, carried on
             for cell, more in zip(rows[-1], row, strict=True):
                 cell.append(more)
         else:
             rows.append([[cell] for cell in row])
     return rows
+
+
+def _broken(cell: list[list[TextSpan]]) -> bool:
+    """Does ``cell`` end in a word broken at its line's end (a hyphen there, ``CMV-`` / ``dominant``)?"""
+    lines = [line for line in cell if line]
+    return bool(lines) and spaced(Line(lines[-1], '', UP).text).rstrip().endswith(('-', '\N{HYPHEN}'))
 
 
 def _under_numbers(row: list[list[TextSpan]], above: _Row) -> bool:

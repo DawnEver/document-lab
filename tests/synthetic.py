@@ -108,6 +108,11 @@ class PlotSpec:
     markers: Sequence[tuple[str, Sequence[tuple[float, float]], tuple[float, float, float]]] = ()
     #: Legend entries inside the frame's top left: (glyph, label, color), the glyph with its label just right of it.
     marker_legend: Sequence[tuple[str, str, tuple[float, float, float]]] = ()
+    #: Each curve drawn as the filled outline of its stroke, this wide (points), no stroke: a sheet exported with its
+    #: strokes turned to fills (IEEE-10012660); None strokes it.
+    outline_width: float | None = None
+    #: Further filled shapes, no stroke: (data points, color) each, a polygon closed by its fill.
+    fills: Sequence[tuple[Sequence[tuple[float, float]], tuple[float, float, float]]] = ()
 
 
 #: A filled tick mark's thickness and length (points).
@@ -387,18 +392,45 @@ def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
     if spec.y_title is not None:
         text, x, y, size = spec.y_title
         page.insert_text((x, y), text, fontname='helv', fontsize=size, rotate=90)
-    for fn, xs, color, *dashes in spec.curves:
-        points = [to_page(spec, x, fn(x)) for x in xs]
-        step = math.ceil((len(points) - 1) / spec.fragments)
-        for k, start in enumerate(range(0, len(points) - 1, step)):
-            piece = points[start : start + step + 1]
-            page.draw_polyline(piece[::-1] if k % 2 else piece, color=color, width=1.0, dashes=next(iter(dashes), None))
+    _draw_curves(page, spec)
     for k, (text, color, dashes) in enumerate(spec.legend):
         y = spec.frame.y0 + 12 + 12 * k
         x = spec.frame.x1 - 80
         page.draw_line((x, y), (x + 20, y), color=color, width=1.0, dashes=dashes)
         page.insert_text((x + 24, y + FONT_SIZE * 0.35), text, fontname='helv', fontsize=FONT_SIZE)
+    for corners, color in spec.fills:
+        page.draw_polyline([to_page(spec, x, y) for x, y in corners], color=None, fill=color, closePath=True)
     _draw_marks(page, spec)
+
+
+def _draw_curves(page: pymupdf.Page, spec: PlotSpec) -> None:
+    for fn, xs, color, *dashes in spec.curves:
+        points = [to_page(spec, x, fn(x)) for x in xs]
+        if spec.outline_width is not None:
+            page.draw_polyline(stroke_outline(points, spec.outline_width), color=None, fill=color, closePath=True)
+            continue
+        step = math.ceil((len(points) - 1) / spec.fragments)
+        for k, start in enumerate(range(0, len(points) - 1, step)):
+            piece = points[start : start + step + 1]
+            page.draw_polyline(piece[::-1] if k % 2 else piece, color=color, width=1.0, dashes=next(iter(dashes), None))
+
+
+def stroke_outline(points: Sequence[tuple[float, float]], width: float) -> list[tuple[float, float]]:
+    """The outline of a polyline stroked ``width`` wide with butt ends and miter joins: one side out, the other back.
+
+    Each side's vertex is offset half the width along the bisector of its two segments' normals, by the miter length.
+    """
+    p = np.asarray(points, dtype=float)
+    step = np.diff(p, axis=0)
+    normal = np.stack((-step[:, 1], step[:, 0]), axis=1) / np.hypot(*step.T)[:, None]
+    ends = [normal[0], *(a + b for a, b in itertools.pairwise(normal)), normal[-1]]
+    offsets = []
+    for k, bisector in enumerate(ends):
+        unit = bisector / np.hypot(*bisector)
+        side = normal[min(k, len(normal) - 1)]
+        offsets.append(unit * width / 2 / float(unit @ side))
+    off = np.asarray(offsets)
+    return [tuple(v) for v in np.vstack((p + off, (p - off)[::-1]))]
 
 
 @functools.cache

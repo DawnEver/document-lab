@@ -886,18 +886,20 @@ def aligned(
     parted there: two columns set closer than its source's word break.
 
     ``rules``: the heights of the level rules across it, top to bottom (a stack's), the first band -- above the
-    second -- its header. No row runs across one: each band between two is read alone. Without them the spans are one
-    band. A band's lines are each column's spans whose middles lie within half a text size (and the spans continuing a
-    word of them); lines of two columns whose middles lie within a quarter text size stand on one level. A band is
-    rows of their own when two columns or more hold a line on each of the same levels, two or more, and every other
-    column holds lines only on those levels or is a label set across them -- left of those columns, one line or lines
-    off the levels, centered on them, repeated in each row as a merged cell is --, the first column one of them, a
-    label or empty. A band whose lines stand staggered otherwise -- two of them more than a quarter text size and less
-    than three quarters apart, a short cell centered beside the lines of a wrapped one --, its first column holding one
-    line at most, is one row whose cells wrap; one such band below the header, of two bands or more there, proves that
-    its rules part every row (the table is ruled by its rows): each band of the table is one row. Any other band is
-    read by baseline: a row is spans whose middles lie within half a text size, and a row with nothing in the first
-    column carries on the cells of the row above in its band (a value wrapped onto a second line).
+    second -- its header. No row runs across one: each band between two is read alone. A header band whose cells of
+    two lines or more start on its top level, every other cell on that level or centered on them, no later line a
+    number alone, is one row whose cells wrap (a two-level header's sub-labels stand in a column with no line on top).
+    Without them the spans are one band. A band's lines are each column's spans whose middles lie within half a text
+    size (and the spans continuing a word of them); lines of two columns whose middles lie within a quarter text size
+    stand on one level. A band is rows of their own when two columns or more hold a line on each of the same levels, two
+    or more, and every other column holds lines only on those levels or is a label set across them -- left of those
+    columns, one line or lines off the levels, centered on them, repeated in each row as a merged cell is --, the first
+    column one of them, a label or empty. A band whose lines stand staggered otherwise -- two of them more than a
+    quarter text size and less than three quarters apart, a short cell centered beside the lines of a wrapped one --,
+    its first column holding one line at most, is one row whose cells wrap; one such band below the header, of two bands
+    or more there, proves that its rules part every row (the table is ruled by its rows): each band of the table is one
+    row. Any other band is read by baseline: a row is spans whose middles lie within half a text size, and a row with
+    nothing in the first column carries on the cells of the row above in its band (a value wrapped onto a second line).
 
     A cell's text is its lines (`document_lab.layout`), top to bottom, its box theirs (None when empty). Spans without
     text, or written vertically, take no part. None when the text does not make two rows of two columns.
@@ -911,7 +913,11 @@ def aligned(
     columns = _runs([w for s in _parting(parting, gap, size) for w in _words(s)], gap)
     spans = [part for s in spans for part in _parted(s, columns, gap)]
     bands = _bands(spans, rules)
-    read = [_Band.of(band, columns, size, ruled=bool(rules)) for band in bands]
+    second = sorted(rules)[1] if len(rules) > 1 else -math.inf
+    read = [
+        _Band.of(band, columns, size, ruled=bool(rules), header=k == 0 and band[0].center[1] < second)
+        for k, band in enumerate(bands)
+    ]
     ruled = len(read) > 2 and any(band.wraps for band in read[1:])  # noqa: PLR2004 -- a header and two bands
     rows = [row for band in read for row in ((band.whole,) if ruled else band.rows)]
     if len(rows) < 2 or len(columns) < 2:  # noqa: PLR2004 -- a label and its value
@@ -940,7 +946,8 @@ def _parting(spans: list[TextSpan], gap: float, size: float) -> list[TextSpan]:
     A core: where :data:`CORE_LINES` of their lines at least (by baseline, half ``size``) set ink, their words
     ``gap`` apart one run. A cell spanning columns hides the white between them, and a value centered across two
     sits in it -- its middle within half ``size`` of the white's -- : either would merge the columns or open one of
-    its own, as no line of the other rows does (a column of its own, set off center, keeps its own). Read
+    its own, as no line of the other rows does (a column of its own, set off center, keeps its own). A span is
+    judged by its runs of words ``gap`` apart: two values of one row set in one span stand each in its column. Read
     without them, they stand in the column they overlap most, else the nearest. All of them where fewer than two
     lines make a core.
     """
@@ -970,7 +977,7 @@ def _parting(spans: list[TextSpan], gap: float, size: float) -> list[TextSpan]:
             held == 0 and any(abs(middle - (a[1] + b[0]) / 2) <= size / 2 for a, b in itertools.pairwise(cores))
         )
 
-    kept = [s for s in spans if not across(s)]
+    kept = [part for s in spans for part in _gapped(s, gap) if not across(part)]
     return kept or spans
 
 
@@ -996,7 +1003,9 @@ class _Band:
     wraps: bool
 
     @classmethod
-    def of(cls, spans: list[TextSpan], columns: list[tuple[float, float]], size: float, *, ruled: bool) -> _Band:
+    def of(
+        cls, spans: list[TextSpan], columns: list[tuple[float, float]], size: float, *, ruled: bool, header: bool
+    ) -> _Band:
         cells: list[list[TextSpan]] = [[] for _ in columns]
         for s in spans:
             cells[_column(s.provenance.bbox, columns)].append(s)
@@ -1004,6 +1013,8 @@ class _Band:
         whole = [list(cell) for cell in lines]
         if max(len(cell) for cell in lines) <= 1:
             return cls([whole], whole, wraps=False)
+        if header and _wrapped_header(lines, size):
+            return cls([whole], whole, wraps=True)
         rows = _on_levels(lines, size)
         if rows is not None:
             return cls(rows, whole, wraps=False)
@@ -1027,6 +1038,30 @@ def _cell_lines(spans: list[TextSpan], size: float) -> list[list[TextSpan]]:
             joined[into] += line
             held[into] |= word
     return joined
+
+
+def _wrapped_header(lines: list[list[list[TextSpan]]], size: float) -> bool:
+    """Is a header band of these columns' ``lines`` one row whose cells wrap, not two header rows?
+
+    Its cells of two lines or more start on one level, the top (within a quarter ``size``), every other cell stands on
+    that level or centered on those cells' lines, and no line after a cell's first is a number alone. A two-level
+    header's sub-labels stand under its group label in a column that holds no line on the top level; a number never
+    wraps, so lines of numbers are rows of data set above the header's rule.
+    """
+    middles = [[_middle(line) for line in cell] for cell in lines]
+    wrapped = [cell for cell in middles if len(cell) > 1]
+    top = min(cell[0] for cell in wrapped)
+    center = (top + max(cell[-1] for cell in wrapped)) / 2
+    return (
+        all(abs(cell[0] - top) <= size / 4 for cell in wrapped)
+        and all(min(abs(cell[0] - top), abs(cell[0] - center)) <= size / 4 for cell in middles if len(cell) == 1)
+        and not any(_number(line) for cell in lines for line in cell[1:])
+    )
+
+
+def _number(spans: list[TextSpan]) -> bool:
+    """Is the line ``spans`` set a number alone (:data:`_NUMBER`)?"""
+    return bool(spans) and _NUMBER.fullmatch(spaced(Line(spans, '', UP).text).strip()) is not None
 
 
 def _staggered(lines: list[list[list[TextSpan]]], size: float) -> bool:
@@ -1118,11 +1153,8 @@ def _under_numbers(row: list[list[TextSpan]], above: _Row) -> bool:
 
     Under a number: the cell of ``above`` in that column ends in a line that is a number alone.
     """
-
-    def number(spans: list[TextSpan]) -> bool:
-        return bool(spans) and _NUMBER.fullmatch(spaced(Line(spans, '', UP).text).strip()) is not None
-
-    return sum(number(cell) and bool(lines) and number(lines[-1]) for cell, lines in zip(row, above, strict=True)) >= 2  # noqa: PLR2004
+    under = sum(_number(cell) and bool(lines) and _number(lines[-1]) for cell, lines in zip(row, above, strict=True))
+    return under >= 2  # noqa: PLR2004 -- two cells
 
 
 def _column(box: BBox, columns: list[tuple[float, float]]) -> int:
@@ -1173,6 +1205,17 @@ def _parted(span: TextSpan, columns: list[tuple[float, float]], gap: float) -> l
         and words[i].x0 >= columns[at[i]][0] - _ROUNDING
         and (words[i - 1].x1 <= columns[at[i - 1]][1] + _ROUNDING or words[i].x0 - words[i - 1].x1 >= gap)
     ]
+    return _cut(span, words, cuts)
+
+
+def _gapped(span: TextSpan, gap: float) -> list[TextSpan]:
+    """``span`` parted where the white between two of its words is ``gap`` wide: each part one run of its words."""
+    words = _words(span)
+    return _cut(span, words, [i for i in range(1, len(words)) if words[i].x0 - words[i - 1].x1 >= gap])
+
+
+def _cut(span: TextSpan, words: tuple[BBox, ...], cuts: list[int]) -> list[TextSpan]:
+    """``span`` parted before each of its words indexed by ``cuts`` (``words``: its words' boxes, word for word)."""
     if not cuts:
         return [span]
     texts = span.text.split()

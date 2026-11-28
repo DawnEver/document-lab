@@ -7,10 +7,10 @@
 //! ([`pdf::shape`]) placed by each glyph's text rendering matrix and filled, stroked or both as its render mode says
 //! (a Type 3 glyph by its procedure's own events), each mark clipped by the chain of clipping paths in force
 //! ([`clip`]: a text clip by its glyphs' outlines) and composited with its constant alpha, blend mode and soft mask,
-//! anti-aliased by `tiny-skia`. A fill, stroke or glyph in a pattern paints the pattern ([`paint`]: a shading
-//! pattern's colors, a tiling pattern's cell repeated), and `sh` paints a shading over the clip ([`shade`]). A
+//! anti-aliased by `tiny-skia`. A fill, stroke or glyph in a pattern paints the pattern (`paint`: a shading
+//! pattern's colors, a tiling pattern's cell repeated), and `sh` paints a shading over the clip (`shade`). A
 //! transparency group's marks are composited together, then their result onto what lies below, and a soft mask's
-//! group is drawn to give it ([`transparency`]). The pixel grid is the page's: pixel `(i, j)` covers page space `[i, i + 1] x [j, j + 1]` divided by
+//! group is drawn to give it (`transparency`). The pixel grid is the page's: pixel `(i, j)` covers page space `[i, i + 1] x [j, j + 1]` divided by
 //! the scale, and a region is drawn on the pixels it touches -- so a region's pixels are the whole page's there, but
 //! for the anti-aliasing of a curve's edge, which differs by a few coverage steps where the region's edge cuts it.
 //!
@@ -24,8 +24,8 @@
 //! are not drawn.
 //!
 //! Layers: [`codec`] (image codecs to samples) -> [`image`] (an image's samples to pixels), [`clip`] (clipping
-//! paths to masks) and [`shade`] (a shading's colors to pixels) -> this module (the page painted), [`paint`] (what a
-//! color paints with) and [`transparency`] (groups and soft masks). Apart from a page, [`specimen`] sets characters
+//! paths to masks) and `shade` (a shading's colors to pixels) -> this module (the page painted), `paint` (what a
+//! color paints with) and `transparency` (groups and soft masks). Apart from a page, [`specimen`] sets characters
 //! of a font program on their own.
 
 pub mod clip;

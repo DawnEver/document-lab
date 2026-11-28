@@ -9,7 +9,15 @@ import pytest
 
 from document_lab.numbers import bound
 from document_lab.pdf import read_pdf
-from document_lab.plot import JoinedMarkers, RasterPlot, UnreadFrame, UnrecognizedFrame, outline_text, plots
+from document_lab.plot import (
+    OUTLINE_LENGTH,
+    JoinedMarkers,
+    RasterPlot,
+    UnreadFrame,
+    UnrecognizedFrame,
+    outline_text,
+    plots,
+)
 from tests.synthetic import (
     BLUE,
     FRAME,
@@ -1141,3 +1149,40 @@ def test_markers_filled_in_the_color_under_them_are_read_only_when_asked(tmp_pat
     assert plot.markers == ()
     (shown,) = plots(page, include_in_background_color=True)
     assert sorted(len(m.x) for m in shown.markers) == [len(TRIANGLES), len(DOTS)]
+
+
+def test_a_stroke_drawn_as_its_filled_outline_is_read_as_the_stroke_along_its_centerline(tmp_path):
+    """IEEE-10012660 pp. 8, 11: every curve is the thin filled outline of its stroke -- four plots read no curve."""
+    xs = [float(x) for x in range(0, 101, 2)]
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([0, 50, 100]),
+        [(lambda x: 50 + 40 * math.sin(x / 9), xs, RED), (lambda x: 0.8 * x + 5, XS, BLUE)],
+        outline_width=0.6,
+    )
+    plot = _one_plot(tmp_path, spec)
+    wave, line = sorted(plot.curves, key=lambda c: c.stroke != RED)
+    assert (wave.stroke, line.stroke) == (RED, BLUE)  # its fill color is the stroke's
+    assert wave.width == pytest.approx(0.6, abs=0.03)  # points: the outline's width
+    assert wave.y == pytest.approx(50 + 40 * np.sin(wave.x / 9), abs=0.5)  # data units of y: on the centerline
+    assert line.y == pytest.approx(0.8 * line.x + 5, abs=0.3)  # data units of y
+    assert wave.x.min() == pytest.approx(0, abs=0.5) and wave.x.max() == pytest.approx(100, abs=0.5)  # end to end
+
+
+def test_a_filled_shape_that_outlines_no_stroke_is_no_curve(tmp_path):
+    """The planted wrong truth: a wedge and a band filled under a wavy edge are long and thin, but their sides part --
+    read as stroke outlines they would be curves the plot never draws. Only the stroked curve beside them is one."""
+    xs = [float(x) for x in range(0, 101, 2)]
+    band = [(x, 10 + 0.3 + 0.2 * math.sin(x / 8)) for x in xs] + [(100.0, 10.0), (0.0, 10.0)]
+    wedge = [(x, 80 + 0.04 * (x - 10)) for x in xs[5:46]] + [(x, 80 - 0.04 * (x - 10)) for x in xs[45:4:-1]]
+    spec = PlotSpec(
+        Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: 0.5 * x + 40, XS, RED)], fills=[(band, BLUE), (wedge, BLUE)]
+    )
+    for corners, _ in spec.fills:  # the premise: each is long and thin enough to be weighed as a stroke's outline
+        ring = np.array([to_page(spec, x, y) for x, y in corners])
+        after = np.roll(ring, -1, axis=0)
+        perimeter = np.hypot(*(after - ring).T).sum()
+        area = abs(np.sum(ring[:, 0] * after[:, 1] - after[:, 0] * ring[:, 1])) / 2
+        assert perimeter / 2 >= OUTLINE_LENGTH * (2 * area / perimeter)
+    (curve,) = _one_plot(tmp_path, spec).curves
+    assert curve.stroke == RED

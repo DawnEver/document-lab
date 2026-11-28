@@ -19,11 +19,15 @@ a break reads right, and an axis whose spacing is neither linear nor log10 maps 
 labeled ticks. Ticks whose values are not strictly monotone along the axis are refused (``ValueError``).
 
 Every stroked open polyline inside the frame (a polyline drawn past the frame is clipped to it) that is not a tick,
-a grid line or the frame is a curve, after fragments are joined: polylines of one style (stroke, width, dash
-array) whose ends meet (to ``JOIN_DIGITS`` decimals) become one, unless more than two ends of that style meet
-there (ambiguous, left unjoined). A short horizontal curve (at most ``SAMPLE_MAX`` long) with a text span starting
-within ``SAMPLE_GAP`` right of it, at its height, is a legend sample: it goes to ``Plot.legend`` with that text,
-not to ``Plot.curves``.
+a grid line or the frame is a curve -- and so is a stroke drawn as the thin filled OUTLINE of itself (a sheet
+exported with its strokes turned to fills): an unstroked fill, no rectangle and bigger than a glyph, at least
+``OUTLINE_LENGTH`` times as long as wide, whose two sides -- from one end, where its outline turns back on itself,
+to the other -- run parallel, one width apart (within ``PARALLEL``), is read as the stroke along their centerline,
+that width wide, in its fill color; a filled shape whose sides part (a wedge, an area under a curve) is none --
+after fragments are joined: polylines of one style (stroke, width, dash array) whose ends meet (to ``JOIN_DIGITS``
+decimals) become one, unless more than two ends of that style meet there (ambiguous, left unjoined). A short
+horizontal curve (at most ``SAMPLE_MAX`` long) with a text span starting within ``SAMPLE_GAP`` right of it, at its
+height, is a legend sample: it goes to ``Plot.legend`` with that text, not to ``Plot.curves``.
 
 A data point drawn as a TEXT glyph (one of ``MARK_GLYPHS``, a filled span of its own whose center is inside the
 frame) is a marker at the center of its glyph box. The reader boxes a glyph by its font's ascent and descent across
@@ -183,6 +187,13 @@ GRID_INK: Final = 0.9
 DARK_SHARE: Final = 0.25
 #: The share of the frame an image must cover for a curve-less plot to count as a raster plot.
 RASTER_COVER: Final = 0.25
+#: A filled outline is a stroke's when it is at least this many times as long (half its perimeter) as it is wide
+#: (twice its area over its perimeter): IEEE-10012660's curves are 300 to 1500 widths long, its circle markers 1.5.
+OUTLINE_LENGTH: Final = 10.0
+#: The two sides of a stroke's outline stand its width apart within this share of it, at the lower quartile and the
+#: median of their distances: IEEE-10012660's curves stand 0.92 to 1.0 widths apart there, a thin filled band under a
+#: curve 0.52 at its quartile (a sharp peak's inner side loops past the apex: the upper quantiles are no measure).
+PARALLEL: Final = 0.2
 
 
 class RasterPlot(ValueError):
@@ -1360,17 +1371,165 @@ def _misfit(pos: np.ndarray, target: np.ndarray) -> float:
 def _curve_paths(frame: BBox, paths: Sequence[VectorPath]) -> list[VectorPath]:
     """Stroked open paths inside the frame (clipped to it) that are no tick mark, grid line or frame edge.
 
+    A stroke drawn as its filled outline is the stroke it outlines (:func:`_outlined_strokes`).
     A grid line is whole (:func:`_is_rule`) or cut into pieces by the labels set over it (:func:`_cut_grid`).
     """
+    here = [p for p in paths if p.provenance.bbox is not None and _overlaps(p.provenance.bbox, frame)]
     pieces = [
         piece
-        for path in paths
+        for path in [*paths, *_outlined_strokes(here)]
         if path.stroke is not None and not path.closed and len(path.points) >= 2  # noqa: PLR2004
         for piece in _clipped(path, frame)
     ]
     straight = [(piece, rules[0]) for piece in pieces if len(piece.points) == 2 and (rules := _edges([piece]))]  # noqa: PLR2004
     rules = {id(piece) for piece, edge in straight if _is_rule(edge, frame)} | _cut_grid(frame, straight)
     return [piece for piece in pieces if id(piece) not in rules]
+
+
+def _outlined_strokes(paths: Sequence[VectorPath]) -> list[VectorPath]:
+    """Each stroke ``paths`` draw as its thin filled outline, as the stroked path it outlines (:func:`_stroke_of`).
+
+    Only an unstroked fill of one color, bigger than a glyph (:func:`_glyph_sized`): a letter's contour is a stroke's
+    outline too (a ``C``, an ``S``), and lettering set as outlines is never a curve, read as words or not. One running
+    straight (within its width of the line between its ends) is that line, its two ends: a frame's side, a grid line
+    or a tick drawn so is told as a stroked one is.
+    """
+    out = []
+    for path in paths:
+        box = path.provenance.bbox
+        if path.fill is None or path.stroke is not None or path.pattern is not None or box is None:
+            continue
+        if _glyph_sized(box):
+            continue
+        found = _stroke_of(path.points)
+        if found is not None:
+            center, width = found
+            chord = center[-1] - center[0]
+            rel = center - center[0]
+            off = np.abs(chord[0] * rel[:, 1] - chord[1] * rel[:, 0]) / max(float(np.hypot(*chord)), 1e-12)
+            if off.max() <= width:  # straight: its two ends, a rule's or a grid line's as a stroked one is
+                center = center[[0, -1]]
+            out.append(
+                VectorPath(
+                    _polyline(center),
+                    path.fill,
+                    width,
+                    (),
+                    closed=False,
+                    provenance=path.provenance.at(bbox=_points_box(center.tolist())),
+                    group=path.group,
+                )
+            )
+    return out
+
+
+def _overlaps(a: BBox, b: BBox) -> bool:
+    return a.x0 < b.x1 and b.x0 < a.x1 and a.y0 < b.y1 and b.y0 < a.y1
+
+
+def _stroke_of(points: np.ndarray) -> tuple[np.ndarray, float] | None:
+    """The centerline and width of the stroke a filled outline draws, or None when it outlines no stroke.
+
+    It is at least ``OUTLINE_LENGTH`` widths long, its width twice its area over its perimeter. Its ends are where it
+    turns back on itself -- where the outline two widths on either side comes within two widths across, the point of
+    each such stretch closest -- and of those the two whose sides run back together closest (the median distance
+    across at lengths out to a quarter of the perimeter) that part it into two sides, each a quarter of it at least.
+    The sides stand a width apart (within ``PARALLEL``) at the lower quartile and the median of the distances from
+    each point along either (every half width) to the other. The centerline runs through the middle between each
+    vertex of a side and its nearest point on the other where they stand within ``PARALLEL`` of a width apart (a sharp
+    peak's inner side loops past the apex), in order along the first side; its width is their median distance.
+    """
+    ring = np.asarray(points, dtype=np.float64)
+    if len(ring) > 1 and np.allclose(ring[0], ring[-1]):
+        ring = ring[:-1]
+    n = len(ring)
+    if n < 5:  # noqa: PLR2004 -- a rectangle is a rule (:func:`_edges`), a triangle a wedge
+        return None
+    after = np.roll(ring, -1, axis=0)
+    steps = np.hypot(*(after - ring).T)
+    perimeter = float(steps.sum())
+    area = abs(float(np.sum(ring[:, 0] * after[:, 1] - after[:, 0] * ring[:, 1]))) / 2
+    width = 2 * area / perimeter if perimeter else 0.0
+    if width <= 0 or perimeter / 2 < OUTLINE_LENGTH * width:
+        return None
+    s = np.concatenate(([0.0], np.cumsum(steps)))
+    xs, ys = np.append(ring[:, 0], ring[0, 0]), np.append(ring[:, 1], ring[0, 1])
+
+    def at(t: np.ndarray) -> np.ndarray:
+        t = np.mod(t, perimeter)
+        return np.stack((np.interp(t, s, xs), np.interp(t, s, ys)), axis=1)
+
+    ends = _turns(np.hypot(*(at(s[:-1] - 2 * width) - at(s[:-1] + 2 * width)).T), s, 2 * width)
+    reach = np.linspace(2 * width, perimeter / 4, 64)
+    back = {i: float(np.median(np.hypot(*(at(s[i] - reach) - at(s[i] + reach)).T))) for i in ends}
+    pairs = sorted((back[i] + back[j], *sorted((i, j))) for x, i in enumerate(ends) for j in ends[x + 1 :])
+    pick = next(((i, j) for _, i, j in pairs if min(s[j] - s[i], perimeter - s[j] + s[i]) >= perimeter / 4), None)
+    if pick is None:
+        return None
+    i, j = pick
+    one, other = ring[i : j + 1], np.concatenate((ring[j:], ring[: i + 1]))[::-1]
+    apart = np.concatenate((_nearest(_dense(one, width / 2), other)[0], _nearest(_dense(other, width / 2), one)[0]))
+    low, mid = np.quantile(apart, (0.25, 0.5))
+    if low < (1 - PARALLEL) * width or mid > (1 + PARALLEL) * width:
+        return None
+    d, near, _ = _nearest(one, other)
+    back_d, back_near, back_along = _nearest(other, one)
+    middles = np.vstack(((one + near) / 2, (other + back_near) / 2))
+    order = np.concatenate((np.arange(len(one), dtype=np.float64), back_along))
+    kept = np.concatenate((d, back_d)) <= (1 + PARALLEL) * width
+    center = middles[kept][np.argsort(order[kept], kind='stable')]
+    return (center, float(mid)) if len(center) >= 2 else None  # noqa: PLR2004 -- a line
+
+
+def _turns(across: np.ndarray, at: np.ndarray, near: float) -> list[int]:
+    """Where an outline turns back on itself, from each vertex's distance ``across`` it and where it stands ``at``.
+
+    ``at``: each vertex's length along the outline, then the whole length. Of each run of vertices whose distance
+    across is ``near`` at most -- each within twice ``near`` along of the one before (two ends a long side apart are
+    two runs) -- the one of least; none when no vertex or every vertex is.
+    """
+    folded = across <= near
+    if folded.all() or not folded.any():
+        return []
+    ends: list[int] = []
+    run: list[int] = []
+    for k in np.roll(np.arange(len(across)), -int(np.argmin(folded))).tolist():
+        if run and (not folded[k] or (at[k] - at[run[-1]]) % at[-1] > 2 * near):
+            ends.append(min(run, key=lambda i: across[i]))
+            run = []
+        if folded[k]:
+            run.append(k)
+    if run:
+        ends.append(min(run, key=lambda i: across[i]))
+    return ends
+
+
+def _dense(points: np.ndarray, step: float) -> np.ndarray:
+    """Points along the polyline ``points`` every ``step`` of its length, from its start."""
+    s = np.concatenate(([0.0], np.cumsum(np.hypot(*np.diff(points, axis=0).T))))
+    t = np.arange(0.0, s[-1] + step / 2, step)
+    return np.stack((np.interp(t, s, points[:, 0]), np.interp(t, s, points[:, 1])), axis=1)
+
+
+def _nearest(points: np.ndarray, line: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Each of ``points``' distance to the polyline ``line``, its nearest point there, and where that stands along it.
+
+    Where: its segment's index plus the fraction along it.
+    """
+    start, step = line[:-1], np.diff(line, axis=0)
+    length = np.maximum((step**2).sum(axis=1), 1e-12)
+    distance, nearest, along = [], [], []
+    for chunk in range(0, len(points), 512):  # a chunk of points against every segment: bounded memory
+        p = points[chunk : chunk + 512]
+        t = np.clip(((p[:, None] - start[None]) * step[None]).sum(axis=2) / length[None], 0.0, 1.0)
+        foot = start[None] + t[..., None] * step[None]
+        gap = np.hypot(*(p[:, None] - foot).transpose(2, 0, 1))
+        k = gap.argmin(axis=1)
+        rows = np.arange(len(p))
+        distance.append(gap[rows, k])
+        nearest.append(foot[rows, k])
+        along.append(k + t[rows, k])
+    return np.concatenate(distance), np.vstack(nearest), np.concatenate(along)
 
 
 def _cut_grid(frame: BBox, straight: Sequence[tuple[VectorPath, _Edge]]) -> set[int]:

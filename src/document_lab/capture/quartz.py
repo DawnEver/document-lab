@@ -347,6 +347,19 @@ def problem(*, sends_input: bool) -> str | None:
     return None
 
 
+def _no_picture(what: str) -> str:
+    """Why macOS gave no picture of ``what``: Screen Recording not granted, or ``what`` not drawn (yet) or gone.
+
+    Granted, the permission is no cause, and naming it would send the user to a setting that changes nothing.
+    """
+    if not _cg().CGPreflightScreenCaptureAccess():
+        return f'macOS gave no picture of {what}: {_SCREEN_RECORDING}'
+    return (
+        f'macOS gave no picture of {what}, though Screen Recording is granted: the window server holds none for it '
+        '(not drawn yet, or closed)'
+    )
+
+
 def client(window: Window) -> Region:
     """``window``'s content area in points: what the program draws and macOS shows untouched.
 
@@ -369,8 +382,7 @@ def _bottom(handle: int, frame: Region) -> int:
     rect = _Rect(_Point(frame.left, frame.top + frame.height - rows), _Size(frame.width, rows))
     image = _cg().CGWindowListCreateImage(rect, _INCLUDING_WINDOW, handle, _NOMINAL_RESOLUTION)
     if not image:
-        msg = f'macOS gave no picture of window {handle}: {_SCREEN_RECORDING}'
-        raise OSError(msg)
+        raise OSError(_no_picture(f'window {handle}'))
     try:
         return _corner_rows(_pixels(image, frame.width, rows, _srgb(), alpha=True)[..., 3])
     finally:
@@ -505,8 +517,7 @@ def _image(target: Window | Region) -> tuple[int, Region]:
     else:
         image = _cg().CGWindowListCreateImage(rect, _ON_SCREEN_ONLY, 0, _NOMINAL_RESOLUTION)
     if not image:
-        msg = f'macOS gave no picture of {target}: {_SCREEN_RECORDING}'
-        raise OSError(msg)
+        raise OSError(_no_picture(str(target)))
     return image, shown
 
 

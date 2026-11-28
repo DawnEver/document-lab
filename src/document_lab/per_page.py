@@ -56,7 +56,7 @@ from document_lab.ir import BBox
 from document_lab.markdown import Headings, headings, page_markdowns
 from document_lab.markdown import table as markdown_table
 from document_lab.pdf import read_pdf, read_raster
-from document_lab.regions import Region, Unnumbered, regions
+from document_lab.regions import Region, Unnumbered, captions_and_prose, regions
 from document_lab.tables import tables
 
 if TYPE_CHECKING:
@@ -117,9 +117,13 @@ def _picture(pdf: Path, page: Page) -> tuple[np.ndarray, float]:
     return pixels, pixels.shape[1] / page.width
 
 
-def _tables(page: Page, pixels: np.ndarray, scale: float) -> tuple[Table, ...]:
-    """The page's ruled tables; a scan's from the rules in its pixels (`document_lab.ink.rulings`)."""
-    return tables(page, rulings=rulings(pixels, scale) if _scanned(page) else None)
+def _tables(page: Page, pixels: np.ndarray, scale: float, body: float) -> tuple[Table, ...]:
+    """The page's ruled tables; a scan's from the rules in its pixels (`document_lab.ink.rulings`).
+
+    Its captions and prose (`document_lab.regions.captions_and_prose`, ``body`` their size) are no stack's cells.
+    """
+    told = captions_and_prose(page, body)
+    return tables(page, rulings=rulings(pixels, scale) if _scanned(page) else None, told=told)
 
 
 def _covers(box: BBox | None, page: BBox) -> bool:
@@ -359,7 +363,7 @@ def write_pages(
     for page in read.pages:
         pixels, scale = _picture(pdf, page)
         drawn.append(_drawings(pixels, scale, page, body))
-        ruled.append(_tables(page, pixels, scale))
+        ruled.append(_tables(page, pixels, scale, body))
     drawn = _without_furniture(drawn, body)
     shown = {'include_hidden': include_hidden, 'include_in_background_color': include_in_background_color}
     compared = compare(read, drawn, **shown)

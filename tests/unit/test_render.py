@@ -533,6 +533,48 @@ def test_a_stencil_sampled_by_exact_arithmetic_is_reported():
     assert not agrees(*disagreement(drawn, planted))
 
 
+#: A magnified image's samples (O64): a ramp of grays crossed by black rules, the scanned page's (BS EN 60034-30-1
+#: p21: 1980 x 2800 samples on 1485 x 2100 points, 1.5625 pixels a sample at 150 dpi) scale, filling the page's height.
+MAGNIFIED_DPI = 600
+MAGNIFIED = np.add.outer(np.arange(200) * 3, np.arange(256) * 5).astype(np.uint8)
+MAGNIFIED[3::7, :] = 0
+MAGNIFIED[:, 3::7] = 0
+
+
+def _magnified_page() -> bytes:
+    rows, columns = MAGNIFIED.shape
+    entries = f'/Width {columns} /Height {rows} /ColorSpace /DeviceGray /BitsPerComponent 8'
+    width, height = (n * 1.5625 * 72 / 150 for n in (columns, rows))
+    return page_pdf(f'q {width} 0 0 {height} 0 0 cm /Im1 Do Q', {'Im1': _image(entries, MAGNIFIED.tobytes())})
+
+
+def _exactly_interpolated(shape: tuple[int, ...]) -> np.ndarray:
+    """The planted wrong interpolation: each pixel bilinear between the samples around its center by exact
+    arithmetic, rounded -- where MuPDF steps in truncated 14-bit fixed point and shifts each product down."""
+    rows, columns = MAGNIFIED.shape
+    scale = 1.5625 * MAGNIFIED_DPI / 150
+    v = (np.arange(int(rows * scale)) + 0.5) / scale - 0.5
+    u = (np.arange(int(columns * scale)) + 0.5) / scale - 0.5
+    v0, u0 = np.floor(v).astype(int), np.floor(u).astype(int)
+    fv, fu = (v - v0)[:, None], (u - u0)[None, :]
+    at = lambda r, c: MAGNIFIED[np.clip(r, 0, rows - 1)][:, np.clip(c, 0, columns - 1)].astype(float)  # noqa: E731
+    top = at(v0, u0) * (1 - fu) + at(v0, u0 + 1) * fu
+    bottom = at(v0 + 1, u0) * (1 - fu) + at(v0 + 1, u0 + 1) * fu
+    out = np.full(shape, 255, dtype=np.uint8)
+    out[shape[0] - len(v) :, : len(u)] = np.round(top * (1 - fv) + bottom * fv).astype(np.uint8)[..., None]
+    return out
+
+
+def test_a_magnified_image_is_interpolated_where_mupdf_s_lerp_painter_steps():
+    # O64: tiny-skia's interpolation put a rule a row off where MuPDF's fixed-point steps fall on a sample's edge.
+    data = _magnified_page()
+    drawn, undrawn = own(data, MAGNIFIED_DPI)
+    assert undrawn == {}
+    assert np.array_equal(drawn, reference(data, MAGNIFIED_DPI))
+    # The planted exact interpolation differs from it, pixel for pixel.
+    assert int((_exactly_interpolated(drawn.shape) != drawn).any(axis=2).sum()) > 0
+
+
 #: A soft mask that does not read (its /S neither Luminosity nor Alpha): the interpreter skips the `gs` setting it.
 UNREAD_MASK = '/ExtGState << /M << /SMask << /S /Opacity /G {G} >> >> >>'
 MASK_FORM = ('<< /Type /XObject /Subtype /Form /BBox [0 0 200 150] /Group << /S /Transparency >> >>', b'0 0 1 1 re f')

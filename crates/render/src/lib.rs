@@ -696,8 +696,9 @@ impl<'a> Canvas<'a> {
         self.placed(event, decoded, &pixels, mask.as_deref());
     }
 
-    /// The image `event` places, `decoded`, drawn as `pixels` says through `mask` (its clip and soft mask): nearest,
-    /// sampled as `MuPDF` samples it ([`image::sampled`]), or interpolated by `tiny-skia`; a stencil mask painting a
+    /// The image `event` places, `decoded`, drawn as `pixels` says through `mask` (its clip and soft mask): square to
+    /// the page, sampled -- nearest or interpolated -- as `MuPDF` samples it ([`image::sampled`]), else interpolated
+    /// by `tiny-skia`; a stencil mask painting a
     /// pattern as its coverage, the pattern painted through it.
     fn placed(
         &mut self,
@@ -713,12 +714,14 @@ impl<'a> Canvas<'a> {
         let blend = blend_mode(compositing.blend);
         #[expect(clippy::cast_possible_truncation, reason = "an alpha")]
         let opacity = compositing.fill_alpha as f32;
-        // Drawn nearest, its pixels sampled as MuPDF samples them; else interpolated by tiny-skia.
-        let nearest = if pixels.smooth {
+        // Square to the page, its pixels sampled as MuPDF samples them; turned or skewed, interpolated by tiny-skia.
+        let nearest = if pixels.smooth && !pixels.grid_fitted {
             None
         } else {
             let scissor = clip::scissor(event.clip.as_ref(), &self.grid);
-            let Some(nearest) = image::sampled(pixmap, pixels.unit, &self.grid, scissor) else {
+            let Some(nearest) =
+                image::sampled(pixmap, pixels.unit, &self.grid, scissor, pixels.smooth)
+            else {
                 return;
             };
             Some(nearest)

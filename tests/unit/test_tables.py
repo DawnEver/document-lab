@@ -798,6 +798,65 @@ def _captioned_booktabs(page, *, in_body=False):
     _booktabs(page, rows, rules=(0, 1 if in_body else 2, len(rows)))
 
 
+def test_two_values_of_one_row_read_as_one_span_part_into_their_columns_though_it_overlaps_both(tmp_path):
+    """W3024740006 p9: one row's two values set closer than the reader's word break are one span over both columns'
+    cores; left out of parting as a spanning cell, it kept its values in one cell. Its words a column gap apart, it
+    parts into its runs, each in its column; a spanning cell's words, a word space apart, still part none."""
+    rows = (('Parameter', 'Min', 'Max'), *((f'row {k}', f'{k}.25', f'{k}.50') for k in range(1, 7)))
+
+    def draw(page):
+        for y in (400, 420, 420 + 20 * len(rows)):
+            page.draw_rect(pymupdf.Rect(72, y - 0.4, 432, y + 0.4), color=None, fill=(0, 0, 0))
+        for r, (name, low, high) in enumerate(rows):
+            y = 414 + (r and 20 * r + 6)
+            apart = 0.7 if r == 3 else 1.5  # one row's values a gap under a text size: one span
+            page.insert_text((76, y), name, fontname='helv', fontsize=9)
+            page.insert_text((240 - pymupdf.get_text_length(low, 'helv', 9), y), low, fontname='helv', fontsize=9)
+            page.insert_text((240 + apart * 9, y), high, fontname='helv', fontsize=9)
+
+    page = _page(tmp_path, draw)
+    assert '3.25 3.50' in {s.text for s in page.spans}  # the reader joined them
+    (table,) = tables(page)
+    assert _cell_differences(table, rows) == []
+    joined = tuple((a, f'{b} {c}') if a == 'row 3' else (a, b, c) for a, b, c in rows)
+    assert _cell_differences(table, joined)  # a planted wrong truth: the row's two values in one cell
+
+
+def _headed(header):
+    """Booktabs over three columns: ``header`` (lines of (column, text, line index or ``0.5`` for centered)) above
+    its rule, then six rows of numbers."""
+
+    def draw(page):
+        for y in (400, 432, 432 + 20 * 6):
+            page.draw_rect(pymupdf.Rect(72, y - 0.4, 432, y + 0.4), color=None, fill=(0, 0, 0))
+        for column, text, line in header:
+            page.insert_text((76 + 120 * column, 412 + 11 * line), text, fontname='helv', fontsize=9)
+        for r in range(1, 7):
+            for column in range(3):
+                page.insert_text((76 + 120 * column, 432 + 20 * r - 6), f'{r}.{column}', fontname='helv', fontsize=9)
+
+    return draw
+
+
+BODY = tuple((f'{r}.0', f'{r}.1', f'{r}.2') for r in range(1, 7))
+
+
+def test_a_header_cell_wrapped_top_aligned_or_centered_beside_its_wrapped_neighbors_is_one_header_row(tmp_path):
+    """W3024740006 p2, 1-s2.0-S2215098626002211 p4: a header cell wrapped onto a second line beside one-line cells set
+    on its top line (or centered on its lines, dca13 p9) read as two header rows. A two-level header -- a sub-label
+    under a column with no line on top -- and numbers above the header's rule stay rows of their own."""
+    top = _page(tmp_path, _headed([(0, 'Rated', 0), (0, 'power', 1), (1, 'Speed', 0), (2, 'Mass', 0)]))
+    (table,) = tables(top)
+    assert table.rows == (('Rated power', 'Speed', 'Mass'), *BODY)
+    assert table.rows[:2] != (('Rated', 'Speed', 'Mass'), ('power', '', ''))  # a planted wrong truth: two rows
+    centered = _page(tmp_path, _headed([(0, 'Rated', 0), (0, 'power', 1), (1, 'Speed', 0.5), (2, 'Mass', 0.5)]))
+    assert tables(centered)[0].rows[0] == ('Rated power', 'Speed', 'Mass')
+    group = _page(tmp_path, _headed([(0, 'Case', 0), (0, 'no.', 1), (1, 'Loss', 0), (1, 'iron', 1), (2, 'copper', 1)]))
+    assert tables(group)[0].rows[:2] == (('Case', 'Loss', ''), ('no.', 'iron', 'copper'))
+    numbers = _page(tmp_path, _headed([(0, 'Rated', 0), (0, 'Rated', 1), (1, '400', 0), (1, '192', 1)]))
+    assert len(tables(numbers)[0].rows) == 8  # two rows of data above the rule, then six
+
+
 def test_a_caption_regions_tell_in_a_stacks_header_band_is_no_row_and_in_its_body_no_table(tmp_path):
     """W3213764655 p9: a caption, or prose, within a stack's rules was read as its row. Regions tell captions and prose
     (`document_lab.regions.captions_and_prose`) and hand their boxes to tables, which never tell them."""

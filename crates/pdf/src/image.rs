@@ -108,7 +108,7 @@ impl Samples {
         match self.space.as_ref()? {
             Space::Gray => Some(levels.iter().flat_map(|&g| [g; 3]).collect()),
             Space::Rgb => Some(levels),
-            Space::Icc(icc) => icc.profile.as_ref().ok()?.rgb8(&levels, self.intent).ok(),
+            Space::Icc(icc, _) => icc.profile.as_ref().ok()?.rgb8(&levels, self.intent).ok(),
             _ => None,
         }
     }
@@ -134,10 +134,10 @@ pub fn jpx_space(data: &[u8]) -> Result<Space> {
         ColorSpace::Icc {
             profile,
             num_channels,
-        } => Space::Icc(Rc::new(Icc::read(
-            profile,
-            Some(usize::from(*num_channels)),
-        ))),
+        } => Space::Icc(
+            Rc::new(Icc::read(profile, Some(usize::from(*num_channels)))),
+            None,
+        ),
         ColorSpace::Unknown { num_channels } => {
             return Err(Error::unsupported(format!(
                 "JPXDecode image of {num_channels} components in a color space neither its dictionary nor its \

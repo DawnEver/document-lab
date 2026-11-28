@@ -12,7 +12,8 @@
 //! samples is first shrunk to its drawn size by averaging the samples each pixel covers; one drawn larger, or turned
 //! or skewed, is interpolated (bilinear) -- but magnified more than twice it shows each sample as a block (nearest),
 //! unless it asks to be interpolated (`/Interpolate true`). Drawn nearest, an image -- a stencil mask alike -- is
-//! sampled as `MuPDF`'s painter samples it, in truncated fixed-point steps (`sampled`).
+//! sampled as `MuPDF`'s painter samples it, in truncated fixed-point steps (`sampled`); interpolated square to the
+//! page, in the same steps, as its lerp painter interpolates (`bilerp`); turned or skewed, by `tiny-skia`.
 
 use std::collections::HashMap;
 
@@ -158,21 +159,23 @@ pub fn place(decoded: &Decoded, to_pixels: Matrix) -> Result<Pixels, String> {
     })
 }
 
-/// The pixels `source` paints drawn nearest through `unit` (its unit square, y up, to the canvas of `grid`) within
+/// The pixels `source` paints through `unit` (its unit square, y up, to the canvas of `grid`) within
 /// `scissor` (device space: the page's pixels, [`crate::clip::scissor`]), sampled as `MuPDF`'s affine painter samples
 /// them (measured 2026-11-27, `fz_paint_image_imp`): in device space, in single precision, the inverse matrix scaled
 /// to 14-bit fixed point and each step truncated; the first pixel's position -- the scissor's first within the
 /// image's box -- taken at its center, every other one stepped from it. So a sample's edge near a pixel's center falls
 /// where those truncated steps put it, a fraction of a pixel from where exact sampling would (6 samples over 241
 /// pixels: the third edge, 122.33 rows down exactly, a row lower), images and stencil masks alike. Each canvas pixel
-/// the source covers is its sample, whole (no anti-aliased edge); None when none is covered. The second value: the
-/// canvas pixel of its top-left corner.
+/// the source covers is its sample, whole (no anti-aliased edge) -- or, when `lerp`, the four samples around its
+/// position interpolated as `MuPDF`'s lerp painter does ([`bilerp`]); None when none is covered. The second value:
+/// the canvas pixel of its top-left corner.
 #[must_use]
 pub(crate) fn sampled(
     source: PixmapRef,
     unit: Matrix,
     grid: &Grid,
     scissor: Rect,
+    lerp: bool,
 ) -> Option<(Pixmap, (i32, i32))> {
     // MuPDF's matrix: the unit square, its top row first, to device space.
     let device = Matrix([1.0, 0.0, 0.0, -1.0, 0.0, 1.0])
@@ -200,7 +203,16 @@ pub(crate) fn sampled(
         for pixel in row {
             let (column, line) = (u >> Stepping::PREC, v >> Stepping::PREC);
             if (0..columns).contains(&column) && (0..rows).contains(&line) {
-                *pixel = pixels[usize::try_from(line * columns + column).ok()?];
+                *pixel = if lerp {
+                    bilerp(
+                        pixels,
+                        (columns, rows),
+                        u - Stepping::HALF,
+                        v - Stepping::HALF,
+                    )?
+                } else {
+                    pixels[usize::try_from(line * columns + column).ok()?]
+                };
             }
             u += steps.across[0];
             v += steps.across[1];
@@ -230,6 +242,7 @@ struct Stepping {
 
 impl Stepping {
     const PREC: u32 = 14;
+    const HALF: i64 = 1 << (Self::PREC - 1);
 
     /// The stepping through an image of `size` samples placed by `device` (its unit square, top row first, to device
     /// space) within `scissor` (device space); None when it paints no pixel or cannot be inverted.
@@ -281,6 +294,41 @@ impl Stepping {
             down: [iyx as i64, iyy as i64],
         })
     }
+}
+
+/// The sample at fixed-point position (`u`, `v`) -- half a sample back from the pixel's own -- interpolated between
+/// the four around it as `MuPDF`'s lerp painter does (`bilerp`): each weight the position's 14-bit fraction, each
+/// product shifted down, a sample past an edge its edge's.
+#[expect(
+    clippy::many_single_char_names,
+    reason = "a bilinear interpolation's terms"
+)]
+fn bilerp(
+    pixels: &[tiny_skia::PremultipliedColorU8],
+    (columns, rows): (i64, i64),
+    u: i64,
+    v: i64,
+) -> Option<tiny_skia::PremultipliedColorU8> {
+    let mask = (1 << Stepping::PREC) - 1;
+    let (column, line, across, down) =
+        (u >> Stepping::PREC, v >> Stepping::PREC, u & mask, v & mask);
+    let at = |c: i64, l: i64| {
+        let (c, l) = (c.clamp(0, columns - 1), l.clamp(0, rows - 1));
+        let p = pixels[usize::try_from(l * columns + c).unwrap_or(0)];
+        [p.red(), p.green(), p.blue(), p.alpha()].map(i64::from)
+    };
+    let (a, b, c, d) = (
+        at(column, line),
+        at(column + 1, line),
+        at(column, line + 1),
+        at(column + 1, line + 1),
+    );
+    let lerp = |x: i64, y: i64, t: i64| x + (((y - x) * t) >> Stepping::PREC);
+    let [r, g, b, alpha] = std::array::from_fn(|k| {
+        let (top, bottom) = (lerp(a[k], b[k], across), lerp(c[k], d[k], across));
+        u8::try_from(lerp(top, bottom, down)).unwrap_or(u8::MAX)
+    });
+    tiny_skia::PremultipliedColorU8::from_rgba(r, g, b, alpha)
 }
 
 /// Whether an image whose pixels are drawn `across` x `down` canvas pixels each is interpolated (see the module).

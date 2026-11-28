@@ -9,6 +9,7 @@ from document_lab.extract import Field, Schema, from_columns, from_rows
 from document_lab.ink import Rulings, rulings
 from document_lab.ir import BBox, Page
 from document_lab.pdf import read_pdf
+from document_lab.regions import captions_and_prose
 from document_lab.tables import NotATable, grids, tables
 from tests.synthetic import (
     BANDED_ROWS,
@@ -747,3 +748,105 @@ def test_a_table_stating_no_word_space_parts_its_columns_at_column_gap(tmp_path)
     (table,) = tables(_page(tmp_path, _close_columns(rows, apart=0.42, font='tiro')))
     assert _cell_differences(table, tuple((row[0], f'{row[1]} {row[2]}') for row in rows)) == []
     assert _cell_differences(table, rows)  # a planted wrong truth: the columns parted without a measure
+
+
+#: Six body rows of three columns: a column's core is a fifth of a table's lines at least (CORE_LINES), so the one
+#: line that inks the white between two columns -- a cell spanning them, a value centered across them -- is none.
+SPAN_HEADER = ('Ref.', 'Objective', 'Constraints')
+SPAN_BODY = tuple((f'[{k}]', f'goal {k}', f'limit {k}') for k in range(1, 6))
+
+
+def test_a_body_cell_spanning_two_columns_parts_neither_and_stands_in_the_one_it_overlaps_most(tmp_path):
+    """IEEE-11348106 p7: a cell set across Objective and Constraints hid the white between them; the two columns read
+    as one. Read without it, the columns stand apart and it in the column it overlaps most."""
+    wide = 'Maximize the torque with no constraint'  # 9 pt Helvetica: ~165 points, into the next column
+    rows = (SPAN_HEADER, *SPAN_BODY, ('[6]', wide, ''))
+    (table,) = tables(_page(tmp_path, lambda p: _booktabs(p, rows)))
+    assert _cell_differences(table, rows) == []
+    merged = tuple((a, f'{b} {c}'.strip()) for a, b, c in rows)
+    assert _cell_differences(table, merged)  # a planted wrong truth: the two columns run together
+
+
+def test_a_value_centered_across_two_columns_opens_no_column_but_a_column_set_off_center_keeps_its_own(tmp_path):
+    """W2947585286 p3: one value centered across two columns (the same for both) opened a column of its own in their
+    white. A sub-row label set off center, in a column of its own on two lines, is a column still."""
+
+    def draw(page):
+        rect = _booktabs(page, (SPAN_HEADER, *SPAN_BODY, ('[6]', '', '')))
+        ends = max(pymupdf.get_text_length(goal, fontname='helv', fontsize=9) for _, goal, _ in SPAN_BODY)
+        white = (rect.x0 + 124 + ends + rect.x0 + 244) / 2  # between the goals' ends and the limits' starts
+        value = pymupdf.get_text_length('1.26', fontname='helv', fontsize=9)
+        page.insert_text((white - value / 2, rect.y1 - 6), '1.26', fontname='helv', fontsize=9)
+
+    (table,) = tables(_page(tmp_path, draw))
+    assert [len(row) for row in table.rows] == [3] * 7  # a planted wrong truth: four columns, one for '1.26' alone
+    assert '1.26' in table.rows[6][1:]
+
+    def labels(page):
+        rect = _booktabs(page, (SPAN_HEADER, *SPAN_BODY, ('[6]', 'goal 6', 'limit 6')))
+        for k in (1, 2):
+            page.insert_text((rect.x0 + 60, rect.y0 + (k + 1) * 20 - 6), 'RMS', fontname='helv', fontsize=9)
+
+    (kept,) = tables(_page(tmp_path, labels))
+    assert [len(row) for row in kept.rows] == [4] * 7  # its own column, though two lines of seven ink it
+
+
+def _captioned_booktabs(page, *, in_body=False):
+    """A table whose top rule stands above its caption: a continued table's header band holds ``Table 3. Cont.``."""
+    caption = ('Table 3. Continued from the previous page', '', '')
+    rows = (*TABLE_ROWS[:1], *TABLE_ROWS[1:2], caption, *TABLE_ROWS[2:]) if in_body else (caption, *TABLE_ROWS)
+    _booktabs(page, rows, rules=(0, 1 if in_body else 2, len(rows)))
+
+
+def test_a_caption_regions_tell_in_a_stacks_header_band_is_no_row_and_in_its_body_no_table(tmp_path):
+    """W3213764655 p9: a caption, or prose, within a stack's rules was read as its row. Regions tell captions and prose
+    (`document_lab.regions.captions_and_prose`) and hand their boxes to tables, which never tell them."""
+    page = _page(tmp_path, _captioned_booktabs)
+    (table,) = tables(page, told=captions_and_prose(page, 9.0))
+    assert table.rows == TABLE_ROWS
+    # the planted wrong truth: without regions' boxes the caption is text of the stack, which reads it as no table
+    assert [t.rows for t in tables(page)] != [TABLE_ROWS]
+    body = _page(tmp_path, lambda p: _captioned_booktabs(p, in_body=True))
+    (refused,) = grids(body, told=captions_and_prose(body, 9.0))
+    assert isinstance(refused, NotATable)
+    assert 'a caption stands in its body' in refused.reason
+
+
+def _justified(words, x0, starts, size=9):
+    """Where each of ``words`` starts, set a span a word from ``x0``, the word space (5 to 9 points, under a text size:
+    one line) chosen so that a word starts at each of ``starts`` or just after (within 8 points: inside its column)."""
+    widths = [pymupdf.get_text_length(w, fontname='helv', fontsize=size) for w in words]
+    for tenth in range(50, 90):
+        at = [x0 + sum(widths[:k]) + k * tenth / 10 for k in range(len(words))]
+        if all(any(0 <= x - start <= 8 for x in at) for start in starts):
+            return at
+    msg = 'no word space sets a word at each start'
+    raise AssertionError(msg)
+
+
+def test_prose_regions_tell_within_a_stacks_rules_makes_it_no_table(tmp_path):
+    """W3213764655 p9: rules of one extent ran from a table's foot past a paragraph to the next table's header rule:
+    the paragraph, its words parted at the table's columns, was read as the header of a table. Prose within a stack's
+    rules -- across half its width at least -- makes that run of rules none; the table under its own rules is read
+    alone."""
+    words = ['the', 'rated', 'output', 'of', 'every', 'machine', 'here', 'is', 'so', 'at', 'its', 'shaft']
+    rows = (
+        ('Quantity', 'Value', 'Unit'),
+        ('stator-winding-resistance', '0.125-ohm-per-phase-in-all', 'ohm-per-phase-winding'),
+        ('magnetizing-inductance-d', '4.5-millihenry-for-each-d', 'henry-per-phase-winding'),
+        ('permanent-magnet-flux-link', '0.11-weber-for-each-phase', 'weber-per-phase-winding'),
+    )  # cells across most of their columns, as a dense table's are: a word of a line set across them parts there
+
+    def draw(page):
+        rect = _booktabs(page, rows)
+        page.draw_rect(pymupdf.Rect(rect.x0, rect.y0 - 40, rect.x1, rect.y0 - 39.6), color=None, fill=(0, 0, 0))
+        starts = [rect.x0 + 4 + c * 120 for c in range(3)]  # the columns' text starts (TABLE_CELL)
+        for word, x in zip(words, _justified(words, starts[0], starts), strict=True):
+            page.insert_text((x, rect.y0 - 14), word, fontname='helv', fontsize=9)
+
+    page = _page(tmp_path, draw)
+    told = captions_and_prose(page, 9.0)
+    assert told.prose  # the premise: regions tell the paragraph as prose
+    assert [t.rows for t in tables(page, told=told)] == [rows]
+    # the planted wrong truth: unaided, the paragraph heads the table
+    assert [t.rows for t in tables(page)] != [rows]

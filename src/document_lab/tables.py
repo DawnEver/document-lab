@@ -55,6 +55,7 @@ read by :func:`aligned` where a caller knows where it stands (`document_lab.regi
 from __future__ import annotations
 
 import dataclasses
+import functools
 import itertools
 import math
 import re
@@ -62,7 +63,7 @@ import statistics
 from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, NamedTuple
 
 import numpy as np
 
@@ -77,6 +78,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     'COLUMN_GAP',
+    'NO_TOLD',
     'SHORT_CELL',
     'STACK_LENGTH',
     'STACK_RULES',
@@ -86,6 +88,7 @@ __all__ = [
     'WORD_INK',
     'WORD_SPACES',
     'NotATable',
+    'Told',
     'aligned',
     'grids',
     'level_rules',
@@ -119,6 +122,9 @@ COLUMN_GAP: Final = 0.5
 #: stands 1.1 of it at most, the closest columns 2.07.
 WORD_SPACES: Final = 1.5
 #: Level rules of one extent, at least this many stacked and none down, rule a table by its rows (booktabs)...
+#: A column's core is where at least this share of a table's lines set ink: a cell spanning two columns, or a value
+#: centered across them, inks their white on its line alone (IEEE-11348106 p7: 3 of 31 lines; W2947585286 p3: 1 of 17).
+CORE_LINES: Final = 0.2
 STACK_RULES: Final = 3
 #: ...each at least this many of its text sizes long: a formula's fraction bars, stacked alike, are shorter.
 STACK_LENGTH: Final = 6.0
@@ -134,6 +140,24 @@ _MARKER: Final = re.compile(
 _Segment = tuple[float, float, float]  # (position, low end, high end)
 
 
+class Told(NamedTuple):
+    """A page's text no table's cell holds, as its caller tells it (`document_lab.regions`).
+
+    Boxes of its captions and of its prose.
+    """
+
+    captions: tuple[BBox, ...] = ()
+    prose: tuple[BBox, ...] = ()
+
+    def turned(self, turn: Callable[[BBox], BBox]) -> Told:
+        """Each box ``turn`` moved: into the frame a table is read in."""
+        return Told(tuple(map(turn, self.captions)), tuple(map(turn, self.prose)))
+
+
+#: Nothing told: a page whose captions and prose its caller does not know.
+NO_TOLD: Final = Told()
+
+
 @dataclass(frozen=True, slots=True)
 class NotATable:
     """A grid of rules that is no table, and why (a single box, a plot's frame, a broken grid)."""
@@ -142,13 +166,15 @@ class NotATable:
     reason: str
 
 
-def tables(page: Page, *, rulings: Rulings | None = None, tolerance: float = TOLERANCE) -> tuple[Table, ...]:
+def tables(
+    page: Page, *, rulings: Rulings | None = None, told: Told = NO_TOLD, tolerance: float = TOLERANCE
+) -> tuple[Table, ...]:
     """The ruled tables of ``page``, top to bottom, each cited as ``table[i]`` and each cell by its own box.
 
-    ``rulings``: the rules of the page's picture (a scan's, :func:`document_lab.ink.rulings`), as :func:`grids` takes
-    them.
+    ``rulings``: the rules of the page's picture (a scan's, :func:`document_lab.ink.rulings`); ``told``: its captions
+    and prose; both as :func:`grids` takes them.
     """
-    return tuple(g for g in grids(page, rulings=rulings, tolerance=tolerance) if isinstance(g, Table))
+    return tuple(g for g in grids(page, rulings=rulings, told=told, tolerance=tolerance) if isinstance(g, Table))
 
 
 def level_rules(page: Page, *, tolerance: float = TOLERANCE) -> list[BBox]:
@@ -160,8 +186,15 @@ def level_rules(page: Page, *, tolerance: float = TOLERANCE) -> list[BBox]:
     return [BBox(lo, at, hi, at) for at, lo, hi in _merge(_rules(page.paths)[0], tolerance)]
 
 
-def grids(page: Page, *, rulings: Rulings | None = None, tolerance: float = TOLERANCE) -> tuple[Table | NotATable, ...]:
+def grids(
+    page: Page, *, rulings: Rulings | None = None, told: Told = NO_TOLD, tolerance: float = TOLERANCE
+) -> tuple[Table | NotATable, ...]:
     """Every grid of rules on ``page``, top to bottom: a :class:`Table`, or a :class:`NotATable` saying why not.
+
+    ``told``: the page's captions and prose, as `document_lab.regions` tells them (this module knows neither): a
+    span whose center stands in a caption's box above a stack's second rule is none of its header's text; one in a
+    caption's box below it, or in a box of prose anywhere in it, makes it no table (rules of one extent framing
+    text and a table, or two tables), nor does a header holding nothing but a caption.
 
     ``rulings``: the rules of the page's picture (:func:`document_lab.ink.rulings`), boxes in the frame its skew
     turns back. They join the page's own rules (each box level when wider than high) -- but for one lying within
@@ -201,7 +234,8 @@ def grids(page: Page, *, rulings: Rulings | None = None, tolerance: float = TOLE
             grid = _grid(framed, h, v, framed_drawings, tolerance)
             found.append(_quartered_grid(grid, -turn, seen) if turn else grid)
     free_down = [v for v in downs if v not in crossed]  # rules down touching no level rule: a stack printed sideways
-    found += _framed_stacks(seen, frame, (levels, downs), (free, free_down), tolerance)
+    told = told.turned(lambda b: _turned_box(b, -skew, page)) if skew else told
+    found += _framed_stacks(seen, frame, (levels, downs), (free, free_down), told, tolerance=tolerance)
     found.sort(key=lambda g: (_bbox(g).y0, _bbox(g).x0))
     numbered: list[Table | NotATable] = []
     for grid in found:
@@ -235,11 +269,14 @@ def _framed_stacks(
     frame: Callable[[int], tuple[Page, list[VectorPath]]],
     rules: tuple[list[_Segment], list[_Segment]],
     free: tuple[list[_Segment], list[_Segment]],
+    told: Told,
+    *,
     tolerance: float,
 ) -> list[Table | NotATable]:
     """The page's stacks (:func:`_stacks`), each read in the frame its text stands upright in, its boxes turned back.
 
-    ``rules``: the page's level and upright rules; ``free``: those touching no rule across them. A stack of level rules
+    ``rules``: the page's level and upright rules; ``free``: those touching no rule across them; ``told``: its
+    captions and prose (:func:`grids`), turned with its frame. A stack of level rules
     is read as the page stands (or upside down, its text so); one of upright rules whose text runs along them -- a
     stack printed sideways -- a quarter turn round, in ``frame(turn)``, as a grid printed sideways is.
     """
@@ -259,7 +296,8 @@ def _framed_stacks(
             level_now,
             _quartered_rules(free_level, free_down, turn, page)[0],
             _quartered_rules(levels, downs, turn, page)[1],
-            tolerance,
+            told.turned(functools.partial(_quartered_box, turn=turn, page=page)),
+            tolerance=tolerance,
         )
         found += [_quartered_grid(g, -turn, page) for g in read] if turn else read
     return found
@@ -867,8 +905,9 @@ def aligned(
         return None
     size = statistics.median(s.size for s in spans)
     parting = [s for s in body if spaced(s.text).strip() and not s.vertical] if body else spans
-    columns = _runs([w for s in parting for w in _words(s)], _column_gap(parting, size))
-    spans = [part for s in spans for part in _parted(s, columns)]
+    gap = _column_gap(parting, size)
+    columns = _runs([w for s in _parting(parting, gap, size) for w in _words(s)], gap)
+    spans = [part for s in spans for part in _parted(s, columns, gap)]
     bands = _bands(spans, rules)
     read = [_Band.of(band, columns, size) for band in bands]
     ruled = len(read) > 2 and any(band.wraps for band in read[1:])  # noqa: PLR2004 -- a header and two bands
@@ -891,6 +930,46 @@ def aligned(
 
 
 type _Row = list[list[list[TextSpan]]]  # a row: each column's cell, as its lines of spans
+
+
+def _parting(spans: list[TextSpan], gap: float, size: float) -> list[TextSpan]:
+    """``spans`` but those set across their columns: overlapping two cores of columns, or centered between two.
+
+    A core: where :data:`CORE_LINES` of their lines at least (by baseline, half ``size``) set ink, their words
+    ``gap`` apart one run. A cell spanning columns hides the white between them, and a value centered across two
+    sits in it -- its middle within half ``size`` of the white's -- : either would merge the columns or open one of
+    its own, as no line of the other rows does (a column of its own, set off center, keeps its own). Read
+    without them, they stand in the column they overlap most, else the nearest. All of them where fewer than two
+    lines make a core.
+    """
+    lines = _baselines(spans, size / 2)
+    need = math.ceil(CORE_LINES * len(lines))
+    if need < 2:  # noqa: PLR2004 -- a core is two lines' at least: one line is no column of the others
+        return spans
+    edges = sorted(
+        (at, step)
+        for line in lines
+        for x0, x1 in _runs([w for s in line for w in _words(s)], gap)
+        for at, step in ((x0, 1), (x1, -1))
+    )
+    cores, held, start = [], 0, 0.0
+    for at, step in edges:
+        if held < need <= held + step:
+            start = at
+        elif held >= need > held + step:
+            cores.append((start, at))
+        held += step
+
+    def across(s: TextSpan) -> bool:
+        box = s.provenance.bbox
+        held = sum(box.x0 < x1 and x0 < box.x1 for x0, x1 in cores)
+        middle = (box.x0 + box.x1) / 2
+        return held > 1 or (
+            held == 0 and any(abs(middle - (a[1] + b[0]) / 2) <= size / 2 for a, b in itertools.pairwise(cores))
+        )
+
+    kept = [s for s in spans if not across(s)]
+    return kept or spans
 
 
 def _bands(spans: list[TextSpan], rules: Sequence[float]) -> list[list[TextSpan]]:
@@ -1046,8 +1125,12 @@ def _column_gap(spans: list[TextSpan], size: float) -> float:
     return min(COLUMN_GAP * size, WORD_SPACES * max(spaces)) if spaces else COLUMN_GAP * size
 
 
-def _parted(span: TextSpan, columns: list[tuple[float, float]]) -> list[TextSpan]:
-    """``span`` parted where the gap between two of its words holds the gap between two ``columns`` whole."""
+def _parted(span: TextSpan, columns: list[tuple[float, float]], gap: float) -> list[TextSpan]:
+    """``span`` parted where two of its words stand in two ``columns``, apart by the white between those columns.
+
+    The white between the words holds the columns' gap whole, or is ``gap`` wide, a column gap of its own (a label
+    overrunning its column, its value set a gap after).
+    """
     words = _words(span)
     if len(words) < 2:  # noqa: PLR2004 -- two words to part
         return [span]
@@ -1056,8 +1139,8 @@ def _parted(span: TextSpan, columns: list[tuple[float, float]]) -> list[TextSpan
         i
         for i in range(1, len(words))
         if at[i] != at[i - 1]
-        and words[i - 1].x1 <= columns[at[i - 1]][1] + _ROUNDING
         and words[i].x0 >= columns[at[i]][0] - _ROUNDING
+        and (words[i - 1].x1 <= columns[at[i - 1]][1] + _ROUNDING or words[i].x0 - words[i - 1].x1 >= gap)
     ]
     if not cuts:
         return [span]
@@ -1096,13 +1179,20 @@ def _baselines(spans: list[TextSpan], reach: float) -> list[list[TextSpan]]:
 
 
 def _stacks(
-    page: Page, stacks: list[list[_Segment]], free: list[_Segment], downs: list[_Segment], tolerance: float
+    page: Page,
+    stacks: list[list[_Segment]],
+    free: list[_Segment],
+    downs: list[_Segment],
+    told: Told,
+    *,
+    tolerance: float,
 ) -> list[Table | NotATable]:
     """The tables ruled by their rows alone among ``stacks``, or why a stack is none.
 
     ``stacks``: level rules of one extent each (:func:`_extents`), top to bottom; ``free``: the level rules touching no
-    rule down, ``downs``: the rules down. The widest stack first; of its rules, from the top, the longest run that is a
-    table (:func:`_stack`) is one, and the search goes on below it. A stack no run of which is a table is named, with
+    rule down, ``downs``: the rules down; ``told``: the page's captions and prose (:func:`grids`). The widest stack
+    first; of its rules, from the top, the longest run that is a table (:func:`_stack`) is one, and the search goes on
+    below it. A stack no run of which is a table is named, with
     why the whole is none; one inside a table found is none of its own (its rules part that table's rows).
     """
     found: list[Table | NotATable] = []
@@ -1116,7 +1206,7 @@ def _stacks(
         while start <= len(rules) - STACK_RULES:
             for end in range(len(rules), start + STACK_RULES - 1, -1):
                 try:
-                    here.append(_stack(page, rules[start:end], free, downs, tolerance))
+                    here.append(_stack(page, rules[start:end], (free, downs), told, tolerance))
                 except _Broken as broken:
                     why = why or str(broken)  # the whole stack's reason: tried first
                     continue
@@ -1151,12 +1241,21 @@ def _stack_box(rules: list[_Segment]) -> BBox:
     return BBox(min(r[1] for r in rules), rules[0][0], max(r[2] for r in rules), rules[-1][0])
 
 
-def _stack(page: Page, rules: list[_Segment], free: list[_Segment], downs: list[_Segment], tolerance: float) -> Table:
+def _stack(
+    page: Page,
+    rules: list[_Segment],
+    others: tuple[list[_Segment], list[_Segment]],
+    told: Told,
+    tolerance: float,
+) -> Table:
     """The table ruled by stacked level ``rules``, top to bottom; raises :class:`_Broken` naming what makes it none.
 
-    Its rows are parted by its rules and by those of ``free`` in its body -- below its header's rule, within its
-    extent, :data:`STACK_LENGTH` text sizes long at least, no text across them: a rule under some of its columns.
+    ``others``: the level rules touching no rule down (``free``) and the rules down. Its rows are parted by its rules
+    and by those of ``free`` in its body -- below its header's rule, within its extent, :data:`STACK_LENGTH` text
+    sizes long at least, no text across them: a rule under some of its columns. Of ``told``, the page's captions and
+    prose, a caption above its second rule is none of its text (:func:`_untold`).
     """
+    free, downs = others
     box = _stack_box(rules)
     inner = BBox(box.x0 + tolerance, box.y0 + tolerance, box.x1 - tolerance, box.y1 - tolerance)
     if any(inner.x0 < x < inner.x1 and lo < inner.y1 and inner.y0 < hi for x, lo, hi in downs):
@@ -1175,6 +1274,7 @@ def _stack(page: Page, rules: list[_Segment], free: list[_Segment], downs: list[
         for s in page.spans
         if spaced(s.text).strip() and upright(s) and box.x0 <= s.center[0] <= box.x1 and box.y0 < s.center[1] < box.y1
     ]
+    spans = _untold(spans, told, rules[1][0], box.width)
     size = statistics.median(s.size for s in spans) if spans else 0.0
     if box.width < STACK_LENGTH * size:
         msg = 'its rules are short (fraction bars, stacked)'
@@ -1203,6 +1303,31 @@ def _stack(page: Page, rules: list[_Segment], free: list[_Segment], downs: list[
         msg = 'a list (a marker before each item)'
         raise _Broken(msg)
     return Table(table.rows, table.cell_bboxes, table.provenance.at(bbox=box))
+
+
+def _untold(spans: list[TextSpan], told: Told, header: float, width: float) -> list[TextSpan]:
+    """A stack's ``spans`` less those in a caption's box of ``told`` above ``header`` (its second rule's height).
+
+    Raises :class:`_Broken` when a span stands in a box of prose half the stack's ``width`` wide at least (a cell's
+    long line runs across its column only), or in a caption's below ``header`` (rules of one extent framing text and
+    a table, or two tables), or the header holds nothing else.
+    """
+
+    def within(s: TextSpan, boxes: tuple[BBox, ...]) -> bool:
+        return any(_within(BBox(*s.center, *s.center), b, 0.0) for b in boxes)
+
+    if any(within(s, tuple(b for b in told.prose if b.width >= width / 2)) for s in spans):
+        msg = 'prose stands in it (rules of one extent framing text and a table)'
+        raise _Broken(msg)
+    captions = [s for s in spans if within(s, told.captions)]
+    if any(s.center[1] > header for s in captions):
+        msg = 'a caption stands in its body (rules of one extent framing two tables)'
+        raise _Broken(msg)
+    kept = [s for s in spans if s not in captions]
+    if captions and not any(s.center[1] < header for s in kept):
+        msg = 'its header is a caption alone'
+        raise _Broken(msg)
+    return kept
 
 
 def _crosses_text(at: float, spans: list[TextSpan]) -> bool:

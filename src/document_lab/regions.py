@@ -60,7 +60,7 @@ import numpy as np
 
 from document_lab import layout, tags
 from document_lab.ir import BBox, union
-from document_lab.tables import SHORT_CELL, aligned, level_rules, tables
+from document_lab.tables import SHORT_CELL, Told, aligned, level_rules, tables
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
@@ -68,7 +68,7 @@ if TYPE_CHECKING:
     from document_lab.ink import Drawing
     from document_lab.ir import Page, Structure, Table, TextSpan
 
-__all__ = ['UNNUMBERED', 'Region', 'Unnumbered', 'equations', 'regions']
+__all__ = ['UNNUMBERED', 'Region', 'Unnumbered', 'captions_and_prose', 'equations', 'regions']
 
 #: A caption: ``Figure``/``Table``, its number (``2``, ``A.1``), then a dash, as standards set it.
 _CAPTION: Final = re.compile(
@@ -980,8 +980,43 @@ def _figures(page: Page, drawings: Sequence[Drawing], body: float, *, clustered:
         ]
         if min(b.width, b.height) > EQUATION_HEIGHT * body
     ]
-    ruled = [t.provenance.bbox for t in tables(page) if t.provenance.bbox is not None]
+    ruled = [t.provenance.bbox for t in tables(page, told=captions_and_prose(page, body)) if t.provenance.bbox]
     return [b for b in images + drawn if b.width * b.height < PAGE_PICTURE * area] + ruled
+
+
+def captions_and_prose(page: Page, body: float) -> Told:
+    """The boxes of ``page``'s table captions and of its lines of prose, as the page stands: text no table's cell holds.
+
+    A caption opens ``Table 2.``, ``TABLE I`` or ``Table A.1 -- `` (:data:`_TABLE_OPENS`, :data:`_CAPTION`). A line of
+    prose holds words, :data:`PROSE_WORDS` or more, with no white a body size wide between its spans -- by count and
+    run: a table's row joined across its columns spans the width as prose does, and a long one as many words -- and so
+    does a paragraph's last line under one: words ending a sentence, starting flush
+    with it (within half ``body``, the body size), within half ``body`` below it (set single: a table's row under a
+    caption stands further off). Each box is one of the line's spans -- of a prose line, one that holds words: a
+    table's value the line took from beside it (a number) is none. What `document_lab.tables.grids` takes as
+    ``told``: a table never tells captions or prose itself.
+    """
+    lines = sorted(layout.lines(page, weighted=False), key=lambda ln: ln.y0)
+
+    def running(line: layout.Line) -> bool:  # no white a body size wide between its spans: no row joined across cells
+        boxes = sorted((s.provenance.bbox for s in line.spans), key=lambda b: b.x0)
+        return all(b.x0 - a.x1 < body for a, b in itertools.pairwise(boxes))
+
+    prose = [ln for ln in lines if layout.wordy(ln.text) and len(ln.text.split()) >= PROSE_WORDS and running(ln)]
+
+    def tail(line: layout.Line) -> bool:
+        return (
+            layout.wordy(line.text)
+            and line.text.rstrip().endswith('.')
+            and any(abs(p.x0 - line.x0) <= body / 2 and -body / 2 < line.y0 - p.y1 <= body / 2 for p in prose)
+        )
+
+    def caption(line: layout.Line) -> bool:
+        return bool(_TABLE_OPENS.match(line.text)) or _caption(_Seen(line, _page_box(line))) is not None
+
+    captions = tuple(s.provenance.bbox for ln in lines if caption(ln) for s in ln.spans)
+    told = [ln for ln in lines if (ln in prose or tail(ln)) and not caption(ln)]
+    return Told(captions, tuple(s.provenance.bbox for ln in told for s in ln.spans if any(c.isalpha() for c in s.text)))
 
 
 def _text_tables(page: Page, body: float) -> list[BBox]:

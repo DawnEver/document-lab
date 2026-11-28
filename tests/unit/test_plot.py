@@ -15,6 +15,7 @@ from tests.synthetic import (
     FRAME,
     MARK_SIZE,
     RED,
+    TICK_BAR,
     Axis,
     PlotSpec,
     draw_mark,
@@ -24,6 +25,9 @@ from tests.synthetic import (
     plot_pdf,
     to_page,
 )
+
+#: Glyph shapes are read against document_lab.glyphs' reference font, fetched first (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures('reference_font')
 
 XS = [float(x) for x in range(0, 101, 10)]
 
@@ -500,6 +504,34 @@ def test_an_outlined_unit_letter_in_place_of_a_tick_label_is_no_label(tmp_path):
     assert sorted(v for _, v in plot.x.ticks) == [0, 100]
 
 
+def test_a_tick_drawn_as_a_bar_beside_the_corner_label_is_the_axis_not_the_labels_glyph(tmp_path):
+    """Ticks drawn as filled bars: the x axis's first one stands beside the y axis's ``0`` as close as a glyph would,
+    and read with it as a mark it made the ``0`` no number, refusing the frame."""
+    spec = PlotSpec(
+        Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], filled_ticks=True, y_label_gap=2.0
+    )
+    (plot,) = plots(read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1))
+    assert sorted(v for _, v in plot.y.ticks) == [0, 50, 100]
+    assert sorted(v for _, v in plot.x.ticks) == [0, 50, 100]
+
+
+def test_a_bar_beside_the_corner_label_off_the_frame_is_still_the_labels_and_refuses(tmp_path):
+    """The planted wrong truth: a bar the size of a tick but standing off the frame's side is no tick of it."""
+    thick, long = TICK_BAR
+    left = FRAME.x0 - 2.0  # beyond EDGE_TOL of the frame's side, between it and the label
+    bar = (left - thick / 2, FRAME.y1 - long, left + thick / 2, FRAME.y1)
+    spec = PlotSpec(
+        Axis([0, 50, 100]),
+        Axis([0, 50, 100]),
+        [(lambda x: x, XS, RED)],
+        tick_marks=False,
+        y_label_gap=3.2,
+        bars=[bar],
+    )
+    with pytest.raises(UnrecognizedFrame, match='unrecognized frame'):
+        plots(read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1))
+
+
 def test_a_recognized_outlined_frame_still_reads_beside_an_outlined_axis_title(tmp_path):
     spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=[('Il', 240.0, 325.0, 8.0)])
     page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1)
@@ -523,6 +555,15 @@ def test_an_outlined_word_is_read_at_its_own_scale_and_a_lone_letter_by_shape_al
     spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=stray)
     page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1)
     assert sorted(s.text for s in outline_text(page)) == ['B', 'OX', 'ox']
+
+
+def test_an_outlined_word_of_one_shape_at_either_scale_is_refused(tmp_path):
+    """``xx`` and ``zz`` draw the same shapes as ``XX`` and ``ZZ``: nothing tells their scale, so neither is read;
+    ``max.`` is read at the x-height, its ``m`` and ``a`` lying far from their place at the ascent."""
+    stray = [('xx', 450.0, 120.0, 8.0), ('ZZ', 450.0, 140.0, 8.0), ('max.', 450.0, 160.0, 8.0)]
+    spec = PlotSpec(Axis([0, 50, 100]), Axis([0, 50, 100]), [(lambda x: x, XS, RED)], stray=stray)
+    page = read_pdf(plot_pdf(tmp_path / 'plot.pdf', spec, outlined=True)).page(1)
+    assert [s.text for s in outline_text(page)] == ['max.']
 
 
 def test_an_outlined_number_before_min_or_max_is_one_bound_span(tmp_path):

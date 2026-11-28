@@ -77,6 +77,12 @@ class PlotSpec:
     )
     frame: pymupdf.Rect = field(default_factory=lambda: pymupdf.Rect(FRAME))
     tick_marks: bool = True
+    #: Tick marks drawn as thin filled bars (:data:`TICK_BAR` thick), not stroked lines, as some figures export them.
+    filled_ticks: bool = False
+    #: Points between a y label's end and the frame.
+    y_label_gap: float = 4.0
+    #: Further thin filled bars, (x0, y0, x1, y1) each: ink that is no tick of the frame.
+    bars: Sequence[tuple[float, float, float, float]] = ()
     grid: bool = False
     grid_grey: float = 0.7  # the major grid's grey level (0 black .. 1 white)
     minor_grid: bool = False  # a log axis also gets grid lines at 2..9 x each decade
@@ -102,6 +108,23 @@ class PlotSpec:
     markers: Sequence[tuple[str, Sequence[tuple[float, float]], tuple[float, float, float]]] = ()
     #: Legend entries inside the frame's top left: (glyph, label, color), the glyph with its label just right of it.
     marker_legend: Sequence[tuple[str, str, tuple[float, float, float]]] = ()
+
+
+#: A filled tick mark's thickness and length (points).
+TICK_BAR = (0.32, 1.8)
+
+
+def _tick(page: pymupdf.Page, spec: PlotSpec, a: tuple[float, float], b: tuple[float, float]) -> None:
+    """A tick mark from ``a`` to ``b`` (axis-parallel): a stroked line, or a bar :data:`TICK_BAR` filled from ``a``."""
+    if not spec.filled_ticks:
+        page.draw_line(a, b, color=(0, 0, 0), width=0.5)
+        return
+    thick, long = TICK_BAR
+    (ax, ay), (bx, by) = a, b
+    ex, ey = ax + math.copysign(long, bx - ax) * (bx != ax), ay + math.copysign(long, by - ay) * (by != ay)
+    across_x, across_y = (thick / 2, 0.0) if ax == bx else (0.0, thick / 2)
+    rect = pymupdf.Rect(min(ax, ex) - across_x, min(ay, ey) - across_y, max(ax, ex) + across_x, max(ay, ey) + across_y)
+    page.draw_rect(rect, color=None, fill=(0, 0, 0), width=0)
 
 
 def to_page(spec: PlotSpec, x: float, y: float) -> tuple[float, float]:
@@ -307,7 +330,7 @@ def _y_axis(page: pymupdf.Page, spec: PlotSpec) -> None:
     for i, v in enumerate(spec.y.ticks):
         _, py = to_page(spec, spec.x.ticks[0], v)
         if spec.tick_marks:
-            page.draw_line((f.x0, py), (f.x0 + 4, py), color=(0, 0, 0), width=0.5)
+            _tick(page, spec, (f.x0, py), (f.x0 + 4, py))
         if spec.grid and not (spec.filled_frame and i in (0, len(spec.y.ticks) - 1)):
             page.draw_line((f.x0, py), (f.x0 + spec.grid_reach * f.width, py), color=(spec.grid_grey,) * 3, width=0.3)
         py += spec.y.label_drop
@@ -332,9 +355,19 @@ def _y_axis(page: pymupdf.Page, spec: PlotSpec) -> None:
             continue
         width = pymupdf.get_text_length(text, fontname='helv', fontsize=FONT_SIZE)
         if spec.y.span_minus and text.startswith('-'):
-            _minus_span(page, text, f.x0 - 4 - width / 2, py, spec.y.minus_glyph)
+            _minus_span(page, text, f.x0 - spec.y_label_gap - width / 2, py, spec.y.minus_glyph)
             continue
-        _centered(page, text, f.x0 - 4 - width / 2, py)
+        _centered(page, text, f.x0 - spec.y_label_gap - width / 2, py)
+
+
+def _draw_stray(page: pymupdf.Page, spec: PlotSpec) -> None:
+    """``spec``'s ink beside the plot: its bars and its stray text."""
+    for bar in spec.bars:
+        page.draw_rect(pymupdf.Rect(bar), color=None, fill=(0, 0, 0), width=0)
+    for text, x, y, size in spec.stray:  # a font object sets every character Helvetica has (``Ω``), not only Latin-1
+        writer = pymupdf.TextWriter(page.rect)
+        writer.append((x, y), text, font=pymupdf.Font('helv'), fontsize=size)
+        writer.write_text(page)
 
 
 def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
@@ -343,17 +376,14 @@ def draw_plot(page: pymupdf.Page, spec: PlotSpec) -> None:
     for i, v in enumerate(spec.x.ticks):
         px, _ = to_page(spec, v, spec.y.ticks[0])
         if spec.tick_marks:
-            page.draw_line((px, f.y1), (px, f.y1 - 4), color=(0, 0, 0), width=0.5)
+            _tick(page, spec, (px, f.y1), (px, f.y1 - 4))
         if spec.grid and not (spec.filled_frame and i in (0, len(spec.x.ticks) - 1)):
             cuts = [f.y0, *(f.y0 + k * f.height for gap in spec.grid_gaps for k in gap), f.y1]
-            for top, bottom in itertools.batched(cuts, 2):
+            for top, bottom in itertools.batched(cuts, 2, strict=True):
                 page.draw_line((px, top), (px, bottom), color=(spec.grid_grey,) * 3, width=0.3)
         _x_label(page, spec, spec.x.labels[i] if spec.x.labels else _label(v), px)
     _y_axis(page, spec)
-    for text, x, y, size in spec.stray:  # a font object sets every character Helvetica has (``Ω``), not only Latin-1
-        writer = pymupdf.TextWriter(page.rect)
-        writer.append((x, y), text, font=pymupdf.Font('helv'), fontsize=size)
-        writer.write_text(page)
+    _draw_stray(page, spec)
     if spec.y_title is not None:
         text, x, y, size = spec.y_title
         page.insert_text((x, y), text, fontname='helv', fontsize=size, rotate=90)
@@ -593,6 +623,54 @@ def icc_profile(*, primaries: Sequence[tuple[float, float]], white: tuple[float,
     return header + len(tags).to_bytes(4, 'big') + table + data
 
 
+def jpx(
+    samples: np.ndarray, *, codestream: bool = False, profile: bytes | None = None, depth: int | None = None
+) -> bytes:
+    """``samples`` -- rows x columns (gray, or 16-bit gray as ``uint16``), or rows x columns x 2, 3 or 4 (gray and
+    alpha, RGB, RGB and alpha) -- coded JPEG 2000 losslessly (the reversible 5/3 wavelet) by OpenJPEG, through
+    Pillow's plugin: a JP2 file (its color space enumerated, gray or sRGB), or the bare ``codestream``, or -- with
+    ``profile`` -- that codestream in a JP2 whose ``colr`` box embeds the ICC profile (T.800 I.5.3.3, method 2).
+
+    ``depth`` (gray samples below ``2 ** depth``, fewer than 8 bits): a bare codestream of that depth, which Pillow
+    cannot write -- the samples coded at 8 bits moved by ``128 - 2 ** (depth - 1)``, then the depth its image and
+    tile size marker (FF51) states lowered, so a decoder's level shift for ``depth`` bits (T.800 G.1.2) gives the
+    samples back exactly (lossless: the coded values are the same either way).
+    """
+    from io import BytesIO  # noqa: PLC0415 -- only the JPEG 2000 cases need it
+
+    from PIL import Image  # noqa: PLC0415 -- Pillow is the dev extra's, the truth of these cases alone
+
+    if depth is not None:
+        assert samples.ndim == 2 and 0 < depth < 8 and samples.max() < 2**depth
+        coded = bytearray(jpx((samples + 128 - 2 ** (depth - 1)).astype(np.uint8), codestream=True))
+        # The image and tile size marker (T.800 A.5.1): FF51, Lsiz, Rsiz, eight 4-byte sizes and offsets, Csiz,
+        # then each component's Ssiz (its depth less one), XRsiz, YRsiz.
+        ssiz = coded.index(b'\xff\x51') + 2 + 2 + 2 + 8 * 4 + 2
+        assert coded[ssiz] == 7
+        coded[ssiz] = depth - 1
+        return bytes(coded)
+    image = Image.fromarray(samples)  # its mode by its shape and type: L, LA, RGB, RGBA or I;16
+    out = BytesIO()
+    image.save(out, 'JPEG2000', irreversible=False, no_jp2=codestream or profile is not None)
+    coded = out.getvalue()
+    if profile is None:
+        return coded
+
+    def box(kind: bytes, body: bytes) -> bytes:
+        return (8 + len(body)).to_bytes(4, 'big') + kind + body
+
+    rows, columns = samples.shape[:2]
+    components = 1 if samples.ndim == 2 else samples.shape[2]
+    header = rows.to_bytes(4, 'big') + columns.to_bytes(4, 'big') + components.to_bytes(2, 'big') + bytes([7, 7, 0, 0])
+    colr = bytes([2, 0, 0]) + profile
+    return (
+        box(b'jP  ', b'\r\n\x87\n')
+        + box(b'ftyp', b'jp2 ' + bytes(4) + b'jp2 ')
+        + box(b'jp2h', box(b'ihdr', header) + box(b'colr', colr))
+        + box(b'jp2c', coded)
+    )
+
+
 def fax_g4(white: np.ndarray) -> bytes:
     """``white`` -- rows of 1 white, 0 black, as CCITT fax decodes by default -- coded Group 4 by MuPDF."""
     rows, columns = white.shape
@@ -600,6 +678,22 @@ def fax_g4(white: np.ndarray) -> bytes:
     stride = len(packed) // rows
     coded = pymupdf.mupdf.fz_compress_ccitt_fax_g4(pymupdf.mupdf.python_buffer_data(packed), columns, rows, stride)
     return bytes(coded.fz_buffer_extract())
+
+
+def jbig2_mmr(white: np.ndarray) -> bytes:
+    """``white`` -- rows of 1 white, 0 black, as a ``JBIG2Decode`` image's samples read -- as an embedded JBIG2 stream
+    (ITU-T T.88 Annex D.3): a page information segment and an immediate lossless generic region, MMR-coded (6.2.6:
+    its data is T.6, the coding of :func:`fax_g4`, by MuPDF; a T.6 white run is a JBIG2 0, the filter's 1)."""
+    rows, columns = white.shape
+
+    def segment(number: int, kind: int, data: bytes) -> bytes:
+        # 7.2: number, flags (type; a one-byte page association), no referred-to segment, page 1, data length.
+        return number.to_bytes(4, 'big') + bytes([kind, 0, 1]) + len(data).to_bytes(4, 'big') + data
+
+    size = columns.to_bytes(4, 'big') + rows.to_bytes(4, 'big')
+    page = size + bytes(8) + bytes([1]) + bytes(2)  # 7.4.8: no resolution, lossless, white, OR, not striped
+    region = size + bytes(8) + bytes([0]) + bytes([1])  # 7.4.1 at (0, 0), OR; 7.4.6.2: MMR
+    return segment(0, 48, page) + segment(1, 38, region + fax_g4(white))
 
 
 TABLE_ROWS = (('Parameter', 'Value', 'Unit'), ('alpha', '1.25', 'mm'), ('beta', '-3', 'kg'), ('gamma', '4.5e2', 's'))
@@ -678,6 +772,37 @@ def draw_ruled_table(
                 page.insert_text((rect.x0 + 4, rect.y1 - 6), text, fontname='helv', fontsize=9)
 
 
+#: A table ruled every few rows, as a standard's tolerance table is: bands of rows, no rule between a band's rows; the
+#: first band its header, its cells wrapped over two lines alike.
+BANDED_ROWS = (
+    (('Nominal', 'Nominal', 'Tolerance'), ('from', 'to', 'mm')),
+    (('4', '6', '+0,15'), ('6', '8', '+0,20'), ('8', '10', '+0,25')),
+    (('10', '13', '+0,30'), ('13', '16', '+0,35')),
+)
+
+
+def draw_banded_table(
+    page: pymupdf.Page, bands: Sequence[Sequence[Sequence[str]]] = BANDED_ROWS, *, pitch: float = 14.0
+) -> None:
+    """``bands`` in a grid ruled round each band alone, at :data:`TABLE_ORIGIN`, :data:`TABLE_CELL` wide columns:
+    each band's rows set ``pitch`` points apart in its ruled cells, no rule between them (an empty string sets
+    nothing)."""
+    x0, y0 = TABLE_ORIGIN
+    width, columns = TABLE_CELL[0], len(bands[0][0])
+    tops = [y0]
+    for band in bands:
+        tops.append(tops[-1] + pitch * len(band) + 6)
+    for y in tops:
+        page.draw_line((x0, y), (x0 + width * columns, y), color=(0, 0, 0), width=0.5)
+    for c in range(columns + 1):
+        page.draw_line((x0 + width * c, y0), (x0 + width * c, tops[-1]), color=(0, 0, 0), width=0.5)
+    for band, top in zip(bands, tops, strict=False):
+        for k, row in enumerate(band):
+            for c, text in enumerate(row):
+                if text:
+                    page.insert_text((x0 + width * c + 4, top + 12 + pitch * k), text, fontname='helv', fontsize=9)
+
+
 #: Booktabs' rules: the top and bottom rules heavier than the one under the header (0.08 em and 0.05 em at 10 pt).
 TOP_RULE, MID_RULE = 0.8, 0.5
 
@@ -708,6 +833,91 @@ def draw_booktabs(
             if text:
                 page.insert_text((x0 + c * w + 4, y0 + (r + 1) * h - 6), text, fontname='helv', fontsize=9)
     return pymupdf.Rect(x0, y0, right, y0 + len(rows) * h)
+
+
+#: A table ruled under every row whose cells wrap, each cell its lines: row 1 holds cells of one, two and three lines,
+#: row 2 two cells of two lines beside short ones (alone, rows of their own to the eye), row 3 one line each.
+WRAPPED_ROWS = (
+    (('Ref.',), ('Domain',), ('Objective',), ('Remarks',)),
+    (('[1]',), ('Stator',), ('Minimize the noise', 'and vibration'), ('Mesh dependence', 'was not studied', 'at all')),
+    (('[2]',), ('Rotor',), ('Minimize torque', 'ripple'), ('Only half a pole', 'was modeled')),
+    (('[3]',), ('Rotor poles',), ('Maximize torque',), ('N/A',)),
+)
+#: A wrapped table's columns, each this many points wide, and the step from one line of a cell to the next.
+WRAPPED_WIDTHS, LINE_PITCH = (60.0, 80.0, 110.0, 110.0), 11.0
+
+
+def draw_wrapped_rows(
+    page: pymupdf.Page,
+    rows: Sequence[Sequence[Sequence[str]]] = WRAPPED_ROWS,
+    *,
+    at: tuple[float, float] = TABLE_ORIGIN,
+    first_ruled: bool = True,
+) -> None:
+    """``rows`` ruled under every row, as IEEE sets a table: each cell's lines centered down its row, as tall as its
+    tallest cell, and a rule between every two rows -- under the first column too unless not ``first_ruled`` (the
+    rules between rows then start at the second column, the first ruled apart: a reference beside its rows)."""
+    x0, y = at
+    right = x0 + sum(WRAPPED_WIDTHS)
+    _rule(page, pymupdf.Point(x0, y), pymupdf.Point(right, y), filled=True, width=TOP_RULE)
+    for r, row in enumerate(rows):
+        height = max(len(cell) for cell in row) * LINE_PITCH + 6
+        x = x0
+        for cell, width in zip(row, WRAPPED_WIDTHS, strict=True):
+            top = y + (height - len(cell) * LINE_PITCH) / 2
+            for i, line in enumerate(cell):
+                page.insert_text((x + 4, top + i * LINE_PITCH + 9), line, fontname='helv', fontsize=9)
+            x += width
+        y += height
+        last = r == len(rows) - 1
+        start = x0 if r == 0 or last or first_ruled else x0 + WRAPPED_WIDTHS[0]
+        thick = TOP_RULE if last else MID_RULE
+        _rule(page, pymupdf.Point(start, y), pymupdf.Point(right, y), filled=True, width=thick)
+        if not (first_ruled or r == 0 or last):  # the first column's own short rule
+            _rule(page, pymupdf.Point(x0, y), pymupdf.Point(x0 + 20, y), filled=True, width=MID_RULE)
+
+
+#: A table ruled between groups of rows: each group's label, set beside its rows and centered down them, then its rows.
+GROUPED_HEADER = ('Data', 'Split', 'P', 'R')
+GROUPED_ROWS = (
+    ('DI', (('DI', '0.847', '0.798'), ('AMP', '0.771', '0.677'), ('Guitar', '0.879', '0.849'))),
+    ('AMP', (('DI', '0.853', '0.836'), ('AMP', '0.824', '0.781'))),
+)
+
+
+def draw_grouped_rows(page: pymupdf.Page, *, at: tuple[float, float] = TABLE_ORIGIN) -> None:
+    """:data:`GROUPED_ROWS` as booktabs sets groups: a rule under the header and between groups, none between rows."""
+    x0, y = at
+    w = TABLE_CELL[0]
+    right = x0 + len(GROUPED_HEADER) * w
+    _rule(page, pymupdf.Point(x0, y), pymupdf.Point(right, y), filled=True, width=TOP_RULE)
+    for c, text in enumerate(GROUPED_HEADER):
+        page.insert_text((x0 + c * w + 4, y + 13), text, fontname='helv', fontsize=9)
+    y += LINE_PITCH + 6
+    for g, (label, rows) in enumerate(GROUPED_ROWS):
+        _rule(page, pymupdf.Point(x0, y), pymupdf.Point(right, y), filled=True, width=MID_RULE)
+        page.insert_text((x0 + 4, y + 3 + len(rows) * LINE_PITCH / 2 + 3.5), label, fontname='helv', fontsize=9)
+        for r, row in enumerate(rows):
+            for c, text in enumerate(row, start=1):
+                page.insert_text((x0 + c * w + 4, y + 3 + r * LINE_PITCH + 9), text, fontname='helv', fontsize=9)
+        y += len(rows) * LINE_PITCH + 6
+        if g == len(GROUPED_ROWS) - 1:
+            _rule(page, pymupdf.Point(x0, y), pymupdf.Point(right, y), filled=True, width=TOP_RULE)
+
+
+def draw_sideways_booktabs(page: pymupdf.Page, rows: Sequence[Sequence[str]] = TABLE_ROWS, turn: int = -90) -> None:
+    """:func:`draw_booktabs`' table turned ``turn`` degrees clockwise about :data:`SCAN_PAGE`'s center, its text with
+    it: a table ruled by its rows printed sideways (-90: read bottom to top)."""
+    x0, y0 = TABLE_ORIGIN
+    w, h = TABLE_CELL
+    right = x0 + len(rows[0]) * w
+    for r in (0, 1, len(rows)):
+        y = y0 + r * h
+        page.draw_line(turned(x0, y, turn), turned(right, y, turn), color=(0, 0, 0), width=MID_RULE)
+    for r, row in enumerate(rows):
+        for c, text in enumerate(row):
+            at = turned(x0 + c * w + 4, y0 + (r + 1) * h - 6, turn)
+            page.insert_text(at, text, fontname='helv', fontsize=9, rotate=-turn % 360)
 
 
 #: A list set between rules, as booktabs rules a table: a heading, then each item after its enumerator.
@@ -810,6 +1020,56 @@ def actual_text_pdf(path: Path) -> Path:
     return path
 
 
+def cid_font_pdf(
+    path: Path,
+    cids: Sequence[int],
+    *,
+    registry: str = 'Adobe',
+    ordering: str = 'Japan1',
+    to_unicode: Mapping[int, str] | None = None,
+) -> Path:
+    """One page showing ``cids`` in one line, in Ryumin-Light on ``/Identity-H`` (each two-byte code its own CID).
+
+    The font is a CID font on the collection ``registry``-``ordering`` that embeds no program, as a Japanese PDF sets
+    text in a printer's resident font; it states no ``/ToUnicode`` unless ``to_unicode`` gives one (text by code).
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=100)
+    font, descendant = doc.get_new_xref(), doc.get_new_xref()
+    doc.update_object(
+        descendant,
+        f'<< /Type /Font /Subtype /CIDFontType0 /BaseFont /Ryumin-Light /CIDSystemInfo << /Registry ({registry}) '
+        f'/Ordering ({ordering}) /Supplement 7 >> /DW 1000 /FontDescriptor << /Type /FontDescriptor '
+        '/FontName /Ryumin-Light /Flags 6 /FontBBox [-170 -331 1024 903] /ItalicAngle 0 /Ascent 723 /Descent -241 '
+        '/CapHeight 709 /StemV 69 >> >>',
+    )
+    stated = ''
+    if to_unicode is not None:
+        cmap = doc.get_new_xref()
+        doc.update_object(cmap, '<< >>')
+        pairs = ' '.join(f'<{code:04X}> <{text.encode("utf-16-be").hex()}>' for code, text in to_unicode.items())
+        doc.update_stream(
+            cmap,
+            '/CIDInit /ProcSet findresource begin 12 dict begin begincmap 1 begincodespacerange <0000> <FFFF> '
+            f'endcodespacerange {len(to_unicode)} beginbfchar {pairs} endbfchar endcmap CMapName currentdict /CMap '
+            'defineresource pop end end'.encode('ascii'),
+        )
+        stated = f' /ToUnicode {cmap} 0 R'
+    doc.update_object(
+        font,
+        '<< /Type /Font /Subtype /Type0 /BaseFont /Ryumin-Light-Identity-H /Encoding /Identity-H '
+        f'/DescendantFonts [{descendant} 0 R]{stated} >>',
+    )
+    doc.xref_set_key(page.xref, 'Resources', f'<< /Font << /F1 {font} 0 R >> >>')
+    stream = doc.get_new_xref()
+    doc.update_object(stream, '<< >>')
+    doc.update_stream(stream, f'BT /F1 12 Tf 20 50 Td <{"".join(f"{c:04X}" for c in cids)}> Tj ET'.encode('ascii'))
+    doc.xref_set_key(page.xref, 'Contents', f'{stream} 0 R')
+    doc.save(path)
+    doc.close()
+    return path
+
+
 def hatch_pdf(path: Path) -> Path:
     """A 200 x 100 page: a blue 5 x 5 solid fill, then a 50 x 50 hatch -- an uncolored tiling pattern (a diagonal
     stroke, as TikZ's ``north east lines``) tinted red through ``[/Pattern /DeviceRGB]``: a pattern, not a solid fill.
@@ -853,20 +1113,10 @@ def tagged_pdf(
     """
     doc = pymupdf.open()
     xrefs = {name: doc.get_new_xref() for name in tree}
-    fonts = []
-    for base in ('Helvetica', 'Helvetica-Bold'):
-        fonts.append(doc.get_new_xref())
-        doc.update_object(fonts[-1], f'<< /Type /Font /Subtype /Type1 /BaseFont /{base} /Encoding /WinAnsiEncoding >>')
     refs = {name: f'{xref} 0 R' for name, xref in xrefs.items()}
-    for i, content in enumerate(contents):
-        page = doc.new_page(width=size[0], height=size[1])
-        stream = doc.get_new_xref()
-        doc.update_object(stream, '<< >>')
-        doc.update_stream(stream, content.encode('latin-1'))
-        doc.xref_set_key(page.xref, 'Contents', f'{stream} 0 R')
-        doc.xref_set_key(page.xref, 'Resources', f'<< /Font << /F1 {fonts[0]} 0 R /F2 {fonts[1]} 0 R >> >>')
-        doc.xref_set_key(page.xref, 'StructParents', str(i))
-        refs[f'page{i + 1}'] = f'{page.xref} 0 R'
+    for i, page in enumerate(_content_pages(doc, contents, size)):
+        doc.xref_set_key(page, 'StructParents', str(i))
+        refs[f'page{i + 1}'] = f'{page} 0 R'
     for name, source in tree.items():
         doc.update_object(xrefs[name], source.format(**refs))
     doc.xref_set_key(doc.pdf_catalog(), 'StructTreeRoot', refs['root'])
@@ -874,6 +1124,35 @@ def tagged_pdf(
     doc.save(path)
     doc.close()
     return path
+
+
+def content_pdf(path: Path, contents: Sequence[str], *, size: tuple[float, float] = PAGE) -> Path:
+    """A PDF whose pages draw exactly ``contents``, one content stream a page (``size`` points), Helvetica as ``/F1``
+    and Helvetica-Bold as ``/F2`` in its resources: for what no PyMuPDF drawing call states (caps, joins, miter
+    limits, dashes, text rendering modes)."""
+    doc = pymupdf.open()
+    _content_pages(doc, contents, size)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def _content_pages(doc: pymupdf.Document, contents: Sequence[str], size: tuple[float, float]) -> list[int]:
+    """Pages added to ``doc`` drawing ``contents``, one a page, with :func:`content_pdf`'s fonts: their xrefs."""
+    fonts = []
+    for base in ('Helvetica', 'Helvetica-Bold'):
+        fonts.append(doc.get_new_xref())
+        doc.update_object(fonts[-1], f'<< /Type /Font /Subtype /Type1 /BaseFont /{base} /Encoding /WinAnsiEncoding >>')
+    pages = []
+    for content in contents:
+        page = doc.new_page(width=size[0], height=size[1])
+        stream = doc.get_new_xref()
+        doc.update_object(stream, '<< >>')
+        doc.update_stream(stream, content.encode('latin-1'))
+        doc.xref_set_key(page.xref, 'Contents', f'{stream} 0 R')
+        doc.xref_set_key(page.xref, 'Resources', f'<< /Font << /F1 {fonts[0]} 0 R /F2 {fonts[1]} 0 R >> >>')
+        pages.append(page.xref)
+    return pages
 
 
 def in_background_color(page: Page) -> Page:
@@ -1092,3 +1371,66 @@ def draw_sideways_table(page: pymupdf.Page, rows: Sequence[Sequence[str]] = TABL
             rect = table_cell_rect(r, c)
             at = turned(rect.x0 + 4, rect.y1 - 6, turn)
             page.insert_text(at, text, fontname='helv', fontsize=9, rotate=-turn % 360)
+
+
+#: A landscape table's caption above it and a note below it, each ``(text, baseline origin)`` in the table's own frame
+#: (:func:`draw_sideways_table`'s before it is turned): set turned with it, they read bottom to top.
+LANDSCAPE_CAPTION = ('Table 10 - Magnetic properties of the sintered grades', (72.0, 385.0))
+LANDSCAPE_NOTE = ('NOTE The values are typical of the grades listed above.', (72.0, 505.0))
+#: The upright running head over it: two spans at the page's top, ``(text, baseline origin)``.
+LANDSCAPE_HEAD = (('IEC 60404-8-1:2023', (72.0, 40.0)), ('- 24 -', (290.0, 40.0)))
+
+
+def landscape_pdf(path: Path, pages: int = 1) -> Path:
+    """``pages`` pages of a landscape table printed sideways (:func:`draw_sideways_table`, read bottom to top) under an
+    upright running head (:data:`LANDSCAPE_HEAD`), its caption above it and a note below it in its own frame -- as a
+    standard prints a landscape table on a portrait page. All in Helvetica 9: most of each page reads sideways."""
+    with pymupdf.open() as doc:
+        for _ in range(pages):
+            page = doc.new_page(width=SCAN_PAGE.width, height=SCAN_PAGE.height)
+            for text, at in LANDSCAPE_HEAD:
+                page.insert_text(at, text, fontname='helv', fontsize=9)
+            draw_sideways_table(page)
+            for text, (x, y) in (LANDSCAPE_CAPTION, LANDSCAPE_NOTE):
+                page.insert_text(turned(x, y, -90), text, fontname='helv', fontsize=9, rotate=90)
+        doc.save(path)
+    return path
+
+
+#: A run of text on a page: its baseline origin (x, y), its text and the degrees PyMuPDF turns it counterclockwise
+#: (0 upright, 90 read bottom to top, 270 read top to bottom).
+type TurnedRun = tuple[float, float, str, int]
+
+
+def turned_text_pdf(path: Path, runs: Sequence[TurnedRun]) -> Path:
+    """One letter page of ``runs``, each set in Helvetica 9 at its origin, turned as it says: every box is known."""
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=612, height=792)
+        for x, y, text, rotate in runs:
+            page.insert_text((x, y), text, fontname='helv', fontsize=9, rotate=rotate)
+        doc.save(path)
+    return path
+
+
+def landscape_text_pdf(path: Path, runs: Sequence[Run], bars: Sequence[pymupdf.Rect] = (), *, sideways: bool) -> Path:
+    """One landscape page of ``runs`` and filled ``bars``, each placed in the page's own frame (792 by 612 points).
+
+    ``sideways``: printed on a portrait Letter page turned a quarter, read bottom to top, as a standard prints a
+    landscape page -- the frame's point (x, y) at the page's (y, 792 - x), every box known; else set upright on a
+    landscape page.
+    """
+    with pymupdf.open() as doc:
+        if not sideways:
+            page = doc.new_page(width=792, height=612)
+            for x, y, text, font, size in runs:
+                page.insert_text((x, y), text, fontname=font, fontsize=size)
+            for bar in bars:
+                page.draw_rect(bar, color=None, fill=(0, 0, 0))
+        else:
+            page = doc.new_page(width=612, height=792)
+            for x, y, text, font, size in runs:
+                page.insert_text((y, 792 - x), text, fontname=font, fontsize=size, rotate=90)
+            for bar in bars:
+                page.draw_rect(pymupdf.Rect(bar.y0, 792 - bar.x1, bar.y1, 792 - bar.x0), color=None, fill=(0, 0, 0))
+        doc.save(path)
+    return path

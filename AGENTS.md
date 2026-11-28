@@ -14,12 +14,15 @@ consumer's vocabulary here -- schemas live in consumers. Modules and usage: `REA
   `per_page` -> `agreement`, `markdown`, `regions`, `tables`, `ink`, `pdf`, `png`, `formula`; `formula` imports nothing
   of ours (torch and transformers only when asked); `agreement` -> `markdown`, `regions`; `regions` -> `tables`;
   `markdown`, `regions` -> `tags` -> `layout` -> `ir`; `tables` -> `layout`; `ink` -> `ir` (`regions` takes its drawings, `tables` a scan's rulings, as boxes, never pixels);
-  `extract` -> `plot`, `pdf`, `html` -> `numbers` -> `ir`; `plot` -> `glyphs` -> `strokefont`; `strokes` -> `plot`, `ir`; `ocr` -> `ink`, `pdf`
+  `extract` -> `plot`, `pdf`, `html` -> `numbers` -> `ir`; `plot` -> `glyphs` -> `strokefont`, `fonts`; `pdf` -> `fonts`
+  (fonts fetched on first use, the one module that downloads them; imports nothing of ours); `strokes` -> `plot`, `ir`; `ocr` -> `ink`, `pdf`
   (a picture measured: its skew; a codec decoded to be turned); `capture` is apart (`cli` -> `session` -> `stitch`; `cli` -> `desktop`, `export`, `ocr`, `files` ->
   `win32`, `export`; `desktop` -> `win32` | `quartz` | `x11` (one per OS, chosen at run time) -> `screen`; `join` ->
   `export`, `stitch`; `export` -> `png`), imported only by `__main__`; `png` imports nothing of ours. PDF bytes are
   `_pdf`'s (the Rust crates): `pdf` reads through it, `capture` (`export`, `join`, `files`) and `ocr` read and write
-  through it; PyMuPDF only renders pixels (`pdf.read_raster`, `paper`, `glyphs`). OCR is `ocr`'s alone: no other
+  through it, and `pdf.read_raster` draws pixels with it (the own renderer, `crates/render`). PyMuPDF is no runtime
+  dependency (D118): the dev extra's test-time reference alone, and the base imports none
+  (`tests/architecture/test_the_base_imports_no_pymupdf.py` proves it in a subprocess). OCR is `ocr`'s alone: no other
   module runs the `tesseract` executable, which is the user's to install, never bundled. The base imports
   without `ai_lab` (`tests/unit/test_ai.py` proves it in a subprocess) and without torch or transformers
   (`tests/unit/test_formula.py`).
@@ -38,8 +41,8 @@ consumer's vocabulary here -- schemas live in consumers. Modules and usage: `REA
   sha256, never committed (`tests/corpus/sources.py`).
 - A value the document does not state is absent, a raster plot raises, an ambiguous match refuses: never a
   silent default.
-- No pymupdf4llm: markdown is written from the IR (`markdown.py`). `pymupdf<2` because 2.x requires
-  pymupdf4llm and onnxruntime (no cp315 wheel); the venv is the family's Python 3.15.
+- No pymupdf4llm: markdown is written from the IR (`markdown.py`). The dev extra's `pymupdf<2` because 2.x
+  requires pymupdf4llm and onnxruntime (no cp315 wheel); the venv is the family's Python 3.14.
 - Verdicts: `.venv/Scripts/python.exe -m dev_lab.dev.verify -- <paths>`. Family files are rendered
   (`tests/architecture/_famconfig.py`, `python -m dev_lab.dev.famfiles`, `python -m dev_lab.dev.ciworkflows render`).
 - Design record: `.claude/memory/2026/11/05/`.

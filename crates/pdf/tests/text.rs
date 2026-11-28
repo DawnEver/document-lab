@@ -29,7 +29,7 @@ fn texts(content: &str, font: &str, extra: &[&str]) -> (Vec<TextEvent>, Vec<Stri
             }
         })
         .collect();
-    (texts, content.warnings)
+    (texts, content.warnings.into_iter().map(|w| w.why).collect())
 }
 
 fn text(event: &TextEvent) -> String {
@@ -667,6 +667,43 @@ fn embedded_text(base: &str, program: &str, codes: &str) -> String {
     text(&events[0])
 }
 
+/// The text of `(aW)` in a simple font of `subtype` named `name`, under `/Encoding /WinAnsiEncoding`, embedding a
+/// TrueType program that names itself `name` when `embedded`.
+fn win_ansi_text(name: &str, subtype: &str, embedded: bool) -> String {
+    let font = format!(
+        "<< /Type /Font /Subtype /{subtype} /BaseFont /{name} /Encoding /WinAnsiEncoding /FontDescriptor 6 0 R >>"
+    );
+    let file = if embedded { "/FontFile2 7 0 R" } else { "" };
+    let descriptor = format!("<< /Type /FontDescriptor /FontName /{name} /Flags 4 {file} >>");
+    let program = common::stream("/Filter /ASCIIHexDecode", &sfnt_named(name));
+    let (events, _) = texts(
+        "BT /F1 10 Tf 0 50 Td (aW) Tj ET",
+        &font,
+        &[&descriptor, &program],
+    );
+    text(&events[0])
+}
+
+#[test]
+fn a_symbol_font_not_embedded_reads_as_the_glyphs_it_draws_whatever_base_encoding_is_named() {
+    // D121: a Symbol embedding no program is drawn by its built-in encoding, as viewers draw it, and its text
+    // follows: alpha and Omega, not the Latin `aW` that WinAnsiEncoding names. So for Zapf Dingbats.
+    for (name, subtype) in [("Symbol", "Type1"), ("SymbolMT", "TrueType")] {
+        assert_eq!(
+            win_ansi_text(name, subtype, false),
+            "\u{3B1}\u{2126}",
+            "{name}"
+        );
+    }
+    assert_eq!(
+        win_ansi_text("ZapfDingbats", "Type1", false),
+        "\u{2741}\u{2737}"
+    );
+    // The planted control: one that embeds its program is drawn by the encoding named, and reads as it.
+    assert_eq!(win_ansi_text("SymbolMT", "TrueType", true), "aW");
+    assert_eq!(win_ansi_text("Symbol", "Type1", true), "aW");
+}
+
 #[test]
 fn a_symbol_font_under_a_generic_name_is_known_by_its_programs_own_name() {
     // A producer's `CIDFont+F7` whose program names itself SymbolMT: Omega and greaterequal.
@@ -767,4 +804,168 @@ fn a_font_not_embedded_is_drawn_by_a_substitute_stretched_to_its_widths_unless_s
     // width the file states for it, twice the substitute's own.
     let ratio = outline_width(&calibri[0]) / outline_width(&helvetica[0]);
     assert!((ratio - 1444.0 / 722.0).abs() < 1e-6, "{ratio}");
+}
+
+/// A Foxit program, here a stand-in for a fallback a test serves.
+fn foxit(name: &str) -> Vec<u8> {
+    std::fs::read(format!(
+        "{}/src/fonts/{name}.cff",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+}
+
+/// The shape of each glyph `(codes)` shows in the font `/F1` (with `extra` objects 6, 7, ...), its fallbacks
+/// fetched through `served` (a fallback's name to the Foxit program served for it, else a failure), and each name
+/// asked for, in order. No fetch at all when `served` is None.
+fn fallback_shapes(
+    font: &str,
+    extra: &[&str],
+    codes: &str,
+    served: Option<&'static [(&'static str, &'static str)]>,
+) -> (Vec<pdf::shape::Shape>, Vec<String>) {
+    let mut objects = vec![font];
+    objects.extend_from_slice(extra);
+    let file = File::open(
+        common::one_page(
+            "/Resources << /Font << /F1 5 0 R >> >>",
+            &format!("BT /F1 10 Tf 0 50 Td <{codes}> Tj ET"),
+            &objects,
+        ),
+        b"",
+    )
+    .unwrap();
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    if let Some(served) = served {
+        let log = std::rc::Rc::clone(&asked);
+        file.fetch_fallbacks(std::rc::Rc::new(move |name: &str| {
+            log.borrow_mut().push(name.to_string());
+            served
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, program)| foxit(program))
+                .ok_or_else(|| format!("{name} cannot be had: offline"))
+        }));
+    }
+    let page = file.pages().unwrap().remove(0);
+    let content = file.interpret(&page, false).unwrap();
+    let shapes = content
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Text(t) => Some(t),
+            _ => None,
+        })
+        .flat_map(|t| t.glyphs.iter().map(|g| t.font.shape(g.code)))
+        .collect();
+    let asked = asked.borrow().clone();
+    (shapes, asked)
+}
+
+/// A composite font `/BaseFont /<name>` embedding no program, `Identity-H` over `CID`s of Adobe's `ordering`, its
+/// descriptor's flags `flags`: the font and its descendant and descriptor (objects 6 and 7).
+fn cjk_font(name: &str, ordering: &str, flags: u32) -> [String; 3] {
+    [
+        format!(
+            "<< /Type /Font /Subtype /Type0 /BaseFont /{name} /Encoding /Identity-H /DescendantFonts [6 0 R] >>"
+        ),
+        format!(
+            "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /{name} /FontDescriptor 7 0 R \
+             /CIDSystemInfo << /Registry (Adobe) /Ordering ({ordering}) /Supplement 0 >> >>"
+        ),
+        format!("<< /Type /FontDescriptor /FontName /{name} /Flags {flags} >>"),
+    ]
+}
+
+fn outlined(shape: &pdf::shape::Shape) -> bool {
+    matches!(shape, pdf::shape::Shape::Outline(o) if !o.is_empty())
+}
+
+fn missing(shape: &pdf::shape::Shape) -> String {
+    match shape {
+        pdf::shape::Shape::Missing(why) => why.to_string(),
+        other => panic!("drawn: {other:?}"),
+    }
+}
+
+#[test]
+fn a_cjk_font_not_embedded_is_drawn_from_its_collections_fallback_fetched_once() {
+    // GB1's CIDs 34 and 35 are `A` and `B` (served by FoxitSans for the test): the fallback is fetched once, when
+    // the first glyph needs it; sans or serif by the descriptor's flags, as MuPDF chooses.
+    for (ordering, flags, wanted) in [
+        ("GB1", 4, "noto-sans-sc"),
+        ("GB1", 6, "noto-serif-sc"),
+        ("CNS1", 4, "noto-sans-tc"),
+        ("Japan1", 4, "noto-sans-jp"),
+        ("Korea1", 6, "noto-serif-kr"),
+    ] {
+        let [font, cid, descriptor] = cjk_font("FZHTJW--GB1-0", ordering, flags);
+        let served: &'static [(&str, &str)] = Box::leak(Box::new([(wanted, "FoxitSans")]));
+        let (shapes, asked) =
+            fallback_shapes(&font, &[&cid, &descriptor], "00220023", Some(served));
+        assert_eq!(asked, [wanted], "{ordering} {flags}");
+        if ordering == "GB1" {
+            assert!(shapes.iter().all(outlined), "{shapes:?}");
+        }
+    }
+}
+
+#[test]
+fn a_fallback_that_cannot_be_had_is_missing_by_name_and_never_guessed() {
+    let [font, cid, descriptor] = cjk_font("FZS3JW--GB1-0", "GB1", 6);
+    let (shapes, asked) = fallback_shapes(&font, &[&cid, &descriptor], "00220023", Some(&[]));
+    assert_eq!(asked, ["noto-serif-sc"]); // asked once: the failure is kept while the file is open
+    assert_eq!(
+        missing(&shapes[1]),
+        "font FZS3JW--GB1-0 is not embedded and its fallback noto-serif-sc cannot be had: offline"
+    );
+    // Nothing fetches: missing too, saying so.
+    let (shapes, _) = fallback_shapes(&font, &[&cid, &descriptor], "0022", None);
+    assert!(missing(&shapes[0]).contains("nothing fetches fallback fonts here"));
+}
+
+#[test]
+fn a_microsoft_symbol_font_not_embedded_is_drawn_from_the_first_fallback_holding_its_character() {
+    // Wingdings 2's 0x95 is U+22C5 (dot operator): not in the first fallback (FoxitSans served), in the second
+    // (FoxitSymbol's dotmath, and its space); the third is never fetched. A character none holds is missing, naming
+    // the fallbacks.
+    let font = "<< /Type /Font /Subtype /TrueType /BaseFont /Wingdings2 /FirstChar 32 /LastChar 149 \
+                /FontDescriptor << /Type /FontDescriptor /FontName /Wingdings2 /Flags 4 >> >>";
+    let served = &[
+        ("noto-sans-symbols-2", "FoxitSans"),
+        ("noto-sans-symbols", "FoxitSymbol"),
+        ("noto-sans-math", "FoxitSans"),
+    ];
+    let (shapes, asked) = fallback_shapes(font, &[], "9520", Some(served));
+    assert!(outlined(&shapes[0]), "{shapes:?}");
+    assert_eq!(shapes[1], pdf::shape::Shape::Outline(std::rc::Rc::from([])));
+    assert_eq!(asked, ["noto-sans-symbols-2", "noto-sans-symbols"]);
+    let (shapes, asked) = fallback_shapes(font, &[], "A7", Some(served)); // U+1F794, in none
+    assert_eq!(asked.len(), 3);
+    assert_eq!(
+        missing(&shapes[0]),
+        "font Wingdings2 is not embedded and a character it shows is in none of its fallbacks \
+         (noto-sans-symbols-2, noto-sans-symbols, noto-sans-math)"
+    );
+}
+
+#[test]
+fn a_font_with_its_program_or_a_substitute_or_no_collection_fetches_nothing() {
+    // The planted controls: an embedded program, a standard font's substitute, and a composite font whose CIDs are
+    // of no collection known (Adobe-Identity) never ask for a fallback; the last stays missing as before.
+    let served = &[("noto-sans-sc", "FoxitSans")];
+    let embedded = "<< /Type /Font /Subtype /Type1 /BaseFont /F /FontDescriptor << /Type /FontDescriptor \
+                    /FontName /F /Flags 32 /FontFile3 6 0 R >> >>";
+    let program = common::hex_stream("/Subtype /Type1C", &foxit("FoxitSans"));
+    let (shapes, asked) = fallback_shapes(embedded, &[&program], "41", Some(served));
+    assert!(outlined(&shapes[0]) && asked == Vec::<String>::new());
+    let (shapes, asked) = fallback_shapes(HELVETICA, &[], "41", Some(served));
+    assert!(outlined(&shapes[0]) && asked == Vec::<String>::new());
+    let [font, cid, descriptor] = cjk_font("F", "Identity", 4);
+    let (shapes, asked) = fallback_shapes(&font, &[&cid, &descriptor], "0022", Some(served));
+    assert_eq!(
+        missing(&shapes[0]),
+        "font F is not embedded and has no substitute"
+    );
+    assert_eq!(asked, Vec::<String>::new());
 }

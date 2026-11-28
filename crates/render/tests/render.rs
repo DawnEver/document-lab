@@ -24,6 +24,7 @@ fn drawn(
         text: false,
         annotations: false,
         alpha: false,
+        jpx: render::image::Jpx::default(),
     };
     render(&file, &page, &options).unwrap()
 }
@@ -53,6 +54,7 @@ fn texted(page_extra: &str, content: &str, extra: &[&str]) -> Raster {
         text: true,
         annotations: false,
         alpha: false,
+        jpx: render::image::Jpx::default(),
     };
     render(&file, &page, &options).unwrap()
 }
@@ -148,23 +150,35 @@ fn a_glyph_is_its_outline_filled_stroked_or_clipped_to() {
 
 #[test]
 fn a_glyph_whose_font_has_no_program_and_no_substitute_is_counted_by_its_font() {
-    let font = "<< /Type /Font /Subtype /Type0 /BaseFont /MSMincho /Encoding /Identity-H /DescendantFonts [<< \
-                /Type /Font /Subtype /CIDFontType2 /BaseFont /MSMincho /CIDSystemInfo << /Registry (Adobe) \
-                /Ordering (Japan1) /Supplement 2 >> /FontDescriptor << /Type /FontDescriptor /FontName /MSMincho \
-                /Flags 4 >> >>] >>";
-    let r = texted(
-        "/Resources << /Font << /F2 5 0 R >> >>",
-        "BT /F2 20 Tf 10 10 Td <00010002> Tj ET",
-        &[font],
-    );
-    assert!(r.data.iter().all(|&v| v == 255));
-    assert_eq!(
-        r.undrawn
-            .get("font MSMincho is not embedded and has no substitute"),
-        Some(&2),
-        "{:?}",
-        r.undrawn
-    );
+    // Its CIDs of no collection known (Adobe-Identity): no substitute, no fallback. Of Adobe-Japan1 a fallback stands
+    // for it, but nothing fetches one here: missing too, saying so.
+    let font = |ordering: &str| {
+        format!(
+            "<< /Type /Font /Subtype /Type0 /BaseFont /MSMincho /Encoding /Identity-H /DescendantFonts [<< \
+             /Type /Font /Subtype /CIDFontType2 /BaseFont /MSMincho /CIDSystemInfo << /Registry (Adobe) \
+             /Ordering ({ordering}) /Supplement 0 >> /FontDescriptor << /Type /FontDescriptor /FontName /MSMincho \
+             /Flags 4 >> >>] >>"
+        )
+    };
+    for (ordering, why) in [
+        (
+            "Identity",
+            "font MSMincho is not embedded and has no substitute",
+        ),
+        (
+            "Japan1",
+            "font MSMincho is not embedded and its fallback noto-sans-jp is not at hand: nothing fetches fallback \
+             fonts here",
+        ),
+    ] {
+        let r = texted(
+            "/Resources << /Font << /F2 5 0 R >> >>",
+            "BT /F2 20 Tf 10 10 Td <00010002> Tj ET",
+            &[&font(ordering)],
+        );
+        assert!(r.data.iter().all(|&v| v == 255));
+        assert_eq!(r.undrawn.get(why), Some(&2), "{:?}", r.undrawn);
+    }
 }
 
 #[test]
@@ -300,22 +314,119 @@ fn hidden_and_inkless_content_marks_nothing() {
     assert_eq!(at(&r, 100, 50), WHITE);
 }
 
+const RED_TO_BLUE: &str = "/ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 200 0] \
+     /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >>";
+
+/// Whether `got` is within a level of `want`, channel by channel.
+fn near(got: [u8; 3], want: [f64; 3]) -> bool {
+    got.iter()
+        .zip(want)
+        .all(|(g, w)| (f64::from(*g) - w * 255.0).abs() <= 1.0)
+}
+
 #[test]
-fn a_shading_and_a_pattern_are_counted_not_drawn() {
+fn a_shading_paints_the_clip_and_a_shading_pattern_its_fill() {
     let r = drawn(
-        "/Resources << /Shading << /Sh1 << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 1 0] \
-         /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >> >> \
-         /Pattern << /P1 << /PatternType 2 /Shading << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 1 0] \
-         /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >> >> >> >>",
+        &format!(
+            "/Resources << /Shading << /Sh1 << {RED_TO_BLUE} >> >> \
+             /Pattern << /P1 << /PatternType 2 /Shading << {RED_TO_BLUE} >> >> >> >>"
+        ),
         "q 0 0 50 50 re W n /Sh1 sh Q /Pattern cs /P1 scn 100 0 50 50 re f",
         &[],
         1.0,
         None,
     );
-    assert_eq!(at(&r, 25, 75), WHITE);
-    assert_eq!(at(&r, 125, 75), WHITE);
-    assert_eq!(r.undrawn.get("shading (stage 3)"), Some(&1));
-    assert_eq!(r.undrawn.get("pattern fill (stage 3)"), Some(&1));
+    // t where a pixel is sampled -- one pixel right of its corner, on its top edge, as MuPDF samples a shading --:
+    // 26 / 200 across for pixel 25.
+    let t = |x: f64| (x + 1.0) / 200.0;
+    assert!(
+        near(at(&r, 25, 75), [1.0 - t(25.0), 0.0, t(25.0)]),
+        "{:?}",
+        at(&r, 25, 75)
+    );
+    assert!(near(at(&r, 125, 75), [1.0 - t(125.0), 0.0, t(125.0)]));
+    assert_eq!(at(&r, 75, 75), WHITE, "between the clip and the fill");
+    assert_eq!(at(&r, 25, 25), WHITE, "outside the clip");
+    assert!(r.undrawn.is_empty(), "{:?}", r.undrawn);
+}
+
+#[test]
+fn a_radial_shading_takes_the_larger_circle_through_a_point_and_extends_as_asked() {
+    // Circles about (100, 50) from radius 0 (red) to 40 (blue), extended past the outer one only.
+    let r = drawn(
+        "/Resources << /Shading << /Sh1 << /ShadingType 3 /ColorSpace /DeviceRGB /Coords [100 50 0 100 50 40] \
+         /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> /Extend [false true] >> >> >>",
+        "/Sh1 sh",
+        &[],
+        1.0,
+        None,
+    );
+    // Pixel (119, 49) is sampled at (120, 49): 20 units right of the circles' center, 1 up: s = |d| / 40.
+    let s = 20.0_f64.hypot(1.0) / 40.0;
+    assert!(
+        near(at(&r, 119, 49), [1.0 - s, 0.0, s]),
+        "{:?}",
+        at(&r, 119, 49)
+    );
+    assert_eq!(
+        at(&r, 180, 50),
+        [0, 0, 255],
+        "extended past the outer circle"
+    );
+}
+
+#[test]
+fn a_mesh_shading_interpolates_its_vertices_colors() {
+    // One free-form triangle, 8-bit flags, coordinates and components: (0, 0) red, (200, 0) green, (0, 100) blue.
+    let data = [
+        0u8, 0, 0, 255, 0, 0, 0, 200, 0, 0, 255, 0, 0, 0, 100, 0, 0, 255,
+    ];
+    let shading = common::hex_stream(
+        "/ShadingType 4 /ColorSpace /DeviceRGB /BitsPerCoordinate 8 /BitsPerComponent 8 /BitsPerFlag 8          /Decode [0 255 0 255 0 1 0 1 0 1]",
+        &data,
+    );
+    let r = drawn(
+        "/Resources << /Shading << /Sh1 5 0 R >> >>",
+        "/Sh1 sh",
+        &[&shading],
+        1.0,
+        None,
+    );
+    // Pixel (49, 74) is sampled at (50, 74), 26 up: weights 1 - x/200 - y/100 red, x/200 green, y/100 blue.
+    let (x, y) = (50.0 / 200.0, 26.0 / 100.0);
+    assert!(
+        near(at(&r, 49, 74), [1.0 - x - y, x, y]),
+        "{:?}",
+        at(&r, 49, 74)
+    );
+    assert_eq!(at(&r, 150, 10), WHITE, "outside the triangle");
+    assert!(r.undrawn.is_empty(), "{:?}", r.undrawn);
+}
+
+#[test]
+fn a_tiling_pattern_repeats_its_cell_and_an_uncolored_one_paints_in_its_tint() {
+    let cell = |paint: u8, color: &str| {
+        common::stream(
+            &format!(
+                "/PatternType 1 /PaintType {paint} /TilingType 1 /BBox [0 0 10 10] /XStep 10 /YStep 10 /Resources << >>"
+            ),
+            &format!("{color} 0 0 5 5 re f"),
+        )
+    };
+    let r = drawn(
+        "/Resources << /Pattern << /P1 5 0 R /P2 6 0 R >> /ColorSpace << /CS1 [/Pattern /DeviceRGB] >> >>",
+        "/Pattern cs /P1 scn 0 0 100 100 re f /CS1 cs 0 0 1 /P2 scn 100 0 100 100 re f",
+        &[&cell(1, "1 0 0 rg"), &cell(2, "")],
+        1.0,
+        None,
+    );
+    // Each cell's lower-left quarter: page rows 95..100 (y up 0..5), every 10 across.
+    assert_eq!(at(&r, 2, 97), RED);
+    assert_eq!(at(&r, 7, 97), WHITE);
+    assert_eq!(at(&r, 92, 7), RED, "repeated to the far corner");
+    assert_eq!(at(&r, 102, 97), BLUE, "the uncolored cell in its tint");
+    assert_eq!(at(&r, 107, 92), WHITE);
+    assert!(r.undrawn.is_empty(), "{:?}", r.undrawn);
 }
 
 #[test]
@@ -332,20 +443,135 @@ fn constant_alpha_and_a_blend_mode_composite_onto_the_backdrop() {
     assert_eq!(at(&r, 125, 75), BLACK, "yellow multiplied onto blue");
 }
 
+/// A Form (object `n` of a page's extra objects) painting `content`, over the page, a transparency group with
+/// `group` in its group dictionary.
+fn form(group: &str, content: &str) -> String {
+    common::stream(
+        &format!(
+            "/Type /XObject /Subtype /Form /BBox [0 0 200 100] /Group << /S /Transparency {group} >>"
+        ),
+        content,
+    )
+}
+
 #[test]
-fn a_soft_mask_is_counted_as_drawn_without_it() {
+fn a_luminosity_soft_mask_shows_a_mark_where_its_group_is_light() {
+    // The mask's group: white over its left half, a black backdrop elsewhere.
     let r = drawn(
         "/Resources << /ExtGState << /G1 << /SMask << /S /Luminosity /G 5 0 R >> >> >> >>",
-        "/G1 gs 0 0 10 10 re f",
-        &[&common::stream(
-            "/Type /XObject /Subtype /Form /BBox [0 0 1 1] /Group << /S /Transparency >>",
-            "",
+        "/G1 gs 0 0 200 100 re f",
+        &[&form("", "1 g 0 0 100 100 re f")],
+        1.0,
+        None,
+    );
+    assert_eq!(at(&r, 50, 50), BLACK, "shown where the mask is white");
+    assert_eq!(
+        at(&r, 150, 50),
+        WHITE,
+        "hidden where it is the black backdrop"
+    );
+    assert!(r.undrawn.is_empty(), "{:?}", r.undrawn);
+}
+
+#[test]
+fn an_alpha_soft_mask_and_its_backdrop_and_transfer_function() {
+    // Alpha: the group's half-transparent fill masks by half. Luminosity over a white backdrop, inverted by /TR.
+    let r = drawn(
+        "/Resources << /ExtGState << /A << /SMask << /S /Alpha /G 5 0 R >> >> \
+         /L << /SMask << /S /Luminosity /G 6 0 R /BC [1] /TR << /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >> >> >> >> >>",
+        "q /A gs 0 0 100 100 re f Q q /L gs 100 0 100 100 re f Q",
+        &[
+            &common::stream(
+                "/Type /XObject /Subtype /Form /BBox [0 0 200 100] /Group << /S /Transparency >>                  /Resources << /ExtGState << /H << /ca 0.5 >> >> >>",
+                "/H gs 0 0 100 100 re f",
+            ),
+            &form("/CS /DeviceGray", "0 g 100 0 50 100 re f"),
+        ],
+        1.0,
+        None,
+    );
+    let half = at(&r, 50, 50);
+    assert!((126..=129).contains(&half[0]), "{half:?}");
+    assert_eq!(at(&r, 125, 50), BLACK, "black inverted: shown");
+    assert_eq!(
+        at(&r, 175, 50),
+        WHITE,
+        "the white backdrop inverted: hidden"
+    );
+}
+
+#[test]
+fn a_group_with_an_alpha_composites_its_marks_together() {
+    // Two overlapping opaque squares in a group at half alpha: the overlap is as light as either alone.
+    let r = drawn(
+        "/Resources << /XObject << /Fm1 5 0 R >> /ExtGState << /H << /ca 0.5 >> >> >>",
+        "/H gs /Fm1 Do",
+        &[&form("", "0 g 0 0 60 100 re f 40 0 60 100 re f")],
+        1.0,
+        None,
+    );
+    assert_eq!(at(&r, 20, 50), at(&r, 50, 50));
+    let half = at(&r, 50, 50);
+    assert!((126..=129).contains(&half[0]), "{half:?}");
+}
+
+#[test]
+fn a_knockout_group_shows_each_mark_over_the_backdrop_alone() {
+    // Two half-alpha squares overlapping: knocked out, the overlap is the second's half alone, not three quarters.
+    let r = drawn(
+        "/Resources << /XObject << /Fm1 5 0 R >> /ExtGState << /H << /ca 0.5 >> >> >>",
+        "/Fm1 Do",
+        &[&form(
+            "/K true",
+            "/H gs 1 0 0 rg 0 0 60 100 re f 0 0 1 rg 40 0 60 100 re f",
         )],
         1.0,
         None,
     );
-    assert_eq!(at(&r, 5, 95), BLACK);
-    assert_eq!(r.undrawn.len(), 1, "{:?}", r.undrawn);
+    let overlap = at(&r, 50, 50);
+    let half = 126..=129;
+    assert!(
+        half.contains(&overlap[0]) && half.contains(&overlap[1]) && overlap[2] == 255,
+        "{overlap:?}"
+    );
+}
+
+#[test]
+fn a_glyph_with_no_program_in_a_knockout_group_is_counted() {
+    // Each element of a knockout group is drawn over its own box: a glyph whose shape is missing has its box there,
+    // so it is counted as it is anywhere else.
+    let font = "<< /Type /Font /Subtype /Type0 /BaseFont /MSMincho /Encoding /Identity-H /DescendantFonts [<< \
+                /Type /Font /Subtype /CIDFontType2 /BaseFont /MSMincho /CIDSystemInfo << /Registry (Adobe) \
+                /Ordering (Identity) /Supplement 0 >> /FontDescriptor << /Type /FontDescriptor /FontName /MSMincho \
+                /Flags 4 >> >>] >>";
+    for knockout in ["/K true", "/K false"] {
+        let group = common::stream(
+            &format!(
+                "/Type /XObject /Subtype /Form /BBox [0 0 200 100] /Group << /S /Transparency {knockout} >> \
+                 /Resources << /Font << /F2 6 0 R >> >>"
+            ),
+            "BT /F2 20 Tf 10 10 Td <00010002> Tj ET",
+        );
+        let r = texted(
+            "/Resources << /XObject << /Fm1 5 0 R >> >>",
+            "/Fm1 Do",
+            &[&group, font],
+        );
+        let why = "font MSMincho is not embedded and has no substitute";
+        assert_eq!(r.undrawn.get(why), Some(&2), "{knockout}: {:?}", r.undrawn);
+    }
+}
+
+#[test]
+fn an_isolated_group_blends_its_marks_with_each_other_not_the_page() {
+    // Red on the page; a green square multiplied in a group: isolated, it multiplies onto nothing and shows green.
+    let content = "1 0 0 rg 0 0 200 100 re f /Fm1 Do";
+    let group = |isolated: &str| form(isolated, "/M gs 0 1 0 rg 0 0 100 100 re f");
+    let page = "/Resources << /XObject << /Fm1 5 0 R >> /ExtGState << /M << /BM /Multiply >> >> >>";
+    let isolated = drawn(page, content, &[&group("/I true")], 1.0, None);
+    let open = drawn(page, content, &[&group("")], 1.0, None);
+    assert_eq!(at(&isolated, 50, 50), [0, 255, 0]);
+    assert_eq!(at(&open, 50, 50), BLACK, "green multiplied onto red");
 }
 
 /// A page placing image object 5 over user space (10, 10)-(10 + w, 10 + h), drawn at one pixel a point.
@@ -531,16 +757,18 @@ fn a_fax_image_decodes_its_runs() {
 }
 
 #[test]
-fn an_image_in_a_codec_not_decoded_is_counted_by_its_name() {
+fn an_image_whose_codec_data_does_not_decode_is_counted_by_its_codec_and_why() {
     let image = common::stream(
         "/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /JPXDecode",
         "x",
     );
     let r = placed(&image, 10, 10, "");
     assert_eq!(at(&r, 15, 85), WHITE);
-    assert_eq!(
-        r.undrawn.get("JPXDecode image (not decoded in stage 1)"),
-        Some(&1)
+    let why: Vec<_> = r.undrawn.keys().collect();
+    assert_eq!(why.len(), 1, "{why:?}");
+    assert!(
+        why[0].starts_with("JPXDecode image that does not decode: "),
+        "{why:?}"
     );
 }
 

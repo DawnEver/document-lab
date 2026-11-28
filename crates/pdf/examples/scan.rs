@@ -76,7 +76,7 @@ fn scan(path: &Path, t: &mut Totals) {
                     Ok(content) => {
                         t.warnings += content.warnings.len();
                         for w in content.warnings.iter().take(2) {
-                            problems.push(format!("page {} warning: {w}", page.number));
+                            problems.push(format!("page {} warning: {}", page.number, w.why));
                         }
                         for e in &content.events {
                             match e {

@@ -3,11 +3,11 @@
 What a page draws comes back as text spans, vector paths and image figures, each with its box in page space, and its
 links beside them; what the document states beside its pages -- outline, page labels, metadata, form fields, embedded
 files -- on the :class:`Document`. Pixels are the reader's only as an image's own samples (no codec is decoded):
-:func:`read_raster` takes a region that is one image whole from them, and draws any other with a renderer -- PyMuPDF
-(the reference, the default) or document-lab's own (``renderer='own'``: the ``render`` crate, drawing from this
-reader's interpreter, text from its fonts' outlines; it refuses a region holding what it does not draw yet, by
-name -- D37 of task document-lab-pdf-reader; what text a region shows is `document_lab.ir.Page.shown`'s);
-an embedded file's bytes are :func:`read_attachment`'s.
+:func:`read_raster` takes a region that is one image whole from them, and draws any other with document-lab's own
+renderer (the ``render`` crate, drawing from this reader's interpreter, text from its fonts' outlines -- a font the
+file does not embed and no built-in substitute stands for from a fallback :mod:`document_lab.fonts` fetches on first
+use; it refuses a region holding what it cannot draw, by name -- D37 and D118 of task document-lab-pdf-reader; what
+text a region shows is `document_lab.ir.Page.shown`'s); an embedded file's bytes are :func:`read_attachment`'s.
 
 A tagged file's structure tree comes back as :attr:`~document_lab.ir.Document.structure`, each element holding the
 very values it covers: the spans, paths and figures drawn under its marked content, the annotations and images it
@@ -29,9 +29,8 @@ from pathlib import Path
 from typing import Final, Literal, overload
 
 import numpy as np
-import pymupdf
 
-from document_lab import _pdf
+from document_lab import _pdf, fonts
 from document_lab._pdf import Locked, Malformed, NotPdf, Refused, Unsupported
 from document_lab.ir import (
     Action,
@@ -67,7 +66,6 @@ __all__ = [
     'Malformed',
     'NotPdf',
     'Refused',
-    'Renderer',
     'Unsupported',
     'read_attachment',
     'read_pdf',
@@ -91,8 +89,11 @@ _IMAGE_LAYER: Final = 6
 #: The text rendering mode that neither fills nor strokes (an OCR layer): text that shows nothing.
 INVISIBLE_TEXT: Final = 3
 
-#: What draws a region: PyMuPDF, or document-lab's own renderer.
-Renderer = Literal['pymupdf', 'own']
+#: How the own renderer reads what ISO 32000 and MuPDF read apart: as the standard says, or as MuPDF does.
+Reading = Literal['standard', 'mupdf']
+#: How the own renderer sets a CJK font's fallback glyphs across: at the fallback's own advance, or stretched to the
+#: widths the file states.
+FallbackWidths = Literal['own', 'stated']
 
 
 def read_pdf(
@@ -210,7 +211,10 @@ def _actual_texts(tree: tuple, pages: tuple[Page, ...]) -> tuple[Page, ...]:
         spans = [v for key in _marks(tree, index) for v in drawn.get(key, ()) if isinstance(v, TextSpan)]
         for i, span in enumerate(spans):
             replaced[id(span)] = dataclasses.replace(
-                span, text=actual if i == 0 else '', drawn=span.drawn if span.drawn is not None else span.text
+                span,
+                text=actual if i == 0 else '',
+                drawn=span.drawn if span.drawn is not None else span.text,
+                words=(),  # the replacement's words are not its glyphs'
             )
 
     for root in roots:
@@ -462,7 +466,7 @@ def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
     text, font, size, bold, box, mode, unspaced, vertical, direction, layer, paint, run_and_mark = row
     hidden, _, annotation = layer
     fill, in_background_color = paint
-    continues_run, drawn, marked = run_and_mark
+    continues_run, drawn, marked, words = run_and_mark
     return TextSpan(
         text,
         size,
@@ -481,6 +485,7 @@ def _span(row: tuple, cite: Callable[..., Provenance]) -> TextSpan:
         artifact=marked[2],
         continues_run=continues_run,
         in_background_color=in_background_color,
+        words=tuple(BBox(*word) for word in words),
     )
 
 
@@ -564,7 +569,9 @@ def read_raster(
     *,
     dpi: float | None = None,
     password: str = '',
-    renderer: Renderer = 'pymupdf',
+    jpx_decode: Reading = 'standard',
+    jpx_opacity: Reading = 'standard',
+    fallback_widths: FallbackWidths = 'own',
 ) -> Raster:
     """The region ``bbox`` of 1-based ``page`` as pixels, everything drawn there composited.
 
@@ -573,19 +580,29 @@ def read_raster(
     region overlaps, so a pixel is a source pixel and none is invented; a region holding no image renders at
     ``VECTOR_DPI``. A region that is one image whole at its native resolution, nothing else visible on it, is that
     image's own samples where the reader holds them as the page shows them (:func:`_samples`); any other region is
-    drawn by ``renderer``: PyMuPDF, or the own renderer (:func:`_drawn`).
+    drawn by the own renderer (:func:`_drawn`).
+
+    The own renderer's readings where ISO 32000 and MuPDF part (PyMuPDF draws MuPDF's): a JPEG 2000 image's
+    ``/Decode`` (``jpx_decode``) and its opacity channel under ``/SMaskInData 0`` (``jpx_opacity``) are ignored, as
+    the standard says, or applied, as MuPDF applies them (an ``Indexed`` image's ``/Decode`` it ignores too); a CJK
+    font that embeds no program is drawn from a fallback whose glyphs are set at their own advance (``'own'``, as
+    MuPDF sets its own) or stretched across the widths the file states (``fallback_widths='stated'``).
 
     Raises:
-        Unsupported: ``renderer='own'`` and the region holds what it does not draw yet (a shading, a glyph of a font
-            it has no program for, ...).
+        Unsupported: the region holds what the own renderer cannot draw (a glyph of a font it has no program for, or
+            whose fallback cannot be had: :class:`document_lab.fonts.FontUnavailable`'s message, an image that does
+            not decode, a shading that does not read, an operation of its content that does not read and whose mark,
+            or the state the marks after it are drawn in, meets the region, ...).
+        ValueError: a reading not named above.
 
     """
-    if renderer not in ('pymupdf', 'own'):
-        msg = f'renderer {renderer!r}: one of pymupdf, own'
-        raise ValueError(msg)
+    for name, reading in (('jpx_decode', jpx_decode), ('jpx_opacity', jpx_opacity)):
+        if reading not in ('standard', 'mupdf'):
+            msg = f'{name} {reading!r}: one of standard, mupdf'
+            raise ValueError(msg)
     path = Path(path)
     data = path.read_bytes()  # rendered and cited alike: the pixels are those of the bytes hashed
-    reader = _pdf.open(data, password.encode())
+    reader = _pdf.open(data, password.encode(), fonts=fonts.program, fallback_widths=fallback_widths)
     rows, paths, images, _ = reader.page(page, annotations=True, curve_samples=1)
     here = Provenance(reader.sha256, file_uri(path.resolve()), page=page, bbox=bbox)
     _, width, height = reader.pages[page - 1]
@@ -596,10 +613,8 @@ def read_raster(
     if dpi is None:
         dpi = max(filter(None, map(_native, under)), default=VECTOR_DPI)
     pixels = _samples(reader, under, bbox, dpi) if _alone(spans, paths, bbox) else None
-    if pixels is None and renderer == 'own':
-        pixels = _drawn(reader, page, bbox, dpi)
     if pixels is None:
-        pixels = _rendered(data, page, bbox, dpi, password)
+        pixels = _drawn(reader, page, bbox, dpi, jpx_decode=jpx_decode == 'mupdf', jpx_opacity=jpx_opacity == 'mupdf')
     return Raster(pixels, here)
 
 
@@ -643,16 +658,29 @@ def _texts(spans: Sequence[TextSpan], bbox: BBox) -> int:
     )
 
 
-def _drawn(reader: _pdf.Reader, page: int, bbox: BBox, dpi: float) -> np.ndarray:
-    """``bbox`` drawn by the own renderer, refusing a region holding what it does not draw yet, by name and count."""
+def _drawn(
+    reader: _pdf.Reader, page: int, bbox: BBox, dpi: float, *, jpx_decode: bool, jpx_opacity: bool
+) -> np.ndarray:
+    """``bbox`` drawn by the own renderer, refusing a region holding what it cannot draw, by name and count.
+
+    A JPEG 2000 image's ``/Decode`` (``jpx_decode``) and opacity channel under ``/SMaskInData 0``
+    (``jpx_opacity``) are read as MuPDF reads them when asked, else as the standard does.
+    """
     width, height, channels, pixels, undrawn = reader.render(
-        page, tuple(bbox), dpi / 72, text=True, annotations=True, alpha=False
+        page,
+        tuple(bbox),
+        dpi / 72,
+        text=True,
+        annotations=True,
+        alpha=False,
+        jpx_decode=jpx_decode,
+        jpx_opacity=jpx_opacity,
     )
     if undrawn:
         named = ', '.join(f'{what} x{count}' for what, count in undrawn)
         msg = (
-            f'page {page}: the own renderer does not draw all the region holds yet: {named}; render it with '
-            "renderer='pymupdf'"
+            f'page {page}: the own renderer does not draw all the region holds yet: {named}; it draws no region in '
+            'part and nothing else draws it (D118): what it names is a gap of crates/render to close'
         )
         raise Unsupported(msg)
     return np.frombuffer(pixels, dtype=np.uint8).reshape(height, width, channels).copy()
@@ -685,12 +713,3 @@ def _samples(reader: _pdf.Reader, under: list, bbox: BBox, dpi: float) -> np.nda
     if turned:
         rows = rows.transpose(1, 0, 2)
     return np.array(rows[:: -1 if rows_reversed else 1, :: -1 if columns_reversed else 1])
-
-
-def _rendered(data: bytes, page: int, bbox: BBox, dpi: float, password: str) -> np.ndarray:
-    with pymupdf.open(stream=data, filetype='pdf') as pdf:
-        if password:
-            pdf.authenticate(password)
-        zoom = pymupdf.Matrix(dpi / 72, dpi / 72)
-        pix = pdf[page - 1].get_pixmap(matrix=zoom, clip=pymupdf.Rect(*bbox), colorspace=pymupdf.csRGB, alpha=False)
-        return np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3).copy()

@@ -291,13 +291,13 @@ pub struct Font {
     /// Its identity.
     pub info: Rc<FontInfo>,
     pub(crate) kind: Kind,
-    to_unicode: Option<CMap>,
+    pub(crate) to_unicode: Option<CMap>,
     /// The embedded TrueType program's glyph text, the last word on a glyph's text.
     glyph_text: Option<GlyphText>,
     /// A `CIDFontType2`'s CID-to-glyph map (None: the identity).
     pub(crate) cid_to_gid: Option<Vec<u16>>,
     /// The symbol font it is, by its name or its program's: its private-use text is read as the symbol shown.
-    symbols: Option<Symbols>,
+    pub(crate) symbols: Option<Symbols>,
     /// Its glyphs' shapes.
     pub(crate) shapes: Shapes,
     /// From glyph space to text space (`[0.001 0 0 0.001 0 0]` but for Type 3 fonts).
@@ -367,14 +367,16 @@ impl Font {
         self.info.flags & 4 != 0
     }
 
-    /// The width a simple font's `/Widths` states for `code`, in text space units of one font size; None when it
-    /// states none.
+    /// The width the font states for `code`, in text space units of one font size: a simple font's `/Widths`
+    /// entry, None when it states none; a composite font's `/W` entry for the code's `CID`, else its `/DW`.
     pub(crate) fn stated_width(&self, code: u32) -> Option<f64> {
-        let Kind::Simple { first, widths, .. } = &self.kind else {
-            return None;
+        let width = match &self.kind {
+            Kind::Simple { first, widths, .. } => {
+                *widths.get(usize::try_from(i64::from(code) - first).ok()?)?
+            }
+            Kind::Composite { cmap, widths, .. } => widths.of(cmap.cid(code)),
         };
-        let index = usize::try_from(i64::from(code) - first).ok()?;
-        widths.get(index).map(|w| w * self.matrix.0[0])
+        Some(width * self.matrix.0[0])
     }
 
     /// Split `bytes` into codes, each with its text and advances.
@@ -597,7 +599,7 @@ impl Symbols {
 
     /// The character code `code` shows: Symbol's and Zapf Dingbats' by their glyph names' text, the Microsoft fonts'
     /// by their tables.
-    fn character(self, code: u8) -> Option<char> {
+    pub(crate) fn character(self, code: u8) -> Option<char> {
         let table: &[(u8, char)] = match self {
             Self::Symbol => return pdf_encoding::SYMBOL.get(code).map(glyph_of_table),
             Self::ZapfDingbats => return pdf_encoding::ZDINGBAT.get(code).map(glyph_of_table),
@@ -723,8 +725,7 @@ impl File {
             descriptor.as_ref(),
             program_weight,
         )?;
-        let source =
-            self.shape_source(dict, &info, cid_font.is_some(), symbols, program.as_ref())?;
+        let source = self.shape_source(dict, &info, &kind, symbols, program.as_ref())?;
         Ok(Font {
             kind,
             to_unicode,
@@ -775,14 +776,15 @@ impl File {
         Ok((ascent, descent))
     }
 
-    /// Where the glyph shapes of the font `dict` describes, of identity `info`, come from: a Type 3 font's
+    /// Where the glyph shapes of the font `dict` describes, of identity `info` and `kind`, come from: a Type 3 font's
     /// procedures, the program it embeds, else its substitute -- for a simple font, by its name or descriptor
-    /// ([`shape::substitute`]) -- else nowhere, why named.
+    /// ([`shape::substitute`]) -- else its fallbacks -- a CJK composite font's, a Microsoft symbol font's
+    /// ([`shape::fallback`]) -- else nowhere, why named.
     fn shape_source(
         &self,
         dict: &Dict,
         info: &FontInfo,
-        composite: bool,
+        kind: &Kind,
         symbols: Option<Symbols>,
         program: Option<&Program>,
     ) -> Result<Source> {
@@ -810,11 +812,22 @@ impl File {
         }
         let standard = base14(&info.name).map(|m| m.name);
         let italic = shape::italic(info.flags, info.italic_angle, info.name_without_subset());
+        let composite = match kind {
+            Kind::Composite { collection, .. } => Some(collection.map(|c| c.ordering)),
+            Kind::Simple { .. } => None,
+        };
         let substitute = shape::substitute(standard, symbols, info.flags, info.bold(), italic);
-        Ok(match (composite, substitute) {
-            (false, Some((substitute, stretched))) => Source::Substitute {
+        let fallback = shape::fallback(composite.flatten(), symbols, info.flags);
+        Ok(match (composite, substitute, fallback) {
+            (None, Some((substitute, stretched)), _) => Source::Substitute {
                 substitute,
                 stretched,
+            },
+            (_, _, Some(chain)) => Source::Fallback {
+                fallbacks: self.fallbacks.clone(),
+                chain,
+                stretched: composite.is_none()
+                    || self.fallback_widths.get() == shape::FallbackWidths::Stated,
             },
             _ => Source::Unavailable(
                 format!("font {} is not embedded and has no substitute", info.name).into(),
@@ -1001,7 +1014,8 @@ impl File {
         // The glyph names: the base encoding's characters' names; with no base named, none where the program's own
         // encoding is the base (a symbolic TrueType font, an embedded Type 1 or CFF program). Symbol and Zapf
         // Dingbats embedding no program are drawn by their built-in encodings (Annex D.5, D.6) whatever base is
-        // named, as viewers draw them: a base named for one (`WinAnsiEncoding`) names glyphs it does not have.
+        // named, as viewers draw them: a base named for one (`WinAnsiEncoding`) names glyphs it does not have. One
+        // that embeds its program is drawn, and read, by the encoding named.
         let own_base = base_name.is_none()
             && ((subtype == "TrueType" && symbolic)
                 || matches!(program, Some(Program::Type1(_) | Program::Cff(_))));
@@ -1025,6 +1039,13 @@ impl File {
             None if own_base => vec![None; 256],
             None => encoding.iter().cloned().map(name_of).collect(),
         };
+        // Its text follows the glyphs drawn (D121): Symbol's Greek and Zapf Dingbats' dingbats, as viewers show them,
+        // not the Latin of a base encoding named for it.
+        if let Some(symbols) = built_in {
+            encoding = (0..=255u8)
+                .map(|b| symbols.character(b).map(String::from))
+                .collect();
+        }
         // An embedded Type 1 program with no base encoding named: the program's own encoding is the base.
         if base_name.is_none()
             && matches!(subtype, "Type1" | "MMType1")

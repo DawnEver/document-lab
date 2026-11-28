@@ -302,7 +302,7 @@ def open_in(viewer: Viewer, pdf: Path, timeout: float, monitor: Region | None = 
                 break
         else:
             _not_cleared(window, viewer)
-    except (OSError, LookupError, ValueError):
+    except OSError, LookupError, ValueError:
         with contextlib.suppress(OSError):  # a close that fails must not hide why the window could not be used
             win32.close(window)
         raise
@@ -319,7 +319,7 @@ def _press(window: Window, chord: str) -> None:
 
     try:
         win32.press(window, chord)
-    except (LookupError, OSError):
+    except LookupError, OSError:
         win32.key('enter')
         time.sleep(REDRAW)
         win32.press(window, chord)

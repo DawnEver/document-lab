@@ -2,13 +2,22 @@
 the prose around it bound a figure or table, an equation number the noise lines beside it."""
 
 import pymupdf
+import pytest
 
 from document_lab import layout
 from document_lab.ink import Drawing
 from document_lab.ir import BBox
 from document_lab.pdf import read_pdf
 from document_lab.regions import regions
-from tests.synthetic import hidden_layer, in_background_color
+from tests.synthetic import (
+    LANDSCAPE_CAPTION,
+    TABLE_ROWS,
+    hidden_layer,
+    in_background_color,
+    landscape_pdf,
+    turned,
+    turned_text_pdf,
+)
 
 PROSE = 'The rated output is the mechanical power available at the shaft and shall be expressed in watts.'
 
@@ -138,9 +147,9 @@ def test_an_untitled_table_ends_at_the_formula_after_it(tmp_path):
         _text(page, 240, 'U,=qW,+a, +220]', x=230, size=18)  # a formula, OCR'd
         _text(page, 265, '1/. +0U,', x=260, size=14)
 
-    found = regions(*_page(tmp_path, draw))
-    assert [(r.kind, r.label) for r in found] == [('table', 'Untitled table 1')]
-    assert found[0].bbox.y1 < 225
+    found = regions(*_page(tmp_path, draw))  # the formula is a display of its own, no number printed
+    assert [(r.kind, r.label) for r in found] == [('table', 'Untitled table 1'), ('equation', 'Untitled equation 1')]
+    assert found[0].bbox.y1 < 225 and found[0].bbox.y1 <= found[1].bbox.y0
 
 
 def test_two_columns_of_prose_split_into_three_pieces_are_no_table(tmp_path):
@@ -365,3 +374,72 @@ def test_rows_ruled_apart_with_text_are_a_table_a_striped_icon_without_text_is_n
     icon = _drawn((200, 260, 260, 320), rules=(5, 0), loose=8)
     found = regions(page, face, [ruled, icon])
     assert [(r.kind, r.label) for r in found] == [('table', 'Untitled table 1'), ('figure', 'Untitled figure 1')]
+
+
+#: A drawn table's page, as set upright: prose above, three rows of cells, a note under them (twelve words and more),
+#: each ``(x, baseline, text)``; the table's drawing is ruled by its rows alone (four level rules).
+NOTED_TABLE = (
+    *((60, 100 + 14 * k, PROSE) for k in range(4)),
+    *((x, y, text) for y in (325, 355, 385) for x, text in ((110, 'Grade M235-35A'), (330, '2.35 W/kg'))),
+    (100, 440, 'NOTE The values in this table are typical of the grades the standard lists above.'),
+)
+TABLE_DRAWING = (100.0, 300.0, 430.0, 420.0)
+#: A link's frame round the note's words.
+NOTE_FRAME = (96.0, 429.0, 440.0, 445.0)
+
+
+def _noted(tmp_path, turn):
+    """:data:`NOTED_TABLE` on a letter page, upright (``turn`` 0) or turned a quarter (-90: read bottom to top, as a
+    landscape table is printed), with the drawings of its table (rules, level and upright, turned with it) and of the
+    frame round its note."""
+    runs = [(*(turned(x, y, turn) if turn else (x, y)), text, -turn) for x, y, text in NOTED_TABLE]
+    path = turned_text_pdf(tmp_path / f'noted{turn}.pdf', runs)
+
+    def drawn(box, rules):
+        corners = [turned(x, y, turn) for x in box[::2] for y in box[1::2]]
+        xs, ys = [x for x, _ in corners], [y for _, y in corners]
+        return _drawn((min(xs), min(ys), max(xs), max(ys)), rules=rules[::-1] if turn else rules, loose=5)
+
+    read = read_pdf(path)
+    return read.page(1), layout.body_face(read), drawn(TABLE_DRAWING, (4, 0)), drawn(NOTE_FRAME, (2, 2))
+
+
+@pytest.mark.parametrize('turn', [0, -90])
+def test_a_drawn_table_beside_a_long_note_is_found_on_a_landscape_page_as_on_an_upright_one(tmp_path, turn):
+    """Drawings are judged in the page's way: on a landscape page, judged as the page stands, the sideways note under
+    the table ran as long down the page as the table, so the table's drawing read as a frame round the note's words;
+    and its rows, ruled down the page, counted as no rows."""
+    page, face, table, frame = _noted(tmp_path, turn)
+    assert layout.reading_way(page.spans) == ((0.0, -1.0) if turn else layout.UP)
+    (region,) = regions(page, face, [table])
+    assert (region.kind, region.label) == ('table', 'Untitled table 1')
+    assert region.bbox.contains(table.box.x0, table.box.y0) and region.bbox.contains(table.box.x1, table.box.y1)
+    # The planted wrong truth: a frame round the note's words is no region, in the page's way as upright.
+    assert regions(page, face, [frame]) == []
+
+
+def test_a_caption_up_the_side_of_a_landscape_table_cuts_its_region_in_its_own_frame(tmp_path):
+    """A landscape table printed sideways, its caption above it in its frame (left of it on the page, read bottom to
+    top): the caption is matched in its frame and the table runs across the page from it to the note after it; its
+    cells are read in that frame, each box turned back to where the page shows it."""
+    read = read_pdf(landscape_pdf(tmp_path / 'landscape.pdf'))
+    page = read.page(1)
+    (region,) = regions(page, layout.body_face(read))
+    assert (region.kind, region.label) == ('table', 'Table 10')
+    cells = {cell for row in TABLE_ROWS for cell in row}
+
+    def wrongly(box):
+        """The spans ``box`` holds and should not, or should hold and does not: the caption and the cells it holds."""
+        return [s.text for s in page.spans if box.contains(*s.center) != (s.text in cells | {LANDSCAPE_CAPTION[0]})]
+
+    assert wrongly(region.bbox) == []
+    caption = next(s for s in page.spans if s.text == LANDSCAPE_CAPTION[0]).provenance.bbox
+    # The planted wrong truth: the caption read as the page stands, its table running down the page from it.
+    assert wrongly(BBox(0, caption.y0, page.width, page.height))
+    assert region.table.rows == TABLE_ROWS
+    boxes = {s.text: tuple(s.provenance.bbox) for s in page.spans}
+    seen = [v for r, row in enumerate(TABLE_ROWS) for c in range(len(row)) for v in region.table.cell_bboxes[r][c]]
+    assert seen == pytest.approx([v for row in TABLE_ROWS for cell in row for v in boxes[cell]])
+    # The planted wrong truth: a cell's box left in the table's frame stands nowhere near its text on the page.
+    framed = layout.framed(region.table.cell_bboxes[0][0], (0.0, -1.0))
+    assert not framed.contains(*next(s for s in page.spans if s.text == TABLE_ROWS[0][0]).center)

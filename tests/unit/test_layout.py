@@ -12,7 +12,17 @@ from document_lab import layout
 from document_lab.ir import BBox, Page, Provenance, TextSpan
 from document_lab.layout import lines
 from document_lab.pdf import read_pdf
-from tests.synthetic import ACTUAL_TEXT_LINES, actual_text_pdf, layer_pdf
+from tests.synthetic import (
+    ACTUAL_TEXT_LINES,
+    LANDSCAPE_CAPTION,
+    LANDSCAPE_HEAD,
+    LANDSCAPE_NOTE,
+    TABLE_ROWS,
+    actual_text_pdf,
+    landscape_pdf,
+    layer_pdf,
+    turned_text_pdf,
+)
 
 
 def _line_texts(path):
@@ -132,9 +142,10 @@ def test_running_heads_and_feet_repeat_at_the_page_edges_page_numbers_varying(tm
 
 def test_an_equation_number_closing_pages_at_one_place_is_no_running_foot(tmp_path):
     """A paper's text block ends at one baseline on every page: pages ending in a numbered equation set its number at
-    the same place, ``(7)``, ``(12)``, ``(19)`` -- each its own equation, never a page number repeating."""
+    the same place, a chapter's ``(4.7)``, ``(4.12)``, ``(4.19)`` -- each its own equation, never a page number
+    repeating."""
     doc = pymupdf.open()
-    for number, equation in enumerate((7, 12, 19, 23), start=1):
+    for number, equation in enumerate(('4.7', '4.12', '4.19', '4.23'), start=1):
         page = doc.new_page(width=595, height=842)
         page.insert_text((37, 120), f'Section {number} opens the page with its own words', fontsize=11)
         page.insert_text((200, 780), f'x{number} = a + b', fontsize=11)
@@ -143,6 +154,50 @@ def test_an_equation_number_closing_pages_at_one_place_is_no_running_foot(tmp_pa
     doc.save(tmp_path / 'paper.pdf')
     found = layout.running(read_pdf(tmp_path / 'paper.pdf'))
     assert [[ln.text for ln in page.foot] for page in found] == [[str(n)] for n in range(1, 5)]  # the page numbers
+
+
+def test_a_lone_digit_level_with_the_body_s_last_line_is_no_running_foot(tmp_path):
+    """Three pages of eight end with an integral's lower limit ``0`` in the left column at one place, level with the
+    right column's last line: it repeats on enough pages to run, as a page number does, but standing level with the
+    body's text it runs only where half the pages repeat it, so it is the body's. A line so level that every page
+    repeats (a page number beside a first page's notes) still runs; the page numbers below the body run."""
+    doc = pymupdf.open()
+    for number in range(1, 9):
+        page = doc.new_page(width=595, height=842)
+        page.insert_text((37, 120), f'Section {number} opens the page with its own words', fontsize=10)
+        if number in {2, 5, 7}:
+            page.insert_text((150, 740), '0', fontsize=7)
+        page.insert_text((320, 742), f'the right column closes page {number} with words of its own', fontsize=10)
+        page.insert_text((60, 742), 'Journal 12', fontsize=7)  # level with the body, on every page
+        page.insert_text((291, 800), str(number), fontsize=10)
+    doc.save(tmp_path / 'paper.pdf')
+    found = layout.running(read_pdf(tmp_path / 'paper.pdf'))
+    feet = [[ln.text for ln in page.foot] for page in found]
+    assert feet == [['Journal 12', str(n)] for n in range(1, 9)]
+    assert feet != [
+        ['0', 'Journal 12', str(n)] if n in {2, 5, 7} else ['Journal 12', str(n)] for n in range(1, 9)
+    ]  # planted
+
+
+def test_an_equation_number_in_the_gutter_takes_nothing_of_the_next_column(tmp_path):
+    """A two-column page set by a word processor: the left column's number ``(3)`` stands in the gutter, the right
+    column's line on its baseline starts within a word gap of it. The number is a line of its own; a list item's
+    ``(3)`` before its own column's words is one line with them, as before."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((180, 400), 'M = 2 V / U', fontsize=9)
+    page.insert_text((314, 400), 'phase-shift angle for each speed and torque.', fontsize=9)
+    page.insert_text((88, 500), 'the third item of the list', fontsize=9)
+    # each number drawn after the text beside it, so the reader's spans part them as the paper's do
+    page.insert_text((295, 400), '(3)', fontsize=9)  # ends at 307, past the middle (306) by less than the gutter
+    page.insert_text((72, 500), '(3)', fontsize=9)
+    doc.save(tmp_path / 'gutter.pdf')
+    assert len(read_pdf(tmp_path / 'gutter.pdf').page(1).spans) == 5  # each run its own span
+    texts = _line_texts(tmp_path / 'gutter.pdf')
+    assert '(3)' in texts
+    assert 'phase-shift angle for each speed and torque.' in texts
+    assert '(3) the third item of the list' in texts  # its own column's words: one line
+    assert '(3) phase-shift angle for each speed and torque.' not in texts  # planted: the joined line, as before
 
 
 def test_a_page_alone_and_a_line_on_too_few_pages_run_nowhere(tmp_path):
@@ -339,3 +394,121 @@ def test_a_span_that_continues_a_run_is_one_run_with_the_span_before_it():
     for continues, texts in ((True, ['one two']), (False, ['one', 'two'])):
         page = _page(_flat('one', 72, 100), dataclasses.replace(piece, continues_run=continues))
         assert [ln.text for ln in layout.ordered(layout.lines(page, weighted=True))] == texts
+
+
+# The page's way: the way most of its characters read, the frame its furniture, columns and order are judged in.
+
+
+def _furniture(path) -> list[str]:
+    return [s.text for s in layout.furniture(read_pdf(path).page(1))]
+
+
+def test_a_landscape_table_under_an_upright_running_head_reads_sideways_its_head_turned_against_it(tmp_path):
+    """A standard's landscape table printed sideways under a two-span upright running head: most of the page reads
+    bottom to top, so that is its way; the head, upright and wholly outside the sideways text, is its furniture."""
+    page = read_pdf(landscape_pdf(tmp_path / 'landscape.pdf')).page(1)
+    assert layout.reading_way(page.spans) == (0.0, -1.0)
+    head = [text for text, _ in LANDSCAPE_HEAD]
+    assert [s.text for s in layout.furniture(page)] == head
+    found = layout.lines(page, weighted=False)
+    assert {ln.page_way for ln in found} == {(0.0, -1.0)}
+    read = [ln.text for ln in layout.ordered(found)]
+    assert read[0] == LANDSCAPE_CAPTION[0]  # its top is the sideways text's: the caption above the table
+    every = {LANDSCAPE_CAPTION[0], LANDSCAPE_NOTE[0], *(cell for row in TABLE_ROWS for cell in row)}
+    assert {ln.text for ln in found} == every  # the sideways text, every line of it, and nothing else
+    # The planted wrong truth: judged against the box of the page's upright text -- the head's -- every sideways span
+    # stands outside it and would be furniture.
+    upright = [s.provenance.bbox for s in page.spans if layout.upright(s)]
+    below = max(b.y1 for b in upright)
+    assert all(s.provenance.bbox.y0 >= below for s in page.spans if not layout.upright(s))
+
+
+def test_an_upright_page_keeps_its_sideways_margin_notes_as_furniture(tmp_path):
+    """The control: prose upright, a note up the left margin and one down the right -- the page reads upright and the
+    notes are its furniture, as they were."""
+    prose = 'The rated output is the mechanical power available at the shaft, expressed in watts.'
+    runs = [(72, 100 + 14 * i, prose, 0) for i in range(4)] + [
+        (30, 400, 'Draft for comment', 90),
+        (585, 200, 'Not for citation', 270),
+    ]
+    path = turned_text_pdf(tmp_path / 'notes.pdf', runs)
+    assert layout.reading_way(read_pdf(path).page(1).spans) == layout.UP
+    assert _furniture(path) == ['Draft for comment', 'Not for citation']
+    # The planted wrong truth: the page read the notes' way would make its prose the furniture.
+    assert prose not in _furniture(path)
+
+
+def test_an_upright_page_reads_upright_beside_a_stamp_longer_than_most_of_its_lines(tmp_path):
+    """A publisher's stamp down the margin holds more characters than the upright text's half -- with axis labels up a
+    figure inside the text -- yet the upright text is the most any way holds: the page reads upright, and the stamp is
+    furniture. A rule asking more than half the characters would find no way, and keep the stamp as text."""
+    stamp = 'Downloaded from the publisher library on 1 January 2026 by a reader; see the terms of use'
+    runs = [
+        (72, 100, 'Figure 3 shows the current of each phase at full load.', 0),
+        (72, 114, 'The peaks fall where the model places them within 2 %.', 0),
+        (90, 400, 'Current amplitude (A)', 90),
+        (300, 400, 'Current amplitude (A)', 90),
+        (72, 500, 'Table 4 lists them.', 0),
+        (580, 60, stamp, 270),
+    ]
+    path = turned_text_pdf(tmp_path / 'stamped.pdf', runs)
+    page = read_pdf(path).page(1)
+    counts = {}
+    for s in page.spans:
+        counts[s.direction] = counts.get(s.direction, 0) + len(s.text.replace(' ', ''))
+    assert 2 * counts[(1.0, 0.0)] < sum(counts.values()) < 3 * counts[(1.0, 0.0)]  # most, but not more than half
+    assert layout.reading_way(page.spans) == layout.UP
+    assert _furniture(path) == [stamp]
+    assert 'Current amplitude (A)' not in _furniture(path)  # the control: labels inside the text stay
+
+
+def test_a_page_two_ways_read_equally_has_no_way_none_of_its_text_furniture_and_reads_as_it_stands(tmp_path):
+    """No silent default: a page whose characters read upright and sideways in equal numbers has no way
+    (``reading_way`` None), no text of it is furniture, and its lines are read as it stands, upright. The planted
+    control: one more upright character, and the page reads upright with the stamp its furniture."""
+    stamp = (585, 200, 'ABCDEFGHIJ KLMNOPQRST', 270)
+    tie = turned_text_pdf(tmp_path / 'tie.pdf', [(72, 100, 'abcdefghij klmnopqrst', 0), stamp])
+    page = read_pdf(tie).page(1)
+    assert layout.reading_way(page.spans) is None
+    assert layout.furniture(page) == []
+    found = layout.lines(page, weighted=False)
+    assert sorted(ln.text for ln in found) == ['ABCDEFGHIJ KLMNOPQRST', 'abcdefghij klmnopqrst']
+    assert {ln.page_way for ln in found} == {layout.UP}
+    more = turned_text_pdf(tmp_path / 'more.pdf', [(72, 100, 'abcdefghij klmnopqrstu', 0), stamp])
+    assert _furniture(more) == ['ABCDEFGHIJ KLMNOPQRST']
+
+
+def test_a_one_line_stamp_outnumbering_a_sparse_page_s_lines_reads_no_way_and_makes_none_of_them_furniture(tmp_path):
+    """A figure's page: two upright lines and a publisher's stamp up the margin holding more characters than they do.
+    Counted by characters the page read the stamp's way and its upright lines, outside the stamp's box, were furniture:
+    one line against lines is no sure count, so the page has no way and keeps them all. The planted controls: the
+    stamp set in two lines outnumbering them still reads its way, and one upright line still outweighs a shorter
+    one-line stamp (as two lines of one way are no surer than one line of each)."""
+    stamp = 'Downloaded from the publisher library on 1 January 2026 by a reader; see the terms of use for rules'
+    upright = [(72, 600, 'Figure 2: the measured loss.', 0), (72, 614, 'Source: the authors.', 0)]
+    path = turned_text_pdf(tmp_path / 'sparse.pdf', [*upright, (580, 60, stamp, 270)])
+    page = read_pdf(path).page(1)
+    assert sum(len(s.text.replace(' ', '')) for s in page.spans if s.direction == (1.0, 0.0)) < len(stamp) / 2
+    assert layout.reading_way(page.spans) is None
+    assert layout.furniture(page) == []
+    assert {ln.text for ln in layout.lines(page, weighted=False)} >= {text for _, _, text, _ in upright}
+    halves = [(580, 60, stamp[:50], 270), (568, 60, stamp[50:], 270)]
+    two = read_pdf(turned_text_pdf(tmp_path / 'two.pdf', [*upright, *halves])).page(1)
+    assert layout.reading_way(two.spans) == (0.0, 1.0)
+    assert sorted(s.text for s in layout.furniture(two)) == sorted(text for _, _, text, _ in upright)
+    short = (580, 60, stamp[:30], 270)
+    one = turned_text_pdf(tmp_path / 'one.pdf', [(72, 600, 'Figure 2: the measured loss at full load.', 0), short])
+    assert layout.reading_way(read_pdf(one).page(1).spans) == layout.UP
+    assert _furniture(one) == [stamp[:30].strip()]
+
+
+def test_a_landscape_table_s_cells_at_the_page_top_on_every_page_are_no_running_head(tmp_path):
+    """A table continued sideways over pages sets its cells at the same place on each, its last column at the page's
+    top: a line turned sideways only ends at the top and runs along no edge, so it is never a running line."""
+    read = read_pdf(landscape_pdf(tmp_path / 'landscape.pdf', pages=3))
+    found = layout.running(read)
+    assert [(run.head, run.foot) for run in found] == [((), ())] * 3
+    # The planted wrong truth: the topmost line of each page is a cell that recurs at its place on every page.
+    tops = [min(layout.lines(page, weighted=True), key=lambda ln: ln.y0) for page in read.pages]
+    assert len({ln.text for ln in tops}) == 1
+    assert tops[0].text in {cell for row in TABLE_ROWS for cell in row}

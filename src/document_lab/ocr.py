@@ -448,23 +448,39 @@ def _surer(readings: list[list[_Word]]) -> list[_Word]:
 
     A page read as placed and turned -- a table printed sideways under an upright running head -- is misread by each
     reading where the other reads right. Line by line, a line is kept unless a line of another reading overlaps it
-    with a higher mean confidence.
+    with a higher mean confidence -- or reads across it: a line running along its baseline no farther than the other
+    line (itself longer than thick) is thick across its own is that line misread the other way, however sure
+    Tesseract is of it (an upright running head read with the sideways table under it, its glyphs taken for words a
+    tenth as long as they are high); when each reads across the other, confidence decides.
     """
     lines: dict[_Line, list[_Word]] = defaultdict(list)
     for word in itertools.chain.from_iterable(readings):
         lines[word.line].append(word)
-    measured: dict[_Line, tuple[Box, float]] = {}
+    measured: dict[_Line, tuple[Box, float, bool]] = {}
     for key, words in lines.items():
         boxes = [w.covers() for w in words]
         box = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
-        measured[key] = (box, sum(w.confidence for w in words) / len(words))
+        level = abs(math.cos(math.radians(words[0].angle))) >= abs(math.sin(math.radians(words[0].angle)))
+        measured[key] = (box, sum(w.confidence for w in words) / len(words), level)
+
+    def across(key: _Line, other: _Line) -> bool:
+        """Does ``key``'s line run across ``other``'s, a line, no longer along its baseline than ``other`` is thick?"""
+        (x0, y0, x1, y1), _, level = measured[key]
+        (ox0, oy0, ox1, oy1), _, other_level = measured[other]
+        if level == other_level:
+            return False
+        wide, high, other_wide, other_high = x1 - x0, y1 - y0, ox1 - ox0, oy1 - oy0
+        return wide <= other_wide < other_high if level else high <= other_high < other_wide
 
     def beaten(key: _Line) -> bool:
-        (x0, y0, x1, y1), mine = measured[key]
-        return any(
-            other[0] != key[0] and theirs > mine and ox0 < x1 and x0 < ox1 and oy0 < y1 and y0 < oy1
-            for other, ((ox0, oy0, ox1, oy1), theirs) in measured.items()
-        )
+        (x0, y0, x1, y1), mine, _ = measured[key]
+        for other, ((ox0, oy0, ox1, oy1), theirs, _) in measured.items():
+            if other[0] == key[0] or not (ox0 < x1 and x0 < ox1 and oy0 < y1 and y0 < oy1):
+                continue
+            mine_across, theirs_across = across(key, other), across(other, key)
+            if (mine_across and not theirs_across) or (mine_across == theirs_across and theirs > mine):
+                return True
+        return False
 
     kept = {key for key in lines if not beaten(key)}
     return [w for w in itertools.chain.from_iterable(readings) if w.line in kept]

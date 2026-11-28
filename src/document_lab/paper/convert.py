@@ -67,7 +67,7 @@ def has_nvidia_gpu() -> bool:
         return False
     try:
         listed = subprocess.run([smi, '-L'], capture_output=True, text=True, timeout=PROBE_S, check=False)
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return False
     return listed.returncode == 0 and 'GPU' in listed.stdout
 
@@ -106,7 +106,7 @@ def missing_surya_backend() -> str | None:
         return f'{lead}, and docker is not on PATH'
     try:
         subprocess.run([docker, 'info'], capture_output=True, timeout=PROBE_S, check=True)
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return f'{lead}, and the docker daemon does not answer `docker info` ({docker})'
     return None
 

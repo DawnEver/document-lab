@@ -18,8 +18,9 @@ use std::fmt::Write;
 use std::fs;
 use std::io::{self, BufWriter};
 use std::path::PathBuf;
+use std::rc::Rc;
 
-use pdf::color::Pattern;
+use pdf::color::PatternKind;
 use pdf::destination::{Action, Destination, Targets};
 use pdf::error::Kind;
 use pdf::forms::{Field, Value};
@@ -80,7 +81,7 @@ type MarkedRow = (Option<i64>, Option<u32>, bool);
 /// baseline runs along (page space, y down), its layer, its fill color (None: not filled) and whether that is the
 /// color painted under it, and -- one tuple, as pyo3 converts twelve elements at most -- whether it continues the
 /// run of the span before it (`pdf::spans::Span`) and what its marked content says: the text its glyphs draw when an
-/// `/ActualText` replaced it (None: the text is that), and the sequence itself.
+/// `/ActualText` replaced it (None: the text is that), and the sequence itself -- and its words' boxes (`Span::words`).
 type SpanRow = (
     String,
     String,
@@ -93,7 +94,7 @@ type SpanRow = (
     (f64, f64),
     LayerRow,
     (Option<Vec<f64>>, bool),
-    (bool, Option<String>, MarkedRow),
+    (bool, Option<String>, MarkedRow, Vec<Box4>),
 );
 /// What a page paints as paths, as columns -- `document_lab.pdf` takes each buffer whole with `numpy.frombuffer`,
 /// no Python object per point. Buffers are native-endian; an entry per subpath (`pdf::paths::Polylines`) unless
@@ -301,8 +302,29 @@ struct Reader {
 
 /// Open the PDF `source` with `password` (empty: none): the file at a path (`str` or `os.PathLike`), read whole
 /// here, or the bytes of one already in memory (`bytes`), copied. Python holds no copy of a file read here.
+///
+/// `fonts`: what fetches a fallback font program by its name (one of `FALLBACK_FONTS`), called when a glyph first
+/// needs it, at most once a name -- its `bytes`, or an exception whose message says why it cannot be had (the glyphs
+/// it would draw are then counted in `render`'s undrawn, by that message). None: no fallback is fetched.
+/// `fallback_widths`: how a composite (CJK) font's fallback glyphs are set across -- `own` (each at the fallback's
+/// own advance), or `stated` (stretched across the widths the file states).
 #[pyfunction]
-fn open(source: &Bound<'_, PyAny>, password: &[u8]) -> PyResult<Reader> {
+#[pyo3(signature = (source, password, *, fonts = None, fallback_widths = "own"))]
+fn open(
+    source: &Bound<'_, PyAny>,
+    password: &[u8],
+    fonts: Option<Py<PyAny>>,
+    fallback_widths: &str,
+) -> PyResult<Reader> {
+    let widths = match fallback_widths {
+        "own" => pdf::shape::FallbackWidths::Own,
+        "stated" => pdf::shape::FallbackWidths::Stated,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "fallback_widths {other:?}: one of own, stated"
+            )));
+        }
+    };
     let data = if let Ok(bytes) = source.cast::<PyBytes>() {
         bytes.as_bytes().to_vec()
     } else {
@@ -310,6 +332,20 @@ fn open(source: &Bound<'_, PyAny>, password: &[u8]) -> PyResult<Reader> {
         fs::read(&path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?
     };
     let file = pdf::File::open(data, password).map_err(|e| refused(&e))?;
+    file.set_fallback_widths(widths);
+    if let Some(fetch) = fonts {
+        file.fetch_fallbacks(Rc::new(move |name: &str| {
+            Python::attach(|py| {
+                let said = |e: PyErr| e.value(py).to_string();
+                let program = fetch.call1(py, (name,)).map_err(said)?;
+                let bytes = program
+                    .bind(py)
+                    .cast::<PyBytes>()
+                    .map_err(|_| format!("{name}: the fetch gave no bytes"))?;
+                Ok(bytes.as_bytes().to_vec())
+            })
+        }));
+    }
     let pages = file.pages().map_err(|e| refused(&e))?;
     Ok(Reader {
         file,
@@ -393,7 +429,12 @@ impl Reader {
                         s.fill.as_ref().map(pdf::color::Color::rgb_or_components),
                         s.in_background_color,
                     ),
-                    (s.continues_run, s.drawn, marked(s.marked)),
+                    (
+                        s.continues_run,
+                        s.drawn,
+                        marked(s.marked),
+                        s.words.into_iter().map(box4).collect(),
+                    ),
                 )
             })
             .collect();
@@ -431,7 +472,7 @@ impl Reader {
                         0.0,
                         Some(Vec::new()),
                         false,
-                        Some(pattern(Pattern::Shading)),
+                        Some(pattern(PatternKind::Shading)),
                         layer(&shading.layer),
                         marked(shading.marked),
                     ));
@@ -440,6 +481,7 @@ impl Reader {
             }
         }
         let paths = columns(py, &lines, &groups, styles);
+        let warnings = warnings.into_iter().map(|w| w.why).collect();
         Ok((spans, paths, images, warnings))
     }
 
@@ -517,9 +559,16 @@ impl Reader {
 
     /// The `region` (page space; None: the whole page) of page `number` drawn by the own renderer (`render`) at
     /// `scale` pixels a point -- text only when `text`, annotations' appearances when
-    /// `annotations`, on transparency when `alpha` (else white): (width, height, channels, pixels, undrawn), the
+    /// `annotations`, on transparency when `alpha` (else white), a JPEG 2000 image's `/Decode` applied to an image
+    /// that is no mask when `jpx_decode` and its opacity channel under `/SMaskInData 0` when `jpx_opacity` (`MuPDF`'s
+    /// readings; by default the standard's, which ignores both): (width, height, channels, pixels, undrawn), the
     /// pixels rows top-down, `undrawn` each kind of mark in the region not drawn as the file states it and how many.
-    #[pyo3(signature = (number, region, scale, *, text, annotations, alpha))]
+    #[pyo3(signature = (number, region, scale, *, text, annotations, alpha, jpx_decode = false, jpx_opacity = false))]
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::fn_params_excessive_bools,
+        reason = "Python's keyword arguments"
+    )]
     fn render(
         &self,
         number: usize,
@@ -528,6 +577,8 @@ impl Reader {
         text: bool,
         annotations: bool,
         alpha: bool,
+        jpx_decode: bool,
+        jpx_opacity: bool,
     ) -> PyResult<RasterRow> {
         let page = self.at(number)?;
         let options = render::Options {
@@ -536,6 +587,10 @@ impl Reader {
             text,
             annotations,
             alpha,
+            jpx: render::image::Jpx {
+                decode: jpx_decode,
+                opacity: jpx_opacity,
+            },
         };
         let raster = render::render(&self.file, page, &options).map_err(|e| refused(&e))?;
         Ok((
@@ -560,6 +615,7 @@ impl Reader {
             Some(codec) => codec.fax().map_err(|e| refused(&e))?,
             None => None,
         };
+        let masked = samples.masked();
         let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
         Ok((
             samples.width,
@@ -573,7 +629,7 @@ impl Reader {
             samples.data,
             samples.codec.map(|c| text(&c.name)),
             samples.decode,
-            samples.masked,
+            masked,
             fax.map(|f| (f.k, f.columns, f.end_of_line, f.byte_align, f.black_is_1)),
         ))
     }
@@ -603,6 +659,25 @@ fn create(path: PathBuf, level: u8) -> PyResult<Writer> {
         .map_err(|e| PyOSError::new_err(format!("{}: {e}", path.display())))?;
     let inner = pdf::writer::Writer::new(BufWriter::new(file), level).map_err(|e| refused(&e))?;
     Ok(Writer { inner: Some(inner) })
+}
+
+/// `text` set in the font program `program` at `size` pixels an em, the first glyph's origin on its baseline at
+/// `origin` (pixels, y down), on a canvas `width` by `height`: each pixel's ink 0-255, rows top-down
+/// (`render::specimen`).
+#[pyfunction]
+fn specimen<'py>(
+    py: Python<'py>,
+    program: &[u8],
+    text: &str,
+    size: f64,
+    origin: (f64, f64),
+    width: u32,
+    height: u32,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let (x, y) = origin;
+    let ink = render::specimen::specimen(program, text, size, Point { x, y }, width, height)
+        .map_err(|e| refused(&e))?;
+    Ok(PyBytes::new(py, &ink))
 }
 
 /// The Python exception of `e`'s kind.
@@ -879,10 +954,10 @@ fn value(v: &StructureValue) -> AttributeValue {
 }
 
 /// A pattern's kind, by name.
-fn pattern(p: Pattern) -> &'static str {
-    match p {
-        Pattern::Tiling { .. } => "tiling",
-        Pattern::Shading => "shading",
+fn pattern(kind: PatternKind) -> &'static str {
+    match kind {
+        PatternKind::Tiling { .. } => "tiling",
+        PatternKind::Shading => "shading",
     }
 }
 
@@ -898,8 +973,8 @@ fn style(path: &PathEvent) -> StyleRow {
         path.fill.as_ref().is_some_and(|f| f.even_odd),
         path.fill
             .as_ref()
-            .and_then(|f| f.color.pattern)
-            .map(pattern),
+            .and_then(|f| f.color.pattern.as_ref())
+            .map(|p| pattern(p.kind)),
         layer(&path.layer),
         marked(path.marked),
     )
@@ -1012,6 +1087,8 @@ fn extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(open, module)?)?;
     module.add_class::<Reader>()?;
     module.add_function(wrap_pyfunction!(create, module)?)?;
+    module.add_function(wrap_pyfunction!(specimen, module)?)?;
+    module.add("FALLBACK_FONTS", pdf::shape::FALLBACKS.to_vec())?;
     module.add_class::<Writer>()?;
     let py = module.py();
     module.add("Refused", py.get_type::<Refused>())?;

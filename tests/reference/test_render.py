@@ -1,5 +1,6 @@
-"""The ``reference`` part, rendering: the own renderer (paths, clips, images, text from font outlines) accepted
-against PyMuPDF's renders of the real PDFs ``DOCUMENT_LAB_REFERENCE_PDFS`` names.
+"""The ``reference`` part, rendering: the own renderer (paths, clips, images, text from font outlines, shadings,
+patterns, soft masks and transparency groups) accepted against PyMuPDF's renders of the real PDFs
+``DOCUMENT_LAB_REFERENCE_PDFS`` names.
 
 Every :data:`STEP`-th page of each document, its first among them, is drawn whole by both, text and annotations
 too, at :data:`DPI`, and compared as ``tests/rendering.py`` says: a page agrees when at most :data:`PAGE_SHARE` of
@@ -7,18 +8,26 @@ the pixels either inks are off by more than its ``PIXEL_TOLERANCE`` levels after
 ways, color-managed (``ICCBased`` through its profile, ``DeviceCMYK`` through a press profile) or not (every space by
 the standard's formulas); the reader converts ``ICCBased`` the first way and ``DeviceCMYK`` the second
 (`tests/unit/test_render.py`), so a page agrees with whichever agrees better. A page holding what the own renderer
-does not draw yet (``undrawn``: a shading, a pattern, a transparency group composited with an alpha, a glyph of a
-font it has no program for) is not compared. The planted control: each document's compared page with the most dark
+cannot draw (``undrawn``: a glyph of a font it has no program for, a JPX or JBIG2 image, a shading or pattern that
+does not read) is not compared. The planted control: each document's compared page with the most dark
 ink, held to its own reference turned upside down and moved a few pixels, must be reported.
 
 A standard font a document does not embed is drawn with PDFium's Foxit substitute where PyMuPDF draws URW's, two
 designs (``tests/unit/test_render_text.py`` holds the substitution itself to PyMuPDF drawing the Foxit program):
-its glyphs' edges differ, which the measurement below includes.
+its glyphs' edges differ, which the measurement below includes. A CJK font a document does not embed is drawn from a
+fallback fetched on first use (Noto Sans or Serif CJK, ``document_lab.fonts``), where PyMuPDF draws every one with its
+own Droid Sans Fallback: dense strokes of two designs differ on up to a third of their pixels (32.8 % on IEC 60205's
+first page), so here the reader is handed PyMuPDF's own program for those fallbacks (:func:`_fallback`) -- the
+choice of glyph and its place are compared, not the design. Measured on 2026-11-27, the 10 pages of the one local
+document holding such fonts: 0.00-0.02 % off with Droid on both sides; with the fallbacks themselves 3.2-32.8 %
+(sans only, 2.2-19.3 %).
 
-Measured on 2026-11-27 over 283 local PDFs, every 10th page (774 pages; 5 holding what is not drawn -- 2 patterns,
-a shading, an alpha-composited group, a Chinese font not embedded): of the 769 compared, 78.0 % have at most 0.5 %
-of their inked pixels off, 93.5 % at most 2 %, 99.3 % at most 5 %; the worst 14.2 % (finely striped plots sampled
-a fraction of a pixel apart); the 84 pages with a font not embedded 70.2 %, 91.7 % and 100 %, worst 3.8 %.
+Measured on 2026-11-28 over 283 local PDFs, every 10th page (774 pages; 1 holding what is not drawn -- a Chinese
+font not embedded): of the 773 compared, 78.0 % have at most 0.5 % of their inked pixels off, 93.5 % at most 2 %,
+99.4 % at most 5 %; the worst 14.2 % (finely striped plots sampled a fraction of a pixel apart); the 84 pages with a
+font not embedded (measured 2026-11-27) 70.2 %, 91.7 % and 100 %, worst 3.8 %. The pages holding shadings,
+patterns, soft masks or transparency groups (185, every page of a document up to 6) 73.0 %, 92.4 % and 98.9 %,
+worst 9.4 % (D130 of task document-lab-pdf-reader).
 :data:`PAGE_SHARE` guards against what is not anti-aliasing or a substitute's design: the faults this comparison
 found -- CMYK JPEGs inverted twice (88 % off), a page held to the wrong color mode (50 %) -- are far above it, as are
 glyphs placed a fraction of a pixel off MuPDF's grid (25-45 % on synthetic pages of text).
@@ -33,7 +42,7 @@ import numpy as np
 import pymupdf
 import pytest
 
-from document_lab import _pdf
+from document_lab import _pdf, fonts
 from tests.reference.test_reference import PDFS, _needs_documents
 from tests.rendering import PIXEL_TOLERANCE, blurred_difference, inked
 
@@ -54,10 +63,17 @@ def _pixels(data: bytes, width: int, height: int) -> np.ndarray:
     return np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3)
 
 
+def _fallback(name: str) -> bytes:
+    """PyMuPDF's own CJK program for a CJK fallback (the design compared away); any other fetched as in use."""
+    if name.startswith(('noto-sans-', 'noto-serif-')) and name[-3:] in ('-sc', '-tc', '-jp', '-kr'):
+        return bytes(pymupdf.Font('cjk').buffer)
+    return fonts.program(name)
+
+
 @lru_cache(maxsize=1)  # the document under test; never the whole corpus at once
 def _document(pdf: Path) -> tuple[bytes, _pdf.Reader]:
     data = pdf.read_bytes()
-    return data, _pdf.open(data, b'')
+    return data, _pdf.open(data, b'', fonts=_fallback)
 
 
 def _reference(data: bytes, number: int, *, managed: bool) -> np.ndarray:
@@ -72,7 +88,7 @@ def _reference(data: bytes, number: int, *, managed: bool) -> np.ndarray:
 
 
 def _own(pdf: Path, number: int) -> np.ndarray | None:
-    """Page ``number`` drawn by the own renderer; None when it holds what the own renderer does not draw yet."""
+    """Page ``number`` drawn by the own renderer; None when it holds what the own renderer cannot draw."""
     width, height, _, pixels, undrawn = _document(pdf)[1].render(
         number, None, DPI / 72, text=True, annotations=True, alpha=False
     )
@@ -82,7 +98,7 @@ def _own(pdf: Path, number: int) -> np.ndarray | None:
 def off_share(pdf: Path, number: int, *, misplaced: bool = False) -> float | None:
     """The share of page ``number``'s compared pixels the own render has off from PyMuPDF's -- turned upside down and
     moved by :data:`PLANTED_SHIFT` pixels when ``misplaced``: a planted wrong reference; None when the page holds what
-    the own renderer does not draw yet.
+    the own renderer cannot draw.
     """
     own = _own(pdf, number)
     if own is None:

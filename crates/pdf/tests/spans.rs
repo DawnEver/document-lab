@@ -37,6 +37,35 @@ fn a_gap_without_a_space_glyph_reads_as_a_space() {
 }
 
 #[test]
+fn a_span_states_each_word_s_box_its_glyphs_between_spaces() {
+    // `one` and `two` 20 points apart (a gap read as a space), `three` after a space glyph: one span, three words.
+    let found = page_spans("BT /F1 10 Tf 10 50 Td (one) Tj 20 0 Td (two three) Tj ET");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].text, "one two three");
+    let words: Vec<(f64, f64)> = found[0].words.iter().map(|w| (w.x0, w.x1)).collect();
+    // Helvetica at 10 points: o, n, e, h 5.56, t 2.78, w 7.22, r 3.33, the space glyph 2.78.
+    let expected = [(10.0, 26.68), (30.0, 45.56), (48.34, 71.13)];
+    assert_eq!(words.len(), expected.len(), "{words:?}");
+    for ((x0, x1), (e0, e1)) in words.iter().zip(expected) {
+        assert!(
+            (x0 - e0).abs() < 0.01 && (x1 - e1).abs() < 0.01,
+            "{words:?}"
+        );
+    }
+    // A planted wrong truth: the words read as one, the span's own box.
+    let bbox = found[0].bbox;
+    assert_ne!(words, [(bbox.x0, bbox.x1)]);
+}
+
+#[test]
+fn a_span_whose_text_an_actual_text_replaced_states_no_words() {
+    let found =
+        page_spans("BT /F1 10 Tf 10 50 Td /Span << /ActualText (fi) >> BDC (f i) Tj EMC ET");
+    assert_eq!(found[0].text, "fi");
+    assert!(found[0].words.is_empty(), "{:?}", found[0].words);
+}
+
+#[test]
 fn a_font_change_a_new_line_or_a_far_jump_starts_a_span() {
     assert_eq!(
         texts("BT /F1 10 Tf 10 50 Td (plain) Tj /F2 10 Tf (bold) Tj ET"),
@@ -453,4 +482,219 @@ fn a_region_or_clip_leaving_any_of_the_text_out_does_not_cover_it() {
         x0 + 1.0,
         b + 1.0
     )));
+}
+
+/// White text set where the strokes below are drawn round it.
+const WHITE: &str = "BT 1 g /F1 10 Tf 50 45 Td (white) Tj ET";
+
+/// Whether [`WHITE`] drawn over `strokes` (black, unless they say otherwise) shows nothing on the white page, the
+/// strokes made from the box the text is set in, in user space: left, bottom, right, top.
+fn unseen_over(strokes: impl Fn(f64, f64, f64, f64) -> String) -> bool {
+    let set = page_spans(WHITE).remove(0).bbox;
+    let (x0, b, x1, t) = (set.x0, 100.0 - set.y1, set.x1, 100.0 - set.y0);
+    let content = format!("0 G {} {WHITE}", strokes(x0, b, x1, t));
+    let found = page_spans(&content);
+    assert_eq!(found.len(), 1, "{content}");
+    found[0].in_background_color
+}
+
+/// A rectangle `margin` round the text's box, as `re` draws it.
+fn around(x0: f64, b: f64, x1: f64, t: f64, margin: f64) -> String {
+    format!(
+        "{} {} {} {} re",
+        x0 - margin,
+        b - margin,
+        x1 - x0 + 2.0 * margin,
+        t - b + 2.0 * margin
+    )
+}
+
+#[test]
+fn a_frame_round_white_text_paints_only_its_band() {
+    // A black frame stroked round the text, a table cell's `re S`: white on the white page inside it.
+    assert!(unseen_over(|x0, b, x1, t| format!(
+        "1 w {} S",
+        around(x0, b, x1, t, 3.0)
+    )));
+    // Filled white and stroked black (`B`): the white fill covers the text, the black band is round it.
+    assert!(unseen_over(|x0, b, x1, t| format!(
+        "1 g 1 w {} B",
+        around(x0, b, x1, t, 3.0)
+    )));
+    // Dashed, its corners mitered: still its band alone.
+    assert!(unseen_over(|x0, b, x1, t| format!(
+        "1 w [3 2] 0 d {} S",
+        around(x0, b, x1, t, 3.0)
+    )));
+    // A thick white stroke across the text, on the white page: white where it paints, white where it does not.
+    assert!(unseen_over(|x0, b, x1, t| format!(
+        "1 G 30 w {} {} m {} {} l S",
+        x0 - 5.0,
+        f64::midpoint(b, t),
+        x1 + 5.0,
+        f64::midpoint(b, t)
+    )));
+}
+
+#[test]
+fn a_stroke_reaching_into_white_text_shows_it() {
+    // The planted wrong truths: each a stroke of the test above, or near it, painting black into the text's box.
+    // The frame's band reaching in: 7 wide, 3 round the text.
+    assert!(!unseen_over(|x0, b, x1, t| format!(
+        "7 w {} S",
+        around(x0, b, x1, t, 3.0)
+    )));
+    // Filled black inside the frame.
+    assert!(!unseen_over(|x0, b, x1, t| format!(
+        "0 g 1 w {} B",
+        around(x0, b, x1, t, 3.0)
+    )));
+    // A dashed frame whose dashes, 7 wide, reach in.
+    assert!(!unseen_over(|x0, b, x1, t| format!(
+        "7 w [3 2] 0 d {} S",
+        around(x0, b, x1, t, 3.0)
+    )));
+    // A thick black stroke across the text: judged by what paints there, black.
+    assert!(!unseen_over(|x0, b, x1, t| format!(
+        "30 w {} {} m {} {} l S",
+        x0 - 5.0,
+        f64::midpoint(b, t),
+        x1 + 5.0,
+        f64::midpoint(b, t)
+    )));
+    // A thick black stroke beside the text, its band's edge across the text's top.
+    assert!(!unseen_over(|x0, _, x1, t| format!(
+        "10 w {} {} m {} {} l S",
+        x0 - 5.0,
+        t + 4.0,
+        x1 + 5.0,
+        t + 4.0
+    )));
+}
+
+#[test]
+fn caps_and_joins_near_white_text_count_as_far_as_they_reach() {
+    // A line 6 wide ending 2 left of the text: a butt cap ends there, a round or square one reaches in.
+    let ending = |cap: u8| {
+        unseen_over(move |x0, b, _, t| {
+            let y = f64::midpoint(b, t);
+            format!("6 w {cap} J {} {y} m {} {y} l S", x0 - 40.0, x0 - 2.0)
+        })
+    };
+    assert!(ending(0));
+    assert!(!ending(1) && !ending(2));
+    // A sharp corner 3 below the text, pointing up at it, 4 wide: mitered, its tip reaches 9.4 (within a limit of
+    // 10); beveled, round, or mitered under a limit of 4 (beveled then), it does not.
+    let corner = |join: u8, limit: f64| {
+        unseen_over(move |x0, b, x1, _| {
+            let mid = f64::midpoint(x0, x1);
+            format!(
+                "4 w {join} j {limit} M {} {} m {mid} {} l {} {} l S",
+                mid - 10.0,
+                b - 49.0,
+                b - 3.0,
+                mid + 10.0,
+                b - 49.0
+            )
+        })
+    };
+    assert!(!corner(0, 10.0));
+    assert!(corner(2, 10.0) && corner(1, 10.0) && corner(0, 4.0));
+}
+
+#[test]
+fn a_stroked_glyph_reaches_past_its_box() {
+    // A black `M` stroked 4 wide (render mode 1) set just left of white text: its outline's stroke reaches in.
+    let content = |width: f64| {
+        let set = page_spans(WHITE).remove(0).bbox;
+        format!(
+            "q BT 0 G {width} w 1 Tr /F1 10 Tf {} 45 Td (M) Tj ET Q {WHITE}",
+            set.x0 - 8.33 - 0.5
+        )
+    };
+    let unseen = |width| {
+        page_spans(&content(width))
+            .into_iter()
+            .find(|s| s.text == "white")
+            .unwrap()
+            .in_background_color
+    };
+    assert!(!unseen(4.0));
+    // The planted control: a hairline outline stays inside its glyph's box, clear of the text.
+    assert!(unseen(0.0));
+}
+
+/// A line through the middle of the text's box, from `from` to `to` along it.
+fn level(from: f64, to: f64, b: f64, t: f64) -> String {
+    let y = f64::midpoint(b, t);
+    format!("{from} {y} m {to} {y} l")
+}
+
+#[test]
+fn a_thick_band_holding_text_in_its_color_covers_it() {
+    // Stroked in black, the default stroke color. A 30 wide black rule across the text: its band holds the box, so the page's white under it is hidden.
+    assert!(hidden_by(|x0, b, x1, t| format!(
+        "30 w {} S",
+        level(x0 - 5.0, x1 + 5.0, b, t)
+    )));
+    // A corner of it: one piece's band holds the box, the other's turns away.
+    assert!(hidden_by(|x0, b, x1, t| format!(
+        "30 w {} {} {} l S",
+        level(x0 - 5.0, x1 + 5.0, b, t),
+        x1 + 5.0,
+        b - 60.0
+    )));
+    // Clipped to a rectangle round the text: the clip covers it too.
+    assert!(hidden_by(|x0, b, x1, t| format!(
+        "q {} W n 30 w {} S Q",
+        around(x0, b, x1, t, 3.0),
+        level(x0 - 5.0, x1 + 5.0, b, t)
+    )));
+    // Filled white under its black band (`B` of a closed rectangle 30 wide round the line): the band is on top.
+    assert!(hidden_by(|x0, b, x1, t| {
+        let y = f64::midpoint(b, t);
+        format!(
+            "1 g 30 w {} {y} m {} {y} l {} {} l h B",
+            x0 - 5.0,
+            x1 + 5.0,
+            x1 + 5.0,
+            y - 80.0
+        )
+    }));
+}
+
+#[test]
+fn a_band_that_may_leave_some_of_the_text_unpainted_covers_nothing() {
+    // The planted wrong truths: each the rule above, or near it, leaving the page's white somewhere in the box.
+    // Dashed: its gaps may fall anywhere along it.
+    assert!(!hidden_by(|x0, b, x1, t| format!(
+        "30 w [3 2] 0 d {} S",
+        level(x0 - 5.0, x1 + 5.0, b, t)
+    )));
+    // Thinner than the text is tall: its band reaches only part of the box.
+    assert!(!hidden_by(|x0, b, x1, t| format!(
+        "6 w {} S",
+        level(x0 - 5.0, x1 + 5.0, b, t)
+    )));
+    // Ending inside the text, butt capped.
+    assert!(!hidden_by(|x0, b, x1, t| format!(
+        "30 w 0 J {} S",
+        level(x0 - 5.0, f64::midpoint(x0, x1), b, t)
+    )));
+    // Clipped to half the text.
+    assert!(!hidden_by(|x0, b, x1, t| format!(
+        "q {} {} {} {} re W n 30 w {} S Q",
+        x0 - 3.0,
+        b - 3.0,
+        (x1 - x0) / 2.0,
+        t - b + 6.0,
+        level(x0 - 5.0, x1 + 5.0, b, t)
+    )));
+    // In a color of its own.
+    assert!(!hidden_by(|x0, b, x1, t| format!(
+        "1 0 0 RG 30 w {} S",
+        level(x0 - 5.0, x1 + 5.0, b, t)
+    )));
+    // Black text on the white page: the visible control.
+    assert!(!hidden_by(|_, _, _, _| String::new()));
 }

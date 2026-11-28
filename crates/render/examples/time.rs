@@ -36,6 +36,7 @@ fn main() {
         text: false,
         annotations: true,
         alpha: false,
+        jpx: render::image::Jpx::default(),
     };
     let (mut pages, mut total, mut failed) = (0usize, 0.0f64, 0usize);
     let mut slowest: Vec<(f64, String)> = Vec::new();

@@ -242,6 +242,10 @@ class TextSpan:
     #: Filled (and only filled) in the color its source paints under its box -- the page's white, or the paint of what
     #: was drawn under it -- so it shows nothing (see the module). Its source compares the colors exactly.
     in_background_color: bool = False
+    #: The box of each of its words, in order: its text split at white space, word for word, as its source placed them
+    #: (two columns set closer than a reader's word break are one span, its words apart). Empty when its source does
+    #: not say, or its words and its text do not match one to one (an ``/ActualText``).
+    words: tuple[BBox, ...] = ()
 
     @property
     def center(self) -> tuple[float, float]:

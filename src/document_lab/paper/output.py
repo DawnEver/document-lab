@@ -13,7 +13,7 @@ from document_lab.paper.text import extract_title_from_preamble, slug
 
 if TYPE_CHECKING:
     from document_lab.formula import Transcribe
-    from document_lab.pdf import Renderer
+    from document_lab.regions import Unnumbered
 
 #: The head of a heading-less preamble paper.md keeps as the abstract when the paper states none.
 ABSTRACT_FALLBACK_CHARS = 800
@@ -300,14 +300,15 @@ def write_paper_output(
     md_text: str,
     title_override: str | None = None,
     pdf_path: Path | None = None,
-    renderer: Renderer = 'pymupdf',
     transcribe: Transcribe | None = None,
+    unnumbered: Unnumbered = 'strict',
     include_hidden: bool = False,
     include_in_background_color: bool = False,
 ) -> tuple[int, int, int]:
-    """Write per-section files, paper.md, images (rendered by ``renderer``), INDEX.md for one paper.
+    """Write per-section files, paper.md, images (`document_lab.pdf.read_raster`'s), INDEX.md for one paper.
 
     ``transcribe``: each equation crop's LaTeX follows its image (:func:`render_equation_images`).
+    ``unnumbered``: how displays without a number are found (`document_lab.regions.Unnumbered`).
     ``include_hidden``, ``include_in_background_color``: what the text locating figures and equations reads
     beside the default view (`document_lab.paper.render`).
 
@@ -339,7 +340,6 @@ def write_paper_output(
             pdf_path,
             out_dir,
             body_sections,
-            renderer=renderer,
             include_hidden=include_hidden,
             include_in_background_color=include_in_background_color,
         )
@@ -350,8 +350,8 @@ def write_paper_output(
             body_sections,
             figure_images,
             page_section_map,
-            renderer=renderer,
             transcribe=transcribe,
+            unnumbered=unnumbered,
             include_hidden=include_hidden,
             include_in_background_color=include_in_background_color,
         )

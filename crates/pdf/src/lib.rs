@@ -4,10 +4,10 @@
 //! with the origin top-left and y growing down. Layout, regions and pixels are not this crate's.
 //!
 //! Layers, each depending only on those above it: [`error`], [`object`] (the values), [`parser`] (bytes to
-//! values), [`filter`] (stream data decoded), [`crypt`] (strings and streams decrypted), [`xref`] (where each object is), [`file`] (a PDF opened: objects
+//! values), [`filter`] (stream data decoded), [`crypt`] (strings and streams decrypted), [`xref`] (where each object is), [`file`](mod@file) (a PDF opened: objects
 //! resolved by reference), [`page`] (the page tree), [`content`] (a content stream's operations), [`font`] and [`cmap`] (with [`shape`]: a glyph's outline, from its font program or a substitute), [`function`] (PDF functions), [`icc`] (ICC profiles), [`color`] and
 //! [`geometry`], [`image`] (an image's samples), [`optional`] (which optional content shows), and [`interpret`] (what a
-//! page draws, as events in page space),
+//! page draws, as events in page space; what a stroke may paint bounded by [`band`]),
 //! read as [`spans`] (runs of text) and [`paths`] (subpaths, curves flattened). [`structure`] reads a tagged PDF's
 //! structure tree: its elements in order, and the marked content each covers.
 //!
@@ -18,6 +18,7 @@
 
 mod accents;
 pub mod attachments;
+pub mod band;
 mod base14;
 mod cid2unicode;
 pub mod cmap;
@@ -48,6 +49,7 @@ pub mod outline;
 pub mod page;
 pub mod parser;
 pub mod paths;
+pub mod shading;
 pub mod shape;
 pub mod spans;
 pub mod structure;

@@ -430,7 +430,8 @@ def test_a_fax_image_placed_turned_is_handed_with_its_placement_as_the_tiff_s_or
 def test_a_group_3_fax_image_s_coding_is_stated_in_its_tiff(tmp_path, tesseract, params, compression, t4):
     pdf = fax_pdf(tmp_path / 'fax.pdf', b'coded rows', f'{params} /Columns 64 /BlackIs1 true')
     fake = tesseract(page())
-    text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES)
+    # The bytes are no fax coding: only their TIFF is judged, never decoded to be measured (the renderer refuses them).
+    text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES, deskew_above=None)
     ((_, handed),) = fake.images
     tags = tiff_tags(handed)
     assert (tags[259], tags.get(292), tags[262]) == (compression, t4, 1)  # BlackIs1: BlackIsZero
@@ -448,8 +449,8 @@ def test_a_group_3_fax_image_s_coding_is_stated_in_its_tiff(tmp_path, tesseract,
 def test_a_fax_coding_no_tiff_holds_is_refused_by_name(tmp_path, tesseract, params, refusal):
     pdf = fax_pdf(tmp_path / 'fax.pdf', b'coded rows', params)
     tesseract()
-    with pytest.raises(ValueError, match=refusal):
-        text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES)
+    with pytest.raises(ValueError, match=refusal):  # the bytes are no fax coding: never decoded to be measured
+        text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES, deskew_above=None)
 
 
 @pytest.mark.parametrize(
@@ -565,6 +566,26 @@ def test_a_turn_osd_is_sure_of_is_read_as_well_as_placed_and_the_surer_line_kept
     assert near(spans['sideways'].provenance.bbox, [100 * scale, 140 * scale, 130 * scale, 260 * scale], 0.2)
     assert near(spans['sideways'].direction, (0, -1), 1e-6)
     assert near(spans['header'].direction, (1, 0), 1e-6)
+
+
+@pytest.mark.parametrize(
+    ('across', 'kept'), [(('OAl', 262, 220, 16, 80), 'IEC 60404'), (('OAl', 200, 220, 90, 40), 'OAl')]
+)
+def test_a_line_read_across_a_line_of_the_other_reading_is_that_line_misread_however_sure(
+    tmp_path, tesseract, across, kept
+):
+    """A landscape page's upright head, read again with the sideways table: the turned reading takes its glyphs for a
+    line 16 pixels long and 80 high across the head, surer than the head itself (logo noise in it). A line no longer
+    along its baseline than the other is thick is that line read across: dropped. The planted wrong truth: a turned
+    line longer than the head is thick (90) is a line of its own, and the surer one wins as before."""
+    pdf, _ = capture(tmp_path)
+    as_placed = page(('IEC', 200, 20, 40, 20), ('60404', 250, 20, 100, 20), confidence=0.2)
+    turned = document(region(('sideways', 40, 100, 120, 30), confidence=0.9), region(across, confidence=0.6))
+    tesseract(as_placed, turned, orientation=osd(90, 15.0))
+    text_layer(pdf, tmp_path / 'ocr.pdf', places=PLACES)
+    lines = {s.text for s in read_pdf(tmp_path / 'ocr.pdf').pages[0].spans}
+    assert 'sideways' in lines
+    assert kept in lines and {'IEC 60404', 'OAl'} - {kept} - lines == {'IEC 60404', 'OAl'} - {kept}
 
 
 @pytest.mark.parametrize(

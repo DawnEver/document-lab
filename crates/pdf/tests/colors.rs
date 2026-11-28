@@ -176,7 +176,7 @@ fn a_tint_transform_that_overflows_its_stack_gives_no_rgb_and_says_why() {
     );
     assert_eq!(content.warnings.len(), 1, "{:?}", content.warnings);
     assert!(
-        content.warnings[0].contains("stack grows past 100"),
+        content.warnings[0].why.contains("stack grows past 100"),
         "{:?}",
         content.warnings
     );
@@ -274,7 +274,7 @@ fn what_the_colorant_none_paints_is_reported_inkless() {
         ]
     );
     assert!(paths(&content).iter().all(|p| !p.layer.hidden));
-    assert_eq!(content.warnings, Vec::<String>::new());
+    assert!(content.warnings.is_empty(), "{:?}", content.warnings);
 }
 
 #[test]
@@ -322,7 +322,7 @@ fn a_stencil_mask_an_image_and_a_shading_in_the_colorant_none_are_inkless() {
             ("shading", false),
         ]
     );
-    assert_eq!(content.warnings, Vec::<String>::new());
+    assert!(content.warnings.is_empty(), "{:?}", content.warnings);
 }
 
 #[test]
@@ -347,6 +347,10 @@ fn a_space_that_does_not_read_keeps_its_colors_components_and_is_named() {
     let space = &paths(&content)[1].fill.as_ref().unwrap().color.space;
     assert_eq!(space, b"Lab");
     assert_eq!(content.warnings.len(), 2, "{:?}", content.warnings);
-    assert!(content.warnings[0].contains("gives 3, for 1 colorants into 4 components"));
-    assert!(content.warnings[1].contains("no valid /WhitePoint"));
+    assert!(
+        content.warnings[0]
+            .why
+            .contains("gives 3, for 1 colorants into 4 components")
+    );
+    assert!(content.warnings[1].why.contains("no valid /WhitePoint"));
 }

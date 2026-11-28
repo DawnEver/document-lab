@@ -14,8 +14,11 @@ number -- where OCR'd text cannot be trusted (a formula, a table's numbers), the
 written where it stands as a markdown table, its link above it when a region holds it: a ruled one
 (`document_lab.tables`) from its rules and the text in its cells -- a scan's rules found in its pixels
 (`document_lab.ink.rulings`) and its cells' text from its text layer (its own invisible OCR text, or ours), one set
-sideways read in its text's frame -- else one whose text makes rows and columns (:attr:`Region.table`). An untitled
-drawing's link stands where the drawing does, the text drawn in it after the link, not in the body (:func:`_placed`).
+sideways read in its text's frame -- else one whose text makes rows and columns (:attr:`Region.table`), which stands
+for its ruled ones only where it reads more rows and no fewer columns (:func:`_written`). Rows a ruled table holds
+that no region holds (a continued table's header bands, told as an untitled table) are its own: it is written for
+them, and no region of them is cut (:func:`_unruled`). An untitled drawing's link stands where the drawing does, the
+text drawn in it after the link, not in the body (:func:`_placed`).
 Asked for ``formulas='latex'``, each equation's LaTeX, read from its crop by `document_lab.formula` (the ``formula``
 extra), follows its link as a display block. A region reaching the page's foot is marked as continuing on the next
 page. ``INDEX.md`` lists the pages with the clause headings each opens and the regions it holds. A page without text
@@ -52,8 +55,8 @@ from document_lab.ink import Drawing, drawings, rulings
 from document_lab.ir import BBox
 from document_lab.markdown import Headings, headings, page_markdowns
 from document_lab.markdown import table as markdown_table
-from document_lab.pdf import Renderer, read_pdf, read_raster
-from document_lab.regions import Region, regions
+from document_lab.pdf import read_pdf, read_raster
+from document_lab.regions import Region, Unnumbered, regions
 from document_lab.tables import tables
 
 if TYPE_CHECKING:
@@ -104,13 +107,13 @@ def _scanned(page: Page) -> bool:
     return len(page.figures) == 1 and _covers(page.figures[0].provenance.bbox, BBox(0, 0, page.width, page.height))
 
 
-def _picture(pdf: Path, page: Page, renderer: Renderer) -> tuple[np.ndarray, float]:
+def _picture(pdf: Path, page: Page) -> tuple[np.ndarray, float]:
     """The page as seen, RGB rows, and its pixels per point.
 
-    A page one image covers is read at that image's resolution, any other drawn by ``renderer``.
+    A page one image covers is read at that image's resolution, any other drawn by the own renderer.
     """
     whole = BBox(0, 0, page.width, page.height)
-    pixels = read_raster(pdf, page.number, whole, dpi=None if _scanned(page) else RENDER_DPI, renderer=renderer).pixels
+    pixels = read_raster(pdf, page.number, whole, dpi=None if _scanned(page) else RENDER_DPI).pixels
     return pixels, pixels.shape[1] / page.width
 
 
@@ -232,17 +235,15 @@ def _link(name: str, page: Page, region: Region, latex: dict[int, str]) -> str:
     return f'![{region.alt or region.label}]({_file(name, region)}){more}{beside}'
 
 
-def _latex(
-    pdf: Path, read: Document, found: list[list[Region]], transcribe: formula.Transcribe, renderer: Renderer
-) -> dict[int, str]:
+def _latex(pdf: Path, read: Document, found: list[list[Region]], transcribe: formula.Transcribe) -> dict[int, str]:
     """What stands beside each equation's link (`document_lab.formula.beside`), by the region's id.
 
-    Each is read from the crop written (:func:`_cut` of the page's picture drawn by ``renderer``).
+    Each is read from the crop written (:func:`_cut` of the page's picture, :func:`_picture`).
     """
     latex = {}
     for page, held in zip(read.pages, found, strict=True):
         if equations := [r for r in held if r.kind == 'equation']:
-            pixels, scale = _picture(pdf, page, renderer)
+            pixels, scale = _picture(pdf, page)
             for region in equations:
                 latex[id(region)] = formula.beside(transcribe(_cut(pixels, scale, region)), _number(region.label))
     return latex
@@ -262,13 +263,30 @@ def _written(region: Region, inside: list[Table]) -> list[Table]:
     """The tables written for ``region``: the ruled ones it holds (``inside``), or the cells its text reads.
 
     Its ruled tables' rules part its cells and know its merged ones -- unless its text reads more rows than they do
-    (rows set apart by baseline that no rule parts, a data sheet's ordering table), or it holds none; then the cells
-    its text reads (:attr:`Region.table`), if any.
+    and no fewer columns (rows set apart by baseline that no rule parts, a data sheet's ordering table), or it holds
+    none; then the cells its text reads (:attr:`Region.table`), if any. Text that runs columns its rules part into one
+    reads less, however many rows it makes (an OCR'd table's words, apart by less than a column's gap).
     """
     text = region.table
-    if text is not None and len(text.rows) > sum(len(t.rows) for t in inside):
+    rows = sum(len(t.rows) for t in inside)
+    columns = max((len(row) for t in inside for row in t.rows), default=0)
+    if text is not None and len(text.rows) > rows and max(len(row) for row in text.rows) >= columns:
         return [text]
     return inside
+
+
+def _unruled(found: list[Region], ruled: tuple[Table, ...]) -> list[Region]:
+    """``found`` less each untitled table that stands inside a ruled table it does not hold.
+
+    Rows a ruled table holds that no region holds (a continued table's header bands) are its own: the ruled table is
+    written for them, and no region of them is cut.
+    """
+
+    def inside(region: Region) -> bool:
+        x, y = (region.bbox.x0 + region.bbox.x1) / 2, (region.bbox.y0 + region.bbox.y1) / 2
+        return any(t.provenance.bbox is not None and t.provenance.bbox.contains(x, y) for t in ruled)
+
+    return [r for r in found if r.kind != 'table' or r.captioned or _ruled_in(r, ruled) or not inside(r)]
 
 
 def _placed(
@@ -309,22 +327,23 @@ def write_pages(
     pdf: Path,
     out: Path,
     *,
-    renderer: Renderer = 'pymupdf',
     outline: bool = True,
     tagged: Collection[str] = tags.DEFAULT_USES,
     formulas: formula.Formulas | None = None,
     formula_model: formula.Model = 'texteller',
+    unnumbered: Unnumbered = 'strict',
     include_hidden: bool = False,
     include_in_background_color: bool = False,
 ) -> Paged:
     """Write ``pdf`` page by page into ``out``: a directory (made if missing), or a ``.zip`` archive.
 
-    Each page's picture is drawn by ``renderer`` (`document_lab.pdf.read_raster`). ``outline``: the PDF's stated
+    Each page's picture is `document_lab.pdf.read_raster`'s. ``outline``: the PDF's stated
     outline names the clause headings when it matches the pages; False keeps to its tags and the rules
     (`document_lab.markdown.headings`). ``tagged``: what a tagged PDF's tags give (`document_lab.tags.USES`; by default
     ``DEFAULT_USES``, all but figures); none infers it all from layout. ``formulas``: ``latex`` writes each equation's
     LaTeX after its link, read by ``formula_model`` (`document_lab.formula`); refused by
-    :class:`document_lab.formula.FormulaUnavailable` before anything is written when that model cannot run. Every
+    :class:`document_lab.formula.FormulaUnavailable` before anything is written when that model cannot run.
+    ``unnumbered``: how displays without a number are found (`document_lab.regions.Unnumbered`). Every
     step reads the page as its default view shows it (`document_lab.ir.Page.shown`): its pictures, ruled tables,
     regions, tags, running heads, headings and markdown, and how the tags agree with layout
     (`document_lab.agreement`); ``include_hidden``: what hidden layers draw is read too,
@@ -338,19 +357,21 @@ def write_pages(
     names = [f'page-{number:0{width}d}' for number in range(1, len(read.pages) + 1)]
     drawn, ruled = [], []
     for page in read.pages:
-        pixels, scale = _picture(pdf, page, renderer)
+        pixels, scale = _picture(pdf, page)
         drawn.append(_drawings(pixels, scale, page, body))
         ruled.append(_tables(page, pixels, scale))
     drawn = _without_furniture(drawn, body)
     shown = {'include_hidden': include_hidden, 'include_in_background_color': include_in_background_color}
     compared = compare(read, drawn, **shown)
     found = [
-        regions(page, face, drawings, structure=read.structure, tagged=tagged, **shown)
-        for page, drawings in zip(read.pages, drawn, strict=True)
+        _unruled(
+            regions(page, face, drawings, structure=read.structure, tagged=tagged, unnumbered=unnumbered, **shown), held
+        )
+        for page, drawings, held in zip(read.pages, drawn, ruled, strict=True)
     ]
     furniture = layout.running(read)
     text = layout.without_running(read, furniture)
-    latex = {} if transcribe is None else _latex(pdf, read, found, transcribe, renderer)
+    latex = {} if transcribe is None else _latex(pdf, read, found, transcribe)
     placed = [_placed(*part, latex) for part in zip(names, text.pages, found, ruled, strict=True)]
     structure = headings(text, outline=outline, tagged=tagged, **shown)
     texts = page_markdowns(text, placed, sections=structure, tagged=tagged, **shown)
@@ -360,7 +381,7 @@ def write_pages(
         if out / pdf.name != pdf:  # the layout stands alone; a PDF already where it goes is not copied onto itself
             put(pdf.name, pdf.read_bytes())
         for number, (name, md, page, held) in enumerate(zip(names, texts, read.pages, found, strict=True), start=1):
-            pixels, scale = _picture(pdf, page, renderer)
+            pixels, scale = _picture(pdf, page)
             put(f'{name}.png', png.encode(pixels))
             for region in held:
                 put(_file(name, region), png.encode(_cut(pixels, scale, region)))

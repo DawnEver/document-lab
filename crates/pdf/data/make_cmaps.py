@@ -82,7 +82,7 @@ def paths() -> dict[str, str]:
 class CMap:
     """One ``CMap`` resolved: its ordering, writing mode, code space and each code's CID."""
 
-    def __init__(self, name: str, where: dict[str, str], done: dict[str, 'CMap']) -> None:
+    def __init__(self, name: str, where: dict[str, str], done: dict[str, CMap]) -> None:
         """Read ``name`` (and its ``usecmap`` parent, through ``done``)."""
         text = fetch(where[name]).decode('latin-1')
         body = text[text.index('begincmap') :]

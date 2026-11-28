@@ -1,32 +1,44 @@
 """A page's spans as lines in reading order: what every layout of a page -- its markdown, its regions -- starts from.
 
-- Furniture: text turned sideways (neither :func:`upright` nor written vertically) wholly outside the box of the
-  page's text (upright, or written vertically) -- an arXiv stamp up the margin -- is :func:`furniture` and makes no
-  line; turned text inside that box (a figure's axis label) stays. A page without such text has no furniture.
+- The page's way: :func:`reading_way` is the way most of its text reads -- the quarter turn more of its characters
+  read along than any other, vertical writing counted upright (its glyphs stand as the page's do) -- so a landscape
+  table printed sideways under an upright running head reads sideways, and an upright page beside a long stamp up its
+  margin reads upright. A page with no such way -- two ways tie for most, text askew off every quarter turn reads
+  most, or the way that reads most is one line while another way's text runs to more (a long stamp up the margin of
+  a sparse page) -- has none: it is read as it stands, upright, and none of its text is furniture. It is the one
+  source of a page's frame: each :class:`Line` carries it (``page_way``), and :func:`holder` reads a placed block's
+  place in it.
+- Furniture: text turned against the page's way (standing in another quarter turn, or askew) wholly outside the box
+  of the text that reads the page's way -- an arXiv stamp up the margin of an upright page, the upright running head
+  over a sideways table -- is :func:`furniture` and makes no line; turned text inside that box (a figure's axis label)
+  stays.
 - Frames: a line is built and read in its own frame -- x along its text, y down across its lines -- the page's own
   for upright text; text turned sideways reads along its baseline (a quarter turn exactly within :data:`UPRIGHT`),
-  vertical writing down its column. A line's page box is its frame box turned back.
+  vertical writing down its column. A line's page box is its frame box turned back; its place in the page's frame
+  (:attr:`Line.page_frame`) is what its column, its paragraph and its reading order are judged by.
 - Runs: a span that ``continues_run`` (:class:`~document_lab.ir.TextSpan`) is one run with the span before it
   (:func:`_runs`): a reader splits a run where its fill changes and says which piece goes on with it, and a line is
   built and measured from runs, so a scan's glyphs each in a grey of their own read as the run their source set.
 - Lines: runs on one baseline running one way, each starting within :data:`LINE_GAP` font sizes of the line's
   end, its middle across within 0.4 of a size of the line's own (never the last run's); a column gutter is wider, so
-  two columns' lines at one height stay two lines. A line's text spaces two
+  two columns' lines at one height stay two lines, and an equation's number set alone in the gutter takes nothing of
+  the next column's line on its baseline. A line's text spaces two
   neighboring spans apart unless they share an ``unspaced`` number (:class:`~document_lab.ir.TextSpan`): where a
   word gap is, is the spans' source's to say, never measured here. A bare clause number takes the text set apart
   beside it, within :data:`CLAUSE_GAP` font sizes, as a standard sets ``4.1    General`` and a paper
   ``1    Introduction``: in an unweighted document (no bold span: OCR'd text carries no weight) any clause number or
   bullet; in a weighted one a bold number or appendix letter (``A``), and only bold text of its size.
 - Columns: a line is FULL width (crossing the page middle) or in the LEFT or RIGHT column -- a turned line its
-  block's; :func:`ordered` reads the bands between full-width lines, each its left column, then its right.
+  block's; :func:`ordered` reads the bands between full-width lines, each its left column, then its right. All of it
+  in the page's frame: on a sideways page, its left and its top are its text's.
 - Blocks: :func:`blocks` sets lines into paragraphs -- each next line within :data:`BLOCK_GAP` font sizes below
   the last, in its column, overlapping it across.
-- Turned text (vertical writing, text turned sideways): a block is lines of one way side by side -- overlapping
-  along their text, within :data:`BLOCK_GAP` font sizes across -- its page column the whole block's. Lines of one way
-  overlapping along their text are placed as one, at their top, and read in their frame: line by line down it --
-  lines whose middles across stand within half a line of each other are one line of it -- each along its text. So a
-  caption up the side of a landscape table reads line by line, left to right, and vertical writing column by column,
-  right to left.
+- Turned text (vertical writing, text reading another way than the page): a block is lines of one way side by
+  side -- overlapping along their text, within :data:`BLOCK_GAP` font sizes across -- its page column the whole
+  block's. Lines of one way overlapping along their text are placed as one, at their top, and read in their frame:
+  line by line down it -- lines whose middles across stand within half a line of each other are one line of it --
+  each along its text. So a caption up the side of a landscape table reads line by line, left to right, and vertical
+  writing column by column, right to left.
 - Vertical writing (spans written vertically): a line is a column -- spans down one center line, each starting within
   :data:`DOWN_GAP` ems below the last; columns within :data:`COLUMN_GAP` ems apart are one block. Its em is its box's
   width across (writing mode 1 sets an em across; the size an OCR'd word states is its box's share of the column).
@@ -34,34 +46,38 @@
   :func:`body_size` is the size most of a document's text is set in, :func:`body_face` the font and size.
 - Running heads and feet: :func:`running` finds the lines at a page's top and foot that recur at the same place
   on :data:`RUNNING_PAGES` pages (a page number its digits aside): a document's furniture, not its body;
-  :func:`without_running` is the document without them, the text its body is written from.
+  :func:`without_running` is the document without them, the text its body is written from. A running line runs
+  along the page's top or foot: text turned sideways only ends there (a landscape table's cells) and never runs.
 """
 
 from __future__ import annotations
 
 import itertools
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from statistics import median
 from typing import TYPE_CHECKING, Final
 
-from document_lab.ir import BBox, spaced
+from document_lab.ir import BBox, Provenance, TextSpan, spaced, union
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
-    from document_lab.ir import Document, Page, TextSpan
+    from document_lab.ir import Document, Page
 
 __all__ = [
     'BLOCK_GAP',
     'CLAUSE_GAP',
     'COLUMN_GAP',
     'DOWN_GAP',
+    'EQUATION_NUMBER',
     'GUTTER',
     'LINE_GAP',
+    'QUARTERS',
     'RUNNING_PAGES',
     'SAME_WAY',
+    'UP',
     'UPRIGHT',
     'Block',
     'Line',
@@ -70,10 +86,14 @@ __all__ = [
     'body_face',
     'body_size',
     'column',
+    'framed',
     'furniture',
+    'holder',
     'lines',
     'ordered',
+    'reading_way',
     'running',
+    'unframed',
     'upright',
     'without_running',
     'wordy',
@@ -104,17 +124,29 @@ LETTER_SHARE: Final = 0.6
 RUNNING_PAGES: Final = 3
 _CLAUSE: Final = re.compile(r'^(?:\d+(?:\.\d+)*\.?|[-\N{EN DASH}\N{EM DASH}\N{BULLET}])$')  # a clause number, a bullet
 _NUMBER: Final = re.compile(r'^(?:\d+|[A-Z])(?:\.\d+)*\.?$')  # a heading's number: 2, 2.1, an appendix's A, A.1
-_EQUATION_NUMBER: Final = re.compile(r'^\( ?\d+ ?\)$')  # an equation's number: never a running line
-_UP: Final = (1.0, 0.0)  # the way upright text reads: its frame is the page's
-_QUARTERS: Final = (_UP, (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0))
+#: An equation's number, in parentheses: ``(3)``, ``(12b)``, an annex's ``(A.1)``, a chapter's ``(4.23)`` -- never a
+#: value such as ``(0.167)``, as no number starts with 0. Never a running line (:func:`running`); `document_lab.regions`
+#: finds equations by it.
+EQUATION_NUMBER: Final = re.compile(r'\(\s*((?:[A-Z]\.?)?[1-9]\d*(?:\.\d+)*[a-z]?)\s*\)')
+#: A way text reads along on the page (y down): a unit vector.
+type Way = tuple[float, float]
+#: The way upright text reads: its frame is the page's.
+UP: Final[Way] = (1.0, 0.0)
+#: The quarter turns a page's text may read along: upright, down, upside down, up.
+QUARTERS: Final[tuple[Way, ...]] = (UP, (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0))
 
 
 @dataclass
 class Line:
-    """Spans on one baseline (or down one column), and the ``column`` they stand in: ``'L'``, ``'R'`` or ``'F'``."""
+    """Spans on one baseline (or down one column), in their ``column``: ``'L'``, ``'R'`` or ``'F'``.
+
+    ``page_way``: the way their page reads (:func:`reading_way`; :data:`UP` for a page without one), the frame its
+    column and its place are judged in.
+    """
 
     spans: list[TextSpan]
     column: str
+    page_way: Way
 
     @property
     def vertical(self) -> bool:
@@ -122,7 +154,7 @@ class Line:
         return self.spans[0].vertical
 
     @property
-    def way(self) -> tuple[float, float]:
+    def way(self) -> Way:
         """The direction it reads along on the page (y down): its first span's (:func:`_way`)."""
         return _way(self.spans[0])
 
@@ -141,6 +173,11 @@ class Line:
         )
 
     @property
+    def page_frame(self) -> BBox:
+        """Its box in its page's frame (``page_way``): x along the way the page reads, y down across its lines."""
+        return framed(unframed(self.frame, self.way), self.page_way)
+
+    @property
     def text(self) -> str:
         """The spans' text along the line (upright, left to right), spaced but where they share ``unspaced``.
 
@@ -149,7 +186,7 @@ class Line:
         parts: list[str] = []
         before = None
         way = self.way
-        for span in sorted(self.spans, key=lambda s: _framed(s.provenance.bbox, way).x0):
+        for span in sorted(self.spans, key=lambda s: framed(s.provenance.bbox, way).x0):
             if before is not None and (span.unspaced is None or span.unspaced != before.unspaced):
                 parts.append(' ')
             parts.append(span.text)
@@ -159,22 +196,22 @@ class Line:
     @property
     def y0(self) -> float:
         """Its top on the page: its :attr:`frame` turned back -- upright, the median span top; vertically, its top."""
-        return _unframed(self.frame, self.way).y0
+        return unframed(self.frame, self.way).y0
 
     @property
     def y1(self) -> float:
         """Its bottom on the page: upright, the median span bottom; vertically, the bottom of its last span."""
-        return _unframed(self.frame, self.way).y1
+        return unframed(self.frame, self.way).y1
 
     @property
     def x0(self) -> float:
         """Its left on the page: upright, the left end of its leftmost span; vertically, the median span left."""
-        return _unframed(self.frame, self.way).x0
+        return unframed(self.frame, self.way).x0
 
     @property
     def x1(self) -> float:
         """Its right on the page: upright, the right end of its rightmost span; vertically, the median span right."""
-        return _unframed(self.frame, self.way).x1
+        return unframed(self.frame, self.way).x1
 
     @property
     def size(self) -> float:
@@ -192,7 +229,7 @@ def upright(span: TextSpan) -> bool:
     return span.direction[0] >= UPRIGHT
 
 
-def _way(span: TextSpan) -> tuple[float, float]:
+def _way(span: TextSpan) -> Way:
     """The direction ``span`` reads along on the page (y down): down its column, or along its baseline.
 
     A baseline within :data:`UPRIGHT` of a quarter turn reads along the quarter turn exactly, so an upright span's
@@ -201,12 +238,12 @@ def _way(span: TextSpan) -> tuple[float, float]:
     if span.vertical:
         return (0.0, 1.0)
     dx, dy = span.direction
-    return next((q for q in _QUARTERS if dx * q[0] + dy * q[1] >= UPRIGHT), (dx, dy))
+    return next((q for q in QUARTERS if dx * q[0] + dy * q[1] >= UPRIGHT), (dx, dy))
 
 
-def _framed(box: BBox, way: tuple[float, float]) -> BBox:
+def framed(box: BBox, way: Way) -> BBox:
     """``box`` in the frame of text reading along ``way``: x along it, y down across its lines."""
-    if way == _UP:
+    if way == UP:
         return box
     dx, dy = way
     corners = [(x, y) for x in (box.x0, box.x1) for y in (box.y0, box.y1)]
@@ -215,9 +252,9 @@ def _framed(box: BBox, way: tuple[float, float]) -> BBox:
     return BBox(min(along), min(across), max(along), max(across))
 
 
-def _unframed(box: BBox, way: tuple[float, float]) -> BBox:
+def unframed(box: BBox, way: Way) -> BBox:
     """``box`` of the frame of text reading along ``way`` as the page shows it: :func:`_framed` undone."""
-    if way == _UP:
+    if way == UP:
         return box
     dx, dy = way
     corners = [(a, b) for a in (box.x0, box.x1) for b in (box.y0, box.y1)]
@@ -226,21 +263,94 @@ def _unframed(box: BBox, way: tuple[float, float]) -> BBox:
     return BBox(min(xs), min(ys), max(xs), max(ys))
 
 
-def furniture(page: Page) -> list[TextSpan]:
-    """The page's text turned sideways wholly outside the box of its text: a margin's stamp or note.
+def _standing(span: TextSpan) -> Way:
+    """The way ``span`` reads, its glyphs standing as they stand: its own, but :data:`UP` for vertical writing.
 
-    Its text is upright or written vertically (a column of CJK writing is no turned text).
+    Vertical writing's glyphs stand upright while its column runs down.
     """
-    frame = [s.provenance.bbox for s in page.spans if upright(s) or s.vertical]
-    if not frame:
+    return UP if span.vertical else _way(span)
+
+
+def reading_way(spans: Iterable[TextSpan]) -> Way | None:
+    """The way most of ``spans``' text reads: the quarter turn more of their characters read than any other.
+
+    Characters are counted spaces aside, each span's for the way its glyphs stand in (:func:`_standing`: vertical
+    writing as upright). None when no quarter turn reads most: two ways tie for most, text askew off every quarter
+    turn reads most, the way that reads most is one line (:func:`_one_line`) while text standing another way runs to
+    more -- a long stamp up a sparse page's margin may outnumber its few upright lines, a figure's one-line caption
+    its sideways labels: one line against lines is no sure count, so neither makes the other furniture -- or there is
+    no text.
+    """
+    texts: dict[Way, list[TextSpan]] = defaultdict(list)
+    for span in spans:
+        if ''.join(spaced(span.text).split()):
+            texts[_standing(span)].append(span)
+    counts = Counter({way: sum(len(''.join(spaced(s.text).split())) for s in held) for way, held in texts.items()})
+    ranked = counts.most_common(2)
+    if not ranked:
+        return None
+    (way, most), *rest = ranked
+    lined = _one_line(texts[way]) and any(not _one_line(held) for other, held in texts.items() if other != way)
+    if rest and (rest[0][1] == most or lined):
+        return None
+    return way if way in QUARTERS else None
+
+
+def _one_line(spans: Sequence[TextSpan]) -> bool:
+    """Do ``spans`` lie along one line: all reading one direction, their boxes in its frame sharing a band across it?"""
+    ways = {_way(s) for s in spans}
+    if len(ways) > 1:
+        return False
+    (way,) = ways
+    boxes = [framed(s.provenance.bbox, way) for s in spans]
+    return max(b.y0 for b in boxes) < min(b.y1 for b in boxes)
+
+
+def furniture(page: Page) -> list[TextSpan]:
+    """The page's text turned against its way, wholly outside the box of the text that reads its way.
+
+    The page's way is :func:`reading_way`'s: a margin's stamp up an upright page, the upright running head over a
+    table printed sideways. A page without one (two ways tie for most of its text) has no furniture: no text of it is
+    surely turned against the rest.
+    """
+    return _furniture(page, reading_way(page.spans))
+
+
+def _furniture(page: Page, way: Way | None) -> list[TextSpan]:
+    """:func:`furniture` of ``page``, whose text reads ``way``."""
+    if way is None:
         return []
+    frame = [s.provenance.bbox for s in page.spans if _standing(s) == way]
     x0, y0 = min(b.x0 for b in frame), min(b.y0 for b in frame)
     x1, y1 = max(b.x1 for b in frame), max(b.y1 for b in frame)
 
     def outside(box: BBox) -> bool:
         return box.x1 <= x0 or box.x0 >= x1 or box.y1 <= y0 or box.y0 >= y1
 
-    return [s for s in page.spans if not upright(s) and not s.vertical and outside(s.provenance.bbox)]
+    return [s for s in page.spans if _standing(s) != way and outside(s.provenance.bbox)]
+
+
+def _level(line: Line) -> bool:
+    """Does ``line`` read the way its page reads -- level in the page's frame, no vertical writing?"""
+    return not line.vertical and line.way == line.page_way
+
+
+def _middle(page: Page, way: Way) -> float:
+    """The middle of ``page`` along ``way``: where its frame's columns part."""
+    box = framed(BBox(0.0, 0.0, page.width, page.height), way)
+    return (box.x0 + box.x1) / 2
+
+
+def holder(page: Page, box: BBox, text: str) -> Line:
+    """A line of ``text`` holding the place of a block set in ``box`` (a table, a figure's link).
+
+    It reads as a line of the page's text across the box, in the page's frame (:func:`reading_way`, as :func:`lines`
+    reads it).
+    """
+    way = reading_way(page.spans) or UP
+    span = TextSpan(text, 0.0, '', Provenance('', '', page=page.number, bbox=box), direction=way)
+    seen = framed(box, way)
+    return Line([span], column(seen.x0, seen.x1, _middle(page, way)), way)
 
 
 def _same_way(a: TextSpan, b: TextSpan) -> bool:
@@ -269,14 +379,18 @@ def _runs(spans: Iterable[TextSpan]) -> list[list[TextSpan]]:
     return out
 
 
-def _run_box(run: list[TextSpan], way: tuple[float, float]) -> BBox:
+def _run_box(run: list[TextSpan], way: Way) -> BBox:
     """The box round ``run``'s pieces in the frame of text reading along ``way``."""
-    boxes = [_framed(s.provenance.bbox, way) for s in run]
+    boxes = [framed(s.provenance.bbox, way) for s in run]
     return BBox(min(b.x0 for b in boxes), min(b.y0 for b in boxes), max(b.x1 for b in boxes), max(b.y1 for b in boxes))
 
 
-def _joins(line: Line, run: list[TextSpan], *, weighted: bool) -> bool:
-    """Does ``run`` continue ``line`` in its frame: starting within reach of its end, its middle on the line's?"""
+def _joins(line: Line, run: list[TextSpan], *, weighted: bool, mid: float) -> bool:
+    """Does ``run`` continue ``line`` in its frame: starting within reach of its end, its middle on the line's?
+
+    A line that is an equation's number alone (:data:`EQUATION_NUMBER`, set in the gutter) takes no run of another
+    page column (``mid``: where the page's columns part): the next column's words on its baseline are their own line.
+    """
     span = run[0]
     frame, box = line.frame, _run_box(run, line.way)
     if span.vertical:  # an em across, its box's width
@@ -284,12 +398,17 @@ def _joins(line: Line, run: list[TextSpan], *, weighted: bool) -> bool:
     else:
         em, reach = max(span.size, line.size), _reach(line, span, weighted=weighted)
     near = -GUTTER <= box.x0 - frame.x1 <= reach * em
-    return near and abs((frame.y0 + frame.y1) / 2 - (box.y0 + box.y1) / 2) <= 0.4 * em
+    if not (near and abs((frame.y0 + frame.y1) / 2 - (box.y0 + box.y1) / 2) <= 0.4 * em):
+        return False
+    if EQUATION_NUMBER.fullmatch(line.text):
+        here, there = line.page_frame, framed(unframed(box, line.way), line.page_way)
+        return column(here.x0, here.x1, mid) == column(there.x0, there.x1, mid)
+    return True
 
 
 def _start(span: TextSpan) -> tuple[float, float]:
     """Where ``span`` starts in its own frame: along its text, then across."""
-    box = _framed(span.provenance.bbox, _way(span))
+    box = framed(span.provenance.bbox, _way(span))
     return box.x0, box.y0
 
 
@@ -297,27 +416,32 @@ def lines(page: Page, *, weighted: bool) -> list[Line]:
     """The page's lines (unordered), its :func:`furniture` left out; a bare clause number takes the text beside it.
 
     Each line is built in its own frame: upright text along the page, text turned sideways along its baseline,
-    vertical writing down its column. ``weighted`` False (no bold in the document): any clause number or bullet takes
-    its text; True: a bold number or appendix letter, and only bold text of its size.
+    vertical writing down its column; its column is judged in the page's frame (:func:`reading_way`; a page no way
+    reads most of is read as it stands, :data:`UP`). ``weighted`` False (no bold in the document): any clause number
+    or bullet takes its text; True: a bold number or appendix letter, and only bold text of its size.
     """
-    mid = page.width / 2
-    margin = {id(s) for s in furniture(page)}
+    way = reading_way(page.spans)
+    margin = {id(s) for s in _furniture(page, way)}
+    way = way or UP
+    mid = _middle(page, way)
     found: list[Line] = []
     runs = [r for run in _runs(page.spans) if (r := [s for s in run if id(s) not in margin])]
     for run in sorted(runs, key=lambda run: _start(run[0])):
         span = run[0]
         for line in found:
             same = line.vertical == span.vertical and (span.vertical or _same_way(line.spans[0], span))
-            if same and _joins(line, run, weighted=weighted):
+            if same and _joins(line, run, weighted=weighted, mid=mid):
                 line.spans.extend(run)
                 break
         else:
-            found.append(Line(list(run), ''))
+            found.append(Line(list(run), '', way))
     for line in found:
-        if line.way == _UP:
-            line.column = column(line.x0, line.x1, mid)
-    for block in _turned_blocks([ln for ln in found if ln.way != _UP]):
-        side = column(min(ln.x0 for ln in block), max(ln.x1 for ln in block), mid)
+        if _level(line):
+            box = line.page_frame
+            line.column = column(box.x0, box.x1, mid)
+    for block in _turned_blocks([ln for ln in found if not _level(ln)]):
+        boxes = [ln.page_frame for ln in block]
+        side = column(min(b.x0 for b in boxes), max(b.x1 for b in boxes), mid)
         for line in block:
             line.column = side
     return [line for line in found if line.text]
@@ -399,14 +523,20 @@ class Block:
 
 
 def blocks(page: Page) -> list[Block]:
-    """The page's lines set into paragraphs, in reading order (:func:`ordered` of their first lines)."""
+    """The page's lines set into paragraphs, in reading order (:func:`ordered` of their first lines).
+
+    Measured in the page's frame (:attr:`Line.page_frame`): on a sideways page, down its text.
+    """
     found: list[Block] = []
     every = lines(page, weighted=True)
-    for line in sorted((ln for ln in every if ln.way == _UP), key=lambda ln: (ln.y0, ln.x0)):
+    boxes = {id(ln): ln.page_frame for ln in every}
+    for line in sorted((ln for ln in every if _level(ln)), key=lambda ln: (boxes[id(ln)].y0, boxes[id(ln)].x0)):
+        here = boxes[id(line)]
         for block in found:
             last = block.lines[-1]
-            gap = line.y0 - last.y1
-            across = line.x0 < block.bbox.x1 and block.bbox.x0 < line.x1
+            gap = here.y0 - boxes[id(last)].y1
+            span = union([boxes[id(ln)] for ln in block.lines])
+            across = here.x0 < span.x1 and span.x0 < here.x1
             if (
                 last.column == line.column
                 and across
@@ -416,25 +546,29 @@ def blocks(page: Page) -> list[Block]:
                 break
         else:
             found.append(Block([line]))
-    found += [Block(block) for block in _turned_blocks([ln for ln in every if ln.way != _UP])]
+    found += [Block(block) for block in _turned_blocks([ln for ln in every if not _level(ln)])]
     first = {id(b.lines[0]): b for b in found}
     return [first[id(ln)] for ln in ordered([b.lines[0] for b in found])]
 
 
 def ordered(found: list[Line]) -> list[Line]:
-    """Bands between full-width lines; each band's left column, then its right; each read by :func:`_top_down`."""
+    """Bands between full-width lines; each band's left column, then its right; each read by :func:`_top_down`.
+
+    Read in the lines' page's frame (:attr:`Line.page_frame`): a sideways page's top is its text's.
+    """
     out: list[Line] = []
     band: list[Line] = []
+    tops = {id(ln): ln.page_frame.y0 for ln in found}
 
     def flush() -> None:
-        out.extend(_top_down([ln for ln in band if ln.column == 'L']))
-        out.extend(_top_down([ln for ln in band if ln.column == 'R']))
+        out.extend(_top_down([ln for ln in band if ln.column == 'L'], tops))
+        out.extend(_top_down([ln for ln in band if ln.column == 'R'], tops))
         band.clear()
 
     columns = [ln for ln in found if ln.column != 'F']
-    for row in _rows([ln for ln in found if ln.column == 'F']):
-        top = min(ln.y0 for ln in row)
-        band.extend(ln for ln in columns if ln.y0 < top and ln not in out)
+    for row in _rows([ln for ln in found if ln.column == 'F'], tops):
+        top = min(tops[id(ln)] for ln in row)
+        band.extend(ln for ln in columns if tops[id(ln)] < top and ln not in out)
         columns = [ln for ln in columns if ln not in band]
         flush()
         out.extend(row)
@@ -443,21 +577,21 @@ def ordered(found: list[Line]) -> list[Line]:
     return out
 
 
-def _top_down(found: list[Line]) -> list[Line]:
+def _top_down(found: list[Line], tops: dict[int, float]) -> list[Line]:
     """Lines top to bottom, turned lines side by side as one (:func:`_rows`)."""
-    return [ln for row in _rows(found) for ln in row]
+    return [ln for row in _rows(found, tops) for ln in row]
 
 
-def _rows(found: list[Line]) -> list[list[Line]]:
+def _rows(found: list[Line], tops: dict[int, float]) -> list[list[Line]]:
     """Lines top to bottom, each a row of its own -- but turned lines, placed side by side as one.
 
-    Turned lines (vertical writing, text turned sideways) of one way overlapping along their text are one row, at
-    their top, read in their frame (:func:`_in_frame`).
+    ``tops``: each line's top in its page's frame. Turned lines (vertical writing, text reading another way than the
+    page) of one way overlapping along their text are one row, at their top, read in their frame (:func:`_in_frame`).
     """
-    rows = [[ln] for ln in found if ln.way == _UP]
-    ways: dict[tuple[tuple[float, float], bool], list[Line]] = {}
+    rows = [[ln] for ln in found if _level(ln)]
+    ways: dict[tuple[Way, bool], list[Line]] = {}
     for line in found:
-        if line.way != _UP:
+        if not _level(line):
             ways.setdefault((line.way, line.vertical), []).append(line)
     for same in ways.values():
         frames = {id(ln): ln.frame for ln in same}
@@ -472,7 +606,7 @@ def _rows(found: list[Line]) -> list[list[Line]]:
                 side.append([line])
                 reach = frame.x1
         rows += [_in_frame(lines) for lines in side]
-    return sorted(rows, key=lambda row: min(ln.y0 for ln in row))
+    return sorted(rows, key=lambda row: min(tops[id(ln)] for ln in row))
 
 
 def wordy(text: str) -> bool:
@@ -511,17 +645,25 @@ def running(doc: Document) -> list[Running]:
     A line repeats when :data:`RUNNING_PAGES` pages (every page of a shorter document, two at least) set its text --
     as :func:`_furniture_key` compares it, so a page number repeats -- at its place. The head is the page's lines
     from the top while each repeats, the foot from the bottom: a repeated line inside the body (a heading each page
-    opens a table with) is not reached. Only a whole document can tell, and a page alone has none. Built on
+    opens a table with) is not reached, and one level with the body's text runs only where half the document's pages
+    repeat it (a journal's head, a page number beside a first page's notes do; an integral's limit ``0`` at a column's
+    last baseline, repeated by chance where two other pages set a limit, does not). Only a whole document can tell,
+    and a page alone has none. Built on
     :func:`lines`, it never sees a page's :func:`furniture` (a sideways stamp): a span is one or the other, never both.
+    A line turned sideways is no running line (:func:`_across`): the cells of a landscape table continued over pages
+    recur at the page's top, its running head over them.
     """
-    pages = [sorted(lines(page, weighted=True), key=lambda ln: (ln.y0, ln.x0)) for page in doc.pages]
+    pages = [
+        sorted((ln for ln in lines(page, weighted=True) if _across(ln)), key=lambda ln: (ln.y0, ln.x0))
+        for page in doc.pages
+    ]
     need = max(2, min(RUNNING_PAGES, len(pages)))
     seen: dict[str, list[tuple[int, Line]]] = {}
     for number, found in enumerate(pages):
         for line in found:
             seen.setdefault(_furniture_key(line.text), []).append((number, line))
 
-    def repeats(number: int, line: Line) -> bool:
+    def repeats(number: int, line: Line, pages_needed: float = need) -> bool:
         reach = line.size
         here = {
             other
@@ -530,15 +672,29 @@ def running(doc: Document) -> list[Running]:
             and min(abs(them.x0 - line.x0), abs(them.x1 - line.x1), abs(them.x0 + them.x1 - line.x0 - line.x1) / 2)
             <= reach
         }
-        return len(here | {number}) >= need
+        return len(here | {number}) >= pages_needed
 
     out = []
     for number, found in enumerate(pages):
         head = list(itertools.takewhile(lambda ln, n=number: repeats(n, ln), found))
         rest = found[len(head) :]
         foot = list(itertools.takewhile(lambda ln, n=number: repeats(n, ln), reversed(rest)))
+        body = rest[: len(rest) - len(foot)]
+        if body:  # a line level with the body's text runs only where half the document's pages repeat it
+            top, bottom, most = min(ln.y0 for ln in body), max(ln.y1 for ln in body), max(need, len(pages) / 2)
+
+            def runs(line: Line, n: int = number, top: float = top, bottom: float = bottom, most: float = most) -> bool:
+                return not top <= (line.y0 + line.y1) / 2 <= bottom or repeats(n, line, most)
+
+            head = list(itertools.takewhile(runs, head))
+            foot = list(itertools.takewhile(runs, foot))
         out.append(Running(tuple(head), tuple(reversed(foot))))
     return out
+
+
+def _across(line: Line) -> bool:
+    """Does ``line`` run across the page, along its top and foot: any line but one turned sideways?"""
+    return line.vertical or abs(line.way[1]) < UPRIGHT
 
 
 def without_running(doc: Document, found: Sequence[Running] | None = None) -> Document:
@@ -559,6 +715,6 @@ def _furniture_key(text: str) -> str:
     equation set its number at the text's last baseline, each its own.
     """
     text = ' '.join(text.casefold().split())
-    if any(c.isalpha() for c in text) or _EQUATION_NUMBER.match(text):
+    if any(c.isalpha() for c in text) or EQUATION_NUMBER.fullmatch(text):
         return text
     return re.sub(r'\d+', '#', text)

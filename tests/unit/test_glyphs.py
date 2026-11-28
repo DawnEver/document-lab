@@ -19,6 +19,9 @@ from document_lab.glyphs import (
 )
 from document_lab.strokefont import TEMPLATES
 
+#: Glyph shapes are read against document_lab.glyphs' reference font, fetched first (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures('reference_font')
+
 
 def _ink(text: str, *, size: float = 24, font: str = 'helv', dpi: int = 72) -> np.ndarray:
     with pymupdf.open() as doc:
@@ -196,3 +199,22 @@ def test_a_flat_fill_rasterizes_to_a_bounded_blank_not_a_column_per_nanopoint():
     assert ink.shape[0] == RASTER_ROWS
     assert ink.shape[1] <= RASTER_ROWS
     assert not ink.any()
+
+
+def test_a_row_of_flat_marks_is_refused_not_divided_by_its_letters():
+    """Rules drawn as glyph outlines, no glyph taller than another's mark: no letter at all, refused by name."""
+    flat = [Glyph(np.ones((1, 8), dtype=bool), (x, 50.0, x + 8.0, 50.0)) for x in (10.0, 30.0)]
+    with pytest.raises(UnreadableGlyph):
+        read_word(flat)
+    assert not has_letter(flat)
+
+
+@pytest.mark.parametrize('rows', [27, 31, 32, 37, 44, 54])
+def test_a_lone_bar_is_never_guessed_an_i_or_an_l(rows):
+    """Helvetica draws ``I`` and ``l`` as one bar: at every height they are twins, a lone bar refused naming both
+    (27, 31, 37, 44 and 54 rows: the heights where sampling alone parted their references)."""
+    width = max(2, round(rows * 0.12))
+    bar = Glyph(np.ones((rows, width), dtype=bool), (0.0, 0.0, float(width), float(rows)))
+    with pytest.raises(UnreadableGlyph) as refused:
+        read_word([bar])
+    assert {'I', 'l'} <= set(refused.value.candidates), str(refused.value)

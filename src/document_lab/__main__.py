@@ -3,7 +3,7 @@
 ``capture`` and ``capture-merge`` make a PDF of page images from the screen, ``capture-files`` one for each PDF its
 viewer shows; ``ocr`` lays a text layer over one;
 ``pages`` writes any PDF as a markdown file and an image per page (standards, manuals); ``paper`` writes a paper as
-sections with its figures.
+sections with its figures; ``fonts`` lists the fonts fetched on first use, ``fonts --fetch`` fetches them ahead.
 """
 
 from __future__ import annotations
@@ -15,8 +15,10 @@ from typing import TYPE_CHECKING
 
 from lab_commons.log import emit
 
+from document_lab import fonts
 from document_lab.capture import cli as capture_cli
 from document_lab.formula import MODELS
+from document_lab.regions import UNNUMBERED
 
 if TYPE_CHECKING:
     from document_lab.markdown import Headings
@@ -31,11 +33,13 @@ _IN_BACKGROUND_COLOR = (
 #: `--include-hidden`: what a layer turned off in the default view draws is read too (`document_lab.ir`).
 _HIDDEN = "read what the PDF's layers turned off in its default view draw too; left out by default"
 
-#: `--renderer`: what draws a page or region's pixels (`document_lab.pdf.read_raster`).
-_RENDERER = {
-    'choices': ('pymupdf', 'own'),
-    'default': 'pymupdf',
-    'help': "what draws the pictures: pymupdf (default) or own (document-lab's renderer; refuses what it cannot draw)",
+#: `--unnumbered-equations`: how displays without a number are found (`document_lab.regions.Unnumbered`).
+_UNNUMBERED = {
+    'choices': UNNUMBERED,
+    'default': 'strict',
+    'help': 'displays without a number: strict (default: those set apart above, below and across, in no table or '
+    'figure, showing a formula beyond one relation sign), '
+    'loose (every formula line that is no prose: more found, more taken in error) or off (numbered ones only)',
 }
 
 
@@ -89,10 +93,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     pages.add_argument('pdf', type=Path)
     pages.add_argument('out', type=Path, help='the directory to write the pages into, or a .zip archive')
-    pages.add_argument('--renderer', **_RENDERER)
     pages.add_argument('--tags', type=_uses, default=_DEFAULT, help=_TAGS_HELP)
     pages.add_argument('--no-outline', action='store_true', help=_NO_OUTLINE)
     _formulas_option(pages)
+    pages.add_argument('--unnumbered-equations', **_UNNUMBERED)
     pages.add_argument('--include-hidden', action='store_true', help=_HIDDEN)
     pages.add_argument('--include-in-background-color', action='store_true', help=_IN_BACKGROUND_COLOR)
     paper = sub.add_parser('paper', help='a paper PDF to per-section markdown and cropped figures')
@@ -103,12 +107,21 @@ def _parser() -> argparse.ArgumentParser:
         choices=('marker', 'ir'),
         help="the converter (default: ir; marker needs the gpu extra and surya's model server, and refuses without)",
     )
-    paper.add_argument('--renderer', **_RENDERER)
     paper.add_argument('--tags', type=_uses, default=_DEFAULT, help=_TAGS_HELP)
     paper.add_argument('--no-outline', action='store_true', help=_NO_OUTLINE)
     _formulas_option(paper)
+    paper.add_argument('--unnumbered-equations', **_UNNUMBERED)
     paper.add_argument('--include-hidden', action='store_true', help=_HIDDEN)
     paper.add_argument('--include-in-background-color', action='store_true', help=_IN_BACKGROUND_COLOR)
+    fonts_cmd = sub.add_parser(
+        'fonts',
+        help='the fonts document-lab downloads on first use (renderer fallbacks, the glyph reference) and which the '
+        'cache holds; DOCUMENT_LAB_OFFLINE=1 forbids downloading',
+    )
+    fonts_cmd.add_argument('names', nargs='*', help='the fonts (default: all)')
+    fonts_cmd.add_argument(
+        '--fetch', action='store_true', help='download each the cache lacks now, for later offline use'
+    )
     return parser
 
 
@@ -158,20 +171,21 @@ def _ocr(args: argparse.Namespace) -> int:
 
 def _pages(args: argparse.Namespace) -> int:
     from document_lab.formula import FormulaUnavailable  # noqa: PLC0415
+    from document_lab.pdf import Refused  # noqa: PLC0415
     from document_lab.per_page import write_pages  # noqa: PLC0415
 
     try:
         done = write_pages(
             args.pdf,
             args.out,
-            renderer=args.renderer,
             outline=not args.no_outline,
+            unnumbered=args.unnumbered_equations,
             tagged=args.tags,
             include_hidden=args.include_hidden,
             include_in_background_color=args.include_in_background_color,
             **_formulas(args),
         )
-    except FormulaUnavailable as refused:
+    except (FormulaUnavailable, Refused) as refused:
         return _refused(refused)
     emit(f'{done.out}: {done.pages} page(s)')
     _structure(done.structure)
@@ -190,20 +204,21 @@ def _paper(args: argparse.Namespace) -> int:
     from document_lab.formula import FormulaUnavailable  # noqa: PLC0415
     from document_lab.paper.convert import MarkerUnavailable  # noqa: PLC0415
     from document_lab.paper.ingest import ingest  # noqa: PLC0415
+    from document_lab.pdf import Refused  # noqa: PLC0415
 
     try:
         done = ingest(
             args.pdf,
             args.out,
             tool=args.tool,
-            renderer=args.renderer,
             outline=not args.no_outline,
+            unnumbered=args.unnumbered_equations,
             tagged=args.tags,
             include_hidden=args.include_hidden,
             include_in_background_color=args.include_in_background_color,
             **_formulas(args),
         )
-    except (MarkerUnavailable, FormulaUnavailable) as refused:
+    except (MarkerUnavailable, FormulaUnavailable, Refused) as refused:
         return _refused(refused)
     emit(
         f'{args.out}: {done.sections} sections, {done.figures} figures, {done.tables} tables '
@@ -213,6 +228,27 @@ def _paper(args: argparse.Namespace) -> int:
         _structure(done.structure)
     _disagreements(done.disagreements)
     return 0
+
+
+def _fonts(args: argparse.Namespace) -> int:
+    unknown = sorted(set(args.names) - set(fonts.FONTS))
+    if unknown:
+        return _refused(ValueError(f'no font {", ".join(unknown)}: one of {", ".join(fonts.FONTS)}'))
+    failed = 0
+    emit(f'cache: {fonts.used().cache}')
+    for name in args.names or fonts.FONTS:
+        font = fonts.FONTS[name]
+        held = fonts.held(name)
+        if args.fetch and not held:
+            try:
+                fonts.fetch(name)
+            except fonts.FontUnavailable as refused:
+                emit(f'refused: {refused}')
+                failed += 1
+                continue
+            held = True
+        emit(f'{name}: {"held" if held else "not held"}, {font.size / 1e6:.2f} MB, {font.license}')
+    return 2 if failed else 0
 
 
 def _disagreements(notes: tuple[str, ...]) -> None:
@@ -252,11 +288,13 @@ _RUN = {
     'ocr': _ocr,
     'pages': _pages,
     'paper': _paper,
+    'fonts': _fonts,
 }
 
 
 def main(argv: list[str] | None = None) -> int:
     """Parse ``argv`` and run its subcommand; the exit status."""
+    fonts.use(fonts.Fonts.of(os.environ))  # where fetched fonts are kept, whether they may be downloaded
     parser = _parser()
     args = parser.parse_args(argv)
     if getattr(args, 'formula_model', None) is not None and args.formulas is None:

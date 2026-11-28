@@ -10,6 +10,9 @@ from document_lab.pdf import read_raster
 from document_lab.plot import NoCurveOfColor, NoPlotFrame, UnreadableTickLabels, raster_plot
 from tests.synthetic import BLUE, FRAME, RED, Axis, PlotSpec, raster_pdf
 
+#: Glyph shapes are read against document_lab.glyphs' reference font, fetched first (tests/conftest.py).
+pytestmark = pytest.mark.usefixtures('reference_font')
+
 XS = [float(x) for x in range(0, 101, 5)]
 
 

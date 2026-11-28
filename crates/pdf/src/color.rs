@@ -29,6 +29,7 @@ use crate::error::{Error, Result};
 use crate::file::File;
 use crate::filter::Decoded;
 use crate::function::Function;
+use crate::geometry::Matrix;
 use crate::icc::{Icc, Intent};
 use crate::object::{Dict, Object};
 
@@ -116,10 +117,24 @@ pub struct Color {
     pub pattern: Option<Pattern>,
 }
 
-/// What a `Pattern` color paints an area with (8.7).
+/// What a `Pattern` color paints an area with (8.7): the pattern, where its space lies on the page, and what it is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pattern {
+    /// Which kind of pattern it is.
+    pub kind: PatternKind,
+    /// From pattern space to page space: the pattern's `/Matrix`, then the matrix of the default space of the
+    /// content stream it is painted in (8.7.2: the page's, a Form's, a glyph procedure's), not the CTM.
+    pub matrix: Matrix,
+    /// The pattern object: a tiling pattern's stream, a shading pattern's dictionary.
+    pub object: Rc<Object>,
+    /// The rendering intent a shading pattern's colors convert at: the one in force where the color was set.
+    pub intent: Intent,
+}
+
+/// The kind of a pattern (8.7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pattern {
-    /// A tiling pattern (`PatternType` 1): a cell repeated across the area; the cell is not interpreted.
+pub enum PatternKind {
+    /// A tiling pattern (`PatternType` 1): a cell repeated across the area.
     Tiling {
         /// Uncolored (`PaintType` 2): its cell is painted in the tint the color states, in the pattern space's base.
         uncolored: bool,
@@ -418,12 +433,19 @@ impl File {
                 .all(|n| self.resolve(n).ok().as_ref().and_then(Object::as_name) == Some(b"None"))
     }
 
-    /// The pattern `/name` in `resources`.
+    /// The pattern `/name` in `resources`, painted in a content stream whose default space maps to page space by
+    /// `base`, its colors converted at `intent`.
     ///
     /// # Errors
     ///
     /// Refuses a name `resources` has no pattern for, and a pattern of no known `/PatternType`.
-    pub fn pattern(&self, name: &[u8], resources: &Dict) -> Result<Pattern> {
+    pub fn pattern(
+        &self,
+        name: &[u8],
+        resources: &Dict,
+        base: Matrix,
+        intent: Intent,
+    ) -> Result<Pattern> {
         let named = || String::from_utf8_lossy(name).into_owned();
         let Some(Object::Dict(patterns)) = self.get(resources, b"Pattern")? else {
             return Err(Error::malformed(format!(
@@ -435,22 +457,41 @@ impl File {
             Some(p) => self.resolve(p)?,
             None => return Err(Error::malformed(format!("no pattern /{}", named()))),
         };
-        let int = |key: &[u8]| -> Result<Option<i64>> {
-            Ok(match pattern.as_dict() {
-                Some(d) => self.get(d, key)?.and_then(|t| t.as_integer()),
-                None => None,
-            })
+        let Some(dict) = pattern.as_dict() else {
+            return Err(Error::malformed(format!(
+                "pattern /{} is a {}",
+                named(),
+                pattern.kind()
+            )));
         };
-        match int(b"PatternType")? {
-            Some(1) => Ok(Pattern::Tiling {
+        let int = |key: &[u8]| -> Result<Option<i64>> {
+            Ok(self.get(dict, key)?.and_then(|t| t.as_integer()))
+        };
+        let kind = match int(b"PatternType")? {
+            Some(1) => PatternKind::Tiling {
                 uncolored: int(b"PaintType")? == Some(2),
-            }),
-            Some(2) => Ok(Pattern::Shading),
-            _ => Err(Error::malformed(format!(
-                "pattern /{} has no known /PatternType",
-                named()
-            ))),
-        }
+            },
+            Some(2) => PatternKind::Shading,
+            _ => {
+                return Err(Error::malformed(format!(
+                    "pattern /{} has no known /PatternType",
+                    named()
+                )));
+            }
+        };
+        let own = match self.get(dict, b"Matrix")? {
+            Some(Object::Array(m)) => {
+                Matrix::from_numbers(&m.iter().filter_map(Object::as_number).collect::<Vec<_>>())
+                    .unwrap_or(Matrix::IDENTITY)
+            }
+            _ => Matrix::IDENTITY,
+        };
+        Ok(Pattern {
+            kind,
+            matrix: own.then(base),
+            object: Rc::new(pattern),
+            intent,
+        })
     }
 
     fn space_at_depth(&self, value: &Object, resources: &Dict, depth: usize) -> Result<Space> {

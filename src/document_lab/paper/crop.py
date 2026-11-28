@@ -1,6 +1,6 @@
 """Figure and table crops, and an equation's context text, from a page read into the IR.
 
-An equation's crop is `document_lab.regions.equation`'s.
+An equation is found and cropped by `document_lab.regions.equations`; here is only the text around it.
 """
 
 from __future__ import annotations
@@ -324,29 +324,9 @@ def _build_crop_rect(
     return crop if crop.height >= 40 else None
 
 
-def _find_eq_number_pos(blocks: list[layout.Block], eq_num: str) -> tuple[float | None, float | None]:
-    """Find the y/x position of equation number (N) on the page.
-
-    Returns the y/x center of the specific LINE (not block) containing "(N)" so that
-    the crop region is tight even when (N) appears at the bottom of a multi-line block.
-    Matches both standalone "(N)" blocks and inline "formula... (N)" at end of block.
-    """
-    pattern = re.compile(rf'\({re.escape(eq_num)}\)\s*$')
-    for blk in blocks:
-        # Scan individual lines to find the one ending with (N)
-        for line in blk.lines:
-            line_text = line.text.strip()
-            if pattern.search(line_text):
-                lb = _line_box(line)
-                return (lb[1] + lb[3]) / 2, (lb[0] + lb[2]) / 2
-        # Fallback: check full block text (some renderers produce single-span blocks)
-        blk_text = ''.join(ln.text for ln in blk.lines).strip()
-        if pattern.search(blk_text):
-            bbox = blk.bbox
-            return (bbox[1] + bbox[3]) / 2, (bbox[0] + bbox[2]) / 2
-    return None, None
-
-
+#: Points a lead-in line may reach into the equation's box (its padding meets the line above).
+_LEAD_IN_OVERLAP = 2.0
+_EQ_NUMBER_RE = re.compile(r'\(\s*[A-Z]?\.?\d+(?:\.\d+)*[a-z]?\s*\)\s*$')
 _BODY_END_RE = re.compile(r'(?:is|are|as|by|of|for|with|from|follows):\s*$', re.IGNORECASE)
 
 
@@ -370,87 +350,25 @@ def _is_body_text_line(text: str) -> bool:
     return total > 0 and alpha / total > 0.60
 
 
-def get_equation_context(page: Page, eq_num: str) -> tuple[str | None, str | None]:
-    """Return (lead_in_text, formula_text) for equation *eq_num*.
+def equation_context(page: Page, box: BBox) -> tuple[str | None, str | None]:
+    """The ``(lead_in, formula)`` text of the equation in ``box`` on ``page`` (`document_lab.regions.equations`).
 
-    lead_in_text: the body-prose sentence immediately before the formula,
-                  used to locate the insertion point in the markdown when
-                  the explicit (N) reference is absent.
-    formula_text: concatenated span text of formula lines (may contain unicode
-                  math chars; useful as a plain-text hint for AI readers).
-
-    Strategy: walk backward from the (N) line within its block (same logic as
-    _crop_eq_text_region) until hitting a body-text line — that line is the
-    lead-in.  For standalone (N) blocks that contain no body text, fall back
-    to the last body-text LINE of the preceding same-column block.
+    ``lead_in``: the last line of prose above it in its column (:func:`_is_body_text_line`), the sentence that leads
+    into it -- where the markdown places it when no ``(N)`` stands alone there (a display without a number never
+    has one). ``formula``: its lines' text in reading order, its number left out -- a plain-text hint for a reader
+    of the markdown. Each None when there is none.
     """
-    page_rect = BBox(0.0, 0.0, page.width, page.height)
-    page_mid = page_rect.width / 2
-    blocks = layout.blocks(page)
-
-    eq_num_y, eq_num_x = _find_eq_number_pos(blocks, eq_num)
-    if eq_num_y is None:
-        return None, None
-
-    eq_col_left = (eq_num_x < page_mid) if eq_num_x is not None else True
-    pattern = re.compile(rf'\({re.escape(eq_num)}\)\s*$')
-
-    lead_in_text: str | None = None
-    formula_parts: list[str] = []
-    eq_block_y0: float | None = None  # y0 of the (N)-containing block
-
-    # ── Step 1: within-block backward walk ────────────────────────────────────
-    for blk in blocks:
-        blk_col_left = (blk.bbox.x0 + blk.bbox.x1) / 2 < page_mid
-        if blk_col_left != eq_col_left:
-            continue
-        lines = blk.lines
-        eq_line_idx = None
-        for i, line in enumerate(lines):
-            lt = line.text.strip()
-            if pattern.search(lt):
-                eq_line_idx = i
-                break
-        if eq_line_idx is None:
-            continue
-
-        eq_block_y0 = blk.bbox.y0
-
-        # Walk backward: collect formula lines, then ALL consecutive body-text lines
-        # that form the lead-in sentence (may span multiple lines, e.g. "...can be\n"
-        # "easily obtained in the cylindrical coordinate system as:").
-        lead_in_parts: list[str] = []
-        collecting_lead_in = False
-        for i in range(eq_line_idx - 1, -1, -1):
-            lt = lines[i].text.strip()
-            if _is_body_text_line(lt):
-                collecting_lead_in = True
-                lead_in_parts.insert(0, lt)
-            elif lt:
-                if collecting_lead_in:
-                    break  # formula line interrupts body → stop
-                formula_parts.insert(0, lt)
-        if lead_in_parts:
-            lead_in_text = ' '.join(lead_in_parts)
-        break  # found the block
-
-    # ── Step 2: fallback — last body-text LINE of the preceding same-col block ─
-    if lead_in_text is None and eq_block_y0 is not None:
-        best_y1 = 0.0
-        for blk in blocks:
-            bx0, _by0, bx1, by1 = blk.bbox
-            blk_col_left = (bx0 + bx1) / 2 < page_mid
-            if blk_col_left != eq_col_left or by1 > eq_block_y0 + 5:
-                continue
-            if by1 <= best_y1:
-                continue
-            # Find the last body-text line in this block
-            for line in reversed(blk.lines):
-                lt = line.text.strip()
-                if _is_body_text_line(lt):
-                    best_y1 = by1
-                    lead_in_text = lt
-                    break
-
-    formula_text = ' '.join(formula_parts).strip() or None
-    return lead_in_text, formula_text
+    lines = layout.ordered(layout.lines(page, weighted=True))
+    inside = [ln for ln in lines if box.contains((ln.x0 + ln.x1) / 2, (ln.y0 + ln.y1) / 2)]
+    above = [
+        ln
+        for ln in lines
+        if ln.y1 <= box.y0 + _LEAD_IN_OVERLAP
+        and ln.x0 < box.x1
+        and box.x0 < ln.x1
+        and _is_body_text_line(ln.text)
+        and ln not in inside
+    ]
+    lead_in = max(above, key=lambda ln: ln.y1).text.strip() if above else None
+    formula = ' '.join(_EQ_NUMBER_RE.sub('', ln.text).strip() for ln in inside).strip()
+    return lead_in, formula or None

@@ -1,26 +1,31 @@
-//! An image `XObject`'s samples (ISO 32000-2 section 8.9.5): its size, color space and depth, and its data through
-//! every lossless filter -- still in its image codec (`DCTDecode`, `JPXDecode`, ...) when it has one, for whoever
-//! turns it into pixels -- where they show as they stand, their sRGB ([`Samples::rgb`]), and how a placement shows
-//! them ([`Placement`]).
+//! An image's samples (ISO 32000-2 section 8.9.5) as its dictionary states them -- the one reading of an image
+//! dictionary, an image `XObject`'s, an inline image's or a mask's: its size, color space (a JPEG 2000's own when its
+//! dictionary states none, [`jpx_space`]), depth, `/Decode`, masks and intent, and its data through every lossless
+//! filter -- still in its image codec (`DCTDecode`, `JPXDecode`, ...) when it has one, for whoever turns it into pixels
+//! -- where they show as they stand, their sRGB ([`Samples::rgb`]), and how a placement shows them ([`Placement`]).
+
+use std::rc::Rc;
 
 use crate::color::Space;
 use crate::error::{Error, Result};
 use crate::file::File;
-use crate::filter::Codec;
+use crate::filter::{self, Codec, Decoded};
 use crate::geometry::Matrix;
-use crate::icc::Intent;
-use crate::object::{Dict, Object};
+use crate::icc::{Icc, Intent};
+use crate::interpret::Inline;
+use crate::object::{Dict, Object, Stream};
 
 /// An image's samples.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Samples {
-    /// Samples across.
+    /// Samples across; 0 when it states none.
     pub width: i64,
-    /// Samples down.
+    /// Samples down; 0 when it states none.
     pub height: i64,
     /// Its color space; None for a stencil mask (`/ImageMask true`), one bit a sample.
     pub space: Option<Space>,
-    /// Bits per component.
+    /// Bits per component as its dictionary states them: 1 for a stencil mask; 0 when it states none, as a
+    /// `JPXDecode` image may (its codec's data then says).
     pub bits: i64,
     /// The data after every lossless filter.
     pub data: Vec<u8>,
@@ -28,14 +33,39 @@ pub struct Samples {
     pub codec: Option<Codec>,
     /// Its `/Decode` array, when it states one: how each sample maps into its component's range.
     pub decode: Option<Vec<f64>>,
-    /// Whether it states a mask (`/SMask` or `/Mask`): what shows of it is then more than its samples.
-    pub masked: bool,
+    /// Its `/SMask`, as stated (an image `XObject`'s; an inline image has none).
+    pub soft_mask: Option<Object>,
+    /// Its `/Mask`, as stated: a stencil mask image, or the color key ranges it hides.
+    pub mask: Option<Object>,
+    /// Its `/SMaskInData` (a `JPXDecode` image's, Table 87): 0 (the default) ignores the opacity its codec's data
+    /// carries, 1 takes it as the soft mask, 2 that with the colors preblended with it.
+    pub in_data: i64,
+    /// Whether it asks to be interpolated when magnified (`/Interpolate true`).
+    pub interpolate: bool,
     /// Its `/Intent`; relative colorimetric when it states none (the graphics state's where it is placed is not known
     /// to its samples).
     pub intent: Intent,
 }
 
+/// What an image stream is read as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// An image, as its dictionary states it.
+    Image,
+    /// An `/SMask` (11.6.5.3): one gray component whatever space it states.
+    SoftMask,
+    /// A `/Mask` image (8.9.6.3): a stencil mask whatever it states, as `MuPDF` reads it.
+    Stencil,
+}
+
 impl Samples {
+    /// Whether it states a mask (`/SMask`, `/Mask`, or an `/SMaskInData` other than 0): what shows of it is then more
+    /// than its samples.
+    #[must_use]
+    pub fn masked(&self) -> bool {
+        self.soft_mask.is_some() || self.mask.is_some() || self.in_data != 0
+    }
+
     /// Its samples as 8-bit sRGB, three bytes a sample, rows top-down, when they show as they stand: raw (no codec),
     /// unmasked, mapped as stated by default (no `/Decode`, or `[0 1]` for each component), every row present, and
     /// `DeviceGray` of 1, 2, 4 or 8 bits (its levels spread over 0..=255), `DeviceRGB` of 8, or `ICCBased` of those
@@ -46,7 +76,7 @@ impl Samples {
         let n = self.space.as_ref()?.components();
         let identity = (0..n).flat_map(|_| [0.0, 1.0]).collect::<Vec<_>>();
         if self.codec.is_some()
-            || self.masked
+            || self.masked()
             || self.decode.as_ref().is_some_and(|d| *d != identity)
         {
             return None;
@@ -82,6 +112,39 @@ impl Samples {
             _ => None,
         }
     }
+}
+
+/// The color space a JPEG 2000's own data states, for an image whose dictionary states none (7.4.9, Table 87): its
+/// JP2 `colr` box's -- gray, RGB (sYCC too, its samples being converted to RGB), CMYK, or the ICC profile it embeds --
+/// else its components' count (1 gray, 3 RGB, 4 CMYK), an opacity channel apart. Read off the header by
+/// `hayro-jpeg2000`, which decodes the samples alike; nothing is decoded here.
+///
+/// # Errors
+///
+/// Refuses data whose header does not read, and data that states no space this reader reads.
+pub fn jpx_space(data: &[u8]) -> Result<Space> {
+    use hayro_jpeg2000::{ColorSpace, DecodeSettings, Image};
+    let image = Image::new(data, &DecodeSettings::default()).map_err(|e| {
+        Error::malformed(format!("JPXDecode image whose header does not read: {e:?}"))
+    })?;
+    Ok(match image.color_space() {
+        ColorSpace::Gray => Space::Gray,
+        ColorSpace::RGB => Space::Rgb,
+        ColorSpace::CMYK => Space::Cmyk,
+        ColorSpace::Icc {
+            profile,
+            num_channels,
+        } => Space::Icc(Rc::new(Icc::read(
+            profile,
+            Some(usize::from(*num_channels)),
+        ))),
+        ColorSpace::Unknown { num_channels } => {
+            return Err(Error::unsupported(format!(
+                "JPXDecode image of {num_channels} components in a color space neither its dictionary nor its \
+                 data states"
+            )));
+        }
+    })
 }
 
 /// A placement matrix entry at most this (points) is zero: the image is square to the page.
@@ -136,45 +199,98 @@ impl File {
         let Object::Stream(stream) = self.object(num)? else {
             return Err(Error::invalid(format!("object {num} is no stream")));
         };
-        let dict = &stream.dict;
-        if dict.get(b"Subtype").and_then(Object::as_name) != Some(b"Image") {
+        if stream.dict.get(b"Subtype").and_then(Object::as_name) != Some(b"Image") {
             return Err(Error::invalid(format!("object {num} is no image")));
         }
-        let int = |key: &[u8]| -> Result<Option<i64>> {
-            Ok(self.get(dict, key)?.and_then(|v| v.as_integer()))
+        self.image_stream(&stream, Role::Image)
+    }
+
+    /// The samples of the image `stream` -- an image `XObject`'s, or a mask's (`/SMask`, `/Mask`) -- read in `role`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses data that does not decode, and an image stating no color space where it needs one.
+    pub fn image_stream(&self, stream: &Stream, role: Role) -> Result<Samples> {
+        let decoded = self.decode(stream)?;
+        self.samples(&stream.dict, decoded, &Dict::new(), false, role)
+    }
+
+    /// The samples of the inline image `inline` (8.9.7): its keys and names abbreviated or not, a color space it
+    /// names one of the resources in force where it is placed.
+    ///
+    /// # Errors
+    ///
+    /// Refuses data that does not decode, and an image stating no color space where it needs one.
+    pub fn inline_image(&self, inline: &Inline) -> Result<Samples> {
+        let decoded = filter::decode(&inline.dict, &inline.data, &|o| self.resolve(o))?;
+        self.samples(&inline.dict, decoded, &inline.resources, true, Role::Image)
+    }
+
+    /// The samples `dict` states of `decoded` in `role` (see [`Samples`]); an `inline` image's keys may be
+    /// abbreviated.
+    fn samples(
+        &self,
+        dict: &Dict,
+        decoded: Decoded,
+        resources: &Dict,
+        inline: bool,
+        role: Role,
+    ) -> Result<Samples> {
+        let get = |long: &[u8], short: &[u8]| -> Result<Option<Object>> {
+            let value = dict
+                .get(long)
+                .or_else(|| if inline { dict.get(short) } else { None });
+            value.map(|v| self.resolve(v)).transpose()
         };
-        let mask = matches!(self.get(dict, b"ImageMask")?, Some(Object::Bool(true)));
-        let space = if mask {
-            None
-        } else {
-            let value = self
-                .get(dict, b"ColorSpace")?
-                .ok_or_else(|| Error::malformed(format!("image {num} states no /ColorSpace")))?;
-            Some(self.color_space(&value, &Dict::new())?)
+        let int = |long: &[u8], short: &[u8]| -> Result<Option<i64>> {
+            Ok(get(long, short)?.and_then(|v| v.as_integer()))
         };
-        let decode = self.get(dict, b"Decode")?.and_then(|v| {
-            v.as_array()
-                .map(|a| a.iter().filter_map(Object::as_number).collect())
-        });
-        let masked = self.get(dict, b"SMask")?.is_some() || self.get(dict, b"Mask")?.is_some();
-        let intent = match self.get(dict, b"Intent")? {
+        let stencil = role == Role::Stencil
+            || role == Role::Image && matches!(get(b"ImageMask", b"IM")?, Some(Object::Bool(true)));
+        let space = match get(b"ColorSpace", b"CS")? {
+            _ if stencil => None,
+            _ if role == Role::SoftMask => Some(Space::Gray),
+            Some(value) => Some(self.color_space(&value, resources)?),
+            // A JPEG 2000 may leave its space to its data (Table 87).
+            None if decoded
+                .codec
+                .as_ref()
+                .is_some_and(|c| c.name == b"JPXDecode") =>
+            {
+                Some(jpx_space(&decoded.data)?)
+            }
+            None => return Err(Error::malformed("an image states no /ColorSpace")),
+        };
+        let numbers = |value: Option<Object>| {
+            value.and_then(|v| {
+                v.as_array()
+                    .map(|a| a.iter().filter_map(Object::as_number).collect())
+            })
+        };
+        let intent = match get(b"Intent", b"Intent")? {
             Some(Object::Name(name)) => Intent::named(&name).unwrap_or_default(),
             _ => Intent::default(),
         };
-        let decoded = self.decode(&stream)?;
         Ok(Samples {
-            width: int(b"Width")?.unwrap_or(0),
-            height: int(b"Height")?.unwrap_or(0),
+            width: int(b"Width", b"W")?.unwrap_or(0),
+            height: int(b"Height", b"H")?.unwrap_or(0),
             space,
-            bits: if mask {
+            bits: if stencil {
                 1
             } else {
-                int(b"BitsPerComponent")?.unwrap_or(0)
+                int(b"BitsPerComponent", b"BPC")?.unwrap_or(0)
             },
             data: decoded.data,
             codec: decoded.codec,
-            decode,
-            masked,
+            decode: numbers(get(b"Decode", b"D")?),
+            soft_mask: if inline {
+                None
+            } else {
+                get(b"SMask", b"SMask")?
+            },
+            mask: get(b"Mask", b"Mask")?,
+            in_data: int(b"SMaskInData", b"SMaskInData")?.unwrap_or(0),
+            interpolate: matches!(get(b"Interpolate", b"I")?, Some(Object::Bool(true))),
             intent,
         })
     }

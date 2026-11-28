@@ -91,7 +91,7 @@
         },
         {
           "name": "Sync the environment",
-          "run": "uv sync --frozen --extra dev"
+          "run": "uv sync --frozen --python 3.14 --managed-python --extra dev"
         },
         {
           "name": "Install the normal measurement hooks",
@@ -136,7 +136,7 @@
         },
         {
           "name": "Sync the environment",
-          "run": "uv sync --frozen --extra dev"
+          "run": "uv sync --frozen --python 3.14 --managed-python --extra dev"
         },
         {
           "id": "pending",
@@ -185,12 +185,12 @@
         },
         {
           "name": "Sync the environment",
-          "run": "uv sync --frozen --extra dev"
+          "run": "uv sync --frozen --python 3.14 --managed-python --extra dev"
         },
         {
           "name": "Sync the part's extras",
           "shell": "bash",
-          "run": "uv sync --frozen $(uv run --no-sync python -m dev_lab.dev.depneeds flags --part \"${{ matrix.part }}\")"
+          "run": "uv sync --frozen --python 3.14 --managed-python $(uv run --no-sync python -m dev_lab.dev.depneeds flags --part \"${{ matrix.part }}\")"
         },
         {
           "name": "Produce and post the part",
@@ -246,7 +246,7 @@
         },
         {
           "name": "Sync the environment",
-          "run": "uv sync --frozen --extra dev"
+          "run": "uv sync --frozen --python 3.14 --managed-python --extra dev"
         },
         {
           "name": "Post every part no job settled",
@@ -282,7 +282,7 @@
         },
         {
           "name": "Sync the environment",
-          "run": "uv sync --frozen --extra dev"
+          "run": "uv sync --frozen --python 3.14 --managed-python --extra dev"
         },
         {
           "name": "tests/security",
@@ -318,7 +318,7 @@
         },
         {
           "name": "Sync the environment",
-          "run": "uv sync --frozen --extra dev"
+          "run": "uv sync --frozen --python 3.14 --managed-python --extra dev"
         },
         {
           "name": "head gates",
@@ -363,7 +363,7 @@
         },
         {
           "name": "Sync the environment",
-          "run": "uv sync --frozen --extra dev"
+          "run": "uv sync --frozen --python 3.14 --managed-python --extra dev"
         },
         {
           "id": "ready",
@@ -413,7 +413,7 @@
         },
         {
           "name": "Sync the environment",
-          "run": "uv sync --frozen --extra dev"
+          "run": "uv sync --frozen --python 3.14 --managed-python --extra dev"
         },
         {
           "name": "Promote main",
@@ -458,16 +458,16 @@
         },
         {
           "name": "Sync the environment",
-          "run": "uv sync --frozen --extra dev"
+          "run": "uv sync --frozen --python 3.14 --managed-python --extra dev"
         },
         {
           "name": "Sync the part's extras",
           "shell": "bash",
-          "run": "uv sync --frozen $(uv run --no-sync python -m dev_lab.dev.depneeds flags --part \"corpus\")"
+          "run": "uv sync --frozen --python 3.14 --managed-python $(uv run --no-sync python -m dev_lab.dev.depneeds flags --part \"corpus\")"
         },
         {
           "name": "Set up tests/corpus",
-          "run": "uv run --no-sync python -m tests.corpus.sources"
+          "run": "uv run --no-sync python -m dev_lab.dev.hostedsetup corpus"
         },
         {
           "name": "Produce and post the part",
@@ -516,16 +516,16 @@
         },
         {
           "name": "Sync the environment",
-          "run": "uv sync --frozen --extra dev"
+          "run": "uv sync --frozen --python 3.14 --managed-python --extra dev"
         },
         {
           "name": "Sync the part's extras",
           "shell": "bash",
-          "run": "uv sync --frozen $(uv run --no-sync python -m dev_lab.dev.depneeds flags --part \"linux\")"
+          "run": "uv sync --frozen --python 3.14 --managed-python $(uv run --no-sync python -m dev_lab.dev.depneeds flags --part \"linux\")"
         },
         {
           "name": "Set up tests/linux",
-          "run": "sudo apt-get update && sudo apt-get install -y xvfb openbox python3-tk && (Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp >/dev/null 2>&1 &) && sleep 2 && (DISPLAY=:99 openbox >/dev/null 2>&1 &) && sleep 2 && echo DISPLAY=:99 >> \"$GITHUB_ENV\""
+          "run": "uv run --no-sync python -m dev_lab.dev.hostedsetup linux"
         },
         {
           "name": "Produce and post the part",
@@ -574,16 +574,16 @@
         },
         {
           "name": "Sync the environment",
-          "run": "uv sync --frozen --extra dev"
+          "run": "uv sync --frozen --python 3.14 --managed-python --extra dev"
         },
         {
           "name": "Sync the part's extras",
           "shell": "bash",
-          "run": "uv sync --frozen $(uv run --no-sync python -m dev_lab.dev.depneeds flags --part \"macos\")"
+          "run": "uv sync --frozen --python 3.14 --managed-python $(uv run --no-sync python -m dev_lab.dev.depneeds flags --part \"macos\")"
         },
         {
           "name": "Set up tests/macos",
-          "run": "brew install \"python-tk@$(uv run --no-sync python -c 'import sys; print(\"%d.%d\" % sys.version_info[:2])')\""
+          "run": "uv run --no-sync python -m dev_lab.dev.hostedsetup macos"
         },
         {
           "name": "Produce and post the part",
